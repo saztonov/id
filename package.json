@@ -1,0 +1,39 @@
+{
+  "name": "id-portal",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Портал исполнительной документации",
+  "packageManager": "pnpm@9.15.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "type": "module",
+  "scripts": {
+    "typecheck": "pnpm -r typecheck",
+    "lint": "pnpm -r lint",
+    "test": "pnpm -r test",
+    "build": "pnpm -r build",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "db:probe": "pnpm --filter @id/db-harness probe",
+    "fixtures:generate": "pnpm --filter @id/fixtures generate"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@types/node": "26.2.0",
+    "eslint": "10.8.1",
+    "eslint-config-prettier": "10.1.8",
+    "prettier": "3.9.6",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.67.0",
+    "vitest": "4.1.10"
+  },
+  "pnpm": {
+    "overrides": {
+      "typescript": "6.0.3",
+      "zod": "4.4.3",
+      "react": "19.2.8",
+      "react-dom": "19.2.8"
+    }
+  }
+}

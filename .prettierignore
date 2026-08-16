@@ -1,0 +1,6 @@
+pnpm-lock.yaml
+dist/
+**/dist/
+node_modules/
+temp/
+tools/fixtures/pdf/

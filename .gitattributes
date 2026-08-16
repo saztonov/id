@@ -1,0 +1,20 @@
+# Единый перевод строк во всём репозитории.
+#
+# Без этого Git на Windows подменяет LF на CRLF при checkout: prettier с
+# `endOfLine: "lf"` начинает падать, а бинарные фикстуры портятся — байты
+# на диске перестают совпадать с сгенерированными, и проверка детерминизма
+# фикстур в CI валится на пустом месте.
+* text=auto eol=lf
+
+# Бинарные файлы Git трогать не должен вообще.
+*.pdf   binary
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.webp  binary
+*.ico   binary
+*.woff  binary
+*.woff2 binary
+
+# Lock-файл не участвует в diff-ревью.
+pnpm-lock.yaml -diff linguist-generated=true

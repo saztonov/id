@@ -1,0 +1,13 @@
+{
+  "multipage.pdf": "9b2a00229ffe1bb35ca45316cdf5573281786f73acb4f109ba720bb0b69c9400",
+  "rotated.pdf": "1fddb15dfdb9e92b930770a83c3ee64d18383008b7dd882606b83b617c371b3b",
+  "split-part1.pdf": "c3f910859fc0a2bd170d21d8ae05841aace3836e26093b3699e8f517d779a287",
+  "split-part2.pdf": "55b03f079d9dc4a44261fa78d1b573ba7e8f8278c5ffb9ad487648aecdb52171",
+  "unknown-type.pdf": "2e6183aeeaccacf38ed4974e0ea0f2ccae3c1badcf7c61e92e8609dec3fbf7a9",
+  "single-1.pdf": "abadda8fbb4cc859e8baf4cb7995f541736026e283a824fc404a4eaff662babf",
+  "single-2.pdf": "996e3f93555e6f99fbe2db56d79b7bf5701a3633d5e73ce478ec1375268a3793",
+  "single-3.pdf": "0bfd50835db4dd17a6dee225cdc58f75beb382653231c0d595b1fc3ad4785d5e",
+  "signed.pdf": "7c3c99f7350a63b930ea19ad9cd73efa225501d7e4c14a9b058c4fee14b31ed7",
+  "malformed.pdf": "d759189707f2553d23db8682bfda0314019ebaa84856608ff2c5f8fd1602cef9",
+  "not-a-pdf.pdf": "834305e8dbfa7ebf8cefb90bccbad41835cd433054a96dfeda8ff3867e791591"
+}
