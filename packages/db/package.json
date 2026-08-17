@@ -1,0 +1,36 @@
+{
+  "name": "@id/db",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src --max-warnings 0",
+    "test": "vitest run --passWithNoTests",
+    "schema:generate": "node scripts/generate-schema.mjs"
+  },
+  "dependencies": {
+    "@id/contracts": "workspace:*",
+    "@id/doc-types": "workspace:*",
+    "drizzle-orm": "0.45.2",
+    "pg": "8.23.0"
+  },
+  "devDependencies": {
+    "@id/db-harness": "workspace:*",
+    "@id/migrator": "workspace:*",
+    "@types/node": "26.2.0",
+    "@types/pg": "8.21.0",
+    "drizzle-kit": "0.31.10",
+    "typescript": "6.0.3",
+    "vitest": "4.1.10"
+  }
+}

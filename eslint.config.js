@@ -12,6 +12,8 @@ export default tseslint.config(
       '**/coverage/**',
       '**/*.d.ts',
       'temp/**',
+      // Сгенерированный код: корректность держит тест на дрейф, а не стиль.
+      '**/src/generated/**',
     ],
   },
   eslint.configs.recommended,

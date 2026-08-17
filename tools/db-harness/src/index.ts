@@ -19,6 +19,13 @@ export type RequiredExtension = (typeof REQUIRED_EXTENSIONS)[number];
 export interface TestDatabase {
   readonly kind: 'pglite' | 'postgres';
   query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]>;
+  /**
+   * Многооператорный SQL без параметров.
+   *
+   * `query` в pglite идёт через расширенный протокол и допускает ровно один
+   * оператор, поэтому тело миграции им выполнить нельзя.
+   */
+  exec(sql: string): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -39,7 +46,17 @@ export function hasRealPostgres(): boolean {
  * через опцию `extensions`, и только после этого `CREATE EXTENSION` находит
  * control-файл. Без этого запрос падает в `parse_extension_control_file`.
  */
-export async function createPgliteDatabase(): Promise<TestDatabase> {
+export interface PgliteOptions {
+  /**
+   * Каталог для файловой БД. По умолчанию БД живёт в памяти.
+   *
+   * Файловый вариант нужен генератору схемы Drizzle: `drizzle-kit introspect`
+   * подключается к БД отдельным процессом и памяти предыдущего не видит.
+   */
+  readonly dataDir?: string;
+}
+
+export async function createPgliteDatabase(options: PgliteOptions = {}): Promise<TestDatabase> {
   const [{ PGlite }, { pgcrypto }, { citext }, { pg_trgm }] = await Promise.all([
     import('@electric-sql/pglite'),
     import('@electric-sql/pglite/contrib/pgcrypto'),
@@ -47,7 +64,10 @@ export async function createPgliteDatabase(): Promise<TestDatabase> {
     import('@electric-sql/pglite/contrib/pg_trgm'),
   ]);
 
-  const db = await PGlite.create({ extensions: { pgcrypto, citext, pg_trgm } });
+  const db = await PGlite.create({
+    extensions: { pgcrypto, citext, pg_trgm },
+    ...(options.dataDir ? { dataDir: options.dataDir } : {}),
+  });
 
   for (const ext of REQUIRED_EXTENSIONS) {
     await db.exec(`CREATE EXTENSION IF NOT EXISTS ${ext};`);
@@ -58,6 +78,9 @@ export async function createPgliteDatabase(): Promise<TestDatabase> {
     async query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]> {
       const res = await db.query<T>(sql, params as unknown[] | undefined);
       return res.rows;
+    },
+    async exec(sql: string): Promise<void> {
+      await db.exec(sql);
     },
     async close(): Promise<void> {
       await db.close();
