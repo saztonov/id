@@ -15,3 +15,9 @@ export type ContractsVersion = typeof CONTRACTS_VERSION;
 export * from './enums.js';
 export * from './domain.js';
 export * from './api.js';
+/**
+ * Контрольные суммы реквизитов. Здесь, а не в API: ту же арифметику считают вход
+ * справочника, обезличиватель корпуса и движок правил, а две копии расходятся
+ * молча (см. заголовок `identifiers.ts`).
+ */
+export * from './identifiers.js';

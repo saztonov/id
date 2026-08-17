@@ -15,13 +15,16 @@
 import type { FastifyRequest, preHandlerAsyncHookHandler } from 'fastify';
 import type { UserRole } from '@id/contracts';
 import { forbidden } from '../lib/problem.js';
-import { requireAuth, type AuthContext, type PortalRole } from './require-auth.js';
+import { requireAuth, type PortalRole } from './require-auth.js';
 
 /**
  * Каталог прав: право → роли, которым оно выдано.
  *
  * Матрицей, а не проверками внутри обработчиков: список из одного места видно
  * целиком, и вопрос «кто может вернуть ревизию» не требует чтения кода роутов.
+ * Акцессора «роли по праву» при матрице нет: она сама открыта наружу и типизована
+ * литералами, а функция из одной строки над ней только делала бы вид, что права
+ * где-то ещё перечисляются.
  */
 export const PERMISSIONS = {
   /** Чтение поставок и ревизий в пределах своей области видимости. */
@@ -56,25 +59,22 @@ export const PERMISSIONS = {
 
 export type Permission = keyof typeof PERMISSIONS;
 
-export function rolesWithPermission(permission: Permission): readonly UserRole[] {
-  return PERMISSIONS[permission];
-}
-
 /**
  * Аргумент типа `PortalRole`, а не `UserRole`: подставить сюда строку из
  * `realm_access.roles` не получится, потому что метку ставит только
  * `buildScope()`, читающий `user_roles` (§4.1).
+ *
+ * Обёртки «проверить право внутри обработчика» здесь нет намеренно. Она была, и
+ * ни один обработчик её не вызывал: право на маршрут в портале всегда известно до
+ * разбора тела. Когда такой случай появится, обработчик спросит `hasPermission` и
+ * бросит `forbidden` сам — двух строк на это достаточно, а экспорт, который никто
+ * не вызывает, выглядит работающей защитой и скрывает, что случая ещё нет.
  */
 export function hasPermission(roles: readonly PortalRole[], permission: Permission): boolean {
   // Аннотация обязательна: без неё `PERMISSIONS[permission]` — объединение
   // литеральных кортежей, и параметр `includes` сводится к `never`.
   const allowed: readonly UserRole[] = PERMISSIONS[permission];
   return roles.some((role) => allowed.includes(role));
-}
-
-/** Проверка внутри обработчика — там, где право зависит от разобранного тела. */
-export function assertPermission(auth: AuthContext, permission: Permission): void {
-  if (!hasPermission(auth.roles, permission)) throw permissionDenied(permission);
 }
 
 export function requirePermission(permission: Permission): preHandlerAsyncHookHandler {

@@ -19,6 +19,7 @@
     "generate": "tsc -p tsconfig.build.json && node dist/generate.js"
   },
   "dependencies": {
+    "@id/contracts": "workspace:*",
     "pdf-lib": "1.17.1"
   },
   "devDependencies": {

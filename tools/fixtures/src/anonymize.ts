@@ -12,6 +12,13 @@
  *    и остаётся битым. Иначе обезличиватель молча «починит» дефект, и
  *    регрессионный тест на битый ОГРН перестанет проверять хоть что-нибудь.
  *
+ *    «Валидный» здесь означает ровно то же, что для портала: и проверка, и
+ *    порождение контрольных цифр берутся из `@id/contracts`. Своей арифметики у
+ *    обезличивателя нет намеренно — она тут была, с теми же весами и модулями, и
+ *    именно совпадение делало её опасной. Разойдись копии на один вес, «битый
+ *    ОГРН» производного корпуса стал бы валидным для проверок, а тест на этот
+ *    дефект остался бы зелёным, проверяя пустоту.
+ *
  * 2. **Все синтетические значения лежат в зарезервированном пространстве,**
  *    недостижимом для настоящих реквизитов: ИНН и КПП начинаются с `00`
  *    (региона 00 не существует), ОГРН — с `0` (признака 0 не существует),
@@ -25,6 +32,7 @@
  * адресов и ФИО принципиально неполны, а настоящая фамилия теоретически может
  * совпасть с грамматикой синтетического словаря.
  */
+import { checkInn, checkOgrn, innControlDigits, ogrnControlDigit } from '@id/contracts';
 
 export interface AnonymizeOptions {
   /** Соль. Разные seed дают разные, но одинаково детерминированные наборы. */
@@ -98,74 +106,41 @@ function randomDigits(rng: () => number, count: number): string {
   return out;
 }
 
-/** Портит контрольную цифру гарантированно: сдвиг всегда в диапазоне 1..9. */
-function spoilDigit(digit: number, rng: () => number): number {
-  return (digit + 1 + Math.floor(rng() * 9)) % 10;
+/**
+ * Портит контрольную цифру гарантированно: сдвиг всегда в диапазоне 1..9.
+ *
+ * Цифра — строка, потому что такими их отдаёт `@id/contracts`: у 12-значного ИНН
+ * контрольных цифр две, и «06» это не 6.
+ */
+function spoilDigit(digit: string, rng: () => number): string {
+  return String((Number(digit) + 1 + Math.floor(rng() * 9)) % 10);
 }
 
 // ---------------------------------------------------------------------------
-// Контрольные суммы ИНН и ОГРН
+// Реквизиты с контрольной суммой
 // ---------------------------------------------------------------------------
-
-const INN_WEIGHTS_10: readonly number[] = [2, 4, 10, 3, 5, 9, 4, 6, 8];
-const INN_WEIGHTS_11: readonly number[] = [7, 2, 4, 10, 3, 5, 9, 4, 6, 8];
-const INN_WEIGHTS_12: readonly number[] = [3, 7, 2, 4, 10, 3, 5, 9, 4, 6, 8];
-
-function digitAt(value: string, index: number): number {
-  return value.charCodeAt(index) - 48;
-}
-
-function innCheckDigit(body: string, weights: readonly number[]): number {
-  let sum = 0;
-  for (let i = 0; i < weights.length; i += 1) {
-    sum += (weights[i] ?? 0) * digitAt(body, i);
-  }
-  return (sum % 11) % 10;
-}
-
-/** Официальный алгоритм: 10 цифр — одна контрольная, 12 цифр — две. */
-export function isValidInn(value: string): boolean {
-  if (!/^\d+$/.test(value)) return false;
-  if (value.length === 10) return innCheckDigit(value, INN_WEIGHTS_10) === digitAt(value, 9);
-  if (value.length === 12) {
-    return (
-      innCheckDigit(value, INN_WEIGHTS_11) === digitAt(value, 10) &&
-      innCheckDigit(value, INN_WEIGHTS_12) === digitAt(value, 11)
-    );
-  }
-  return false;
-}
-
-function ogrnCheckDigit(body: string, divisor: bigint): number {
-  return Number((BigInt(body) % divisor) % 10n);
-}
 
 /**
- * ОГРН — 13 цифр с делителем 11, ОГРНИП — 15 цифр с делителем 13.
- * Задание называло 11 для обеих длин; здесь оставлен официальный делитель,
- * иначе настоящий валидный ОГРНИП читался бы как битый и его «невалидность»
- * закреплялась бы в производном корпусе как факт.
+ * Веса, модули и делители здесь не повторяются: и «валиден ли исходный реквизит»,
+ * и «какая цифра нужна синтетическому» спрашиваются у `@id/contracts` — того же
+ * модуля, которым портал будет судить получившийся корпус (§1.4).
  */
-export function isValidOgrn(value: string): boolean {
-  if (!/^\d+$/.test(value)) return false;
-  if (value.length === 13) return ogrnCheckDigit(value.slice(0, 12), 11n) === digitAt(value, 12);
-  if (value.length === 15) return ogrnCheckDigit(value.slice(0, 14), 13n) === digitAt(value, 14);
-  return false;
-}
-
 function synthInn(original: string, seed: string): string {
   const rng = rngFor(seed, 'inn', original);
-  const keepValid = isValidInn(original);
+  const keepValid = checkInn(original).ok;
   if (original.length === 10) {
     const body = SYNTH_INN_PREFIX + randomDigits(rng, 7);
-    const check = innCheckDigit(body, INN_WEIGHTS_10);
-    return body + String(keepValid ? check : spoilDigit(check, rng));
+    const check = innControlDigits(body);
+    return body + (keepValid ? check : spoilDigit(check, rng));
   }
   if (original.length === 12) {
     const body = SYNTH_INN_PREFIX + randomDigits(rng, 8);
-    const withEleventh = body + String(innCheckDigit(body, INN_WEIGHTS_11));
-    const check = innCheckDigit(withEleventh, INN_WEIGHTS_12);
-    return withEleventh + String(keepValid ? check : spoilDigit(check, rng));
+    // Две цифры сразу; портится только вторая, поэтому невалидность остаётся той
+    // же природы, что у исходного значения, — расхождение в последнем знаке.
+    const control = innControlDigits(body);
+    const eleventh = control.slice(0, 1);
+    const twelfth = control.slice(1);
+    return body + eleventh + (keepValid ? twelfth : spoilDigit(twelfth, rng));
   }
   // Длина не 10 и не 12 — сама по себе дефект распознавания. Сохраняем её:
   // правило проверки формата обязано продолжать срабатывать.
@@ -174,16 +149,23 @@ function synthInn(original: string, seed: string): string {
   );
 }
 
+/**
+ * Делитель по длине (11 у ОГРН, 13 у ОГРНИП) выбирает `ogrnControlDigit`.
+ *
+ * Раньше выбор был и здесь: задание называло 11 для обеих длин, и промах в эту
+ * сторону закрепил бы «невалидность» настоящего ОГРНИП в производном корпусе как
+ * факт. Теперь выбирать нечего — длина тела определяет делитель в одном месте.
+ */
 function synthOgrn(original: string, seed: string): string {
   const rng = rngFor(seed, 'ogrn', original);
-  const keepValid = isValidOgrn(original);
-  const build = (bodyLength: number, divisor: bigint): string => {
+  const keepValid = checkOgrn(original).ok;
+  const build = (bodyLength: number): string => {
     const body = SYNTH_OGRN_PREFIX + randomDigits(rng, bodyLength - SYNTH_OGRN_PREFIX.length);
-    const check = ogrnCheckDigit(body, divisor);
-    return body + String(keepValid ? check : spoilDigit(check, rng));
+    const check = ogrnControlDigit(body);
+    return body + (keepValid ? check : spoilDigit(check, rng));
   };
-  if (original.length === 13) return build(12, 11n);
-  if (original.length === 15) return build(14, 13n);
+  if (original.length === 13) return build(12);
+  if (original.length === 15) return build(14);
   // Ровно тот случай, ради которого писался модуль: битый ОГРН из 12 цифр
   // остаётся из 12 цифр и остаётся битым — длина сама по себе делает его таким.
   return (

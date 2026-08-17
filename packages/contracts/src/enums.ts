@@ -241,3 +241,39 @@ export type AutonomyLevel = z.infer<typeof autonomyLevelSchema>;
  */
 export const jobOutcomeSchema = z.enum(['succeeded', 'failed', 'cancelled', 'lease_expired']);
 export type JobOutcome = z.infer<typeof jobOutcomeSchema>;
+
+/**
+ * Категории материалов для матрицы требований к пакету подтверждения (§9.3).
+ *
+ * Здесь, а не в модуле роутов: перечень нужен и схеме входа справочника, и
+ * репозиторию профилей правил, и движку правил на S9. Две копии расходятся
+ * молча — ровно так и вышло с контрольными суммами реквизитов, поэтому
+ * определение одно.
+ *
+ * ✓ — категория подтверждена корпусом двух разделов. Остальные взяты из
+ * нормативного состава, и требования к ним не калиброваны (§0.5).
+ */
+export const MATERIAL_CATEGORIES = [
+  /** ✓ Рулонная гидроизоляция (кровля 2.5.1). */
+  'roll_waterproofing',
+  /** ✓ Арматурный прокат (ЖБ 2.1.5). */
+  'rebar',
+  /** ✓ Товарные бетонные смеси. */
+  'ready_mix_concrete',
+  /** ✓ Минеральная вата и XPS. */
+  'thermal_insulation',
+  /** ✓ Метизы. */
+  'fasteners',
+  /** ✓ Сварная сетка. */
+  'welded_mesh',
+  'pipes',
+  'pipe_fittings',
+  'cable',
+  'equipment',
+  'paint_coatings',
+  'fire_protection',
+  'glazing',
+] as const;
+
+export const materialCategoryCodeSchema = z.enum(MATERIAL_CATEGORIES);
+export type MaterialCategoryCode = z.infer<typeof materialCategoryCodeSchema>;

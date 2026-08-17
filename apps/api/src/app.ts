@@ -86,7 +86,11 @@ import {
   tooManyRequests,
   unprocessable,
 } from './lib/problem.js';
+import { registerAdminRoutes } from './modules/admin/routes.js';
+import { registerAuditRoutes } from './modules/audit/routes.js';
 import { registerHealthRoutes } from './routes/health.js';
+import { registerCatalogRoutes } from './modules/catalog/routes.js';
+import { registerObjectRuleProfileRoutes } from './modules/catalog/object-rule-profiles.js';
 
 /** Тела JSON. Файлы идут в S3 мимо API, поэтому лимит маленький. */
 const JSON_BODY_LIMIT_BYTES = 1_048_576;
@@ -446,6 +450,12 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppInstan
   registerHealthRoutes(app);
   registerMetricsRoute(app, metrics);
   registerAuthRoutes(app);
+  registerAdminRoutes(app);
+  registerCatalogRoutes(app);
+  // Профили правил объекта — тот же префикс `/catalog`, но свой модуль: у них своя
+  // форма наложений и своё разрешение «правила на дату» (§9.2).
+  registerObjectRuleProfileRoutes(app);
+  registerAuditRoutes(app);
 
   app.addHook('onClose', async () => {
     // Пул, полученный извне, принадлежит вызывающему: закрыть его здесь значит

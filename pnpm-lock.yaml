@@ -332,6 +332,9 @@ importers:
 
   tools/fixtures:
     dependencies:
+      '@id/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
       pdf-lib:
         specifier: 1.17.1
         version: 1.17.1

@@ -5,7 +5,7 @@
  * миграцию и выполните `pnpm db:schema:generate`. Ручная правка будет затёрта,
  * а тест на дрейф её заметит.
  */
-import { pgTable, index, foreignKey, unique, uuid, text, boolean, timestamp, check, integer, inet, bigint, jsonb, varchar, date, uniqueIndex, doublePrecision, numeric, primaryKey, pgView } from "drizzle-orm/pg-core"
+import { pgTable, index, foreignKey, unique, uuid, text, boolean, timestamp, check, integer, inet, bigint, jsonb, varchar, uniqueIndex, date, doublePrecision, numeric, primaryKey, pgView } from "drizzle-orm/pg-core"
 import { citext, bytea, int4range } from "../custom-types.js";
 import { sql } from "drizzle-orm"
 
@@ -68,10 +68,11 @@ export const auditLog = pgTable("audit_log", {
 	ip: inet(),
 	requestId: text("request_id"),
 }, (table) => [
-	index("ix_audit_log_actor").using("btree", table.actorUserId.asc().nullsLast().op("timestamptz_ops"), table.at.desc().nullsFirst().op("timestamptz_ops")),
+	index("ix_audit_log_action").using("btree", table.action.asc().nullsLast().op("text_ops"), table.at.desc().nullsFirst().op("timestamptz_ops")),
+	index("ix_audit_log_actor").using("btree", table.actorUserId.asc().nullsLast().op("timestamptz_ops"), table.at.desc().nullsFirst().op("uuid_ops")),
 	index("ix_audit_log_at").using("btree", table.at.desc().nullsFirst().op("timestamptz_ops")),
 	index("ix_audit_log_entity").using("btree", table.entityType.asc().nullsLast().op("text_ops"), table.entityId.asc().nullsLast().op("text_ops")),
-	index("ix_audit_log_object").using("btree", table.objectId.asc().nullsLast().op("timestamptz_ops"), table.at.desc().nullsFirst().op("timestamptz_ops")),
+	index("ix_audit_log_object").using("btree", table.objectId.asc().nullsLast().op("uuid_ops"), table.at.desc().nullsFirst().op("timestamptz_ops")),
 	foreignKey({
 			columns: [table.actorUserId],
 			foreignColumns: [users.id],
@@ -180,6 +181,7 @@ export const sectionProfiles = pgTable("section_profiles", {
 	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
 }, (table) => [
 	index("ix_section_profiles_published").using("btree", table.publishedBy.asc().nullsLast().op("uuid_ops")),
+	uniqueIndex("ux_section_profiles_open_period").using("btree", table.sectionKindCode.asc().nullsLast().op("text_ops")).where(sql`((effective_to IS NULL) AND (published_at IS NOT NULL))`),
 	foreignKey({
 			columns: [table.sectionKindCode],
 			foreignColumns: [sectionKinds.code],
@@ -1235,10 +1237,12 @@ export const validationRuns = pgTable("validation_runs", {
 	startedAt: timestamp("started_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
 	finishedAt: timestamp("finished_at", { withTimezone: true, mode: 'string' }),
 	counts: jsonb().default({}).notNull(),
+	sectionProfileId: uuid("section_profile_id"),
 }, (table) => [
 	index("ix_validation_runs_profile").using("btree", table.objectRuleProfileId.asc().nullsLast().op("uuid_ops")),
-	index("ix_validation_runs_revision").using("btree", table.revisionId.asc().nullsLast().op("uuid_ops"), table.startedAt.desc().nullsFirst().op("timestamptz_ops")),
+	index("ix_validation_runs_revision").using("btree", table.revisionId.asc().nullsLast().op("timestamptz_ops"), table.startedAt.desc().nullsFirst().op("uuid_ops")),
 	index("ix_validation_runs_ruleset").using("btree", table.rulesetVersionId.asc().nullsLast().op("uuid_ops")),
+	index("ix_validation_runs_section_profile").using("btree", table.sectionProfileId.asc().nullsLast().op("uuid_ops")),
 	foreignKey({
 			columns: [table.revisionId],
 			foreignColumns: [submissionRevisions.id],
@@ -1253,6 +1257,11 @@ export const validationRuns = pgTable("validation_runs", {
 			columns: [table.objectRuleProfileId],
 			foreignColumns: [objectRuleProfiles.id],
 			name: "validation_runs_object_rule_profile_id_fkey"
+		}),
+	foreignKey({
+			columns: [table.sectionProfileId],
+			foreignColumns: [sectionProfiles.id],
+			name: "validation_runs_section_profile_id_fkey"
 		}),
 	unique("validation_runs_revision_uq").on(table.id, table.revisionId),
 ]);

@@ -8,9 +8,18 @@
  * Главное, что проверяется, — обезличиватель не «чинит» дефекты: битый ОГРН из
  * 12 цифр обязан пережить обработку битым и двенадцатизначным, иначе
  * регрессионный тест на этот дефект станет бессмысленным.
+ *
+ * Судит о валидности `@id/contracts` — тот самый модуль, которым портал проверяет
+ * реквизиты на входе и в правилах (§9.2). Своей проверки у теста нет намеренно: с
+ * собственной копией он подтверждал бы согласие обезличивателя с самим собой, а
+ * нужно согласие с порталом. Причём сравнивается ПРИЧИНА отказа, а не «невалидно»:
+ * `length` — это дефект оформления документа (вердикт `fail`), а `checksum` —
+ * дефект распознавания (`undetermined`), и подмена одного другим меняет смысл
+ * замечания подрядчику.
  */
 import { describe, it, expect } from 'vitest';
-import { anonymizeText, containsPii, isValidInn, isValidOgrn } from './anonymize.js';
+import { checkInn, checkOgrn, type IdentifierCheck, type IdentifierDefect } from '@id/contracts';
+import { anonymizeText, containsPii } from './anonymize.js';
 
 /** Реквизиты вымышлены; контрольные цифры посчитаны по официальному алгоритму. */
 const VALID_INN_10 = '7712345671';
@@ -53,6 +62,11 @@ function anonymizeRequisite(label: string, value: string): string {
   return requisite(anonymizeText(`${label} ${value}`), label);
 }
 
+/** Причина отказа либо `null` у принятого значения: причины сравниваются прямо. */
+function defectOf(result: IdentifierCheck): IdentifierDefect | null {
+  return result.ok ? null : result.defect;
+}
+
 describe('обезличиватель корпуса', () => {
   it('детерминирован: два прогона дают одинаковый результат', () => {
     expect(anonymizeText(SAMPLE)).toBe(anonymizeText(SAMPLE));
@@ -70,28 +84,28 @@ describe('обезличиватель корпуса', () => {
       const result = anonymizeRequisite('ИНН', VALID_INN_10);
       expect(result).toHaveLength(10);
       expect(result).not.toBe(VALID_INN_10);
-      expect(isValidInn(result)).toBe(true);
+      expect(checkInn(result)).toEqual({ ok: true });
     });
 
-    it('невалидный ИНН из 10 цифр остаётся невалидным', () => {
-      expect(isValidInn(INVALID_INN_10)).toBe(false);
+    it('невалидный ИНН из 10 цифр остаётся невалидным С ТОЙ ЖЕ ПРИЧИНОЙ', () => {
+      expect(defectOf(checkInn(INVALID_INN_10))).toBe('checksum');
       const result = anonymizeRequisite('ИНН', INVALID_INN_10);
       expect(result).toHaveLength(10);
-      expect(isValidInn(result)).toBe(false);
+      expect(defectOf(checkInn(result))).toBe(defectOf(checkInn(INVALID_INN_10)));
     });
 
     it('валидный ИНН из 12 цифр заменяется на валидный', () => {
       const result = anonymizeRequisite('ИНН', VALID_INN_12);
       expect(result).toHaveLength(12);
       expect(result).not.toBe(VALID_INN_12);
-      expect(isValidInn(result)).toBe(true);
+      expect(checkInn(result)).toEqual({ ok: true });
     });
 
-    it('невалидный ИНН из 12 цифр остаётся невалидным', () => {
-      expect(isValidInn(INVALID_INN_12)).toBe(false);
+    it('невалидный ИНН из 12 цифр остаётся невалидным С ТОЙ ЖЕ ПРИЧИНОЙ', () => {
+      expect(defectOf(checkInn(INVALID_INN_12))).toBe('checksum');
       const result = anonymizeRequisite('ИНН', INVALID_INN_12);
       expect(result).toHaveLength(12);
-      expect(isValidInn(result)).toBe(false);
+      expect(defectOf(checkInn(result))).toBe(defectOf(checkInn(INVALID_INN_12)));
     });
   });
 
@@ -100,32 +114,47 @@ describe('обезличиватель корпуса', () => {
       const result = anonymizeRequisite('ОГРН', VALID_OGRN_13);
       expect(result).toHaveLength(13);
       expect(result).not.toBe(VALID_OGRN_13);
-      expect(isValidOgrn(result)).toBe(true);
+      expect(checkOgrn(result)).toEqual({ ok: true });
     });
 
-    it('невалидный ОГРН из 13 цифр остаётся невалидным', () => {
-      expect(isValidOgrn(INVALID_OGRN_13)).toBe(false);
-      expect(isValidOgrn(anonymizeRequisite('ОГРН', INVALID_OGRN_13))).toBe(false);
+    it('невалидный ОГРН из 13 цифр остаётся невалидным по контрольной сумме', () => {
+      expect(defectOf(checkOgrn(INVALID_OGRN_13))).toBe('checksum');
+      expect(defectOf(checkOgrn(anonymizeRequisite('ОГРН', INVALID_OGRN_13)))).toBe('checksum');
     });
 
     it('валидный ОГРНИП из 15 цифр заменяется на валидный', () => {
+      // Делитель 15-значного — 13, а не 11. Реализация, применившая к ОГРНИП
+      // правило 13-значного, закрепила бы в корпусе «невалидность» настоящего
+      // реквизита — и проверять корпус стало бы нечем.
       const result = anonymizeRequisite('ОГРНИП', VALID_OGRN_15);
       expect(result).toHaveLength(15);
-      expect(isValidOgrn(result)).toBe(true);
+      expect(checkOgrn(result)).toEqual({ ok: true });
     });
 
-    it('битый ОГРН из 12 цифр остаётся из 12 цифр и остаётся битым', () => {
+    it('битый ОГРН из 12 цифр остаётся из 12 цифр и битым ИМЕННО ПО ДЛИНЕ', () => {
+      // Тот самый дефект корпуса, ради которого модуль писался. Причина обязана
+      // остаться `length`: подмена на `checksum` превратила бы дефект оформления
+      // документа (`fail`) в дефект распознавания (`undetermined`).
+      expect(defectOf(checkOgrn(BROKEN_OGRN_12))).toBe('length');
       const result = anonymizeRequisite('ОГРН', BROKEN_OGRN_12);
       expect(result).toHaveLength(12);
       expect(result).not.toBe(BROKEN_OGRN_12);
-      expect(isValidOgrn(result)).toBe(false);
+      expect(defectOf(checkOgrn(result))).toBe('length');
     });
 
     it('битый ОГРН переживает обработку и в составе полной строки', () => {
       const result = anonymizeText(SAMPLE);
       const value = requisite(result.split('\n')[3] ?? '', 'ОГРН');
       expect(value).toHaveLength(12);
-      expect(isValidOgrn(value)).toBe(false);
+      expect(defectOf(checkOgrn(value))).toBe('length');
+    });
+
+    it('две причины отказа не сливаются в одну на обезличенных значениях', () => {
+      // Если бы обезличиватель судил своей копией арифметики, здесь и была бы
+      // точка расхождения: оба значения «невалидны», но вердикты у них разные.
+      const byLength = anonymizeRequisite('ОГРН', BROKEN_OGRN_12);
+      const bySum = anonymizeRequisite('ОГРН', INVALID_OGRN_13);
+      expect(defectOf(checkOgrn(byLength))).not.toBe(defectOf(checkOgrn(bySum)));
     });
   });
 

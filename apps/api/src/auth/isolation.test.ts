@@ -244,6 +244,9 @@ const REVISION_SCOPE: ScopeTarget = {
 
 const idParams = z.object({ id: z.uuid() });
 
+/** Маршрут-проба уровня permission. */
+const ADMIN_PROBE_ROUTE = '/api/v1/isolation-probe/admin';
+
 /**
  * Строки приходят с именами колонок БД: без join'а drizzle не переименовывает
  * их, поэтому ключи здесь в snake_case. Типы — псевдонимы, а не интерфейсы:
@@ -407,7 +410,11 @@ function registerIsolationRoutes(app: AppInstance): void {
   );
 
   // Административный маршрут: право есть только у роли `admin` из user_roles.
-  app.get('/api/v1/admin/users', { preHandler: requirePermission('users.manage') }, () =>
+  // Путь намеренно не совпадает с боевым путём администрирования: тот теперь
+  // зарегистрирован самим приложением, и второе объявление того же метода
+  // Fastify отвергает. Гейт проверяет не URL, а то, что permission на маршруте
+  // работает (см. пояснение в начале файла).
+  app.get(ADMIN_PROBE_ROUTE, { preHandler: requirePermission('users.manage') }, () =>
     Promise.resolve({ ok: true }),
   );
 }
@@ -716,7 +723,7 @@ describe('роль из токена', () => {
     expect(body.denial).toBe('no-business-role');
     expect(body.scope).toBeNull();
 
-    expect((await get('/api/v1/admin/users', session)).statusCode).toBe(403);
+    expect((await get(ADMIN_PROBE_ROUTE, session)).statusCode).toBe(403);
 
     const list = await get('/api/v1/submissions', session);
     expect(list.statusCode).toBe(403);
@@ -724,12 +731,12 @@ describe('роль из токена', () => {
   });
 
   it('та же роль, выданная в портале, доступ даёт: 403 выше не про маршрут', async () => {
-    const response = await get('/api/v1/admin/users', await sessionFor(KC.admin));
+    const response = await get(ADMIN_PROBE_ROUTE, await sessionFor(KC.admin));
     expect(response.statusCode).toBe(200);
   });
 
   it('подрядчик не получает административного доступа', async () => {
-    const response = await get('/api/v1/admin/users', await sessionFor(KC.contractorA));
+    const response = await get(ADMIN_PROBE_ROUTE, await sessionFor(KC.contractorA));
     expect(response.statusCode).toBe(403);
   });
 });
