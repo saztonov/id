@@ -18,14 +18,15 @@
     "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
-    "@id/contracts": "workspace:*",
-    "@id/doc-types": "workspace:*",
-    "@id/rules": "workspace:*",
     "@fastify/cookie": "11.1.2",
     "@fastify/csrf-protection": "8.0.1",
     "@fastify/helmet": "13.1.0",
     "@fastify/rate-limit": "11.2.0",
     "@fastify/static": "10.1.3",
+    "@id/contracts": "workspace:*",
+    "@id/db": "workspace:*",
+    "@id/doc-types": "workspace:*",
+    "@id/rules": "workspace:*",
     "drizzle-orm": "0.45.2",
     "fastify": "5.12.0",
     "fastify-type-provider-zod": "7.0.0",
@@ -38,7 +39,10 @@
     "zod": "4.4.3"
   },
   "devDependencies": {
+    "@id/db-harness": "workspace:*",
+    "@id/migrator": "workspace:*",
     "@types/node": "26.2.0",
+    "@types/pg": "8.21.0",
     "drizzle-kit": "0.31.10",
     "typescript": "6.0.3",
     "vitest": "4.1.10"

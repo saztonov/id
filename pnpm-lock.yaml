@@ -59,6 +59,9 @@ importers:
       '@id/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      '@id/db':
+        specifier: workspace:*
+        version: link:../../packages/db
       '@id/doc-types':
         specifier: workspace:*
         version: link:../../packages/doc-types
@@ -96,9 +99,18 @@ importers:
         specifier: 4.4.3
         version: 4.4.3
     devDependencies:
+      '@id/db-harness':
+        specifier: workspace:*
+        version: link:../../tools/db-harness
+      '@id/migrator':
+        specifier: workspace:*
+        version: link:../../tools/migrator
       '@types/node':
         specifier: 26.2.0
         version: 26.2.0
+      '@types/pg':
+        specifier: 8.21.0
+        version: 8.21.0
       drizzle-kit:
         specifier: 0.31.10
         version: 0.31.10
