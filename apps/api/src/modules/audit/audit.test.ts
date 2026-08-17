@@ -35,7 +35,7 @@ import type { LightMyRequestResponse } from 'fastify';
 import type { Pool } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { createPgliteDatabase, type TestDatabase } from '@id/db-harness';
+import { createPgliteDatabase, type TestDatabase, createTestPool } from '@id/db-harness';
 import { loadMigrations } from '@id/migrator';
 
 import { buildApp, type AppInstance } from '../../app.js';
@@ -171,88 +171,6 @@ const FIXTURE: readonly string[] = [
      VALUES ('${CANDIDATE_NEW_TYPE}', 'ведомость закладных', 'ВЕДОМОСТЬ закладных деталей', 3)`,
 ];
 
-// =====================================================================
-// Приложение поверх pglite
-// =====================================================================
-
-interface QueryConfig {
-  readonly text: string;
-  readonly rowMode?: 'array' | undefined;
-}
-
-interface QueryOutcome {
-  rows: unknown[];
-  rowCount: number;
-}
-
-const SELECT_STATEMENT = /^\s*select\b/i;
-const WRITE_STATEMENT = /^\s*(insert|update|delete)\b/i;
-
-/**
- * Позиционная строка из pglite (разбор — в `catalog.test.ts`).
- *
- * Коротко: Drizzle просит `rowMode: 'array'` и сопоставляет значения ПОЗИЦИОННО,
- * а pglite отдаёт объекты, теряя одноимённые колонки (`to_char`, `coalesce`).
- * PostgreSQL собирает строку в JSON-массив по порядку столбцов сам.
- */
-function positionalQuery(text: string): string {
-  const cells = `(select json_agg(cell.value order by cell.ord)
-       from json_each(row_to_json(drizzle_row)) with ordinality as cell(key, value, ord)) as cells`;
-
-  if (SELECT_STATEMENT.test(text)) {
-    return `select ${cells} from (${text}) as drizzle_row`;
-  }
-  if (WRITE_STATEMENT.test(text)) {
-    return `with drizzle_row as (${text}) select ${cells} from drizzle_row`;
-  }
-  throw new Error(`Позиционная выборка не поддержана для оператора: ${text.slice(0, 40)}`);
-}
-
-class PglitePool {
-  readonly #db: TestDatabase;
-
-  constructor(db: TestDatabase) {
-    this.#db = db;
-  }
-
-  async query(source: string | QueryConfig, values?: unknown[]): Promise<QueryOutcome> {
-    if (typeof source === 'string') {
-      const raw = await this.#db.query<Record<string, unknown>>(source, values);
-      return { rows: raw, rowCount: raw.length };
-    }
-
-    if (source.rowMode === 'array') {
-      const rows = await this.#db.query<{ cells: unknown[] | null }>(
-        positionalQuery(source.text),
-        values,
-      );
-      return { rows: rows.map((row) => row.cells ?? []), rowCount: rows.length };
-    }
-
-    const rows = await this.#db.query<Record<string, unknown>>(source.text, values);
-    return { rows: rows.map((row) => normalizeRow(row)), rowCount: rows.length };
-  }
-
-  connect(): Promise<{
-    query: (source: string | QueryConfig, values?: unknown[]) => Promise<QueryOutcome>;
-    release: () => void;
-  }> {
-    return Promise.resolve({ query: this.query.bind(this), release: () => undefined });
-  }
-
-  end(): Promise<void> {
-    return Promise.resolve();
-  }
-}
-
-function normalizeRow(row: Record<string, unknown>): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(row)) {
-    out[key] = value instanceof Date ? value.toISOString() : value;
-  }
-  return out;
-}
-
 const TEST_ENV = loadEnv({
   NODE_ENV: 'test',
   PUBLIC_URL: 'http://localhost:3000',
@@ -277,7 +195,7 @@ beforeAll(async () => {
     await db.query(statement);
   }
 
-  app = await buildApp({ env: TEST_ENV, pool: new PglitePool(db) as unknown as Pool });
+  app = await buildApp({ env: TEST_ENV, pool: createTestPool(db) as unknown as Pool });
   await app.ready();
 }, 180_000);
 

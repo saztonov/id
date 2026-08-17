@@ -60,8 +60,24 @@ export default tseslint.config(
       'no-restricted-syntax': [
         'error',
         {
+          // Методы, специфичные для построителя запросов: столкновений с
+          // библиотечными именами у них нет, поэтому получатель не уточняется.
           selector:
-            'CallExpression > MemberExpression[property.name=/^(select|selectDistinct|insert|update|delete|execute)$/]',
+            'CallExpression > MemberExpression[property.name=/^(select|selectDistinct|selectDistinctOn|insert)$/]',
+          message:
+            'Запросы к БД — только в db/repositories/, где область видимости обязательна (§4.1). ' +
+            'Прямой запрос из роута или job обходит изоляцию между подрядчиками.',
+        },
+        {
+          /**
+           * `update`, `delete` и `execute` носят и обычные объекты: `Set.delete`,
+           * `Map.delete`, `createHash().update()`. Широкое правило поймало
+           * подсчёт sha256 в разборщике PDF, то есть запрещало корректный код.
+           * Поэтому здесь уточняется получатель — им может быть только
+           * дескриптор соединения или транзакции.
+           */
+          selector:
+            'CallExpression > MemberExpression[object.name=/^(db|tx|trx|executor|conn|pool)$/][property.name=/^(update|delete|execute)$/]',
           message:
             'Запросы к БД — только в db/repositories/, где область видимости обязательна (§4.1). ' +
             'Прямой запрос из роута или job обходит изоляцию между подрядчиками.',

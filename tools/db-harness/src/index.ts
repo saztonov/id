@@ -20,6 +20,17 @@ export interface TestDatabase {
   readonly kind: 'pglite' | 'postgres';
   query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]>;
   /**
+   * Та же выборка, но значения строки — ПОЗИЦИОННО, а не по именам колонок.
+   *
+   * Существует ровно ради Drizzle: он запрашивает `rowMode: 'array'` и
+   * сопоставляет значения с полями по порядку. Собирать массив из объектного
+   * ответа (`Object.values(row)`) нельзя — объект схлопывает одноимённые
+   * колонки, и `select a.id, b.id` даёт одно значение вместо двух. Сдвиг после
+   * этого молчаливый: тест зелёный, данные не те. pglite умеет позиционный
+   * режим сам, поэтому он и пробрасывается.
+   */
+  queryArray(sql: string, params?: unknown[]): Promise<unknown[][]>;
+  /**
    * Многооператорный SQL без параметров.
    *
    * `query` в pglite идёт через расширенный протокол и допускает ровно один
@@ -56,6 +67,24 @@ export interface PgliteOptions {
   readonly dataDir?: string;
 }
 
+/**
+ * Даты и метки времени — СЫРЫМ текстом, как их видит Drizzle через `pg`.
+ *
+ * Drizzle подменяет парсеры типов драйвера на тождественные и разбирает
+ * временны́е значения сама. pglite по умолчанию отдаёт `Date`, а приведение
+ * `Date` к ISO ломает именно `date`: колонка `effective_from` со значением
+ * `2026-06-01` превратилась бы в `2026-06-01T00:00:00.000Z` и не прошла бы
+ * схему ответа. Поэтому на пути Drizzle разбор отключается, а не исправляется
+ * после него.
+ *
+ * OID: 1082 `date`, 1114 `timestamp`, 1184 `timestamptz`.
+ */
+const RAW_TEMPORAL_PARSERS: Record<number, (value: string) => string> = {
+  1082: (value) => value,
+  1114: (value) => value,
+  1184: (value) => value,
+};
+
 export async function createPgliteDatabase(options: PgliteOptions = {}): Promise<TestDatabase> {
   const [{ PGlite }, { pgcrypto }, { citext }, { pg_trgm }] = await Promise.all([
     import('@electric-sql/pglite'),
@@ -79,6 +108,13 @@ export async function createPgliteDatabase(options: PgliteOptions = {}): Promise
       const res = await db.query<T>(sql, params as unknown[] | undefined);
       return res.rows;
     },
+    async queryArray(sql: string, params?: unknown[]): Promise<unknown[][]> {
+      const res = await db.query<unknown[]>(sql, params as unknown[] | undefined, {
+        rowMode: 'array',
+        parsers: RAW_TEMPORAL_PARSERS,
+      });
+      return res.rows;
+    },
     async exec(sql: string): Promise<void> {
       await db.exec(sql);
     },
@@ -86,4 +122,102 @@ export async function createPgliteDatabase(options: PgliteOptions = {}): Promise
       await db.close();
     },
   };
+}
+
+// =====================================================================
+// Пул поверх тестовой БД для Drizzle
+// =====================================================================
+
+/** Запрос в форме, в которой его присылает Drizzle. */
+export interface PoolQueryConfig {
+  readonly text: string;
+  readonly rowMode?: 'array' | undefined;
+}
+
+export interface PoolQueryOutcome {
+  rows: unknown[];
+  rowCount: number;
+}
+
+export interface PoolClientLike {
+  query(source: string | PoolQueryConfig, values?: unknown[]): Promise<PoolQueryOutcome>;
+  release(): void;
+}
+
+export interface PoolLike {
+  query(source: string | PoolQueryConfig, values?: unknown[]): Promise<PoolQueryOutcome>;
+  connect(): Promise<PoolClientLike>;
+  end(): Promise<void>;
+}
+
+/**
+ * Адаптер тестовой БД под интерфейс `pg.Pool`, которого ждёт Drizzle.
+ *
+ * Один на все тесты намеренно. Раньше эта дюжина строк была скопирована в
+ * десяток файлов, и в девяти из них позиционный режим собирался через
+ * `Object.values()` — то есть с потерей одноимённых колонок и последующим
+ * сдвигом полей (см. `queryArray`). Дефект такого рода не проявляется отказом:
+ * тест остаётся зелёным, а данные приезжают чужие. Поэтому реализация обязана
+ * быть одна.
+ *
+ * Одно соединение pglite означает, что `connect()` отдаёт тот же исполнитель:
+ * настоящей изоляции транзакций здесь нет, и тесты на конкурентность обязаны
+ * проверять `hasRealPostgres()`.
+ */
+export function createTestPool(db: TestDatabase): PoolLike {
+  return new Pool(db);
+}
+
+/**
+ * Имя класса значимо.
+ *
+ * Драйвер `node-postgres` в Drizzle отличает пул от одиночного клиента по имени
+ * конструктора. Объектный литерал с теми же методами он принял бы за клиента, и
+ * транзакции перестали бы брать соединение.
+ */
+class Pool implements PoolLike {
+  readonly #db: TestDatabase;
+
+  constructor(db: TestDatabase) {
+    this.#db = db;
+    this.query = this.query.bind(this);
+  }
+
+  async query(source: string | PoolQueryConfig, values?: unknown[]): Promise<PoolQueryOutcome> {
+    // Строка первым аргументом — прямой вызов мимо Drizzle (сессии, область
+    // видимости). Он идёт и мимо её парсеров типов, поэтому метки времени
+    // обязаны остаться объектами `Date`, как их отдаёт настоящий `pg`.
+    if (typeof source === 'string') {
+      const raw = await this.#db.query<Record<string, unknown>>(source, values);
+      return { rows: raw, rowCount: raw.length };
+    }
+
+    // Drizzle подменяет парсеры типов и оставляет метки времени ТЕКСТОМ,
+    // поэтому на её пути `Date` приводится к ISO-8601.
+    if (source.rowMode === 'array') {
+      const rows = await this.#db.queryArray(source.text, values);
+      return { rows: rows.map((row) => row.map(normalizeCell)), rowCount: rows.length };
+    }
+
+    const rows = await this.#db.query<Record<string, unknown>>(source.text, values);
+    return { rows: rows.map(normalizeRow), rowCount: rows.length };
+  }
+
+  connect(): Promise<PoolClientLike> {
+    return Promise.resolve({ query: this.query, release: (): void => undefined });
+  }
+
+  end(): Promise<void> {
+    return Promise.resolve();
+  }
+}
+
+function normalizeCell(value: unknown): unknown {
+  return value instanceof Date ? value.toISOString() : value;
+}
+
+function normalizeRow(row: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(row)) out[key] = normalizeCell(value);
+  return out;
 }

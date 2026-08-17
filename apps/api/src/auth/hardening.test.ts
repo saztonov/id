@@ -24,7 +24,7 @@ import type { Pool } from 'pg';
 import pino from 'pino';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { createPgliteDatabase, type TestDatabase } from '@id/db-harness';
+import { createPgliteDatabase, type TestDatabase, createTestPool } from '@id/db-harness';
 import { applyMigrations, loadMigrations } from '@id/migrator';
 
 import { buildApp, type AppInstance } from '../app.js';
@@ -40,34 +40,6 @@ const MIGRATIONS_DIR = join(
   '..',
   'migrations',
 );
-
-// =====================================================================
-// Окружение и приложение поверх pglite
-// =====================================================================
-
-/**
- * Пул поверх тестовой БД.
- *
- * `buildApp()` принимает `pg.Pool`, а Docker и настоящей PostgreSQL на машине
- * сборки нет (§1.3). Реализованы только те методы, которыми пользуется
- * приложение: параметризованный `query` и `end`.
- */
-class PglitePool {
-  readonly #db: TestDatabase;
-
-  constructor(db: TestDatabase) {
-    this.#db = db;
-  }
-
-  async query<T>(text: string, values?: unknown[]): Promise<{ rows: T[]; rowCount: number }> {
-    const rows = await this.#db.query<T>(text, values);
-    return { rows, rowCount: rows.length };
-  }
-
-  end(): Promise<void> {
-    return Promise.resolve();
-  }
-}
 
 const BASE_ENV: Readonly<Record<string, string>> = {
   PUBLIC_URL: 'http://localhost:3000',
@@ -138,7 +110,7 @@ beforeAll(async () => {
   db = await createPgliteDatabase();
   await applyMigrations(db, loadMigrations(MIGRATIONS_DIR));
 
-  const pool = new PglitePool(db) as unknown as Pool;
+  const pool = createTestPool(db) as unknown as Pool;
 
   app = await buildApp({ env: MAIN_ENV, pool });
   await app.ready();

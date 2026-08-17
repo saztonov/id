@@ -29,7 +29,7 @@ import type { Pool } from 'pg';
 import { z } from 'zod';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { createPgliteDatabase, type TestDatabase } from '@id/db-harness';
+import { createPgliteDatabase, type TestDatabase, createTestPool } from '@id/db-harness';
 import { loadMigrations } from '@id/migrator';
 import { revisionEvents, sourceFiles, storedBlobs, submissionRevisions, submissions } from '@id/db';
 
@@ -190,35 +190,6 @@ const FIXTURE: readonly string[] = [
              '{"marker": "${EVENT_MARKER_B}"}'::jsonb)`,
 ];
 
-// =====================================================================
-// Приложение поверх pglite
-// =====================================================================
-
-/**
- * Пул поверх тестовой БД.
- *
- * `buildApp()` принимает `pg.Pool`, а Docker и настоящей PostgreSQL на машине
- * сборки нет (§1.3). Реализованы только те методы, которыми пользуется
- * приложение: параметризованный `query` и `end`. `rowCount` выводится из числа
- * возвращённых строк — приложение читает его лишь у запросов с RETURNING.
- */
-class PglitePool {
-  readonly #db: TestDatabase;
-
-  constructor(db: TestDatabase) {
-    this.#db = db;
-  }
-
-  async query<T>(text: string, values?: unknown[]): Promise<{ rows: T[]; rowCount: number }> {
-    const rows = await this.#db.query<T>(text, values);
-    return { rows, rowCount: rows.length };
-  }
-
-  end(): Promise<void> {
-    return Promise.resolve();
-  }
-}
-
 const TEST_ENV = loadEnv({
   NODE_ENV: 'test',
   PUBLIC_URL: 'http://localhost:3000',
@@ -314,9 +285,20 @@ function registerIsolationRoutes(app: AppInstance): void {
     },
   );
 
-  // Путь 3: поток событий ревизии.
+  /**
+   * Путь 3: поток событий ревизии.
+   *
+   * Путь маршрута — тестовый (`_isolation`), а не боевой: настоящий SSE
+   * появился на S5 (`modules/events/sse.ts`) и зарегистрирован в `app.ts`,
+   * поэтому одинаковая форма пути дала бы отказ Fastify «route already
+   * declared». Подменять им боевой поток нельзя по другой причине:
+   * настоящий SSE не закрывается сам, и `inject()` ждал бы его до
+   * таймаута. Здесь проверяется превращение области видимости в SQL на
+   * четвёртом пути доступа; изоляция самого боевого маршрута проверена в
+   * `jobs/engine.test.ts` на поднятом сокете.
+   */
   app.get(
-    '/api/v1/revisions/:id/events',
+    '/api/v1/_isolation/revisions/:id/events',
     { schema: { params: idParams }, preHandler: requirePermission('submission.read') },
     async (request, reply) => {
       const { scope } = currentAuth(request);
@@ -432,7 +414,7 @@ beforeAll(async () => {
     await db.query(statement);
   }
 
-  app = await buildApp({ env: TEST_ENV, pool: new PglitePool(db) as unknown as Pool });
+  app = await buildApp({ env: TEST_ENV, pool: createTestPool(db) as unknown as Pool });
   registerIsolationRoutes(app);
   await app.ready();
 }, 180_000);
@@ -607,7 +589,7 @@ describe('путь 2: прямой доступ по id', () => {
 describe('путь 3: поток событий', () => {
   it('подрядчик А не получает поток ревизии подрядчика Б', async () => {
     const response = await get(
-      `/api/v1/revisions/${REVISION_B}/events`,
+      `/api/v1/_isolation/revisions/${REVISION_B}/events`,
       await sessionFor(KC.contractorA),
     );
     expect([403, 404]).toContain(response.statusCode);
@@ -619,7 +601,7 @@ describe('путь 3: поток событий', () => {
 
   it('свой поток открывается и содержит события: отказ выше не про пустую таблицу', async () => {
     const response = await get(
-      `/api/v1/revisions/${REVISION_A}/events`,
+      `/api/v1/_isolation/revisions/${REVISION_A}/events`,
       await sessionFor(KC.contractorA),
     );
     expect(response.statusCode).toBe(200);
@@ -629,7 +611,7 @@ describe('путь 3: поток событий', () => {
 
   it('инженер объекта А не получает поток ревизии объекта Б', async () => {
     const response = await get(
-      `/api/v1/revisions/${REVISION_B}/events`,
+      `/api/v1/_isolation/revisions/${REVISION_B}/events`,
       await sessionFor(KC.engineerA),
     );
     expect([403, 404]).toContain(response.statusCode);

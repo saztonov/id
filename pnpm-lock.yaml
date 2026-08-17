@@ -175,6 +175,9 @@ importers:
 
   apps/worker:
     dependencies:
+      '@id/api':
+        specifier: workspace:*
+        version: link:../api
       '@id/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
@@ -200,9 +203,21 @@ importers:
         specifier: 4.4.3
         version: 4.4.3
     devDependencies:
+      '@electric-sql/pglite':
+        specifier: 0.5.5
+        version: 0.5.5
+      '@id/db-harness':
+        specifier: workspace:*
+        version: link:../../tools/db-harness
+      '@id/migrator':
+        specifier: workspace:*
+        version: link:../../tools/migrator
       '@types/node':
         specifier: 26.2.0
         version: 26.2.0
+      '@types/pg':
+        specifier: 8.21.0
+        version: 8.21.0
       typescript:
         specifier: 6.0.3
         version: 6.0.3

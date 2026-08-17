@@ -28,7 +28,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { eq } from 'drizzle-orm';
 import { promptTemplates } from '@id/db';
-import { createPgliteDatabase, type TestDatabase } from '@id/db-harness';
+import { createPgliteDatabase, createTestPool, type TestDatabase } from '@id/db-harness';
 import { loadMigrations } from '@id/migrator';
 
 import { buildApp, type AppInstance } from '../../app.js';
@@ -143,43 +143,6 @@ const FIXTURE: readonly string[] = [
 // =====================================================================
 
 /**
- * Пул поверх тестовой БД.
- *
- * Обёртка сложнее, чем «прокинуть query», потому что репозитории ходят в БД
- * через Drizzle, а Drizzle обращается к драйверу `pg` в трёх формах, которых
- * интерфейс `TestDatabase` не знает. Каждая из них здесь эмулируется, и каждая
- * нужна:
- *
- *   1. `client.query(config, params)` — первым аргументом ОБЪЕКТ с полем `text`,
- *      а не строка. Без разбора этой формы любой запрос Drizzle падает с
- *      `ERR_INVALID_ARG_TYPE` (проверено: так падали все 30 проверок).
- *   2. `config.rowMode === 'array'` — Drizzle читает строки ПОЗИЦИОННО для любой
- *      выборки с явным списком полей и сопоставляет их со своим порядком.
- *      pglite отдаёт объекты, поэтому строка собирается в массив по порядку
- *      столбцов; ради однозначности этого порядка все вычисляемые поля в
- *      репозитории имеют псевдонимы.
- *   3. `config.types.getTypeParser` — Drizzle подменяет парсеры и оставляет
- *      метки времени ТЕКСТОМ. pglite по умолчанию отдаёт `Date`, поэтому даты
- *      приводятся к строке: иначе тест проверял бы поведение, которого в
- *      продакшне нет.
- *
- * `connect()` реализован намеренно: транзакции Drizzle берут клиента из пула, и
- * без этого метода атомарная публикация набора правил не выполнилась бы вовсе.
- * pglite одноканален, поэтому «клиент» — тот же канал, а `release()` ничего не
- * освобождает. Имя класса содержит «Pool»: Drizzle отличает пул от клиента по
- * имени конструктора.
- */
-interface QueryConfig {
-  readonly text: string;
-  readonly rowMode?: 'array' | undefined;
-}
-
-interface QueryOutcome {
-  rows: unknown[];
-  rowCount: number;
-}
-
-/**
  * Искусственный обрыв одного запроса внутри транзакции.
  *
  * Нужен двум проверкам, которые иначе недоказуемы.
@@ -245,62 +208,36 @@ function stopRecording(): void {
   recorded = null;
 }
 
-class PglitePool {
-  readonly #db: TestDatabase;
-
-  constructor(db: TestDatabase) {
-    this.#db = db;
-  }
-
-  async query(source: string | QueryConfig, values?: unknown[]): Promise<QueryOutcome> {
-    const text = typeof source === 'string' ? source : source.text;
+/**
+ * Тестовая БД с журналом и подстановкой ошибки.
+ *
+ * Перехват стоит НИЖЕ пула (`createTestPool`), а не вместо него: формы вызова
+ * драйвера `pg`, позиционный режим и приведение меток времени — общее поведение
+ * всех тестов, и вторая его реализация здесь означала бы, что этот файл проверяет
+ * репозитории на драйвере, отличном от остальных.
+ */
+function instrument(db: TestDatabase): TestDatabase {
+  const intercept = (text: string): void => {
     // Запрос записывается ДО подстановки ошибки: прерванный запрос обязан быть
     // виден в журнале, иначе по нему нельзя судить, где именно оборвалось.
     if (recorded !== null) recorded.push(text);
-
     const fault = takeFault(text);
     if (fault !== null) throw fault;
+  };
 
-    // Строка первым аргументом — это прямой вызов `pool.query()` из кода сессий
-    // и провижининга. Он идёт мимо Drizzle, а значит и мимо её парсеров: там
-    // метки времени обязаны остаться объектами `Date`, как их отдаёт `pg`.
-    // Приведение к тексту применяется только к запросам Drizzle, которые
-    // узнаются по объекту конфигурации.
-    if (typeof source === 'string') {
-      const raw = await this.#db.query<Record<string, unknown>>(source, values);
-      return { rows: raw, rowCount: raw.length };
-    }
-
-    const rows = await this.#db.query<Record<string, unknown>>(source.text, values);
-    const normalized = rows.map((row) => normalizeRow(row));
-    return {
-      rows: source.rowMode === 'array' ? normalized.map((row) => Object.values(row)) : normalized,
-      rowCount: rows.length,
-    };
-  }
-
-  connect(): Promise<{
-    query: (source: string | QueryConfig, values?: unknown[]) => Promise<QueryOutcome>;
-    release: () => void;
-  }> {
-    return Promise.resolve({
-      query: this.query.bind(this),
-      release: () => undefined,
-    });
-  }
-
-  end(): Promise<void> {
-    return Promise.resolve();
-  }
-}
-
-/** Метки времени — текстом, как их отдаёт `pg` с парсерами Drizzle. */
-function normalizeRow(row: Record<string, unknown>): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(row)) {
-    out[key] = value instanceof Date ? value.toISOString() : value;
-  }
-  return out;
+  return {
+    kind: db.kind,
+    query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]> {
+      intercept(sql);
+      return db.query<T>(sql, params);
+    },
+    queryArray(sql: string, params?: unknown[]): Promise<unknown[][]> {
+      intercept(sql);
+      return db.queryArray(sql, params);
+    },
+    exec: (sql: string): Promise<void> => db.exec(sql),
+    close: (): Promise<void> => db.close(),
+  };
 }
 
 /** Настоящие значения секретов: тело ответов обязано их не содержать. */
@@ -337,7 +274,7 @@ beforeAll(async () => {
     await db.query(statement);
   }
 
-  app = await buildApp({ env: TEST_ENV, pool: new PglitePool(db) as unknown as Pool });
+  app = await buildApp({ env: TEST_ENV, pool: createTestPool(instrument(db)) as unknown as Pool });
   await app.ready();
 }, 180_000);
 
@@ -785,6 +722,7 @@ describe('деактивация закрывает доступ существ�
     expect(before.statusCode).toBe(200);
 
     const off = await asAdmin('POST', `${P}/users/${USER_SUSPENDED}/deactivate`);
+    if (off.statusCode !== 200) throw new Error('BODY ' + off.body);
     expect(off.statusCode).toBe(200);
     expect(off.json<{ user: { isActive: boolean } }>().user.isActive).toBe(false);
 

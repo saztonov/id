@@ -87,10 +87,17 @@ import {
   unprocessable,
 } from './lib/problem.js';
 import { registerAdminRoutes } from './modules/admin/routes.js';
+import { registerJobsConsoleRoutes } from './modules/admin/jobs-console.js';
 import { registerAuditRoutes } from './modules/audit/routes.js';
 import { registerHealthRoutes } from './routes/health.js';
 import { registerCatalogRoutes } from './modules/catalog/routes.js';
 import { registerObjectRuleProfileRoutes } from './modules/catalog/object-rule-profiles.js';
+import { registerRevisionEventRoutes } from './modules/events/sse.js';
+import { registerFileRoutes } from './modules/files/routes.js';
+import { registerBundleRoutes } from './modules/bundles/routes.js';
+import { queueSnapshot } from './db/repositories/jobs.js';
+import { createStorage, type StorageProvider } from './storage/provider.js';
+import { LOCAL_UPLOAD_PATH } from './storage/local.js';
 
 /** Тела JSON. Файлы идут в S3 мимо API, поэтому лимит маленький. */
 const JSON_BODY_LIMIT_BYTES = 1_048_576;
@@ -141,6 +148,14 @@ declare module 'fastify' {
     metrics: Metrics;
     /** Регистрация ошибок в `error_events` (§11): нужна и `server.ts`. */
     errorReporter: ErrorReporter;
+    /**
+     * Хранилище файлов (§7, §13).
+     *
+     * Один экземпляр на приложение: он несёт конфигурацию драйвера и обёртку
+     * измерения внешних вызовов, а создание его на каждом запросе означало бы
+     * ещё и новый секрет подписи у драйвера `local`.
+     */
+    storage: StorageProvider;
   }
 }
 
@@ -194,6 +209,12 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppInstan
   // и до первого запроса — обёртка накладывается на месте и на клиентов
   // транзакций тоже.
   instrumentPool(pool, { logger, slowQueryMs: env.SLOW_QUERY_MS, metrics });
+
+  // Хранилище создаётся здесь и здесь же оборачивается измерением: провайдер,
+  // собранный на месте вызова, остался бы без метрик и без порога
+  // `SLOW_EXTERNAL_MS` — а внешний ввод-вывод портала это, кроме RD WEB и LLM,
+  // именно оно (§11).
+  const storage = createStorage(env, { metrics, logger });
 
   const errorReporter = createErrorReporter({
     kind: env.ERROR_REPORTER,
@@ -254,6 +275,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppInstan
   app.decorate('authProvider', authProvider);
   app.decorate('metrics', metrics);
   app.decorate('errorReporter', errorReporter);
+  app.decorate('storage', storage);
 
   app.decorateRequest('authSession', null);
   app.decorateRequest('authContext', null);
@@ -367,7 +389,32 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppInstan
     done();
   });
 
-  app.addHook('onRequest', csrfGuardHook(middlewareDeps));
+  /**
+   * CSRF — на всём, кроме приёма байтов драйвером `local`.
+   *
+   * Тот маршрут моделирует presigned PUT: право на запись даёт подписанный
+   * сервером токен в адресе, а не сессия, и клиент считает адрес непрозрачным,
+   * поэтому заголовка CSRF в запросе нет. Но адрес same-origin, значит cookie
+   * сессии браузер приложит САМ — и общая проверка отвергала бы законную
+   * загрузку в разработке с формулировкой про CSRF. Исключение узкое и
+   * существует только при драйвере `local`, который `env.ts` запрещает в
+   * production: сравнивается шаблон совпавшего маршрута, а не строка адреса.
+   *
+   * Атаку это не открывает: адрес выдаёт `init` — POST под сессией и с
+   * CSRF-токеном, — а прочитать его ответ чужая страница не может (CORS).
+   * Без токена маршрут отвечает 403, и записать он может только в
+   * `uploads/{uuid}`, откуда байты попадают в ревизию лишь через `complete`,
+   * который снова проверяет и сессию, и область видимости, и сам файл.
+   */
+  const csrfGuard = csrfGuardHook(middlewareDeps);
+  const localUploadExempt = storage.localUploads !== undefined;
+  app.addHook('onRequest', function guardCsrf(request, reply) {
+    if (localUploadExempt && request.routeOptions.url === LOCAL_UPLOAD_PATH) {
+      return Promise.resolve();
+    }
+    // `call` сохраняет `this` хука: Fastify объявляет его экземпляром сервера.
+    return csrfGuard.call(this, request, reply);
+  });
 
   // Ответы API кэшировать нельзя: /me и списки поставок зависят от сессии, а
   // промежуточный кэш о ней не знает.
@@ -447,15 +494,32 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppInstan
       .send(problemBody(notFound('Маршрут не найден.'), problemContext(request))),
   );
 
+  // Глубина очереди задач в `/metrics` (§11). Снимок берётся в момент сбора, а
+  // не по таймеру: иначе значение отстаёт на интервал, и по нему нельзя судить
+  // о заторе. Провайдер ставит и воркер — метрики у процессов свои, а вопрос
+  // «сколько задач ждёт» одинаковый, и ответ обязан быть одним и тем же.
+  metrics.setQueueSnapshotProvider(() => queueSnapshot(app.db));
+
   registerHealthRoutes(app);
   registerMetricsRoute(app, metrics);
   registerAuthRoutes(app);
   registerAdminRoutes(app);
+  // Консоль задач и поток событий ревизии: §12 и §3.8. Оба модуля обязаны быть
+  // зарегистрированы здесь — модуль, написанный и не подключённый, выглядит
+  // работающим и проходит собственные тесты (урок S3).
+  registerJobsConsoleRoutes(app);
+  registerRevisionEventRoutes(app);
   registerCatalogRoutes(app);
   // Профили правил объекта — тот же префикс `/catalog`, но свой модуль: у них своя
   // форма наложений и своё разрешение «правила на дату» (§9.2).
   registerObjectRuleProfileRoutes(app);
   registerAuditRoutes(app);
+  // Приём файлов и выдача содержимого (§4.2). Маршрут приёма байтов для драйвера
+  // `local` регистрируется внутри и только при этом драйвере: в боевой
+  // конфигурации такого пути в приложении нет вовсе.
+  registerFileRoutes(app);
+  // Рабочий документ ревизии: сборка (§6.1, подстадия 1) и карта страниц (§3.3).
+  registerBundleRoutes(app);
 
   app.addHook('onClose', async () => {
     // Пул, полученный извне, принадлежит вызывающему: закрыть его здесь значит

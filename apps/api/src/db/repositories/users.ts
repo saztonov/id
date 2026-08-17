@@ -89,6 +89,16 @@ type UserRowShape = {
   roles: string[];
 };
 
+/**
+ * Метка времени в ISO-8601 средствами БД, а не форматтером драйвера.
+ *
+ * Колонка объявлена `mode: 'string'`, и Drizzle отдаёт то, что прислал
+ * PostgreSQL, — `2026-08-18 03:23:26.132+05`. Это не ISO-8601: пробел вместо
+ * `T`, смещение без двоеточия. Схема ответа (`isoDateTimeSchema`) такое значение
+ * отвергает, то есть список пользователей отвечал бы 500. Тесты этого не
+ * показывали, потому что тестовый пул приводил `Date` к ISO сам, — дефект жил
+ * ровно в зазоре между двойником и настоящим драйвером.
+ */
 const SELECTION = {
   id: users.id,
   email: users.email,
@@ -96,7 +106,10 @@ const SELECTION = {
   position: users.position,
   isActive: users.isActive,
   contractorId: users.contractorId,
-  createdAt: users.createdAt,
+  createdAt:
+    sql<string>`to_char(${users.createdAt} at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`.as(
+      'created_at_iso',
+    ),
   roles: ROLES_AGGREGATE,
 };
 

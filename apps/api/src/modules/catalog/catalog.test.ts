@@ -37,7 +37,7 @@ import type { LightMyRequestResponse } from 'fastify';
 import type { Pool } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { createPgliteDatabase, type TestDatabase } from '@id/db-harness';
+import { createPgliteDatabase, type TestDatabase, createTestPool } from '@id/db-harness';
 import { loadMigrations } from '@id/migrator';
 
 import { buildApp, type AppInstance } from '../../app.js';
@@ -156,131 +156,6 @@ const FIXTURE: readonly string[] = [
      VALUES ('${CANDIDATE_RARE}', 'протокол проверки узла', 'ПРОТОКОЛ проверки узла', 1)`,
 ];
 
-// =====================================================================
-// Приложение поверх pglite
-// =====================================================================
-
-interface QueryConfig {
-  readonly text: string;
-  readonly rowMode?: 'array' | undefined;
-}
-
-interface QueryOutcome {
-  rows: unknown[];
-  rowCount: number;
-}
-
-const SELECT_STATEMENT = /^\s*select\b/i;
-const WRITE_STATEMENT = /^\s*(insert|update|delete)\b/i;
-
-/**
- * Позиционная строка из pglite: почему нельзя `Object.values()`.
- *
- * Drizzle просит у драйвера `rowMode: 'array'` для любой выборки с явным
- * списком полей и сопоставляет значения со своим порядком ПОЗИЦИОННО. pglite
- * умеет отдавать только объекты, а объект теряет одноимённые колонки: селект
- * каталога видов ИД состоит из четырёх выражений `coalesce(...)`, и все четыре
- * приходят под именем `coalesce` — проверено, из четырёх значений в объекте
- * остаётся одно. Селект очереди кандидатов так же теряет две метки времени из
- * трёх (`to_char`). Наивная сборка массива из значений объекта дала бы не отказ,
- * а МОЛЧА сдвинутые поля: имя типа в поле `shortName`, дата в поле статуса.
- *
- * Настоящий `pg` этой проблемы не имеет — там `rowMode: 'array'` и есть массив,
- * — поэтому дефекта в продакшне здесь нет и обходить нужно именно ограничение
- * тестовой БД. Обход: PostgreSQL сам собирает строку в JSON-массив по порядку
- * столбцов. `row_to_json` (тип `json`, а не `jsonb`) сохраняет одноимённые ключи,
- * `json_each ... WITH ORDINALITY` возвращает их все с номерами, `json_agg` по
- * номеру даёт массив значений в порядке колонок.
- *
- * SELECT заворачивается в подзапрос, INSERT/UPDATE/DELETE ... RETURNING — в
- * data-modifying CTE (обычным подзапросом они быть не могут). Незнакомая форма
- * оператора приводит к ОТКАЗУ, а не к тихому возврату к `Object.values()`:
- * молчаливая деградация здесь означала бы зелёный тест на перепутанных полях.
- */
-function positionalQuery(text: string): string {
-  const cells = `(select json_agg(cell.value order by cell.ord)
-       from json_each(row_to_json(drizzle_row)) with ordinality as cell(key, value, ord)) as cells`;
-
-  if (SELECT_STATEMENT.test(text)) {
-    return `select ${cells} from (${text}) as drizzle_row`;
-  }
-  if (WRITE_STATEMENT.test(text)) {
-    return `with drizzle_row as (${text}) select ${cells} from drizzle_row`;
-  }
-  throw new Error(`Позиционная выборка не поддержана для оператора: ${text.slice(0, 40)}`);
-}
-
-/**
- * Пул поверх тестовой БД.
- *
- * Драйвер `pg` вызывается Drizzle в трёх формах, которых интерфейс
- * `TestDatabase` не знает, и каждая здесь эмулируется:
- *
- *   1. `client.query(config, params)` — первым аргументом ОБЪЕКТ с полем `text`.
- *      Без разбора этой формы любой запрос Drizzle падает с
- *      `ERR_INVALID_ARG_TYPE`.
- *   2. `config.rowMode === 'array'` — разбор выше.
- *   3. `config.types.getTypeParser` — Drizzle подменяет парсеры и оставляет
- *      метки времени ТЕКСТОМ. Репозиторий справочников от этого не зависит: он
- *      формирует ISO-8601 в SQL через `to_char`, а `date` и так приходит строкой.
- *
- * `connect()` реализован намеренно: транзакции Drizzle берут клиента из пула, и
- * без этого метода атомарное «завести тип по кандидату» не выполнилось бы вовсе.
- * pglite одноканален, поэтому «клиент» — тот же канал. Имя класса содержит
- * «Pool»: Drizzle отличает пул от клиента по имени конструктора.
- */
-class PglitePool {
-  readonly #db: TestDatabase;
-
-  constructor(db: TestDatabase) {
-    this.#db = db;
-  }
-
-  async query(source: string | QueryConfig, values?: unknown[]): Promise<QueryOutcome> {
-    // Строка первым аргументом — прямой вызов `pool.query()` из кода сессий и
-    // области видимости. Он идёт мимо Drizzle, а значит и мимо её парсеров: там
-    // метки времени обязаны остаться объектами `Date`, как их отдаёт `pg`.
-    if (typeof source === 'string') {
-      const raw = await this.#db.query<Record<string, unknown>>(source, values);
-      return { rows: raw, rowCount: raw.length };
-    }
-
-    if (source.rowMode === 'array') {
-      const rows = await this.#db.query<{ cells: unknown[] | null }>(
-        positionalQuery(source.text),
-        values,
-      );
-      return { rows: rows.map((row) => row.cells ?? []), rowCount: rows.length };
-    }
-
-    const rows = await this.#db.query<Record<string, unknown>>(source.text, values);
-    return { rows: rows.map((row) => normalizeRow(row)), rowCount: rows.length };
-  }
-
-  connect(): Promise<{
-    query: (source: string | QueryConfig, values?: unknown[]) => Promise<QueryOutcome>;
-    release: () => void;
-  }> {
-    return Promise.resolve({
-      query: this.query.bind(this),
-      release: () => undefined,
-    });
-  }
-
-  end(): Promise<void> {
-    return Promise.resolve();
-  }
-}
-
-/** Метки времени — текстом, как их отдаёт `pg` с парсерами Drizzle. */
-function normalizeRow(row: Record<string, unknown>): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(row)) {
-    out[key] = value instanceof Date ? value.toISOString() : value;
-  }
-  return out;
-}
-
 const TEST_ENV = loadEnv({
   NODE_ENV: 'test',
   PUBLIC_URL: 'http://localhost:3000',
@@ -305,7 +180,7 @@ beforeAll(async () => {
     await db.query(statement);
   }
 
-  app = await buildApp({ env: TEST_ENV, pool: new PglitePool(db) as unknown as Pool });
+  app = await buildApp({ env: TEST_ENV, pool: createTestPool(db) as unknown as Pool });
   await app.ready();
 }, 180_000);
 
