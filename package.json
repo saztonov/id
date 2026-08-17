@@ -16,7 +16,8 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "db:probe": "pnpm --filter @id/db-harness probe",
-    "fixtures:generate": "pnpm --filter @id/fixtures generate"
+    "fixtures:generate": "pnpm --filter @id/fixtures generate",
+    "pii:scan": "node tools/scripts/pii-scan.mjs"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
