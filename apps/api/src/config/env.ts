@@ -117,10 +117,43 @@ const envSchema = z.object({
    */
   RDWEB_OCR_PROMPT_PROFILES: z.string().optional(),
 
-  LLM_PROVIDER: z.enum(['proxy_llm', 'recorded', 'none']).default('none'),
+  /**
+   * Провайдер анализа (§10).
+   *
+   * `rdweb` присутствует в перечислении намеренно: переключатель обязан
+   * существовать в администрировании, потому что заказчик выбрал «proxy_llm и
+   * RD WEB на выбор». Но generic text-analysis эндпоинта у RD WEB нет (§0.3
+   * п.6), поэтому выбор проходит проверки конфигурации и упирается в отказ на
+   * первом же вызове с пояснением. Отсутствие значения в перечислении выглядело
+   * бы как «мы про него забыли», а тихая подмена на `proxy_llm` — как будто
+   * переключатель работает.
+   */
+  LLM_PROVIDER: z.enum(['proxy_llm', 'rdweb', 'recorded', 'none']).default('none'),
   PROXY_LLM_BASE_URL: z.string().url().optional(),
   PROXY_LLM_TOKEN: z.string().optional(),
   LLM_MODEL_ALLOWLIST: z.string().optional(),
+  /**
+   * Модель по умолчанию для вызовов, где стадия её не выбирает.
+   *
+   * Значения по умолчанию нет по той же причине, что у `RDWEB_OCR_MODEL`:
+   * выдумать идентификатор модели чужого шлюза нельзя, а отсутствие настройки
+   * обязано останавливать старт с внятной причиной, а не давать 400 из прокси
+   * на первом же вызове.
+   */
+  LLM_MODEL: z.string().min(1).optional(),
+  /**
+   * Месячный потолок суммы `ai_runs.cost` (§11). `0` — ограничения нет.
+   *
+   * Ноль по умолчанию, а не какое-нибудь «разумное» число: придуманный порог
+   * либо останавливает работу на ровном месте, либо не значит ничего.
+   */
+  LLM_BUDGET_MONTHLY: z.coerce.number().nonnegative().default(0),
+  /** Скользящее окно в процессе; `0` — без ограничения. */
+  LLM_RATE_LIMIT_PER_MIN: z.coerce.number().int().nonnegative().default(60),
+  LLM_TIMEOUT_MS: z.coerce.number().int().positive().default(120_000),
+  /** Потолок и срок жизни кэша ответов LLM в памяти процесса (§8.2). */
+  LLM_CACHE_MAX_ENTRIES: z.coerce.number().int().positive().default(500),
+  LLM_CACHE_TTL_MS: z.coerce.number().int().positive().default(3_600_000),
 
   AUDIT_HMAC_KEY: nonPlaceholder('AUDIT_HMAC_KEY').optional(),
 
@@ -168,6 +201,29 @@ const envSchema = z.object({
 });
 
 export type Env = z.infer<typeof envSchema>;
+
+/**
+ * Хосты вендоров моделей, обращение к которым напрямую запрещено §10.
+ *
+ * Список именно хостов, а не подстрок: проверка вхождением поймала бы
+ * законный `https://llm-gw.internal/openrouter-compat` и пропустила бы
+ * `https://openrouter.ai.evil.example`.
+ */
+const DIRECT_VENDOR_HOSTS = ['openrouter.ai', 'api.openai.com', 'api.anthropic.com'];
+
+function forbiddenLlmHost(baseUrl: string | undefined): string | null {
+  if (baseUrl === undefined) return null;
+  let hostname: string;
+  try {
+    hostname = new URL(baseUrl).hostname.toLowerCase();
+  } catch {
+    // Не разобралось как URL — об этом уже сказала схема поля.
+    return null;
+  }
+  return (
+    DIRECT_VENDOR_HOSTS.find((host) => hostname === host || hostname.endsWith(`.${host}`)) ?? null
+  );
+}
 
 /**
  * Требования, которые невозможно выразить схемой поля: они связывают
@@ -243,6 +299,40 @@ function crossChecks(env: Env): string[] {
   if (env.LLM_PROVIDER === 'proxy_llm') {
     for (const key of ['PROXY_LLM_BASE_URL', 'PROXY_LLM_TOKEN'] as const) {
       if (!env[key]) errors.push(`${key} обязателен при LLM_PROVIDER=proxy_llm`);
+    }
+    if (isProd && !env.LLM_MODEL) {
+      // Только в production, как и остальные обязательные значения этого
+      // блока: выдумать идентификатор модели чужого шлюза нельзя, и на боевом
+      // стенде отсутствие настройки обязано останавливать старт, а не давать
+      // 400 из шлюза на первом же вызове. В test и development отсутствие
+      // модели допустимо — там вызов либо не делается, либо модель приходит
+      // с запросом; отказ при этом остаётся внятным (см. ProxyLlmProvider).
+      errors.push('LLM_MODEL обязателен при LLM_PROVIDER=proxy_llm в production');
+    }
+  }
+
+  if (env.LLM_PROVIDER === 'recorded' && isProd) {
+    // Двойник отвечает записанными строками и не ходит наружу. В продакшне это
+    // означает выдуманный результат анализа ИД, поданный как настоящий, —
+    // ровно та же категория, что и AUTH_MODE=dev-stub.
+    errors.push('LLM_PROVIDER=recorded запрещён при NODE_ENV=production');
+  }
+
+  const directVendorHost = forbiddenLlmHost(env.PROXY_LLM_BASE_URL);
+  if (directVendorHost !== null) {
+    // §10: прямые запросы в OpenRouter из портала запрещены. Проверка стоит
+    // здесь, а не в клиенте: адрес читается один раз при старте, и «мы просто
+    // временно переключили base url на вендора» обязано не подниматься вовсе.
+    errors.push(
+      `PROXY_LLM_BASE_URL указывает прямо на ${directVendorHost}: §10 разрешает только ` +
+        'корпоративный шлюз proxy_llm, прямые запросы к вендору из портала запрещены',
+    );
+  }
+
+  if (env.LLM_MODEL !== undefined) {
+    const allowlist = allowedModels(env);
+    if (allowlist.length > 0 && !allowlist.includes(env.LLM_MODEL)) {
+      errors.push('LLM_MODEL не входит в LLM_MODEL_ALLOWLIST: вызов был бы отвергнут политикой');
     }
   }
 

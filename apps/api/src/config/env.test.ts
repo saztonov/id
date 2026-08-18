@@ -322,4 +322,116 @@ describe('значения по умолчанию', () => {
     ).toStrictEqual(['a-model', 'b-model']);
     expect(allowedModels(loadEnv(devEnv()))).toStrictEqual([]);
   });
+
+  it('даёт значения по умолчанию для бюджета, частоты, таймаута и кэша LLM', () => {
+    const env = loadEnv(devEnv());
+
+    expect({
+      LLM_BUDGET_MONTHLY: env.LLM_BUDGET_MONTHLY,
+      LLM_RATE_LIMIT_PER_MIN: env.LLM_RATE_LIMIT_PER_MIN,
+      LLM_TIMEOUT_MS: env.LLM_TIMEOUT_MS,
+      LLM_CACHE_MAX_ENTRIES: env.LLM_CACHE_MAX_ENTRIES,
+      LLM_CACHE_TTL_MS: env.LLM_CACHE_TTL_MS,
+    }).toStrictEqual({
+      // Ноль — «ограничения нет»: придуманный порог либо останавливает работу
+      // на ровном месте, либо не значит ничего.
+      LLM_BUDGET_MONTHLY: 0,
+      LLM_RATE_LIMIT_PER_MIN: 60,
+      LLM_TIMEOUT_MS: 120_000,
+      LLM_CACHE_MAX_ENTRIES: 500,
+      LLM_CACHE_TTL_MS: 3_600_000,
+    });
+  });
+});
+
+// =====================================================================
+// LLM: провайдеры, запрет прямого доступа к вендорам (§10, §0.3 п.6)
+// =====================================================================
+
+describe('провайдер LLM', () => {
+  const proxy = {
+    LLM_PROVIDER: 'proxy_llm',
+    PROXY_LLM_BASE_URL: 'https://llm-gw.internal/v1',
+    PROXY_LLM_TOKEN: 'unit-test-gateway-token',
+    LLM_MODEL: 'gw/model-a',
+  };
+
+  it('переключатель rdweb существует: он заблокирован в коде, а не в схеме', () => {
+    // §0.3 п.6: заказчик выбрал «proxy_llm и RD WEB на выбор». Отсутствие
+    // значения в перечислении выглядело бы как «мы про него забыли», а отказ на
+    // вызове несёт пояснение и ссылку на пункт техзадания S13.
+    expect(loadEnv(devEnv({ LLM_PROVIDER: 'rdweb' })).LLM_PROVIDER).toBe('rdweb');
+  });
+
+  it('recorded запрещён в production', () => {
+    const problems = problemsOf(prodEnv({ LLM_PROVIDER: 'recorded' }));
+
+    expect(problemAbout(problems, 'LLM_PROVIDER=recorded')).toBe(
+      'LLM_PROVIDER=recorded запрещён при NODE_ENV=production',
+    );
+  });
+
+  it('вне production двойник допустим', () => {
+    expect(loadEnv(devEnv({ LLM_PROVIDER: 'recorded' })).LLM_PROVIDER).toBe('recorded');
+  });
+
+  it('proxy_llm требует адрес и токен', () => {
+    const problems = problemsOf(devEnv({ LLM_PROVIDER: 'proxy_llm' }));
+
+    expect(problems).toContain('PROXY_LLM_BASE_URL обязателен при LLM_PROVIDER=proxy_llm');
+    expect(problems).toContain('PROXY_LLM_TOKEN обязателен при LLM_PROVIDER=proxy_llm');
+  });
+
+  it('в production proxy_llm требует ещё и модель', () => {
+    // Выдумать идентификатор модели чужого шлюза нельзя — как и у
+    // RDWEB_OCR_MODEL. Вне production отсутствие допустимо: там вызов либо не
+    // делается, либо модель приходит с запросом.
+    const problems = problemsOf(
+      prodEnv({
+        LLM_PROVIDER: 'proxy_llm',
+        PROXY_LLM_BASE_URL: 'https://llm-gw.internal/v1',
+        PROXY_LLM_TOKEN: 'prod-gateway-token-0001',
+      }),
+    );
+
+    expect(problems).toContain('LLM_MODEL обязателен при LLM_PROVIDER=proxy_llm в production');
+    expect(loadEnv(devEnv({ ...proxy, LLM_MODEL: undefined })).LLM_MODEL).toBeUndefined();
+  });
+
+  it('полная конфигурация proxy_llm принимается', () => {
+    expect(loadEnv(devEnv(proxy)).PROXY_LLM_BASE_URL).toBe('https://llm-gw.internal/v1');
+  });
+
+  it('прямой адрес вендора отвергается (§10)', () => {
+    for (const host of ['openrouter.ai', 'api.openai.com', 'api.anthropic.com']) {
+      const problems = problemsOf(devEnv({ ...proxy, PROXY_LLM_BASE_URL: `https://${host}/v1` }));
+      expect(problemAbout(problems, 'PROXY_LLM_BASE_URL')).toContain(host);
+    }
+    // Поддомен вендора — тот же прямой запрос.
+    expect(
+      problemAbout(
+        problemsOf(devEnv({ ...proxy, PROXY_LLM_BASE_URL: 'https://api.openrouter.ai/v1' })),
+        'PROXY_LLM_BASE_URL',
+      ),
+    ).toContain('openrouter.ai');
+  });
+
+  it('корпоративный шлюз с похожим путём не путается с вендором', () => {
+    // Проверка вхождением подстроки поймала бы этот законный адрес, а
+    // `https://openrouter.ai.evil.example` пропустила бы.
+    expect(
+      loadEnv(devEnv({ ...proxy, PROXY_LLM_BASE_URL: 'https://gw.internal/openrouter-compat' }))
+        .PROXY_LLM_BASE_URL,
+    ).toBe('https://gw.internal/openrouter-compat');
+  });
+
+  it('модель по умолчанию обязана входить в allowlist', () => {
+    const problems = problemsOf(devEnv({ ...proxy, LLM_MODEL_ALLOWLIST: 'gw/model-b,gw/model-c' }));
+
+    expect(problemAbout(problems, 'LLM_MODEL')).toContain('LLM_MODEL_ALLOWLIST');
+    // Согласованная пара проходит.
+    expect(
+      loadEnv(devEnv({ ...proxy, LLM_MODEL_ALLOWLIST: 'gw/model-a,gw/model-b' })).LLM_MODEL,
+    ).toBe('gw/model-a');
+  });
 });

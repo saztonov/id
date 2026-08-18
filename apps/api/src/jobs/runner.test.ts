@@ -54,8 +54,14 @@ import {
   findJob,
 } from '../db/repositories/jobs.js';
 import { RdWebError } from '../integrations/rdweb/port.js';
+import {
+  LlmBudgetError,
+  LlmProtocolError,
+  LlmRateLimitError,
+  LlmTimeoutError,
+} from '../llm/port.js';
 import { JobRegistry, type JobContext } from './registry.js';
-import { JobRunner } from './runner.js';
+import { classifyFailure, JobRunner } from './runner.js';
 import { dedupeKeyFor } from './types.js';
 
 const MIGRATIONS_DIR = join(
@@ -548,6 +554,64 @@ describe('повторы упавшей задачи', () => {
     expect((await rawJob(flaky.jobId))['status']).toBe('done');
 
     await drainQueue();
+  });
+
+  /**
+   * Классификация задаётся САМИМ классом отказа, а не перечислением в движке.
+   *
+   * Перечисление и есть способ, которым дефект возвращается: первая редакция
+   * знала только `RdWebError`, и появившиеся на S8 `SegmentationStateError`,
+   * `LlmBudgetError`, `LlmTimeoutError` все оказались повторяемыми. Тест
+   * пользуется классами, о которых `runner.ts` не знает НИЧЕГО, — если правило
+   * снова станет перечислением, он покраснеет.
+   */
+  it('повторяемость читается у класса отказа, а не перечисляется в движке', () => {
+    class NewPermanentFailure extends Error {
+      readonly retriable = false;
+      constructor() {
+        super('класс отказа, о котором движок не знает');
+        this.name = 'NewPermanentFailure';
+      }
+    }
+    class NewTransientFailure extends Error {
+      readonly retriable = true;
+      readonly status: number | undefined = 502;
+      constructor() {
+        super('преходящий отказ');
+        this.name = 'NewTransientFailure';
+      }
+    }
+
+    expect(classifyFailure(new NewPermanentFailure())).toEqual({
+      errorClass: 'NewPermanentFailure',
+      permanent: true,
+    });
+    // Статус уточняет класс у любого отказа, а не только у RD WEB.
+    expect(classifyFailure(new NewTransientFailure())).toEqual({
+      errorClass: 'NewTransientFailure:502',
+      permanent: false,
+    });
+
+    // Отказ, ничего о себе не сообщивший, остаётся повторяемым: молчание не
+    // должно превращаться в тихий отказ от повтора там, где повтор помогает.
+    expect(classifyFailure(new Error('просто ошибка'))).toEqual({
+      errorClass: 'Error',
+      permanent: false,
+    });
+  });
+
+  /**
+   * Исчерпанный бюджет и таймаут — разные вещи, и повторять их одинаково
+   * неверно в обе стороны: бюджет от повтора не восстановится, а таймаут
+   * внешний и преходящий.
+   */
+  it('бюджет LLM неповторяем, таймаут и лимит частоты — повторяемы', () => {
+    expect(
+      classifyFailure(new LlmBudgetError('бюджет исчерпан', { spent: 10, budget: 10 })).permanent,
+    ).toBe(true);
+    expect(classifyFailure(new LlmTimeoutError(30_000, 'провайдер молчит')).permanent).toBe(false);
+    expect(classifyFailure(new LlmRateLimitError('слишком часто')).permanent).toBe(false);
+    expect(classifyFailure(new LlmProtocolError('ответ не разобрался')).permanent).toBe(true);
   });
 });
 

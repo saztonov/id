@@ -16,7 +16,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint src --max-warnings 0",
     "test": "vitest run --passWithNoTests",
-    "generate": "tsc -p tsconfig.build.json && node dist/generate.js"
+    "generate": "tsc -p tsconfig.build.json && node dist/generate.js",
+    "generate:corpus": "tsc -p tsconfig.build.json && node dist/generate-corpus.js"
   },
   "dependencies": {
     "@id/contracts": "workspace:*",

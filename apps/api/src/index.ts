@@ -271,6 +271,139 @@ export type {
 export { createQpdfToolkit, detectQpdf } from './pdf/qpdf.js';
 export { createPdfLibToolkit, loadPdfLibModule } from './pdf/pdf-lib.js';
 
+/**
+ * Сегментация, извлечение реквизитов и модель (§8, §10).
+ *
+ * Ровно та часть S8, которую исполняет ВОРКЕР. Алгоритмы фаз чистые и живут в
+ * `segmentation/`, репозитории — в `db/repositories/`, провайдер модели — в
+ * `llm/`; задачи 14–19 связывают их в `apps/worker`. Экспорт здесь — не
+ * украшение поверхности: без него модуль остался бы кодом, который
+ * компилируется, покрыт тестами и никогда не выполняется (урок S3).
+ */
+export { classifyPages, PHASE1_CONFIDENCE } from './segmentation/classify.js';
+export type { Phase1Options } from './segmentation/classify.js';
+export {
+  classifyPageWithLlm,
+  locateQuote,
+  pagesNeedingLlm,
+  QUOTE_NOT_MAPPED,
+  SCHEMA_VERSION as SEGMENTATION_SCHEMA_VERSION,
+} from './segmentation/llm-classify.js';
+export type { LlmClassifyDeps, LlmClassifyOutcome } from './segmentation/llm-classify.js';
+export {
+  BOUNDARY_CONFIDENCE_CEILING,
+  CONFIDENT_BOUNDARY,
+  decodeSegmentation,
+} from './segmentation/decoder.js';
+export {
+  findSectionMarkers,
+  PAGE_CLASSIFY_PROMPT,
+  promptDocTypeCodes,
+  renderUserPrompt,
+  SECTION_MARKERS,
+} from './segmentation/prompts.js';
+export type { PromptText } from './segmentation/prompts.js';
+export { normalizeRegistryName, parseAnnexRegistry } from './segmentation/registry.js';
+export type {
+  RegistryPageInput,
+  RegistryParseInput,
+  RegistryParseResult,
+} from './segmentation/registry.js';
+export { matchRegistryRows } from './segmentation/match.js';
+export type {
+  MatchableDocument,
+  MatchRegistryResult,
+  RegistryMatch as RegistryMatchResult,
+} from './segmentation/match.js';
+export {
+  extractBaseFields,
+  extractFields,
+  extractTypeFields,
+  LLM_ONLY_BASE_FIELDS,
+} from './segmentation/extract.js';
+export type { ExtractionInput, ExtractionPage } from './segmentation/extract.js';
+export type {
+  ClassificationSource,
+  DecodedDocument,
+  DecodedPage,
+  DecodedUnassigned,
+  ExtractedField,
+  ManualLabel,
+  PageClassification,
+  PageInput,
+  PageLabel,
+  ParsedRegistryRow,
+  Segmentation,
+  SegmentationBlockType,
+  TextEvidence,
+  TypeOutcome,
+} from './segmentation/types.js';
+
+export {
+  applySegmentation,
+  confirmDocument,
+  filterDocumentsOfRevision,
+  findLogicalDocument,
+  listDocumentRelations,
+  listFieldValues,
+  listLogicalDocuments,
+  listPageAssignments,
+  listPageClassifications,
+  listRegistryRows,
+  listUnaccountedPages,
+  loadSegmentationPages,
+  savePageClassifications,
+  saveDocumentRelations,
+  saveFieldValues,
+  saveRegistryMatches,
+  saveRegistryRows,
+} from './db/repositories/documents.js';
+export type {
+  ApplySegmentationInput,
+  ApplySegmentationOutcome,
+  DocumentRelationInput,
+  FieldValueView,
+  LogicalDocumentView,
+  PageAssignmentView,
+  PageClassificationView,
+  RegistryMatch,
+  RegistryRowView,
+  SegmentationInput,
+  SegmentationPageRow,
+} from './db/repositories/documents.js';
+
+export { observeDocTypeCandidate, normalizeObservedTitle } from './db/repositories/catalog.js';
+export { listPromptTemplates } from './db/repositories/admin.js';
+export type { PromptTemplateRow } from './db/repositories/admin.js';
+
+export {
+  createAiSpendReader,
+  createLlmProvider,
+  LlmBlockedProviderError,
+  LlmBudgetError,
+  LlmDisabledError,
+  LlmError,
+  LlmModelNotAllowedError,
+  LlmProtocolError,
+  LlmRateLimitError,
+  LlmRecordingMissingError,
+  LlmTimeoutError,
+  LlmTransportError,
+  ProxyLlmProvider,
+  RecordedLlmProvider,
+} from './llm/index.js';
+export type {
+  LlmAttempt,
+  LlmPort,
+  LlmProviderName,
+  LlmRequest,
+  LlmResponse,
+  LlmStage,
+  RecordedBehaviour,
+} from './llm/index.js';
+export { buildEffectivePrompt, cacheKey, promptHash } from './llm/prompt.js';
+export { listAiRuns, monthlyAiSpend, recordAiRun } from './db/repositories/ai-runs.js';
+
 export {
   createStorage,
   instrumentStorage,

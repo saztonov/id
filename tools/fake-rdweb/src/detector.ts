@@ -89,6 +89,17 @@ function rect(
   return { pageIndex, blockType, coordsNorm: [left, top, right, bottom] };
 }
 
+/**
+ * Полностраничный TEXT-блок — профиль `full-page-text` оригинала (§5.3).
+ *
+ * Отдельная функция, а не флаг внутри раскладки: этот режим НЕ смешивается с
+ * частичной детекцией. Полностраничный блок поверх найденных — та самая ошибка
+ * v3, из-за которой один и тот же текст попадал бы в markdown дважды.
+ */
+export function detectFullPage(pageIndex: number): DetectedBlock[] {
+  return [rect(pageIndex, 'text', 0, 0, 1, 1)];
+}
+
 /** Разметка одной страницы по правилу из докстроки модуля. */
 export function detectPage(seed: string, documentId: string, pageIndex: number): DetectedBlock[] {
   if (pageIndex % EMPTY_EVERY === EMPTY_EVERY - 1) {
@@ -138,6 +149,9 @@ export function detectPages(
   seed: string,
   documentId: string,
   pageIndices: readonly number[],
+  fullPageBlocks = false,
 ): DetectedBlock[] {
-  return pageIndices.flatMap((pageIndex) => detectPage(seed, documentId, pageIndex));
+  return pageIndices.flatMap((pageIndex) =>
+    fullPageBlocks ? detectFullPage(pageIndex) : detectPage(seed, documentId, pageIndex),
+  );
 }

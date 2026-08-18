@@ -946,6 +946,7 @@ export const logicalDocuments = pgTable("logical_documents", {
 	isDerivedCopy: boolean("is_derived_copy").default(true).notNull(),
 	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
 	updatedAt: timestamp("updated_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	version: integer().default(0).notNull(),
 }, (table) => [
 	index("ix_logical_documents_confirmed_by").using("btree", table.confirmedBy.asc().nullsLast().op("uuid_ops")),
 	index("ix_logical_documents_contractor").using("btree", table.contractorId.asc().nullsLast().op("uuid_ops")),
@@ -979,6 +980,7 @@ export const logicalDocuments = pgTable("logical_documents", {
 	check("logical_documents_boundary_confidence_chk", sql`(boundary_confidence IS NULL) OR ((boundary_confidence >= (0)::double precision) AND (boundary_confidence <= (1)::double precision))`),
 	check("logical_documents_confirmed_chk", sql`(NOT is_confirmed) OR (confirmed_by IS NOT NULL)`),
 	check("logical_documents_derived_pdf_chk", sql`derived_pdf_blob_sha256 ~ '^[0-9a-f]{64}$'::text`),
+	check("logical_documents_version_chk", sql`version >= 0`),
 ]);
 
 export const pageAssignments = pgTable("page_assignments", {
@@ -1014,6 +1016,49 @@ export const pageAssignments = pgTable("page_assignments", {
 	unique("page_assignments_page_uq").on(table.revisionId, table.sourcePageId),
 	check("page_assignments_sort_order_chk", sql`(sort_order IS NULL) OR (sort_order >= 0)`),
 	check("page_assignments_state_chk", sql`((document_id IS NOT NULL) AND (sort_order IS NOT NULL) AND (reason IS NULL)) OR ((document_id IS NULL) AND (sort_order IS NULL) AND (page_role_code IS NULL) AND (reason IS NOT NULL))`),
+]);
+
+export const registryRows = pgTable("registry_rows", {
+	id: uuid().defaultRandom().primaryKey().notNull(),
+	revisionId: uuid("revision_id").notNull(),
+	documentId: uuid("document_id").notNull(),
+	rowNo: integer("row_no").notNull(),
+	sectionTitle: text("section_title"),
+	docNameRaw: text("doc_name_raw").notNull(),
+	docNoRaw: text("doc_no_raw"),
+	orgRaw: text("org_raw"),
+	docNoNorm: text("doc_no_norm"),
+	docNoFolded: text("doc_no_folded"),
+	validFrom: date("valid_from"),
+	validTo: date("valid_to"),
+	issuedAt: date("issued_at"),
+	matchedDocumentId: uuid("matched_document_id"),
+	matchScore: doublePrecision("match_score"),
+	matchState: text("match_state").default('missing').notNull(),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	ordinal: integer().notNull(),
+}, (table) => [
+	index("ix_registry_rows_document_ordinal").using("btree", table.documentId.asc().nullsLast().op("uuid_ops"), table.ordinal.asc().nullsLast().op("int4_ops")),
+	index("ix_registry_rows_matched").using("btree", table.matchedDocumentId.asc().nullsLast().op("uuid_ops")),
+	index("ix_registry_rows_no_folded").using("btree", table.docNoFolded.asc().nullsLast().op("text_ops")),
+	index("ix_registry_rows_no_norm").using("btree", table.docNoNorm.asc().nullsLast().op("text_ops")),
+	index("ix_registry_rows_revision").using("btree", table.revisionId.asc().nullsLast().op("uuid_ops")),
+	foreignKey({
+			columns: [table.revisionId, table.documentId],
+			foreignColumns: [logicalDocuments.id, logicalDocuments.revisionId],
+			name: "registry_rows_document_fk"
+		}).onDelete("cascade"),
+	foreignKey({
+			columns: [table.revisionId, table.matchedDocumentId],
+			foreignColumns: [logicalDocuments.id, logicalDocuments.revisionId],
+			name: "registry_rows_matched_document_fk"
+		}),
+	unique("registry_rows_ordinal_uq").on(table.documentId, table.ordinal),
+	check("registry_rows_row_no_chk", sql`row_no > 0`),
+	check("registry_rows_match_score_chk", sql`(match_score IS NULL) OR ((match_score >= (0)::double precision) AND (match_score <= (1)::double precision))`),
+	check("registry_rows_match_state_chk", sql`match_state = ANY (ARRAY['matched'::text, 'missing'::text, 'extra'::text, 'ambiguous'::text])`),
+	check("registry_rows_matched_chk", sql`(match_state <> 'matched'::text) OR (matched_document_id IS NOT NULL)`),
+	check("registry_rows_ordinal_chk", sql`ordinal >= 0`),
 ]);
 
 export const fieldValues = pgTable("field_values", {
@@ -1074,46 +1119,6 @@ export const fieldValues = pgTable("field_values", {
 	check("field_values_extracted_by_chk", sql`extracted_by = ANY (ARRAY['rule'::text, 'llm'::text, 'manual'::text])`),
 	check("field_values_span_source_chk", sql`(char_span IS NULL) OR (page_text_version_id IS NOT NULL)`),
 	check("field_values_span_bounds_chk", sql`(char_span IS NULL) OR (lower(char_span) >= 0)`),
-]);
-
-export const registryRows = pgTable("registry_rows", {
-	id: uuid().defaultRandom().primaryKey().notNull(),
-	revisionId: uuid("revision_id").notNull(),
-	documentId: uuid("document_id").notNull(),
-	rowNo: integer("row_no").notNull(),
-	sectionTitle: text("section_title"),
-	docNameRaw: text("doc_name_raw").notNull(),
-	docNoRaw: text("doc_no_raw"),
-	orgRaw: text("org_raw"),
-	docNoNorm: text("doc_no_norm"),
-	docNoFolded: text("doc_no_folded"),
-	validFrom: date("valid_from"),
-	validTo: date("valid_to"),
-	issuedAt: date("issued_at"),
-	matchedDocumentId: uuid("matched_document_id"),
-	matchScore: doublePrecision("match_score"),
-	matchState: text("match_state").default('missing').notNull(),
-	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-}, (table) => [
-	index("ix_registry_rows_matched").using("btree", table.matchedDocumentId.asc().nullsLast().op("uuid_ops")),
-	index("ix_registry_rows_no_folded").using("btree", table.docNoFolded.asc().nullsLast().op("text_ops")),
-	index("ix_registry_rows_no_norm").using("btree", table.docNoNorm.asc().nullsLast().op("text_ops")),
-	index("ix_registry_rows_revision").using("btree", table.revisionId.asc().nullsLast().op("uuid_ops")),
-	foreignKey({
-			columns: [table.revisionId, table.documentId],
-			foreignColumns: [logicalDocuments.id, logicalDocuments.revisionId],
-			name: "registry_rows_document_fk"
-		}).onDelete("cascade"),
-	foreignKey({
-			columns: [table.revisionId, table.matchedDocumentId],
-			foreignColumns: [logicalDocuments.id, logicalDocuments.revisionId],
-			name: "registry_rows_matched_document_fk"
-		}),
-	unique("registry_rows_row_uq").on(table.documentId, table.rowNo),
-	check("registry_rows_row_no_chk", sql`row_no > 0`),
-	check("registry_rows_match_score_chk", sql`(match_score IS NULL) OR ((match_score >= (0)::double precision) AND (match_score <= (1)::double precision))`),
-	check("registry_rows_match_state_chk", sql`match_state = ANY (ARRAY['matched'::text, 'missing'::text, 'extra'::text, 'ambiguous'::text])`),
-	check("registry_rows_matched_chk", sql`(match_state <> 'matched'::text) OR (matched_document_id IS NOT NULL)`),
 ]);
 
 export const materials = pgTable("materials", {
@@ -1731,6 +1736,61 @@ export const rulesetRules = pgTable("ruleset_rules", {
 		}),
 	primaryKey({ columns: [table.ruleCode, table.rulesetVersionId], name: "ruleset_rules_pkey"}),
 	check("ruleset_rules_severity_chk", sql`severity = ANY (ARRAY['error'::text, 'warning'::text, 'info'::text])`),
+]);
+
+export const pageClassifications = pgTable("page_classifications", {
+	revisionId: uuid("revision_id").notNull(),
+	sourcePageId: uuid("source_page_id").notNull(),
+	label: text().notNull(),
+	docTypeCode: text("doc_type_code"),
+	typeOutcome: text("type_outcome").notNull(),
+	observedTitle: text("observed_title"),
+	pageRoleCode: text("page_role_code"),
+	parentRef: text("parent_ref"),
+	confidence: doublePrecision(),
+	reason: text(),
+	source: text().notNull(),
+	pageTextVersionId: uuid("page_text_version_id"),
+	charSpan: int4range("char_span"),
+	quote: text(),
+	alternatives: jsonb().default([]).notNull(),
+	ambiguous: boolean().default(false).notNull(),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+}, (table) => [
+	index("ix_page_classifications_doc_type").using("btree", table.docTypeCode.asc().nullsLast().op("text_ops")),
+	index("ix_page_classifications_other").using("btree", table.revisionId.asc().nullsLast().op("uuid_ops")).where(sql`(type_outcome = 'other'::text)`),
+	index("ix_page_classifications_page_text").using("btree", table.pageTextVersionId.asc().nullsLast().op("uuid_ops")),
+	index("ix_page_classifications_role").using("btree", table.pageRoleCode.asc().nullsLast().op("text_ops")),
+	foreignKey({
+			columns: [table.docTypeCode],
+			foreignColumns: [docTypes.code],
+			name: "page_classifications_doc_type_code_fkey"
+		}),
+	foreignKey({
+			columns: [table.pageRoleCode],
+			foreignColumns: [pageRoles.code],
+			name: "page_classifications_page_role_code_fkey"
+		}),
+	foreignKey({
+			columns: [table.revisionId, table.sourcePageId],
+			foreignColumns: [sourcePages.id, sourcePages.revisionId],
+			name: "page_classifications_source_page_fk"
+		}).onDelete("cascade"),
+	foreignKey({
+			columns: [table.revisionId, table.pageTextVersionId],
+			foreignColumns: [pageTextVersions.id, pageTextVersions.revisionId],
+			name: "page_classifications_page_text_fk"
+		}),
+	primaryKey({ columns: [table.revisionId, table.sourcePageId], name: "page_classifications_pkey"}),
+	check("page_classifications_label_chk", sql`label = ANY (ARRAY['B-DOC'::text, 'I-DOC'::text, 'A-ROLE'::text, 'U'::text])`),
+	check("page_classifications_type_outcome_chk", sql`type_outcome = ANY (ARRAY['known'::text, 'other'::text, 'uncertain'::text, 'none'::text])`),
+	check("page_classifications_source_chk", sql`source = ANY (ARRAY['anchor'::text, 'blocks'::text, 'llm'::text, 'manual'::text])`),
+	check("page_classifications_confidence_chk", sql`(confidence IS NULL) OR ((confidence >= (0)::double precision) AND (confidence <= (1)::double precision))`),
+	check("page_classifications_observed_title_chk", sql`(type_outcome <> 'other'::text) OR ((observed_title IS NOT NULL) AND (btrim(observed_title) <> ''::text))`),
+	check("page_classifications_known_type_chk", sql`(type_outcome <> 'known'::text) OR (doc_type_code IS NOT NULL)`),
+	check("page_classifications_span_source_chk", sql`(char_span IS NULL) OR (page_text_version_id IS NOT NULL)`),
+	check("page_classifications_span_bounds_chk", sql`(char_span IS NULL) OR (lower(char_span) >= 0)`),
+	check("page_classifications_quote_span_chk", sql`(quote IS NULL) OR (char_span IS NOT NULL)`),
 ]);
 export const vUnaccountedPages = pgView("v_unaccounted_pages", {	revisionId: uuid("revision_id"),
 	sourcePageId: uuid("source_page_id"),

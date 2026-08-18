@@ -57,7 +57,6 @@ import {
   type ClaimedJob,
 } from '../db/repositories/jobs.js';
 import type { Database } from '../db/repositories/users.js';
-import { RdWebError } from '../integrations/rdweb/port.js';
 import { emitRevisionEvent, type JobContext, type JobRegistry } from './registry.js';
 import {
   backoffDelayMs,
@@ -97,6 +96,45 @@ export class LeaseLostError extends Error {
 }
 
 /**
+ * Отказ, который сам знает, имеет ли смысл его повторять.
+ *
+ * Контракт структурный, а не номинальный: движку задач важно не то, какого
+ * класса ошибка, а только её собственный ответ на вопрос «повторять ли».
+ * Проверка формой, а не `instanceof`, — единственное, что не требует править
+ * `runner.ts` при появлении следующего класса отказа.
+ */
+interface SelfClassifyingFailure {
+  readonly retriable: boolean;
+}
+
+/** Внешний отказ, у которого бывает HTTP-статус. `undefined` — ответа не было. */
+interface StatusBearingFailure {
+  readonly status: number | undefined;
+}
+
+function retriabilityOf(error: unknown): boolean | null {
+  if (typeof error !== 'object' || error === null) return null;
+  const value = (error as Partial<SelfClassifyingFailure>).retriable;
+  return typeof value === 'boolean' ? value : null;
+}
+
+/**
+ * Уточнение класса отказа HTTP-статусом.
+ *
+ * Свойство `status` берётся только у отказов, которые сами объявили
+ * повторяемость: иначе сюда попал бы любой объект со случайным полем `status`.
+ */
+function statusSuffix(error: unknown): string {
+  if (typeof error !== 'object' || error === null) return '';
+  if (!('status' in error)) return '';
+  const status = (error as Partial<StatusBearingFailure>).status;
+  if (typeof status === 'number') return `:${status}`;
+  // `network` вместо статуса: соединение не состоялось, кода ответа нет —
+  // и это отдельный диагноз, а не «неизвестно какой».
+  return status === undefined ? ':network' : '';
+}
+
+/**
  * Класс отказа и решение о повторе — одним местом.
  *
  * Раньше повторялось ВСЁ: пять попыток на 401 означали пять одинаковых входов
@@ -110,18 +148,39 @@ export class LeaseLostError extends Error {
  * параметров), поэтому в `job_runs.error_message` от «RD WEB ответил 401»
  * остаётся «RD WEB ответил <n>», и отличить отозванный доступ от падения их
  * сервера по журналу нечем. `RdWebError:401` против `RdWebError:503` — можно.
+ *
+ * ## Почему здесь НЕТ перечисления классов
+ *
+ * Первая редакция знала ровно про `RdWebError`, а всё остальное объявляла
+ * повторяемым. Появились `SegmentationStateError`, `LlmBudgetError` и
+ * `LlmTimeoutError` — и первые два поехали в `max_attempts` попыток с backoff:
+ * «прогона распознавания нет» и «месячный бюджет исчерпан» повторялись пять раз
+ * подряд, хотя повтор не мог изменить ни того, ни другого. Перечисление — это и
+ * есть способ, которым дефект возникает второй раз; тот же урок S7 закрывал
+ * `withRunTermination`.
+ *
+ * Поэтому правило общее: решение принимает САМ класс отказа, объявив
+ * `retriable`. Движок его только читает. Отказ, ничего о себе не сообщивший,
+ * считается преходящим — это сохраняет прежнее поведение неизвестных ошибок
+ * (сетевые сбои, срывы аренды), и молчание не превращается в тихий отказ от
+ * повтора там, где повтор помог бы.
+ *
+ * Различение внутри одного семейства из этого следует само: `LlmBudgetError`
+ * объявляет `retriable: false` (бюджет от повтора не восстановится),
+ * `LlmTimeoutError` и `LlmRateLimitError` — `true` (внешняя и преходящая
+ * причина). Повторять их одинаково было бы неверно в обе стороны.
  */
 export function classifyFailure(error: unknown): {
   readonly errorClass: string;
   readonly permanent: boolean;
 } {
-  if (error instanceof RdWebError) {
-    // `network` вместо статуса: соединение не состоялось, кода ответа нет —
-    // и это отдельный диагноз, а не «неизвестно какой».
-    const kind = error.status === undefined ? 'network' : String(error.status);
-    return { errorClass: `RdWebError:${kind}`, permanent: !error.retriable };
-  }
-  return { errorClass: errorClassOf(error), permanent: false };
+  const retriable = retriabilityOf(error);
+  if (retriable === null) return { errorClass: errorClassOf(error), permanent: false };
+
+  return {
+    errorClass: `${errorClassOf(error)}${statusSuffix(error)}`,
+    permanent: !retriable,
+  };
 }
 
 export interface JobRunnerOptions {

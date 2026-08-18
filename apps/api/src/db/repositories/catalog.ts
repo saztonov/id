@@ -2405,6 +2405,181 @@ const CANDIDATE_SELECTION = {
   reviewedAt: isoTimestampOrNull(docTypeCandidates.reviewedAt),
 };
 
+/**
+ * Нормализация наблюдённого заголовка — ключ кластеризации кандидатов (§3.2).
+ *
+ * Смысл ключа один: «АКТ ГИДРАВЛИЧЕСКОГО ИСПЫТАНИЯ ТРУБОПРОВОДОВ № ГИ-77 от
+ * 12.05.2026» и такой же акт с другим номером и другой датой обязаны дать ОДНУ
+ * строку очереди с `occurrences = 2`. Без этого администратор увидел бы не
+ * «встречено 14 документов такого вида, типа нет», а четырнадцать одиночных
+ * записей, то есть механизм роста каталога перестал бы отвечать на свой
+ * единственный вопрос — что заводить в первую очередь.
+ *
+ * Пять шагов, каждый закрывает свой источник расхождения:
+ *
+ * 1. **markdown-обвязка.** Текст страницы приходит из распознавания в Markdown:
+ *    заголовок бывает `## АКТ`, `> **АКТ**`, `| АКТ |` и `1. АКТ`. Это ровно та
+ *    находка S1, из-за которой якоря каталога были в основном мертвы;
+ * 2. **регистр и `Ё`.** Один и тот же бланк печатается и капсом, и обычным
+ *    текстом, а `Ё` OCR читает то так, то эдак;
+ * 3. **номер после `№`.** Именно он различает экземпляры одного вида;
+ * 4. **даты** — «от 12.05.2026» и голая дата в хвосте;
+ * 5. **пробелы и хвостовая пунктуация.**
+ *
+ * Пустой результат не принимается как ключ: строка из одних номеров дала бы
+ * пустой `observed_title_norm`, и в НЕГО склеились бы все незнакомые документы
+ * всех поставок разом. Поэтому при пустом остатке ключом становится заголовок
+ * без снятия номера, а совсем пустой заголовок отвергается.
+ */
+export function normalizeObservedTitle(title: string): string {
+  const withoutMarkdown = title
+    // Обвязка ячейки таблицы и цитаты, заголовочные решётки, маркеры списка и
+    // нумерация пункта — всё это «где напечатано», а не «что напечатано».
+    .replace(/[|>]/gu, ' ')
+    .replace(/^[\s#*_-]+/u, ' ')
+    .replace(/[*_`]/gu, ' ')
+    .replace(/^\s*\d+[.)]\s+/u, ' ');
+
+  const upper = withoutMarkdown.toUpperCase().replace(/Ё/gu, 'Е');
+
+  const withoutIdentity = upper
+    // Номер: после «№» идёт один непробельный токен — это и есть экземпляр.
+    .replace(/№\s*\S+/gu, ' ')
+    // Границы слова `\b` здесь не годятся: они ASCII-ориентированы, и между
+    // пробелом и кириллической «О» границы нет — правило молча не срабатывало
+    // бы, оставляя «… ТРУБОПРОВОДОВ ОТ» отдельным кандидатом.
+    .replace(/(^|\s)ОТ\s+\d{1,2}[.\-/]\d{1,2}[.\-/]\d{2,4}/gu, ' ')
+    .replace(/\b\d{1,2}[.\-/]\d{1,2}[.\-/]\d{2,4}\b/gu, ' ');
+
+  const collapse = (value: string): string =>
+    value
+      .replace(/\s+/gu, ' ')
+      .trim()
+      .replace(/[\s.,;:\-–—]+$/u, '')
+      .trim();
+
+  const normalized = collapse(withoutIdentity);
+  return normalized === '' ? collapse(upper) : normalized;
+}
+
+export interface ObserveCandidateInput {
+  readonly observedTitle: string;
+  /** Ревизия и страница-пример: по ним администратор откроет исходный документ. */
+  readonly revisionId: string;
+  readonly sourcePageId: string;
+}
+
+export interface ObserveCandidateOutcome {
+  readonly created: boolean;
+  readonly occurrences: number;
+  readonly observedTitleNorm: string;
+  readonly status: DocTypeCandidateStatus;
+}
+
+/**
+ * Наблюдение незнакомого заголовка — вход в цикл роста каталога (§3.2).
+ *
+ * Вызывается конвейером на каждой странице с исходом `other`: документ, не
+ * опознанный ни правилами, ни моделью, не имеет права пропасть — это основной
+ * механизм, которым система покрывает разделы работ, отсутствовавшие в корпусе
+ * (§0.5), и §16 проверяет его отдельным пунктом приёмки.
+ *
+ * ## Решение администратора конвейер не отменяет
+ *
+ * `DO UPDATE` трогает ровно две колонки: счётчик и метку последней встречи.
+ * Кандидат, помеченный `mapped` или `ignored`, НЕ возвращается в `new` от того,
+ * что документ встретился снова. Иначе разобранная очередь наполнялась бы
+ * заново каждой поставкой, а «шум OCR», однажды скрытый администратором,
+ * всплывал бы бесконечно. Счётчик при этом растёт — частота остаётся честной, и
+ * по ней видно, что скрытый заголовок встречается всё чаще.
+ *
+ * ## Область видимости
+ *
+ * Читается очередь всеми (кандидаты — конфигурация портала, решение S4), но
+ * ЗАПИСЬ примера идёт под областью вызывающего: `sample_revision_id` и
+ * `sample_source_page_id` — это указатели на конкретную страницу конкретной
+ * поставки, и записать сюда чужую ревизию значило бы дать администратору (а
+ * через него и очереди) ссылку, которой у писавшего не было права.
+ *
+ * Пример НЕ перезаписывается при повторной встрече: первая ссылка стабильна,
+ * администратор возвращается к тому же документу. Обновляется он только если
+ * прежнего нет вовсе — так строка лечится после удаления поставки по retention
+ * (`ON DELETE SET NULL`, 0003).
+ *
+ * Строки в `audit_log` здесь нет намеренно: это не действие пользователя, а
+ * наблюдение конвейера, и запись на каждую страницу открытого мира утопила бы
+ * журнал справочников, ради читаемости которого он и заводился (S4).
+ */
+export async function observeDocTypeCandidate(
+  db: Database,
+  scope: AuthScope,
+  input: ObserveCandidateInput,
+): Promise<ObserveCandidateOutcome> {
+  const norm = normalizeObservedTitle(input.observedTitle);
+  if (norm === '') {
+    // Тот же инвариант, что и CHECK `page_classifications_observed_title_chk`:
+    // заголовок из одних пробелов не является наблюдением.
+    throw unprocessable(
+      [
+        {
+          pointer: '/observedTitle',
+          code: 'empty',
+          message: 'Наблюдённый заголовок пуст: кластеризовать нечего.',
+        },
+      ],
+      'Наблюдённый заголовок пуст.',
+    );
+  }
+
+  const visible = await db
+    .select({ id: submissionRevisions.id })
+    .from(submissionRevisions)
+    .where(
+      withScope(
+        scope,
+        {
+          objectId: submissionRevisions.objectId,
+          contractorId: submissionRevisions.contractorId,
+        },
+        eq(submissionRevisions.id, input.revisionId),
+      ),
+    )
+    .limit(1);
+  if (visible[0] === undefined) throw notFound('Ревизия поставки не найдена.');
+
+  const sample = input.observedTitle.trim().slice(0, 2000);
+
+  const result = await db.execute<{
+    occurrences: number | string;
+    status: string;
+    created: boolean;
+  }>(sql`
+    insert into ${docTypeCandidates}
+      (observed_title_norm, observed_title_sample, sample_revision_id, sample_source_page_id)
+    values (${norm}, ${sample}, ${input.revisionId}::uuid, ${input.sourcePageId}::uuid)
+    on conflict (observed_title_norm) do update
+       set occurrences = ${docTypeCandidates}.occurrences + 1,
+           last_seen_at = now(),
+           -- Пример не перезаписывается: обновляется только отсутствующий.
+           sample_revision_id = coalesce(
+             ${docTypeCandidates}.sample_revision_id, excluded.sample_revision_id),
+           sample_source_page_id = coalesce(
+             ${docTypeCandidates}.sample_source_page_id, excluded.sample_source_page_id)
+    returning occurrences, status, (xmax = 0) as created
+  `);
+
+  const row = result.rows[0];
+  if (row === undefined) {
+    throw internal({ logDetail: 'UPSERT кандидата в виды ИД не вернул строку' });
+  }
+  return {
+    created: row.created === true,
+    occurrences: Number(row.occurrences),
+    observedTitleNorm: norm,
+    status: row.status as DocTypeCandidateStatus,
+  };
+}
+
 export interface CandidateListParams {
   readonly limit: number;
   readonly cursor?: string | null | undefined;

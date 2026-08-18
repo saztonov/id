@@ -60,6 +60,7 @@ import {
   type UserSummary,
 } from '../../db/repositories/users.js';
 import { conflict, internal, notFound, unprocessable } from '../../lib/problem.js';
+import { findSectionMarkers } from '../../segmentation/prompts.js';
 import { currentAuth } from '../../middleware/require-auth.js';
 import { requirePermission } from '../../middleware/require-permission.js';
 import {
@@ -739,6 +740,34 @@ function registerPromptRoutes(app: AppInstance): void {
           );
         }
         throw conflict(verdict.explanation);
+      }
+
+      // §0.5 п. 6 на ТОМ, что реально уедет провайдеру.
+      //
+      // Запрет «промт не сообщает модели раздел работ» проверялся только у
+      // текстов по умолчанию, то есть у того, что написал автор файла. Боевой
+      // промт заполняет администратор, и проверка, не видящая его, доказывала
+      // ровно ничего. Сканируются ОБЕ части — системная и шаблон
+      // пользовательской: раздел, названный в системной части, действует
+      // сильнее, чем в шаблоне.
+      //
+      // Момент выбран публикацией, а не правкой черновика: черновик пишут
+      // итерациями, и отказ на каждом сохранении сделал бы работу невозможной,
+      // а `published` — это состояние, из которого промт берёт конвейер.
+      if (request.body.to === 'published') {
+        const markers = findSectionMarkers(`${current.systemPrompt}\n${current.userTemplate}`);
+        if (markers.length > 0) {
+          throw unprocessable(
+            markers.map((marker) => ({
+              pointer: '/to',
+              code: 'section-marker-in-prompt',
+              message: `Промт называет раздел работ: «${marker}»`,
+            })),
+            'Публикация отклонена: промт не должен сообщать модели раздел работ (§0.5, п. 6). ' +
+              'Промт, знающий про кровлю или армирование, на других разделах будет притягивать ' +
+              'документы к знакомым видам, и ошибка будет тихой и высокоуверенной.',
+          );
+        }
       }
 
       const result = await guardImmutability(() =>

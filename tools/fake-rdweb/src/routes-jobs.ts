@@ -118,8 +118,19 @@ function jobOut(state: FakeState, job: JobRecord): JobOut {
   };
 }
 
-/** Текст, который «распознан» для блока: детерминирован по идентификатору блока. */
-function recognizedMarkdown(block: BlockOut): string {
+/**
+ * Текст, который «распознан» для блока.
+ *
+ * По умолчанию детерминирован по идентификатору блока. Если тесту задан текст
+ * страницы (`FakeState.pageTexts`), отдаётся он: это единственный способ
+ * провести настоящий текст документа через настоящую цепочку задач. Заданный
+ * текст относится к СТРАНИЦЕ, поэтому осмыслен он только в паре с
+ * `fullPageBlocks` — иначе один и тот же текст повторился бы у каждого блока
+ * страницы и приехал бы в `page_text_versions` многократно.
+ */
+function recognizedMarkdown(state: FakeState, block: BlockOut): string {
+  const injected = state.pageTexts[block.page_index];
+  if (typeof injected === 'string') return injected;
   const page = block.page_index + 1;
   return `Синтетический распознанный текст блока ${block.block_id} со страницы ${page}.`;
 }
@@ -129,7 +140,7 @@ function createResults(state: FakeState, job: JobRecord, modelId: string): void 
   for (const blockId of job.blockIds) {
     const block = state.blocks.get(blockId);
     if (block === undefined) continue;
-    const markdown = recognizedMarkdown(block);
+    const markdown = recognizedMarkdown(state, block);
     const result: BlockResultOut = {
       result_id: state.newId('res'),
       block_id: blockId,
@@ -201,7 +212,7 @@ function markdownSection(
     // `page_text_versions` и не отдавать наружу выдачей артефакта.
     `> **Crop:** [Crop](${cropUrl(baseUrl, block.block_id)})`,
     '',
-    recognizedMarkdown(block),
+    recognizedMarkdown(state, block),
     '',
   ];
 }
@@ -265,7 +276,7 @@ function renderHtml(state: FakeState, job: JobRecord, baseUrl: string): string {
       return (
         `<article class="block block-${block.block_type}" id="block-${block.block_id}" ` +
         `data-block-id="${block.block_id}">${meta}` +
-        `<div class="block-content"><p>${recognizedMarkdown(block)}</p></div></article>`
+        `<div class="block-content"><p>${recognizedMarkdown(state, block)}</p></div></article>`
       );
     })
     .join('\n');

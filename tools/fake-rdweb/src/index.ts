@@ -68,6 +68,22 @@ export interface FakeRdWebOptions {
   readonly seed?: string;
   /** TTL access-токена в секундах. */
   readonly accessTtlSec?: number;
+  /**
+   * Текст «распознанной» страницы по индексу страницы рабочего документа.
+   *
+   * Нужен там, где проверяется не транспорт, а СМЫСЛ распознанного: сегментация
+   * и извлечение реквизитов (S8). Двойник от этого мягче не становится — форма
+   * ответа, состав архива, ссылки на кропы и QA-инварианты остаются прежними.
+   * Осмыслен в паре с `fullPageBlocks`.
+   */
+  readonly pageTexts?: readonly (string | null | undefined)[];
+  /**
+   * Один полностраничный TEXT-блок на страницу — профиль `full-page-text` (§5.3).
+   *
+   * Без него страница склеивается из нескольких секций, и заголовок документа
+   * перестаёт быть первой строкой её текста.
+   */
+  readonly fullPageBlocks?: boolean;
 }
 
 export interface FakeRdWeb {
@@ -160,6 +176,8 @@ export async function startFakeRdWeb(options: FakeRdWebOptions = {}): Promise<Fa
     options.renderDelayPolls ?? DEFAULT_RENDER_DELAY_POLLS,
     options.maxPagesPerDetectCall ?? DEFAULT_MAX_PAGES_PER_DETECT_CALL,
     options.accessTtlSec ?? DEFAULT_ACCESS_TTL_SEC,
+    options.pageTexts ?? [],
+    options.fullPageBlocks ?? false,
   );
   for (const account of options.users ?? DEFAULT_USERS) {
     const email = account.email.toLowerCase();

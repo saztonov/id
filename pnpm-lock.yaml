@@ -102,6 +102,9 @@ importers:
       '@id/db-harness':
         specifier: workspace:*
         version: link:../../tools/db-harness
+      '@id/fixtures':
+        specifier: workspace:*
+        version: link:../../tools/fixtures
       '@id/migrator':
         specifier: workspace:*
         version: link:../../tools/migrator

@@ -341,7 +341,12 @@ export function registerBlockRoutes(app: FastifyInstance, state: FakeState, seed
           }
         }
       }
-      for (const candidate of detectPages(seed, document.documentId, [page])) {
+      for (const candidate of detectPages(
+        seed,
+        document.documentId,
+        [page],
+        state.fullPageBlocks,
+      )) {
         created.push(
           createBlock(state, document, user.userId, {
             pageIndex: candidate.pageIndex,

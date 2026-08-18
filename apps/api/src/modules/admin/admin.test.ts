@@ -1049,6 +1049,67 @@ describe('промты: draft → test → published → archived и откат'
     first = body.template;
   });
 
+  /**
+   * §0.5 п. 6 проверяется на том, что РЕАЛЬНО уедет провайдеру.
+   *
+   * Прежняя проверка сканировала тексты по умолчанию, то есть доказывала, что
+   * автор файла ничего не нарушил. Боевой промт заполняет администратор, и
+   * запрет обязан стоять на его пути — иначе «промт не знает раздела работ»
+   * остаётся утверждением о репозитории, а не о системе.
+   */
+  it('промт с названием раздела работ не публикуется', async () => {
+    const created = await asAdmin('POST', `${P}/prompts`, {
+      code: 'page_classify_section_leak',
+      stage: 'page_classify',
+      docTypeCode: null,
+      systemPrompt: 'Ты классифицируешь страницы комплекта по разделу 2.5.1 «Кровля автостоянки».',
+      userTemplate: 'Текст: {{text}}',
+      outputSchema: null,
+      modelOverride: null,
+    });
+    expect(created.statusCode).toBe(201);
+    const leaking = created.json<PromptResponse>();
+
+    // До публикации черновик правится свободно: итеративная работа не должна
+    // упираться в запрет на каждом сохранении.
+    await asAdmin('POST', `${P}/prompts/${leaking.id}/state`, { to: 'test' });
+
+    const published = await asAdmin('POST', `${P}/prompts/${leaking.id}/state`, {
+      to: 'published',
+    });
+    expect(published.statusCode).toBe(422);
+    expect(published.json<{ detail: string }>().detail).toContain('раздел работ');
+
+    // Отказ называет КАЖДЫЙ найденный маркер: «что-то не так» инженер чинит
+    // наугад.
+    const errors = published.json<{ errors?: { code: string; message: string }[] }>().errors ?? [];
+    expect(errors.map((error) => error.code)).toContain('section-marker-in-prompt');
+    expect(errors.some((error) => error.message.includes('кровля'))).toBe(true);
+
+    // Состояние не изменилось: отказ не оставил промт наполовину опубликованным.
+    const fresh = await asAdmin('GET', `${P}/prompts/${leaking.id}`);
+    expect(fresh.json<PromptResponse>().state).toBe('test');
+  });
+
+  it('маркер в ШАБЛОНЕ, а не в системной части, тоже ловится', async () => {
+    const created = await asAdmin('POST', `${P}/prompts`, {
+      code: 'page_classify_template_leak',
+      stage: 'page_classify',
+      docTypeCode: null,
+      systemPrompt: 'Определи роль страницы по её тексту.',
+      userTemplate: 'Комплект по армированию. Текст: {{text}}',
+      outputSchema: null,
+      modelOverride: null,
+    });
+    const leaking = created.json<PromptResponse>();
+    await asAdmin('POST', `${P}/prompts/${leaking.id}/state`, { to: 'test' });
+
+    const published = await asAdmin('POST', `${P}/prompts/${leaking.id}/state`, {
+      to: 'published',
+    });
+    expect(published.statusCode).toBe(422);
+  });
+
   it('опубликованная версия не правится — 409, а не 500', async () => {
     const response = await asAdmin('PATCH', `${P}/prompts/${first.id}`, {
       systemPrompt: 'подмена текста опубликованного промта',

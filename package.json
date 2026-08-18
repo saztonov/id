@@ -17,6 +17,7 @@
     "format:check": "prettier --check .",
     "db:probe": "pnpm --filter @id/db-harness probe",
     "fixtures:generate": "pnpm --filter @id/fixtures generate",
+    "corpus:generate": "pnpm --filter @id/fixtures generate:corpus",
     "pii:scan": "node tools/scripts/pii-scan.mjs",
     "db:schema:generate": "pnpm --filter @id/db schema:generate",
     "seed:generate": "node tools/scripts/generate-seed-migration.mjs"

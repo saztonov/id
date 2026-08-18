@@ -63,9 +63,29 @@ import {
   saveSignatureProbe,
   sha256Hex,
   storableVerdict,
+  applySegmentation,
+  createAiSpendReader,
+  createLlmProvider,
+  listFieldValues,
+  listLogicalDocuments,
+  listPageAssignments,
+  listPageClassifications,
+  listPromptTemplates,
+  listRegistryRows,
+  loadSegmentationPages,
+  observeDocTypeCandidate,
+  recordAiRun,
+  savePageClassifications,
+  saveDocumentRelations,
+  saveFieldValues,
+  saveRegistryMatches,
+  saveRegistryRows,
   type AuthScope,
   type Database,
+  type Env,
   type JobRegistry,
+  type LlmPort,
+  type LlmStage,
   type LayoutRevisionView,
   type PdfToolkit,
   type RdWebPort,
@@ -95,6 +115,17 @@ import {
   type PollRecognitionOptions,
   type RecognitionDeps,
 } from './recognition.js';
+import {
+  createClassifyPagesHandler,
+  createExtractFieldsHandler,
+  createGraphBuildHandler,
+  createMatchRegistryHandler,
+  createParseRegistryHandler,
+  createSegmentHandler,
+  SEGMENTATION_VERSION,
+  type PublishedPrompt,
+  type SegmentationDeps,
+} from './segmentation.js';
 import {
   createAnalyzeCoverageHandler,
   createDetectPagesHandler,
@@ -160,6 +191,20 @@ export interface PipelineJobsOptions {
   readonly recognitionSelections?: readonly RecognitionSelection[] | undefined;
   /** Режим документа RD WEB; по умолчанию выключен (см. `RecognitionDeps`). */
   readonly recognitionDocumentMode?: boolean | undefined;
+  /**
+   * Провайдер модели для фазы 2 сегментации (§8.2, §10).
+   *
+   * `null` и отсутствие значения — РАЗНОЕ. `undefined` означает «собери из
+   * окружения», `null` — «модели нет намеренно», и во втором случае фаза 2
+   * пропускается с названной причиной, а не падает: система обязана работать
+   * на якорных правилах без внешней модели (§0.5).
+   */
+  readonly llm?: LlmPort | null | undefined;
+  /** Окружение: нужно фабрике провайдера модели. Без него провайдер не собирается. */
+  readonly env?: Env | undefined;
+  /** Журнал и метрики для провайдера модели; в тестах подменяются. */
+  readonly llmLogger?: Parameters<typeof createLlmProvider>[1]['logger'] | undefined;
+  readonly llmMetrics?: Parameters<typeof createLlmProvider>[1]['metrics'] | undefined;
 }
 
 export class PipelineScopeError extends Error {
@@ -734,6 +779,163 @@ function recognitionDeps(options: PipelineJobsOptions): RecognitionDeps {
 }
 
 /**
+ * Связывание задач 14–19 с базой, каталогом и провайдером модели (§8).
+ *
+ * Та же дисциплина, что у остальных стадий: ровно одно системное чтение ради
+ * определения подрядчика ревизии (`pinScope`), после чего ВСЁ идёт закреплённой
+ * областью. Задача, поставленная с чужой ревизией в payload, не находит её
+ * вовсе; собственных запросов к БД этот модуль не делает — только вызовы
+ * репозиториев, потому что иначе правило «прямой запрос вне `db/repositories/`
+ * запрещён» держалось бы аккуратностью, а не eslint'ом.
+ */
+function segmentationDeps(options: PipelineJobsOptions): SegmentationDeps {
+  const db = options.db;
+
+  const scopeOf = async (revisionId: string): Promise<AuthScope> => {
+    const scope = await pinScope(db, revisionId);
+    if (scope === null) {
+      throw new PipelineScopeError(`Ревизия ${revisionId} не найдена: задача адресована в никуда.`);
+    }
+    return scope;
+  };
+
+  /**
+   * Провайдер модели.
+   *
+   * Собирается ОДИН раз на реестр, а не на задачу: кэш ответов и скользящее
+   * окно лимита частоты живут внутри провайдера, и пересоздание на каждую
+   * задачу обнуляло бы оба — то есть оплачивало бы повторно каждую страницу
+   * при повторе задачи и делало бы лимит частоты декоративным.
+   *
+   * Бюджет читается областью АДМИНИСТРАТОРА: `LLM_BUDGET_MONTHLY` — потолок
+   * портала, а не подрядчика. Областью подрядчика он считал бы только его
+   * собственные траты, и потолок стал бы кратным числу подрядчиков.
+   */
+  const llm: LlmPort | null =
+    options.llm !== undefined
+      ? options.llm
+      : options.env !== undefined &&
+          options.llmLogger !== undefined &&
+          options.llmMetrics !== undefined
+        ? createLlmProvider(options.env, {
+            metrics: options.llmMetrics,
+            logger: options.llmLogger,
+            spend: createAiSpendReader(db, SYSTEM_SCOPE),
+          })
+        : null;
+
+  return {
+    loadPages: async (revisionId) =>
+      loadSegmentationPages(db, await scopeOf(revisionId), revisionId),
+
+    savePageClassifications: async (input) =>
+      savePageClassifications(db, await scopeOf(input.revisionId), input),
+
+    listPageClassifications: async (revisionId) =>
+      listPageClassifications(db, await scopeOf(revisionId), revisionId),
+
+    applySegmentation: async (input) =>
+      applySegmentation(db, await scopeOf(input.revisionId), {
+        revisionId: input.revisionId,
+        documents: input.segmentation.documents,
+        unassigned: input.segmentation.unassigned,
+        extractorVersion: SEGMENTATION_VERSION,
+      }),
+
+    listDocuments: async (revisionId) =>
+      listLogicalDocuments(db, await scopeOf(revisionId), revisionId),
+
+    listPageAssignments: async (revisionId) =>
+      listPageAssignments(db, await scopeOf(revisionId), revisionId),
+
+    listFieldValues: async (documentId) => listFieldValues(db, SYSTEM_SCOPE, documentId),
+
+    saveFieldValues: async (input) => saveFieldValues(db, await scopeOf(input.revisionId), input),
+
+    saveRegistryRows: async (input) => saveRegistryRows(db, await scopeOf(input.revisionId), input),
+
+    listRegistryRows: async (revisionId) =>
+      listRegistryRows(db, await scopeOf(revisionId), revisionId),
+
+    saveRegistryMatches: async (input) =>
+      saveRegistryMatches(db, await scopeOf(input.revisionId), input),
+
+    saveDocumentRelations: async (input) =>
+      saveDocumentRelations(db, await scopeOf(input.revisionId), input),
+
+    observeCandidate: async (input) => {
+      const outcome = await observeDocTypeCandidate(db, await scopeOf(input.revisionId), input);
+      return { created: outcome.created, occurrences: outcome.occurrences };
+    },
+
+    /**
+     * Опубликованный промт стадии.
+     *
+     * Двух опубликованных промтов одной стадии быть не должно, и «взять
+     * первый» здесь запрещено: выбор между ними определял бы результат
+     * классификации молча. Уникальный индекс БД гарантирует один
+     * опубликованный промт на КОД, но не на стадию, поэтому проверка здесь
+     * настоящая, а не удвоение ограничения.
+     */
+    publishedPrompt: async (stage): Promise<PublishedPrompt | null> => {
+      const page = await listPromptTemplates(db, SYSTEM_SCOPE, {
+        stage,
+        state: 'published',
+        limit: 10,
+      });
+      if (page.items.length === 0) return null;
+      if (page.items.length > 1) {
+        throw new PipelineScopeError(
+          `Стадия ${stage}: опубликовано ${page.items.length} промтов; ` +
+            'какой из них применять — не решает конвейер.',
+        );
+      }
+      const row = page.items[0];
+      if (row === undefined) return null;
+      return {
+        code: row.code,
+        version: row.version,
+        systemPrompt: row.systemPrompt,
+        userTemplate: row.userTemplate,
+        modelOverride: row.modelOverride,
+      };
+    },
+
+    callLlm:
+      llm === null
+        ? null
+        : async (input) => {
+            const response = await llm.complete({
+              stage: input.stage as LlmStage,
+              promptCode: input.promptCode,
+              promptVersion: input.promptVersion,
+              systemPrompt: input.systemPrompt,
+              userPrompt: input.userPrompt,
+              schemaVersion: input.schemaVersion,
+              cacheContext: input.cacheContext,
+              ...(input.model !== undefined ? { model: input.model } : {}),
+            });
+            return {
+              text: response.text,
+              model: response.model,
+              provider: response.provider,
+              inputHash: response.inputHash,
+              outputHash: response.outputHash,
+              tokensIn: response.tokensIn,
+              tokensOut: response.tokensOut,
+              cost: response.cost,
+              latencyMs: response.latencyMs,
+              cacheHit: response.cacheHit,
+            };
+          },
+
+    recordAiRun: async (input) => {
+      await recordAiRun(db, await scopeOf(input.revisionId), input);
+    },
+  };
+}
+
+/**
  * Потолок чтения артефакта в память.
  *
  * Экспорт — это md/html/qa по нескольким сотням блоков, а не рабочий PDF:
@@ -798,6 +1000,18 @@ export function registerPipelineJobs(
     createPollRecognitionHandler(recognition, options.pollRecognition ?? {}),
   );
   registry.register('rd.fetch_export_once', createFetchExportHandler(recognition));
+
+  // Задачи 14–19 (§12): классификация страниц, сборка документов, реквизиты,
+  // реестр приложений, сверка и граф. Регистрируются здесь и безусловно — по
+  // той же причине, что и остальные стадии: обработчик без регистрации
+  // выглядит зависшим конвейером, а не отсутствующей возможностью.
+  const segmentation = segmentationDeps(options);
+  registry.register('doc.classify_pages', createClassifyPagesHandler(segmentation));
+  registry.register('doc.segment', createSegmentHandler(segmentation));
+  registry.register('doc.extract_fields', createExtractFieldsHandler(segmentation));
+  registry.register('doc.parse_registry', createParseRegistryHandler(segmentation));
+  registry.register('doc.match_registry', createMatchRegistryHandler(segmentation));
+  registry.register('graph.build', createGraphBuildHandler(segmentation));
   return registry;
 }
 
