@@ -197,6 +197,23 @@ export function registerBlockRoutes(app: FastifyInstance, state: FakeState, seed
     return { ...requireBlock(state, params.block_id) };
   });
 
+  /**
+   * Результаты распознавания блока (`blocks_history.list_block_results`).
+   *
+   * Единственный источник `model_id` и `confidence`: в архиве экспорта их нет
+   * вовсе. Отдаётся вся история результатов блока с отметкой `is_active` —
+   * ровно как у оригинала, поэтому портал обязан выбирать активный сам.
+   */
+  app.get('/api/blocks/:block_id/results', async (request) => {
+    requireUser(state, request);
+    const params = request.params as { block_id: string };
+    const block = requireBlock(state, params.block_id);
+    const results = [...state.blockResults.values()]
+      .filter((result) => result.block_id === block.block_id)
+      .map((result) => ({ ...result, is_active: result.result_id === block.active_result_id }));
+    return { results, active_result_id: block.active_result_id };
+  });
+
   app.patch('/api/blocks/:block_id', async (request, reply) => {
     const user = requireUser(state, request);
     const params = request.params as { block_id: string };

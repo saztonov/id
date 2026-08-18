@@ -29,18 +29,23 @@ import { stat } from 'node:fs/promises';
 import { pipeline } from 'node:stream/promises';
 
 import {
+  artifactKey,
   blobKey,
+  closeRunDocument,
   createBundle,
   createMaintenanceRegistry,
   createRunDocument,
   evaluatePdfFile,
   FALLBACK_LAYOUT_THRESHOLDS,
+  findArtifact,
   findBundle,
   findBundleByManifest,
   findFileContent,
   findLayoutRevision,
+  findRecognitionRun,
   findRevisionForFiles,
   findRunDocument,
+  finishRecognitionRun,
   importDetectedBlocks,
   listBundlePages,
   listLayoutBlocks,
@@ -48,10 +53,15 @@ import {
   loadProfileForLayout,
   previewPageKey,
   probePdf,
+  recordArtifact,
   replaceRunDocument,
   saveFileVerdict,
   savePageAttentionFlags,
+  saveRdJobId,
+  saveRecognitionResults,
+  saveRemoteHashBefore,
   saveSignatureProbe,
+  sha256Hex,
   storableVerdict,
   type AuthScope,
   type Database,
@@ -59,6 +69,7 @@ import {
   type LayoutRevisionView,
   type PdfToolkit,
   type RdWebPort,
+  type RecognitionSelection,
   type StorageProvider,
 } from '@id/api';
 
@@ -75,6 +86,15 @@ import {
   type FileVerifyDeps,
 } from './file-verify.js';
 import { createSignatureProbeHandler, type SignatureProbeDeps } from './signature-probe.js';
+import {
+  createFetchExportHandler,
+  createPollRecognitionHandler,
+  createReconcileHandler,
+  createStartRecognitionHandler,
+  type LocalBlock,
+  type PollRecognitionOptions,
+  type RecognitionDeps,
+} from './recognition.js';
 import {
   createAnalyzeCoverageHandler,
   createDetectPagesHandler,
@@ -134,6 +154,12 @@ export interface PipelineJobsOptions {
   readonly previewCached?: boolean | undefined;
   /** Настройки поллинга рендера; в тестах ускоряются. */
   readonly waitPages?: WaitPagesOptions | undefined;
+  /** Настройки поллинга распознавания; в тестах ускоряются. */
+  readonly pollRecognition?: PollRecognitionOptions | undefined;
+  /** Выбор провайдера/модели/профиля OCR на тип блока (§10). */
+  readonly recognitionSelections?: readonly RecognitionSelection[] | undefined;
+  /** Режим документа RD WEB; по умолчанию выключен (см. `RecognitionDeps`). */
+  readonly recognitionDocumentMode?: boolean | undefined;
 }
 
 export class PipelineScopeError extends Error {
@@ -540,6 +566,183 @@ function markupDeps(options: PipelineJobsOptions): MarkupDeps {
   };
 }
 
+// =====================================================================
+// Порты задач 10–13 (распознавание)
+// =====================================================================
+
+/**
+ * Область прогона распознавания.
+ *
+ * Та же дисциплина, что у задач разметки: `revisionId` из payload разрешается
+ * системным чтением ровно ради подрядчика, а сам прогон, его блоки, артефакты и
+ * результаты читаются и пишутся уже закреплённой областью. Payload, назвавший
+ * чужой прогон, не находит его вовсе — `findRecognitionRun` фильтрует областью.
+ */
+function recognitionDeps(options: PipelineJobsOptions): RecognitionDeps {
+  const { db, storage } = options;
+
+  /** Область прогона: одна функция на все методы, чтобы её нельзя было забыть. */
+  const scopeOf = async (revisionId: string): Promise<AuthScope> => {
+    const scope = await pinScope(db, revisionId);
+    if (scope === null) {
+      throw new PipelineScopeError(`Ревизия ${revisionId} не найдена: прогон адресован в никуда.`);
+    }
+    return scope;
+  };
+
+  /**
+   * Область по идентификатору прогона.
+   *
+   * Прогон адресуется своим uuid, а ревизия у него денормализована, поэтому
+   * одного системного чтения не избежать — оно ровно одно и здесь.
+   */
+  const scopeOfRun = async (runId: string): Promise<{ scope: AuthScope; revisionId: string }> => {
+    const run = await findRecognitionRun(db, SYSTEM_SCOPE, runId);
+    if (run === null) throw new PipelineScopeError(`Прогон ${runId} не найден.`);
+    return { scope: await scopeOf(run.revisionId), revisionId: run.revisionId };
+  };
+
+  return {
+    rdweb: options.rdweb ?? null,
+    selections: options.recognitionSelections ?? [],
+    documentMode: options.recognitionDocumentMode ?? false,
+    sha256: (bytes) => sha256Hex(bytes),
+
+    loadRun: async ({ revisionId, recognitionRunId }) => {
+      const scope = await pinScope(db, revisionId);
+      if (scope === null) return null;
+      const run = await findRecognitionRun(db, scope, recognitionRunId);
+      // Сверка ревизии в payload с ревизией прогона: задача, поставленная с
+      // чужим прогоном, не находит его через область, а задача с прогоном
+      // соседней ревизии того же подрядчика отсекается здесь.
+      if (run === null || run.revisionId !== revisionId) return null;
+      return {
+        runId: run.id,
+        revisionId: run.revisionId,
+        layoutRevisionId: run.layoutRevisionId,
+        status: run.status,
+        rdDocumentId: run.rdDocumentId,
+        rdJobId: run.rdJobId,
+        localLayoutHash: run.localLayoutHash,
+        remoteLayoutHashBefore: run.remoteLayoutHashBefore,
+        runDocumentClosed: run.runDocumentClosedAt !== null,
+      };
+    },
+
+    loadFrozenBlocks: async (runId): Promise<readonly LocalBlock[]> => {
+      const { scope } = await scopeOfRun(runId);
+      const run = await findRecognitionRun(db, scope, runId);
+      if (run === null) return [];
+      const blocks = await listLayoutBlocks(db, scope, run.layoutRevisionId);
+      return blocks.map((block) => ({
+        id: block.id,
+        workingPageIndex: block.workingPageIndex,
+        blockType: block.blockType,
+        shapeType: block.shapeType,
+        x0: block.x0,
+        y0: block.y0,
+        x1: block.x1,
+        y1: block.y1,
+        sortOrder: block.sortOrder,
+        points: block.points.map((point) => ({ x: point.x, y: point.y })),
+      }));
+    },
+
+    saveRemoteHashBefore: async (runId, remoteHash) => {
+      const { scope } = await scopeOfRun(runId);
+      await saveRemoteHashBefore(db, scope, runId, remoteHash);
+    },
+
+    saveRdJobId: async (runId, rdJobId) => {
+      const { scope } = await scopeOfRun(runId);
+      await saveRdJobId(db, scope, runId, rdJobId);
+    },
+
+    finishRun: async (input) => {
+      const { scope } = await scopeOfRun(input.runId);
+      return finishRecognitionRun(db, scope, input);
+    },
+
+    findArtifact: async (runId, kind) => {
+      const { scope } = await scopeOfRun(runId);
+      const artifact = await findArtifact(db, scope, runId, kind);
+      return artifact === null
+        ? null
+        : {
+            kind: artifact.kind,
+            artifactSha256: artifact.artifactSha256,
+            byteSize: artifact.byteSize,
+          };
+    },
+
+    recordArtifact: async (input) => {
+      const { scope } = await scopeOfRun(input.runId);
+      const outcome = await recordArtifact(db, scope, {
+        recognitionRunId: input.runId,
+        kind: input.kind,
+        artifactSha256: input.artifactSha256,
+        byteSize: input.byteSize,
+      });
+      return { kind: outcome.kind, artifactSha256: outcome.artifact.artifactSha256 };
+    },
+
+    artifactId: async (runId, kind) => {
+      const { scope } = await scopeOfRun(runId);
+      const artifact = await findArtifact(db, scope, runId, kind);
+      if (artifact === null) {
+        throw new PipelineScopeError(`Артефакт ${kind} прогона ${runId} не записан.`);
+      }
+      return artifact.id;
+    },
+
+    readArtifactBytes: async (runId, kind) => {
+      const key = artifactKey(runId, kind);
+      const head = await storage.headObject(key);
+      if (head === null) return null;
+      return readStorageObject(storage, key, MAX_ARTIFACT_BYTES);
+    },
+
+    writeArtifactBytes: async ({ runId, kind, bytes, contentType }) => {
+      await storage.putObject({
+        key: artifactKey(runId, kind),
+        body: Buffer.from(bytes),
+        contentType,
+        contentLength: bytes.byteLength,
+      });
+    },
+
+    saveResults: async (input) => {
+      const { scope } = await scopeOfRun(input.runId);
+      return saveRecognitionResults(db, scope, {
+        recognitionRunId: input.runId,
+        artifactVersionId: input.artifactVersionId,
+        pages: input.pages,
+        blocks: input.blocks,
+      });
+    },
+
+    closeRunDocument: async (layoutRevisionId) => {
+      const layout = await findLayoutRevisionSystemwide(db, layoutRevisionId);
+      if (layout === null) {
+        throw new PipelineScopeError(`Ревизия разметки ${layoutRevisionId} не найдена.`);
+      }
+      const scope = await scopeOf(layout.revisionId);
+      const result = await closeRunDocument(db, scope, layoutRevisionId);
+      return { changed: result.changed };
+    },
+  };
+}
+
+/**
+ * Потолок чтения артефакта в память.
+ *
+ * Экспорт — это md/html/qa по нескольким сотням блоков, а не рабочий PDF:
+ * десятки мегабайт против восьмидесяти. Потолок здесь тот же по смыслу, что и
+ * у приёма файлов (§4.2), и защищает ровно от того же — от объекта, который
+ * «весит» не столько, сколько заявляет.
+ */
+const MAX_ARTIFACT_BYTES = 128 * 1024 * 1024;
+
 /**
  * Ревизия разметки без области видимости.
  *
@@ -583,6 +786,18 @@ export function registerPipelineJobs(
   registry.register('layout.detect_pages', createDetectPagesHandler(markup));
   registry.register('layout.analyze_coverage', createAnalyzeCoverageHandler(markup));
   registry.register('preview.cache_pages', createPreviewCacheHandler(markup));
+
+  // Задачи 10–13 (§12): цикл сверки, запуск OCR, поллинг и однократный забор
+  // экспорта. Регистрируются здесь и безусловно — по той же причине, что и
+  // задачи разметки: обработчик без регистрации выглядит зависшим конвейером.
+  const recognition = recognitionDeps(options);
+  registry.register('layout.reconcile', createReconcileHandler(recognition));
+  registry.register('rd.start_recognition', createStartRecognitionHandler(recognition));
+  registry.register(
+    'rd.poll_recognition',
+    createPollRecognitionHandler(recognition, options.pollRecognition ?? {}),
+  );
+  registry.register('rd.fetch_export_once', createFetchExportHandler(recognition));
   return registry;
 }
 

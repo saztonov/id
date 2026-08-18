@@ -247,9 +247,15 @@ export const JOB_DEFINITIONS = {
   },
 
   // 10–13. Распознавание (§5.2, §6.2).
+  //
+  // Все четыре адресуют ПРОГОН, а не ревизию разметки: прогон уже пиннит и
+  // ревизию разметки, и её `blocks_hash`, и рабочий PDF, и RD-документ, то есть
+  // всё, что задача обязана считать заказанным. Payload, называющий только
+  // разметку, позволил бы задаче цикла сверки отработать по одному прогону, а
+  // старту OCR — по другому, и хэши сравнивались бы не с тем, что заказано.
   'layout.reconcile': {
     queue: 'io',
-    payload: layoutPayload,
+    payload: recognitionPayload,
     stage: 'recognition',
     maxAttempts: DEFAULT_MAX_ATTEMPTS,
     leaseMs: 600_000,

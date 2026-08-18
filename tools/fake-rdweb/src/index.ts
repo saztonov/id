@@ -24,10 +24,16 @@ import { registerBlockRoutes } from './routes-blocks.js';
 import { registerDocumentRoutes } from './routes-documents.js';
 import { registerJobRoutes } from './routes-jobs.js';
 import { registerProjectRoutes } from './routes-projects.js';
-import { FakeState, type FakeRdWebCall, type FakeRdWebSnapshot } from './state.js';
+import {
+  FakeState,
+  type FakeRdWebCall,
+  type FakeRdWebSnapshot,
+  type FakeRecognitionFaults,
+} from './state.js';
 
 export type {
   BlockOut,
+  BlockResultOut,
   BlockSourceName,
   BlockStatusName,
   BlockTypeName,
@@ -36,8 +42,10 @@ export type {
   DocumentStatusName,
   FakeRdWebCall,
   FakeRdWebSnapshot,
+  FakeRecognitionFaults,
   JobOut,
   JobScopeName,
+  JobSnapshot,
   JobStatusName,
   NodeSnapshot,
   NodeTypeName,
@@ -71,7 +79,15 @@ export interface FakeRdWeb {
   failNext(pathFragment: string, status: number, detail?: string): void;
   /** Протухание всех выданных access-токенов: следующий вызов получит 401. */
   expireTokens(): void;
-  /** Снимок состояния для тестов (документы, блоки, узлы) — только чтение. */
+  /**
+   * Включение запрограммированных отказов распознавания.
+   *
+   * Отдельно от `failNext`: тот моделирует ОДИН сбойный ответ, который адаптер
+   * обязан пережить повтором, а эти четыре — устойчивые состояния внешней
+   * системы, на которых проверяются не-деградируемые гейты §1.6.
+   */
+  setFaults(faults: Partial<FakeRecognitionFaults>): void;
+  /** Снимок состояния для тестов (документы, блоки, узлы, job'ы) — только чтение. */
   snapshot(): FakeRdWebSnapshot;
   close(): Promise<void>;
 }
@@ -134,7 +150,7 @@ function buildApp(state: FakeState, seed: string, baseUrl: () => string): Fastif
   registerProjectRoutes(app, state);
   registerDocumentRoutes(app, state, baseUrl);
   registerBlockRoutes(app, state, seed);
-  registerJobRoutes(app, state);
+  registerJobRoutes(app, state, baseUrl);
   return app;
 }
 
@@ -170,6 +186,9 @@ export async function startFakeRdWeb(options: FakeRdWebOptions = {}): Promise<Fa
     },
     expireTokens() {
       state.tokenEpoch += 1;
+    },
+    setFaults(faults: Partial<FakeRecognitionFaults>) {
+      Object.assign(state.faults, faults);
     },
     snapshot() {
       return state.snapshot();

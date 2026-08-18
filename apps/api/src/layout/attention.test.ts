@@ -223,7 +223,30 @@ describe('канонический хэш набора блоков', () => {
     expect(computeBlocksHash([block({ x1: 0.91 })])).not.toBe(base);
     expect(computeBlocksHash([block({ blockType: 'image' })])).not.toBe(base);
     expect(computeBlocksHash([block({ workingPageIndex: 1 })])).not.toBe(base);
-    expect(computeBlocksHash([block({ sortOrder: 1 })])).not.toBe(base);
+  });
+
+  /**
+   * Порядок чтения входит в хэш РАНГОМ, а не сырым `sort_order`.
+   *
+   * Сырое число сравнивать нельзя: на стороне RD WEB его назначает их сервер
+   * (max+1 внутри группы «страница × тип»), нашего значения он не принимает, а
+   * после удалений в нумерации остаются дыры. Хэш обязан ловить смену ПОРЯДКА
+   * блоков и не обязан ловить смену нумерации, при которой порядок тот же.
+   */
+  it('ловит перестановку блоков и не ловит разрыв нумерации', () => {
+    const first = block({ y0: 0.1, y1: 0.3, sortOrder: 0 });
+    const second = block({ y0: 0.4, y1: 0.6, sortOrder: 1 });
+
+    const ordered = computeBlocksHash([first, second]);
+    // Дыры в нумерации (0, 5) описывают ТОТ ЖЕ порядок чтения.
+    expect(computeBlocksHash([first, { ...second, sortOrder: 5 }])).toBe(ordered);
+    // А перестановка — уже другой порядок, и хэш обязан её увидеть.
+    expect(
+      computeBlocksHash([
+        { ...first, sortOrder: 1 },
+        { ...second, sortOrder: 0 },
+      ]),
+    ).not.toBe(ordered);
   });
 
   it('устойчив к дрожанию double после round-trip через JSON', () => {

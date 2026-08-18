@@ -96,6 +96,7 @@ import { registerRevisionEventRoutes } from './modules/events/sse.js';
 import { registerFileRoutes } from './modules/files/routes.js';
 import { registerBundleRoutes } from './modules/bundles/routes.js';
 import { registerLayoutRoutes } from './modules/layout/routes.js';
+import { registerRecognitionRoutes } from './modules/recognition/routes.js';
 import { queueSnapshot } from './db/repositories/jobs.js';
 import { createStorage, type StorageProvider } from './storage/provider.js';
 import { LOCAL_UPLOAD_PATH } from './storage/local.js';
@@ -525,6 +526,9 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppInstan
   // заморозка (§6.1, §7). Маршрут, не зарегистрированный здесь, недостижим —
   // это ровно тот отказ, которым закончились S3 и S5.
   registerLayoutRoutes(app);
+  // Задачи 10–13 и кнопка «Отправить на распознавание» (§6.2): маршрут без
+  // регистрации — это кнопка, которой нет, при полностью написанном конвейере.
+  registerRecognitionRoutes(app);
 
   app.addHook('onClose', async () => {
     // Пул, полученный извне, принадлежит вызывающему: закрыть его здесь значит

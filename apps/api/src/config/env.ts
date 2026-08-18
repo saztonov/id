@@ -95,6 +95,27 @@ const envSchema = z.object({
    * проверить, что аккаунт не пишет в проекты, где работают люди.
    */
   RDWEB_PROJECT_ALLOWLIST: z.string().optional(),
+  /**
+   * Модель OCR, которую портал заказывает у RD WEB (§10, §5.2 шаг 6).
+   *
+   * Обязательное поле их контракта: `JobCreateRequest.settings` —
+   * `dict[BlockType, BlockTypeSelection]`, а у `BlockTypeSelection` обязательны
+   * `provider_type` и `model_id`. Запуск «настройками по умолчанию» невозможен
+   * — их схема отвечает 422. Значения по умолчанию у нас нет намеренно: выдумать
+   * идентификатор модели чужой системы нельзя, а отсутствие настройки обязано
+   * останавливать запуск с внятной причиной, а не приводить к 422 из RD WEB.
+   */
+  RDWEB_OCR_MODEL: z.string().min(1).optional(),
+  /** Тип провайдера их стороны; сегодня в `ProviderType` есть только `lmstudio`. */
+  RDWEB_OCR_PROVIDER: z.string().min(1).default('lmstudio'),
+  /**
+   * Профиль промта OCR на тип блока: `text=<id>,image=<id>,stamp=<id>`.
+   *
+   * Промты OCR не редактируются порталом — это профили RD WEB (§10), поэтому
+   * здесь только ВЫБОР профиля. Пусто — остаётся authoritative-дефолт их
+   * админки, и это штатное состояние, а не деградация.
+   */
+  RDWEB_OCR_PROMPT_PROFILES: z.string().optional(),
 
   LLM_PROVIDER: z.enum(['proxy_llm', 'recorded', 'none']).default('none'),
   PROXY_LLM_BASE_URL: z.string().url().optional(),

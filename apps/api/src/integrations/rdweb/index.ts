@@ -13,7 +13,7 @@ import type { Logger } from 'pino';
 import type { Env } from '../../config/env.js';
 import type { Metrics } from '../../observability/metrics.js';
 import { LegacyRdWebAdapter } from './legacy-adapter.js';
-import type { RdWebPort } from './port.js';
+import type { RdWebPort, RecognitionSelection } from './port.js';
 
 export * from './port.js';
 export { LegacyRdWebAdapter, DETECT_BATCH_LIMIT } from './legacy-adapter.js';
@@ -65,6 +65,39 @@ export function createRdWeb(env: Env, options: CreateRdWebOptions): RdWebPort | 
  * многих: портал создаёт документы прогонов в одном своём проекте. Список
  * существует, чтобы конфигурация была проверяемой, а не чтобы код гадал.
  */
+/**
+ * Выбор провайдера, модели и профиля промта на каждый тип блока (§10).
+ *
+ * Пустой список — «OCR не настроен», и задача 11 обязана честно отказать. Это
+ * не то же самое, что «запустим с дефолтами»: дефолтов у их контракта нет, а
+ * подставленный наугад `model_id` дал бы 422 из RD WEB вместо внятного «не
+ * настроено» в консоли задач.
+ */
+export function recognitionSelections(env: Env): readonly RecognitionSelection[] {
+  if (env.RDWEB_OCR_MODEL === undefined) return [];
+  const profiles = parsePromptProfiles(env.RDWEB_OCR_PROMPT_PROFILES);
+  return (['text', 'image', 'stamp'] as const).map((blockType) => {
+    const promptProfileId = profiles.get(blockType);
+    return {
+      blockType,
+      providerType: env.RDWEB_OCR_PROVIDER,
+      modelId: env.RDWEB_OCR_MODEL as string,
+      ...(promptProfileId !== undefined ? { promptProfileId } : {}),
+    };
+  });
+}
+
+function parsePromptProfiles(raw: string | undefined): ReadonlyMap<string, string> {
+  const map = new Map<string, string>();
+  for (const pair of (raw ?? '').split(',')) {
+    const [key, value] = pair.split('=').map((part) => part.trim());
+    if (key !== undefined && key.length > 0 && value !== undefined && value.length > 0) {
+      map.set(key, value);
+    }
+  }
+  return map;
+}
+
 export function firstAllowedProject(env: Env): string | undefined {
   const list = (env.RDWEB_PROJECT_ALLOWLIST ?? '')
     .split(',')

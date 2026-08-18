@@ -140,9 +140,27 @@ export interface ReconcileLayoutResult {
   readonly remote: readonly RemoteBlock[];
 }
 
+/**
+ * Выбор провайдера, модели и профиля промта на ОДИН тип блока.
+ *
+ * Это их обязательное поле, а не наше украшение: `JobCreateRequest.settings` —
+ * `dict[BlockType, BlockTypeSelection]`, а у `BlockTypeSelection` обязательны
+ * `provider_type` и `model_id`. Пустой объект их сервер отвергает 422, поэтому
+ * «запустить OCR настройками по умолчанию» невозможно в принципе — выбор
+ * обязан прийти из конфигурации портала (§10: промты OCR не редактируются, это
+ * профили RD WEB, и портал лишь выбирает профиль на тип блока).
+ */
+export interface RecognitionSelection {
+  readonly blockType: BlockType;
+  readonly providerType: string;
+  readonly modelId: string;
+  /** `undefined` — остаётся authoritative-дефолт их админки. */
+  readonly promptProfileId?: string | undefined;
+}
+
 export interface StartRecognitionInput {
   readonly documentId: string;
-  readonly blockTypes: readonly BlockType[];
+  readonly selections: readonly RecognitionSelection[];
   readonly documentMode: boolean;
   readonly idempotencyKey: string;
 }
@@ -154,12 +172,50 @@ export interface RecognitionStatus {
   readonly recognizedBlocks: number;
   readonly failedBlocks: number;
   readonly hasExport: boolean;
+  /** Текст отказа их стороны; в журнал идёт как есть, без тела ответа. */
+  readonly errorMessage: string | null;
 }
+
+/**
+ * Терминальные статусы их job'а (`domain/enums.JobStatus`).
+ *
+ * `completed_with_warnings` — успех: документ собран, а перечень неисполнимых
+ * блоков лежит в QA-манифесте. `paused` терминальным НЕ считается: job можно
+ * возобновить, и поллинг обязан его дождаться, а не объявить провалом.
+ */
+export const TERMINAL_RECOGNITION_STATUSES = new Set([
+  'done',
+  'completed_with_warnings',
+  'failed',
+  'canceled',
+]);
+
+export const SUCCESSFUL_RECOGNITION_STATUSES = new Set(['done', 'completed_with_warnings']);
 
 export interface ExportPayload {
   readonly kind: 'zip';
   readonly bytes: Uint8Array;
   readonly contentType: string;
+}
+
+/**
+ * Активный результат распознавания одного блока (`BlockResultOut`).
+ *
+ * Экспорт job'а (`document.md`/`document.html`/`qa_manifest.json`) не содержит
+ * ни модели, ни уверенности — а §9.1 прямо требует, чтобы низкая уверенность
+ * OCR не давала `fail`. Поэтому провенанс результата читается отдельно, и
+ * читается ПОСЛЕ забора экспорта: это не второй экспорт, а read-back.
+ */
+export interface RemoteBlockResult {
+  readonly blockId: string;
+  readonly resultId: string;
+  readonly resultType: string;
+  readonly modelId: string | null;
+  readonly confidence: number | null;
+  readonly ocrHtml: string | null;
+  readonly ocrMarkdown: string | null;
+  readonly ocrText: string | null;
+  readonly ocrJson: unknown;
 }
 
 /**
@@ -179,6 +235,14 @@ export interface RdWebPort {
   startRecognition(input: StartRecognitionInput): Promise<RecognitionStatus>;
   pollRecognition(jobId: string): Promise<RecognitionStatus>;
   fetchExportOnce(jobId: string): Promise<ExportPayload>;
+  /**
+   * Активные результаты перечисленных блоков.
+   *
+   * Множественное число в подписи намеренно: сегодня это N обращений к
+   * `GET /api/blocks/{id}/results`, потому что bulk-ручки у них нет. Когда она
+   * появится (техзадание S13), изменится реализация, а не вызывающий.
+   */
+  fetchBlockResults(blockIds: readonly string[]): Promise<readonly RemoteBlockResult[]>;
   /** Превью страницы: нужно только при `PREVIEW_MODE=cached` (§7.1). */
   fetchPagePreview(documentId: string, pageIndex: number): Promise<Uint8Array>;
   closeRunDocument(documentId: string): Promise<void>;

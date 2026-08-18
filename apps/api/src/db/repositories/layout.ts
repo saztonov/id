@@ -81,7 +81,7 @@ export const DEFAULT_LAYOUT_PROFILE_CODE = 'default';
  * Версия канонической формы. Входит в хэш: изменив состав полей, мы обязаны
  * получить другие хэши, иначе старый пин перестанет описывать то, что описывал.
  */
-export const BLOCKS_HASH_VERSION = 1;
+export const BLOCKS_HASH_VERSION = 2;
 
 /**
  * Разрядность координат в каноническом виде.
@@ -114,7 +114,8 @@ export interface HashableBlock {
   readonly points: readonly { readonly x: number; readonly y: number }[];
 }
 
-function canonicalRow(block: HashableBlock): string {
+/** Геометрия блока без порядка чтения: страница, тип, форма, координаты, точки. */
+function geometryRow(block: HashableBlock): string {
   const points = block.points.map((p) => `${fixed(p.x)},${fixed(p.y)}`).join(';');
   return [
     block.workingPageIndex,
@@ -124,9 +125,51 @@ function canonicalRow(block: HashableBlock): string {
     fixed(block.y0),
     fixed(block.x1),
     fixed(block.y1),
-    block.sortOrder,
     points,
   ].join('|');
+}
+
+/** Группа порядка чтения — та же ось, что у `_next_sort_order` RD WEB: страница × тип. */
+function orderGroupKey(block: HashableBlock): string {
+  return `${block.workingPageIndex}|${block.blockType}`;
+}
+
+/**
+ * Порядок чтения в канонической форме — ПЛОТНЫЙ РАНГ, а не сырое `sort_order`.
+ *
+ * Это не косметика, а условие исполнимости §5.2, шага 5. `sort_order` на
+ * удалённой стороне назначает ИХ сервер (`_next_sort_order` = max+1 внутри
+ * группы «страница × тип»), нашего значения он не принимает ни в create, ни в
+ * PATCH. После любого удаления в группе остаются дыры (0, 5, 7), и сырые числа
+ * двух сторон не совпали бы никогда — то есть хэши расходились бы на исправном
+ * прогоне, а `integrity_error` перестал бы что-либо значить.
+ *
+ * Ранг же выражает ровно то, что порядок чтения и означает: «этот блок идёт
+ * вторым в своей группе». Он вычисляется одинаково из локальных строк и из
+ * ответа RD WEB, а разрыв нумерации на него не влияет. Тай-брейк по геометрии
+ * обязателен: идентификаторы блоков у двух сторон разные, и без него два блока
+ * с равным `sort_order` получили бы ранги в порядке выдачи.
+ */
+function withOrderRanks(blocks: readonly HashableBlock[]): readonly string[] {
+  const groups = new Map<string, { readonly sortOrder: number; readonly row: string }[]>();
+  for (const block of blocks) {
+    const key = orderGroupKey(block);
+    const entry = { sortOrder: block.sortOrder, row: geometryRow(block) };
+    const list = groups.get(key);
+    if (list === undefined) groups.set(key, [entry]);
+    else list.push(entry);
+  }
+
+  const rows: string[] = [];
+  for (const list of groups.values()) {
+    const ordered = [...list].sort(
+      (a, b) => a.sortOrder - b.sortOrder || (a.row < b.row ? -1 : a.row > b.row ? 1 : 0),
+    );
+    ordered.forEach((entry, rank) => {
+      rows.push(`${entry.row}|#${rank}`);
+    });
+  }
+  return rows;
 }
 
 /**
@@ -141,7 +184,7 @@ function canonicalRow(block: HashableBlock): string {
  * Порядок точек полигона, наоборот, значим и сохраняется: он задаёт саму форму.
  */
 export function computeBlocksHash(blocks: readonly HashableBlock[]): string {
-  const rows = blocks.map(canonicalRow).sort();
+  const rows = [...withOrderRanks(blocks)].sort();
   const canonical = `v${BLOCKS_HASH_VERSION}\n${rows.join('\n')}`;
   return createHash('sha256').update(canonical, 'utf8').digest('hex');
 }

@@ -192,6 +192,30 @@ export interface DocumentRecord {
   updatedAt: string;
 }
 
+/** `_blocks_schemas.BlockResultOut` — поля, которые двойник действительно ведёт. */
+export interface BlockResultOut {
+  result_id: string;
+  block_id: string;
+  block_version: number;
+  job_id: string;
+  task_id: string;
+  result_type: string;
+  status: string;
+  provider_type: string;
+  model_id: string;
+  prompt_profile_id: string | null;
+  confidence: number | null;
+  ocr_html: string | null;
+  ocr_text: string | null;
+  ocr_json: unknown;
+  ocr_markdown: string | null;
+  result_phase: string;
+  is_final: boolean;
+  created_by: string;
+  created_at: string;
+  is_active: boolean;
+}
+
 export interface JobRecord {
   jobId: string;
   projectId: string;
@@ -199,11 +223,15 @@ export interface JobRecord {
   scope: JobScopeName;
   priority: number;
   settings: unknown;
+  documentMode: boolean;
+  idempotencyKey: string | null;
   blockIds: string[];
   createdBy: string;
   createdAt: string;
   /** Сколько раз job уже читали через `GET /api/jobs/{id}` (модель прогресса). */
   polls: number;
+  /** Сколько раз архив уже отдавали: сверх одного — нарушение §5.2 порталом. */
+  exportFetches: number;
 }
 
 export interface UploadTokenRecord {
@@ -248,10 +276,63 @@ export interface NodeSnapshot {
   readonly depth: number;
 }
 
+export interface JobSnapshot {
+  readonly jobId: string;
+  readonly documentId: string;
+  readonly scope: JobScopeName;
+  readonly blockCount: number;
+  readonly settings: unknown;
+  readonly idempotencyKey: string | null;
+  /** Сколько раз портал забрал архив. Больше одного — нарушение §5.2. */
+  readonly exportFetches: number;
+}
+
 export interface FakeRdWebSnapshot {
   readonly documents: readonly DocumentSnapshot[];
   readonly blocks: readonly BlockOut[];
   readonly nodes: readonly NodeSnapshot[];
+  readonly jobs: readonly JobSnapshot[];
+  readonly blockResults: readonly BlockResultOut[];
+}
+
+/**
+ * Запрограммированные отказы распознавания — ручки для проверки гейтов §1.6.
+ *
+ * Каждая моделирует свой класс отказа, а не «ошибку вообще»: экспорт, который
+ * не появится никогда; подмена блоков после старта OCR; обрыв выдачи архива;
+ * повреждённый архив; и — отдельной группой — архив СТРУКТУРНО целый, но
+ * описывающий не то, что заказано. Последняя группа появилась потому, что
+ * прогон, распознавший ноль блоков, до неё был неотличим от успешного.
+ */
+export interface FakeRecognitionFaults {
+  /** `has_export` остаётся `false` навсегда: их финализатор не отработал. */
+  neverExport: boolean;
+  /**
+   * Изменить набор блоков сразу после старта OCR.
+   *
+   * Моделирует человека, открывшего документ в их UI: §5.2, шаг 7 обязан это
+   * поймать перечитыванием набора и переводом прогона в `integrity_error`.
+   */
+  mutateBlocksOnStart: boolean;
+  /** Отдать обрезанный архив: заявленный размер больше фактического. */
+  truncateExport: boolean;
+  /** Отдать архив с испорченным содержимым записи (CRC не сойдётся). */
+  corruptExport: boolean;
+
+  /** Не класть в архив `document.html` — состав архива нарушен. */
+  dropHtmlEntry: boolean;
+  /** Не класть в архив `document.md` — состав архива нарушен. */
+  dropMarkdownEntry: boolean;
+  /** `## Page 0` вместо `## Page N`: их `_page_label` — это `page_index + 1`. */
+  badPageLabel: boolean;
+  /** Заголовок страницы за пределами рабочего документа. */
+  pageLabelOutOfRange: boolean;
+  /** Пустой `document.md`: ни одной страницы, ни одного блока. */
+  emptyMarkdown: boolean;
+  /** Секция блока, которого в документе нет: экспорт описывает чужой набор. */
+  foreignBlockInMarkdown: boolean;
+  /** Выбросить из markdown половину блоков: экспорт неполон. */
+  dropHalfOfBlocks: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -311,8 +392,22 @@ export class FakeState {
   readonly blocks = new Map<string, BlockOut>();
   readonly jobs = new Map<string, JobRecord>();
   readonly uploadTokens = new Map<string, UploadTokenRecord>();
+  readonly blockResults = new Map<string, BlockResultOut>();
   readonly calls: FakeRdWebCall[] = [];
   readonly failures: PendingFailure[] = [];
+  readonly faults: FakeRecognitionFaults = {
+    neverExport: false,
+    mutateBlocksOnStart: false,
+    truncateExport: false,
+    corruptExport: false,
+    dropHtmlEntry: false,
+    dropMarkdownEntry: false,
+    badPageLabel: false,
+    pageLabelOutOfRange: false,
+    emptyMarkdown: false,
+    foreignBlockInMarkdown: false,
+    dropHalfOfBlocks: false,
+  };
 
   tokenEpoch = 0;
   private seq = 0;
@@ -408,6 +503,16 @@ export class FakeState {
         path: n.path,
         depth: n.depth,
       })),
+      jobs: [...this.jobs.values()].map((j) => ({
+        jobId: j.jobId,
+        documentId: j.documentId,
+        scope: j.scope,
+        blockCount: j.blockIds.length,
+        settings: j.settings,
+        idempotencyKey: j.idempotencyKey,
+        exportFetches: j.exportFetches,
+      })),
+      blockResults: [...this.blockResults.values()].map((r) => ({ ...r })),
     };
   }
 }

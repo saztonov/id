@@ -113,6 +113,36 @@ export function isUploadKey(key: string): boolean {
   return key.startsWith(`${UPLOAD_PREFIX}/`);
 }
 
+/** Неизменяемые артефакты прогона распознавания (§13). */
+const ARTIFACT_PREFIX = 'artifacts';
+
+export type ArtifactKind = 'zip' | 'md' | 'html' | 'blocks_json' | 'qa';
+
+const ARTIFACT_EXTENSIONS: Readonly<Record<ArtifactKind, string>> = {
+  zip: 'zip',
+  md: 'md',
+  html: 'html',
+  blocks_json: 'json',
+  qa: 'json',
+};
+
+/**
+ * Ключ артефакта прогона: `artifacts/{runId}/{kind}.{ext}` (§13).
+ *
+ * Адресуется ПРОГОНОМ, а не содержимым: в отличие от оригиналов, артефакт —
+ * доказательство «что именно вернул RD WEB по этому прогону», и дедупликация
+ * двух прогонов с побайтово совпавшим экспортом свела бы два разных факта к
+ * одному объекту. Один вид на прогон — это же ограничение держит
+ * `artifact_versions_run_kind_uq`, и второй артефакт того же вида означает не
+ * новую версию, а повторный забор экспорта, запрещённый §5.2.
+ */
+export function artifactKey(recognitionRunId: string, kind: ArtifactKind): string {
+  if (!UUID_PATTERN.test(recognitionRunId)) {
+    throw new InvalidStorageKeyError('Идентификатор прогона распознавания обязан быть uuid');
+  }
+  return `${ARTIFACT_PREFIX}/${recognitionRunId}/${kind}.${ARTIFACT_EXTENSIONS[kind]}`;
+}
+
 /** Кэш превью страниц (§13) — только при `PREVIEW_MODE=cached`. */
 const PREVIEW_PREFIX = 'preview';
 

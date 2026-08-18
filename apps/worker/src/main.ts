@@ -36,6 +36,7 @@ import {
   detectQpdf,
   EnvError,
   firstAllowedProject,
+  recognitionSelections,
   errorDigest,
   installProcessErrorHandlers,
   instrumentPool,
@@ -174,6 +175,10 @@ async function main(): Promise<void> {
     rdweb,
     rdProjectId: firstAllowedProject(env) ?? null,
     previewCached: env.PREVIEW_MODE === 'cached',
+    // Выбор провайдера и модели OCR (§10). Пустой список означает «не
+    // настроено», и задача 11 честно отказывает — она не имеет права
+    // подставить чужой `model_id` за администратора.
+    recognitionSelections: recognitionSelections(env),
   });
 
   const runner = new JobRunner({

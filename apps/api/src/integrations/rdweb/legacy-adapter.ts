@@ -35,6 +35,7 @@ import {
   type ReconcileLayoutInput,
   type ReconcileLayoutResult,
   type RemoteBlock,
+  type RemoteBlockResult,
   type RemoteDocument,
   type StartRecognitionInput,
   type UploadWorkingPdfInput,
@@ -89,6 +90,21 @@ interface RawJob {
   recognized_blocks: number;
   failed_blocks: number;
   has_export: boolean;
+  error_message?: string | null;
+}
+
+/** `_blocks_schemas.BlockResultOut` — только поля, которые портал хранит. */
+interface RawBlockResult {
+  result_id: string;
+  block_id: string;
+  result_type: string;
+  model_id?: string | null;
+  confidence?: number | null;
+  ocr_html?: string | null;
+  ocr_text?: string | null;
+  ocr_markdown?: string | null;
+  ocr_json?: unknown;
+  is_active?: boolean;
 }
 
 function toBlockType(value: string, operation: string): BlockType {
@@ -170,6 +186,29 @@ function blockKey(input: {
     .map((point) => `${(point[0] ?? 0).toFixed(6)}:${(point[1] ?? 0).toFixed(6)}`)
     .join(';');
   return [input.pageIndex, input.blockType, input.shapeType, coords, points].join('|');
+}
+
+/**
+ * Группа порядка чтения: страница × тип блока.
+ *
+ * Та же ось, что у `_next_sort_order` в их `_blocks_helpers.py`, и та же, по
+ * которой канонический хэш считает ранг (`layout.ts`). Совпадение осей —
+ * несущее: сверка приводит к нужному виду ИМЕННО группу, и ранг после этого
+ * совпадает у обеих сторон без единого дополнительного вызова.
+ */
+function groupKey(pageIndex: number, blockType: string): string {
+  return `${pageIndex}|${blockType}`;
+}
+
+function groupOf<T>(items: readonly T[], key: (item: T) => string): Map<string, T[]> {
+  const groups = new Map<string, T[]>();
+  for (const item of items) {
+    const value = key(item);
+    const list = groups.get(value);
+    if (list === undefined) groups.set(value, [item]);
+    else list.push(item);
+  }
+  return groups;
 }
 
 export interface LegacyRdWebAdapterOptions extends RdWebClientOptions {
@@ -326,82 +365,177 @@ export class LegacyRdWebAdapter implements RdWebPort {
   }
 
   /**
-   * Цикл сверки §5.2, шаг 5, за один проход.
+   * Цикл сверки §5.2, шаг 5, за один проход — по группам «страница × тип».
    *
-   * Сначала удаление лишнего, потом создание недостающего: обратный порядок на
-   * документе с сотней блоков временно удвоил бы их число, а у них на каждый
-   * блок пишется строка истории и аудита.
+   * ## Почему группами, а не поблочно
    *
-   * Совпадение ищется по геометрии, а не по идентификатору: локальный id блока
-   * удалённой стороне неизвестен, а `client_id` она возвращает только в ответе
-   * на create и нигде не хранит.
+   * Совпасть обязан не только НАБОР блоков, но и порядок чтения внутри группы:
+   * он входит в канонический хэш (рангом, см. `computeBlocksHash`). А `sort_order`
+   * на их стороне назначает их сервер: create даёт max+1 в группе, PATCH его не
+   * трогает вовсе, нашего значения не принимает ни тот, ни другой. Значит
+   * управлять порядком можно только ПОСЛЕДОВАТЕЛЬНОСТЬЮ операций внутри группы,
+   * а для этого группу надо рассматривать целиком.
+   *
+   * Отсюда правило прохода по каждой группе:
+   *
+   * - позиции, которые есть с обеих сторон, приводятся PATCH'ем с
+   *   `expected_version` — их `sort_order` остаётся прежним, значит и ранг тоже;
+   * - хвост удалённой группы (её длиннее нашей) удаляется — у оставшихся
+   *   `sort_order` не меняется;
+   * - хвост нашей группы создаётся В ПОРЯДКЕ ВОЗРАСТАНИЯ — их сервер выдаёт
+   *   max+1, то есть дописывает ровно в конец и ровно в нашем порядке.
+   *
+   * После такого прохода плотный ранг совпадает у обеих сторон по построению.
+   *
+   * Идентичные позиции не трогаются вовсе: PATCH сбрасывает `status` и
+   * `active_result_id` блока, и переписывать неизменившуюся геометрию значило бы
+   * обнулять результаты прошлого прогона на ровном месте.
+   *
+   * Частичный сбой безопасен: следующий проход перечитывает удалённый набор и
+   * доводит его до того же состояния — никакой операции «продолжить с середины»
+   * здесь нет по построению.
    */
   async reconcileLayout(input: ReconcileLayoutInput): Promise<ReconcileLayoutResult> {
     const remote = await this.listBlocks(input.documentId);
 
-    const desiredByKey = new Map<string, DesiredBlock[]>();
-    for (const block of input.desired) {
-      const key = blockKey(block);
-      const list = desiredByKey.get(key);
-      if (list === undefined) desiredByKey.set(key, [block]);
-      else list.push(block);
-    }
-
-    const keep = new Set<string>();
-    let deleted = 0;
-    for (const block of remote) {
-      const key = blockKey(block);
-      const wanted = desiredByKey.get(key);
-      if (wanted !== undefined && wanted.length > 0) {
-        wanted.pop();
-        keep.add(block.blockId);
-        continue;
-      }
-      await this.#client.request<unknown>({
-        method: 'DELETE',
-        path: `/api/blocks/${encodeURIComponent(block.blockId)}`,
-        operation: 'block_delete',
-        query: { expected_version: block.version },
-        // 409 означает, что блок изменился между чтением и удалением. Это не
-        // отказ прогона: следующий проход цикла перечитает набор.
-        expect: [409],
-      });
-      deleted += 1;
-    }
+    const desiredGroups = groupOf([...input.desired], (block) =>
+      groupKey(block.pageIndex, block.blockType),
+    );
+    const remoteGroups = groupOf([...remote], (block) =>
+      groupKey(block.pageIndex, block.blockType),
+    );
 
     let created = 0;
-    for (const [, blocks] of desiredByKey) {
-      for (const block of blocks) {
-        await this.#client.request<RawBlock>({
-          method: 'POST',
-          path: `/api/documents/${encodeURIComponent(input.documentId)}/blocks`,
-          operation: 'block_create',
-          body: {
-            page_index: block.pageIndex,
-            block_type: block.blockType,
-            shape_type: block.shapeType,
-            coords_norm: [...block.coordsNorm],
-            ...(block.polygonPoints !== null
-              ? { polygon_points: block.polygonPoints.map((point) => [...point]) }
-              : {}),
-          },
-        });
+    let updated = 0;
+    let deleted = 0;
+
+    for (const key of new Set([...desiredGroups.keys(), ...remoteGroups.keys()])) {
+      const desired = [...(desiredGroups.get(key) ?? [])].sort((a, b) => a.sortOrder - b.sortOrder);
+      // Тай-брейк по геометрии — тот же, что в каноническом ранге: без него две
+      // позиции с равным `sort_order` сопоставлялись бы порядком выдачи.
+      const current = [...(remoteGroups.get(key) ?? [])].sort(
+        (a, b) =>
+          (a.sortOrder ?? 0) - (b.sortOrder ?? 0) ||
+          blockKey(a).localeCompare(blockKey(b)) ||
+          a.blockId.localeCompare(b.blockId),
+      );
+
+      const shared = Math.min(desired.length, current.length);
+      for (let index = 0; index < shared; index += 1) {
+        const want = desired[index];
+        const have = current[index];
+        if (want === undefined || have === undefined) continue;
+        if (blockKey(want) === blockKey(have)) continue;
+        await this.#patchBlock(have, want);
+        updated += 1;
+      }
+
+      for (let index = desired.length; index < current.length; index += 1) {
+        const extra = current[index];
+        if (extra === undefined) continue;
+        await this.#deleteBlock(extra);
+        deleted += 1;
+      }
+
+      for (let index = current.length; index < desired.length; index += 1) {
+        const missing = desired[index];
+        if (missing === undefined) continue;
+        await this.#createBlock(input.documentId, missing);
         created += 1;
       }
     }
 
-    return { created, updated: 0, deleted, remote: await this.listBlocks(input.documentId) };
+    return { created, updated, deleted, remote: await this.listBlocks(input.documentId) };
   }
 
+  async #patchBlock(current: RemoteBlock, desired: DesiredBlock): Promise<void> {
+    await this.#client.request<RawBlock>({
+      method: 'PATCH',
+      path: `/api/blocks/${encodeURIComponent(current.blockId)}`,
+      operation: 'block_update',
+      body: {
+        expected_version: current.version,
+        block_type: desired.blockType,
+        shape_type: desired.shapeType,
+        coords_norm: [...desired.coordsNorm],
+        ...(desired.polygonPoints !== null
+          ? { polygon_points: desired.polygonPoints.map((point) => [...point]) }
+          : {}),
+      },
+      // 409 означает, что блок изменился между чтением и правкой. Это не отказ
+      // прогона: следующий проход цикла перечитает набор.
+      expect: [409],
+    });
+  }
+
+  async #deleteBlock(block: RemoteBlock): Promise<void> {
+    await this.#client.request<unknown>({
+      method: 'DELETE',
+      path: `/api/blocks/${encodeURIComponent(block.blockId)}`,
+      operation: 'block_delete',
+      query: { expected_version: block.version },
+      expect: [409],
+    });
+  }
+
+  async #createBlock(documentId: string, block: DesiredBlock): Promise<void> {
+    await this.#client.request<RawBlock>({
+      method: 'POST',
+      path: `/api/documents/${encodeURIComponent(documentId)}/blocks`,
+      operation: 'block_create',
+      body: {
+        page_index: block.pageIndex,
+        block_type: block.blockType,
+        shape_type: block.shapeType,
+        coords_norm: [...block.coordsNorm],
+        ...(block.polygonPoints !== null
+          ? { polygon_points: block.polygonPoints.map((point) => [...point]) }
+          : {}),
+      },
+    });
+  }
+
+  /**
+   * Запуск OCR (`POST /api/recognition/jobs`).
+   *
+   * Путь — с префиксом `/api/recognition`: именно так подключён их роутер
+   * (`recognition.py`, `APIRouter(prefix="/api/recognition")`). `scope` — из
+   * закрытого `JobScope` (`selected|all|unrecognized|failed`), и портал
+   * запускает `all`: набор блоков уже сведён циклом сверки, а `unrecognized`
+   * означал бы «доделать то, что осталось от прошлого прогона», то есть
+   * результат, собранный из двух разных запусков.
+   *
+   * `settings` обязателен и обязан содержать `provider_type` и `model_id` на
+   * каждый выбранный тип блока — иначе их схема отвечает 422.
+   */
   async startRecognition(input: StartRecognitionInput): Promise<RecognitionStatus> {
-    const settings = Object.fromEntries(input.blockTypes.map((type) => [type, { enabled: true }]));
+    if (input.selections.length === 0) {
+      throw new RdWebError(
+        'Запуск распознавания без выбора провайдера и модели невозможен: ' +
+          'RD WEB отвергает пустой settings',
+        { operation: 'job_create' },
+      );
+    }
+    const settings = Object.fromEntries(
+      input.selections.map((selection) => [
+        selection.blockType,
+        {
+          provider_type: selection.providerType,
+          model_id: selection.modelId,
+          ...(selection.promptProfileId !== undefined
+            ? { prompt_profile_id: selection.promptProfileId }
+            : {}),
+        },
+      ]),
+    );
+
     const response = await this.#client.request<{ job: RawJob }>({
       method: 'POST',
-      path: '/api/jobs',
+      path: '/api/recognition/jobs',
       operation: 'job_create',
       body: {
         document_id: input.documentId,
-        scope: 'document',
+        scope: 'all',
         settings,
         document_mode: input.documentMode,
         idempotency_key: input.idempotencyKey,
@@ -413,12 +547,24 @@ export class LegacyRdWebAdapter implements RdWebPort {
   async pollRecognition(jobId: string): Promise<RecognitionStatus> {
     const response = await this.#client.request<RawJob>({
       method: 'GET',
-      path: `/api/jobs/${encodeURIComponent(jobId)}`,
+      path: `/api/recognition/jobs/${encodeURIComponent(jobId)}`,
       operation: 'job_read',
     });
     return toStatus(response.body);
   }
 
+  /**
+   * Забор экспорта.
+   *
+   * Их экспорт транзиентный: архив собирается на лету из ТЕКУЩИХ активных
+   * результатов блоков, а материализован только QA-манифест. То есть «тот же
+   * архив завтра» — не обещание их API, и наш `artifact_sha256` описывает
+   * ровно те байты, которые мы забрали в этот единственный раз (§5.2, шаг 8).
+   *
+   * 409 здесь означает «job не финализирован» и обязан долетать до вызывающего
+   * как отказ: забирать экспорт до `has_export` нельзя, и молча вернуть пустые
+   * байты значило бы записать артефакт ни о чём.
+   */
   async fetchExportOnce(jobId: string): Promise<ExportPayload> {
     const response = await this.#client.request<Uint8Array>({
       method: 'GET',
@@ -427,6 +573,53 @@ export class LegacyRdWebAdapter implements RdWebPort {
       binary: true,
     });
     return { kind: 'zip', bytes: response.body, contentType: 'application/zip' };
+  }
+
+  /**
+   * Активные результаты блоков — поштучно, потому что bulk-ручки у них нет.
+   *
+   * Отдаются ТОЛЬКО активные результаты (`is_active`): история правок оператора
+   * и промежуточные результаты фазы 2 к нашему прогону отношения не имеют, а
+   * `block_results` у нас append-only с отдельным указателем «текущий».
+   */
+  async fetchBlockResults(blockIds: readonly string[]): Promise<readonly RemoteBlockResult[]> {
+    const results: RemoteBlockResult[] = [];
+    for (const blockId of blockIds) {
+      const response = await this.#client.request<{
+        results: RawBlockResult[];
+        active_result_id: string | null;
+      }>({
+        method: 'GET',
+        path: `/api/blocks/${encodeURIComponent(blockId)}/results`,
+        operation: 'block_results_read',
+        // Блок мог быть удалён между чтением набора и чтением результатов; это
+        // не отказ прогона, а отсутствие результата у конкретного блока.
+        expect: [404],
+      });
+      const body = response.body as {
+        results?: RawBlockResult[];
+        active_result_id?: string | null;
+      };
+      const active =
+        body.results?.find((row) =>
+          body.active_result_id !== undefined && body.active_result_id !== null
+            ? row.result_id === body.active_result_id
+            : row.is_active === true,
+        ) ?? null;
+      if (active === null) continue;
+      results.push({
+        blockId,
+        resultId: active.result_id,
+        resultType: active.result_type,
+        modelId: active.model_id ?? null,
+        confidence: typeof active.confidence === 'number' ? active.confidence : null,
+        ocrHtml: active.ocr_html ?? null,
+        ocrMarkdown: active.ocr_markdown ?? null,
+        ocrText: active.ocr_text ?? null,
+        ocrJson: active.ocr_json ?? null,
+      });
+    }
+    return results;
   }
 
   async fetchPagePreview(documentId: string, pageIndex: number): Promise<Uint8Array> {
@@ -467,5 +660,6 @@ function toStatus(job: RawJob): RecognitionStatus {
     recognizedBlocks: job.recognized_blocks,
     failedBlocks: job.failed_blocks,
     hasExport: job.has_export,
+    errorMessage: job.error_message ?? null,
   };
 }

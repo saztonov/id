@@ -44,7 +44,7 @@ export {
   tracePayload,
 } from './observability/context.js';
 
-export { JobRunner, JobTimeoutError, LeaseLostError } from './jobs/runner.js';
+export { classifyFailure, JobRunner, JobTimeoutError, LeaseLostError } from './jobs/runner.js';
 export type { JobRunnerOptions } from './jobs/runner.js';
 export { createMaintenanceRegistry, JobRegistry } from './jobs/registry.js';
 export type { JobContext, JobHandler } from './jobs/registry.js';
@@ -153,6 +153,9 @@ export {
   RdWebClient,
   RdWebError,
   RDWEB_SERVICE,
+  recognitionSelections,
+  SUCCESSFUL_RECOGNITION_STATUSES,
+  TERMINAL_RECOGNITION_STATUSES,
 } from './integrations/rdweb/index.js';
 export type {
   CreateRunDocumentInput,
@@ -162,14 +165,66 @@ export type {
   DetectPagesResult,
   ExportPayload,
   RdWebPort,
+  RecognitionSelection,
   RecognitionStatus,
   ReconcileLayoutResult,
   RemoteBlock,
+  RemoteBlockResult,
   RemoteDocument,
   RemotePage,
 } from './integrations/rdweb/index.js';
 
-export { previewPageKey } from './storage/keys.js';
+/** Разбор экспорта и сопоставление блоков (§5.2, шаги 7–8). */
+export {
+  EXPORT_ENTRY_HTML,
+  EXPORT_ENTRY_MARKDOWN,
+  EXPORT_ENTRY_QA,
+  ExportFormatError,
+  parseExportMarkdown,
+  requireEntry,
+} from './recognition/export.js';
+export type { ExportBlockText, ExportPageText, ParsedExport } from './recognition/export.js';
+export { geometryKey, matchBlocks } from './recognition/match.js';
+export {
+  isRedactableArtifactKind,
+  redactAbsoluteUrls,
+  redactArtifactContent,
+  redactHtml,
+  redactJson,
+  redactMarkdown,
+  REDACTABLE_ARTIFACT_KINDS,
+  REDACTED_URL,
+} from './recognition/redaction.js';
+export type { Redacted, RedactableArtifactKind } from './recognition/redaction.js';
+export type { MatchableBlock, MatchResult } from './recognition/match.js';
+export { crc32, readZipEntries, ZipError } from './lib/zip.js';
+export type { ZipEntry } from './lib/zip.js';
+
+export {
+  closeRunDocument,
+  findArtifact,
+  findRecognitionRun,
+  findRunForLayout,
+  finishRecognitionRun,
+  listArtifacts,
+  listBlockResults,
+  listPageTexts,
+  listRecognitionRuns,
+  recordArtifact,
+  saveRdJobId,
+  saveRecognitionResults,
+  saveRemoteHashBefore,
+  startRecognitionRun,
+} from './db/repositories/recognition.js';
+export type {
+  ArtifactView,
+  PageTextView,
+  RecognitionRunStatus,
+  RecognitionRunView,
+} from './db/repositories/recognition.js';
+
+export { artifactKey, previewPageKey } from './storage/keys.js';
+export type { ArtifactKind } from './storage/keys.js';
 
 export {
   findFileContent,
