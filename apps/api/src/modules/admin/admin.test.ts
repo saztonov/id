@@ -26,6 +26,8 @@ import type { LightMyRequestResponse } from 'fastify';
 import type { Pool } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
+import { RULE_CODES } from '@id/rules';
+
 import { eq } from 'drizzle-orm';
 import { promptTemplates } from '@id/db';
 import { createPgliteDatabase, createTestPool, type TestDatabase } from '@id/db-harness';
@@ -132,10 +134,9 @@ const FIXTURE: readonly string[] = [
   `INSERT INTO user_object_scopes (user_id, object_id)
      VALUES ('${USER_SUSPENDED}', '${OBJECT_1}')`,
 
-  `INSERT INTO rule_definitions (code, title, level, kind, default_severity)
-     VALUES ('${RULE_A}', 'Реквизиты шапки АОСР', 'document', 'field', 'error')`,
-  `INSERT INTO rule_definitions (code, title, level, kind, default_severity)
-     VALUES ('${RULE_B}', 'Изготовление не позже применения', 'graph', 'date', 'warning')`,
+  // Реестр правил заполняется сидом 0017 из RULE_CATALOG (S9), поэтому здесь
+  // фикстур нет: собственная строка rule_definitions ломала бы сверку реестра
+  // с реализациями при старте приложения (§9.6). Коды ниже — настоящие.
 ];
 
 // =====================================================================
@@ -1266,13 +1267,18 @@ interface RulesetResponse {
 describe('набор правил: атомарная публикация версии со снимком', () => {
   let published: RulesetResponse;
 
-  it('реестр правил доступен администратору', async () => {
+  it('реестр правил доступен администратору и совпадает с каталогом реализаций', async () => {
+    // До S9 здесь сравнивались две строки фикстуры. Теперь реестр заполняет
+    // сид 0017 из `RULE_CATALOG`, и осмысленное утверждение другое: выдача
+    // обязана СОВПАДАТЬ с каталогом реализаций, потому что расхождение — это
+    // правило, которое администратор видит и включает, а движок не исполняет.
     const response = await asAdmin('GET', `${P}/rules`);
     expect(response.statusCode).toBe(200);
-    expect(response.json<{ items: { code: string }[] }>().items.map((item) => item.code)).toEqual([
-      RULE_A,
-      RULE_B,
-    ]);
+
+    const codes = response.json<{ items: { code: string }[] }>().items.map((item) => item.code);
+    expect(codes).toEqual([...RULE_CODES].sort());
+    expect(codes).toContain(RULE_A);
+    expect(codes).toContain(RULE_B);
   });
 
   it('версия публикуется вместе со снимком и становится действующей', async () => {

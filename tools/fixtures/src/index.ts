@@ -11,11 +11,12 @@ export {
   type SourcePage,
   REFERENCE_CORPUS_DIR,
   anonymizePackage,
+  auditByPiiScanner,
   auditCorpusPii,
   buildReferencePackage,
+  collectPackageMarkers,
   loadReferenceCorpus,
   parseSourcePackage,
-  readPiiScanMarkers,
   resolveGoldenCorpusDir,
 } from './corpus-reference.js';
 

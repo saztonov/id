@@ -44,6 +44,7 @@ import {
   matchDocTypes,
   matchPageRoles,
   normalizeLine,
+  opensEnumeration,
   PAGE_ROLES,
   resolveDocType,
 } from '@id/doc-types';
@@ -319,6 +320,12 @@ function findUnknownDocumentHeading(normalized: readonly string[]): number {
     if (line.includes('|')) continue;
     // Предложение, а не заголовок.
     if (/[.,;:]$/u.test(line)) continue;
+    // Элемент перечня, введённого двоеточием строкой выше, — упоминание
+    // документа, а не его заголовок. Тот же запрет, что и у якорей каталога
+    // (`opensEnumeration`), и он обязан стоять здесь тоже: иначе снятый с
+    // якоря перечень немедленно возвращается открытым миром, только уже с
+    // резервным типом, и ложная граница остаётся на месте.
+    if (i > 0 && opensEnumeration(normalized[i - 1] as string)) continue;
     if (!OPENER_RE.test(line.toUpperCase())) continue;
     return i;
   }
@@ -328,6 +335,27 @@ function findUnknownDocumentHeading(normalized: readonly string[]): number {
 // ── Внутридокументные счётчики ────────────────────────────────────────────
 
 const SHEET_COUNTER = /^(?:лист|страница)\s+(\d{1,3})\s+из\s+(\d{1,3})\b/iu;
+
+/**
+ * Тот же счётчик листов, но разнесённый по ДВУМ полям бланка.
+ *
+ * «Лист N из M» — не единственная его раскладка. Типографский бланк сертификата
+ * качества печатает счётчик двумя отдельными полями в шапке — «Лист ___» и
+ * «Листов ___», — и OCR отдаёт их разными строками, часто вперемешку с
+ * соседними ячейками таблицы («Нормативный документ | Лист 2», «СТБ 1704-2012 |
+ * Листов 2»). Смысл ровно тот же: N-й лист документа из M.
+ *
+ * Требуются ОБА поля сразу. Одинокое «Лист 2» встречается в реестрах и подписях
+ * колонтитулов и счётчиком не является; пара «Лист N» + «Листов M» — это поля
+ * бланка, и вместе они утверждают позицию листа внутри документа.
+ *
+ * Числа в поле, а не в фразе: после числа обязан идти конец строки или
+ * разделитель ячейки. Без этого «Лист 2 из 2» разбиралось бы дважды — и как
+ * поле, и как фраза, — а «Лист 2 приложения №5» стало бы счётчиком.
+ */
+const SHEET_FIELD = /(?:^|[|\s])лист\s+(\d{1,3})\s*(?:\||$)/iu;
+const SHEETS_TOTAL_FIELD = /(?:^|[|\s])листов\s+(\d{1,3})\s*(?:\||$)/iu;
+
 // `\w` даже под флагом `u` остаётся ASCII-классом и кириллического окончания
 // не покрывает: `страниц\w*` не совпадёт со «страницах». Отсюда `\p{L}*`.
 const TOTAL_SHEETS = /всего\s+на\s+(\d{1,3})\s+(?:страниц|лист)\p{L}*/iu;
@@ -337,6 +365,8 @@ interface SheetCounter {
   readonly sheetNo: number;
   readonly total: number;
   readonly normalizedIndex: number;
+  /** Как счётчик записан: одной фразой или двумя полями бланка. */
+  readonly layout: 'phrase' | 'fields';
 }
 
 function findSheetCounter(normalized: readonly string[]): SheetCounter | null {
@@ -346,9 +376,29 @@ function findSheetCounter(normalized: readonly string[]): SheetCounter | null {
     const sheetNo = Number(m[1]);
     const total = Number(m[2]);
     if (!Number.isFinite(sheetNo) || !Number.isFinite(total)) continue;
-    return { sheetNo, total, normalizedIndex: i };
+    return { sheetNo, total, normalizedIndex: i, layout: 'phrase' };
   }
-  return null;
+
+  // Раскладка бланка: два поля, каждое в своей строке.
+  let sheetAt = -1;
+  let sheetNo = Number.NaN;
+  let total = Number.NaN;
+  for (let i = 0; i < normalized.length; i += 1) {
+    const line = normalized[i] as string;
+    if (sheetAt < 0) {
+      const m = SHEET_FIELD.exec(line);
+      if (m) {
+        sheetNo = Number(m[1]);
+        sheetAt = i;
+      }
+    }
+    if (!Number.isFinite(total)) {
+      const m = SHEETS_TOTAL_FIELD.exec(line);
+      if (m) total = Number(m[1]);
+    }
+  }
+  if (sheetAt < 0 || !Number.isFinite(sheetNo) || !Number.isFinite(total)) return null;
+  return { sheetNo, total, normalizedIndex: sheetAt, layout: 'fields' };
 }
 
 // ── Номер родителя, вынесенный на следующую строку ────────────────────────
@@ -469,7 +519,39 @@ function classifyOne(
   const normalized = lines.map((l) => normalizeLine(l.raw)).filter((l) => l.length > 0);
   const note = weakPriorNote(page, previous);
 
-  // 2. Якоря каталога — построчно, через `matchDocTypes`/`resolveDocType`.
+  // 2. Внутридокументный счётчик листов. Стоит ВЫШЕ якорей заголовка, и это
+  //    разворот прежнего порядка, за который заплачено ложной границей на
+  //    сертификате качества.
+  //
+  //    Счётчик и якорь отвечают на один вопрос и дают противоположные ответы:
+  //    якорь говорит «здесь начинается документ», счётчик — «этот лист второй
+  //    по счёту внутри своего документа». Выигрывает счётчик, потому что
+  //    типографский бланк печатает свою шапку — название, реквизиты
+  //    изготовителя, номер и дату — НА КАЖДОМ листе, а поле «Лист N»
+  //    заполняется на каждом листе своим числом. Повторная шапка выглядит
+  //    заголовком, но заголовком второй раз не становится.
+  //
+  //    «Лист 1 из M» и «Лист 1 / Листов M» решения не принимают: первая
+  //    страница документа продолжением не является, и присоединение её к
+  //    предыдущему документу разорвало бы сразу два.
+  const counter = findSheetCounter(normalized);
+  if (counter && counter.sheetNo > 1) {
+    const rawLine = rawLineByNormalizedIndex(lines, counter.normalizedIndex);
+    const span = rawLine ? contentSpan(rawLine) : null;
+    return {
+      ...NO_SIGNAL,
+      label: 'I-DOC',
+      pageRoleCode: DOC_CONTINUATION,
+      confidence: PHASE1_CONFIDENCE.sheetCounter,
+      reason:
+        counter.layout === 'phrase'
+          ? `внутридокументный счётчик «лист ${counter.sheetNo} из ${counter.total}»: страница продолжает предыдущий документ${note}`
+          : `счётчик листов бланка «лист ${counter.sheetNo}» при «листов ${counter.total}»: страница продолжает предыдущий документ, а шапка бланка на ней повторная${note}`,
+      evidence: span ? evidenceFor(page, span) : null,
+    };
+  }
+
+  // 3. Якоря каталога — построчно, через `matchDocTypes`/`resolveDocType`.
   const matches = matchDocTypes(page.text, DOC_TYPES, { headingLines });
   const resolved = resolveDocType(matches, DOC_TYPES);
   if (resolved.code !== null) {
@@ -498,7 +580,7 @@ function classifyOne(
     };
   }
 
-  // 3. Склейка разорванного заголовка — только когда обычный якорь не сработал.
+  // 4. Склейка разорванного заголовка — только когда обычный якорь не сработал.
   //    Порядок важен: реконструкция не имеет права переспорить настоящую строку.
   const glued = glueCandidates(normalized, headingLines);
   if (glued.length > 0) {
@@ -537,7 +619,7 @@ function classifyOne(
     }
   }
 
-  // 4. Классификация по составу блоков: `image` + `stamp` без якорей — схема.
+  // 5. Классификация по составу блоков: `image` + `stamp` без якорей — схема.
   //    Признак косвенный, поэтому исход `uncertain` и низкая уверенность:
   //    декодер обязан поставить `needs_review`.
   const hasImage = page.blockTypes.includes('image');
@@ -551,23 +633,6 @@ function classifyOne(
       confidence: PHASE1_CONFIDENCE.blocks,
       source: 'blocks',
       reason: `состав блоков страницы (графика и штамп) без якорей заголовка — кандидат в ${EXEC_SCHEME_CODE}; тип присвоен по косвенному признаку и требует подтверждения${note}`,
-    };
-  }
-
-  // 5. Внутридокументные счётчики. «Лист 1 из M» и «Лист 2 из M» — разные
-  //    состояния, и роль `doc_continuation` их не различает: её якорь ловит
-  //    оба. Первая страница документа продолжением не является.
-  const counter = findSheetCounter(normalized);
-  if (counter && counter.sheetNo > 1) {
-    const rawLine = rawLineByNormalizedIndex(lines, counter.normalizedIndex);
-    const span = rawLine ? contentSpan(rawLine) : null;
-    return {
-      ...NO_SIGNAL,
-      label: 'I-DOC',
-      pageRoleCode: DOC_CONTINUATION,
-      confidence: PHASE1_CONFIDENCE.sheetCounter,
-      reason: `внутридокументный счётчик «лист ${counter.sheetNo} из ${counter.total}»: страница продолжает предыдущий документ${note}`,
-      evidence: span ? evidenceFor(page, span) : null,
     };
   }
 

@@ -34,7 +34,7 @@
  */
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { anonymizeText, containsPii } from './anonymize.js';
 
 // ---------------------------------------------------------------------------
@@ -611,8 +611,13 @@ const REPO_ROOT = join(HERE, '..', '..', '..');
 /** Каталог закоммиченного эталона. */
 export const REFERENCE_CORPUS_DIR = join(HERE, '..', 'corpus');
 
-/** Сканер ПДн: список маркеров берётся из него, а не дублируется здесь. */
-const PII_SCAN_PATH = join(REPO_ROOT, 'tools', 'scripts', 'pii-scan.mjs');
+/**
+ * Сканер ПДн. У него берётся ВЕРДИКТ по хэшам, а не значения маркеров.
+ *
+ * Экспортируется, чтобы тест мог утверждать инвариант «в исходнике сканера
+ * нечего прочитать как значение» — см. `auditByPiiScanner`.
+ */
+export const PII_SCANNER_PATH = join(REPO_ROOT, 'tools', 'scripts', 'pii-scan.mjs');
 
 /**
  * Каталог закрытого корпуса или `null`, если его на машине нет.
@@ -912,6 +917,48 @@ const GENERIC_ORG_WORDS: ReadonlySet<string> = new Set([
   'company',
   'limited',
   'branch',
+  // Словарь самих документов. Попав в наименование организации хотя бы один
+  // раз («Центр качества», «Сертификация продукции»), такое слово уезжало в
+  // ПОСЛОВНУЮ замену и уничтожалось по всему корпусу — включая заголовки, по
+  // которым классификатор узнаёт вид документа.
+  //
+  // Цена ошибки измерена: слово «качества» заменялось на бессмысленное, и
+  // заголовок «СЕРТИФИКАТ КАЧЕСТВА №…» переставал существовать на всех 13
+  // страницах-началах `mill_certificate` в комплекте package-c. Якорь каталога
+  // не срабатывал ни разу, boundary recall терял 22% корпуса, и число 0.746
+  // описывало не качество сегментации, а ущерб от обезличивания.
+  //
+  // Наименование организации ЦЕЛИКОМ по-прежнему заменяется фразой: скрывает
+  // участника именно она, а не отдельное нарицательное слово в её составе.
+  'качества',
+  'качество',
+  'сертификат',
+  'сертификаты',
+  'сертификация',
+  'паспорт',
+  'паспорта',
+  'протокол',
+  'протоколы',
+  'декларация',
+  'соответствия',
+  'соответствие',
+  'испытаний',
+  'испытания',
+  'испытательный',
+  'продукции',
+  'продукция',
+  'изготовитель',
+  'производитель',
+  'поставщик',
+  'заказчик',
+  'документ',
+  'документа',
+  'партия',
+  'партии',
+  'номер',
+  'заключение',
+  'экспертиза',
+  'экспертизы',
 ]);
 
 /** Организация в тексте: наименование целиком и его собственные слова. */
@@ -1344,25 +1391,31 @@ export function anonymizePackage(
 // ---------------------------------------------------------------------------
 
 /**
- * Маркеры `pii-scan.mjs`, прочитанные из самого сканера.
+ * Значения, которые обезличиватель заменил на этом прогоне.
  *
- * Копировать список сюда нельзя физически: файл эталона отслеживается git, а
- * значит сканер найдёт маркеры в исходнике барьера и покраснеет. Чтение из
- * сканера заодно снимает дрейф: список пополняется в одном месте.
+ * Прежде такой список читался из исходника `tools/scripts/pii-scan.mjs`
+ * (`readPiiScanMarkers`), и это была ошибка в обе стороны. Сканеру знать
+ * значения не нужно вовсе — ему достаточно уметь их узнать; а служба
+ * справочником заставляла его хранить двенадцать настоящих фамилий открытым
+ * текстом в отслеживаемом git файле, то есть делала стража ПДн их носителем.
+ *
+ * Источник значений у обезличивателя свой и законный: закрытый корпус, который
+ * он и так читает (`resolveGoldenCorpusDir`). Наименования организаций и ФИО он
+ * находит сам — иначе не смог бы их заменить, — и найденное здесь просто
+ * возвращается наружу как набор для само-аудита. Никакого нового источника
+ * данных не появляется, а связь со сканером исчезает.
+ *
+ * Считается по тем же шагам, что и в `anonymizePackage`, и по той же причине:
+ * собирать словарь надо ПОСЛЕ `anonymizeText` и ПО ВСЕМУ комплекту сразу.
  */
-export function readPiiScanMarkers(path: string = PII_SCAN_PATH): readonly string[] {
-  const source = readFileSync(path, 'utf8');
-  const markers: string[] = [];
-  for (const array of source.matchAll(
-    /const\s+(?:SURNAMES|ORGS|IDS|CERT_HASHES)\s*=\s*\[([\s\S]*?)\];/g,
-  )) {
-    for (const literal of (array[1] ?? '').matchAll(/'([^'\n]+)'/g)) {
-      const value = literal[1];
-      if (value !== undefined) markers.push(value);
-    }
-  }
-  if (markers.length === 0) throw new Error(`Из ${path} не удалось прочитать ни одного маркера`);
-  return markers;
+export function collectPackageMarkers(
+  texts: readonly string[],
+  seed: string = DEFAULT_SEED,
+): readonly string[] {
+  const base = texts.map((text) => anonymizeText(text, { seed }));
+  const vocabulary = collectOrganizations(base);
+  const persons = collectPersons(base, seed);
+  return [...vocabulary.phrases, ...vocabulary.words, ...persons.keys()];
 }
 
 /**
@@ -1371,13 +1424,48 @@ export function readPiiScanMarkers(path: string = PII_SCAN_PATH): readonly strin
  * Оба нужны. `containsPii` знает про формы (ИНН, ОГРН, ФИО, адрес) и ловит то,
  * чего в списке маркеров нет; список маркеров знает конкретные значения корпуса
  * и ловит то, под форму не подходящее, — например наименование организации.
+ *
+ * `markers` обязателен намеренно. Пока он был необязательным, забытый аргумент
+ * молча вырождал проверку в «только по форме», и выглядело это как успех.
+ * Там, где значений корпуса нет (машина без `GOLDEN_CORPUS_DIR`), пустой
+ * массив передаётся явно — это заявление, а не умолчание.
  */
-export function auditCorpusPii(text: string, markers?: readonly string[]): readonly string[] {
+export function auditCorpusPii(text: string, markers: readonly string[]): readonly string[] {
   const problems: string[] = [...containsPii(text).findings];
-  for (const marker of markers ?? readPiiScanMarkers()) {
-    if (text.includes(marker)) problems.push(`маркер pii-scan: «${marker}»`);
+  for (const marker of markers) {
+    if (text.includes(marker)) problems.push(`маркер обезличивателя: «${marker}»`);
   }
   return problems;
+}
+
+/** Вердикт сканера ПДн: класс сработавшего маркера без самого значения. */
+export interface PiiScanVerdict {
+  readonly class: string;
+}
+
+/**
+ * Третий, независимый рубеж: вердикт `tools/scripts/pii-scan.mjs` по хэшам.
+ *
+ * Через эту границу не проходит ни одного плоского значения ни в одну сторону:
+ * обезличиватель отдаёт текст и получает КЛАСС сработавшего маркера. Сканер
+ * остаётся хранителем хэшей и ничьим справочником не становится.
+ *
+ * Загрузка динамическая и по вычисляемому пути: сканер — исполняемый скрипт вне
+ * пакета воркспейса, и статический импорт вытащил бы его в `rootDir` сборки.
+ */
+export async function auditByPiiScanner(
+  text: string,
+  path: string = PII_SCANNER_PATH,
+): Promise<readonly string[]> {
+  const module: unknown = await import(pathToFileURL(path).href);
+  const scanText = (module as { scanText?: unknown }).scanText;
+  if (typeof scanText !== 'function') {
+    throw new Error(`В ${path} нет экспортированной функции scanText`);
+  }
+  const hits = (await (scanText as (value: string) => Promise<readonly PiiScanVerdict[]>)(
+    text,
+  )) as readonly PiiScanVerdict[];
+  return hits.map((hit) => `сканер ПДн: маркер класса «${hit.class}»`);
 }
 
 // ---------------------------------------------------------------------------

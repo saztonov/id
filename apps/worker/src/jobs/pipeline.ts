@@ -91,6 +91,16 @@ import {
   type RdWebPort,
   type RecognitionSelection,
   type StorageProvider,
+  finishValidationRun,
+  listFindings,
+  listRuleDefinitionCodes,
+  loadActiveRulesetSnapshot,
+  loadCheckGraph,
+  loadRunJournal,
+  saveDerivedMaterials,
+  saveFindings,
+  saveRunJournal,
+  startValidationRun,
 } from '@id/api';
 
 import {
@@ -106,6 +116,8 @@ import {
   type FileVerifyDeps,
 } from './file-verify.js';
 import { createSignatureProbeHandler, type SignatureProbeDeps } from './signature-probe.js';
+import { createInternalRegistryProviders } from '@id/rules';
+import { createChecksRunHandler, createChecksSummarizeHandler, type ChecksDeps } from './checks.js';
 import {
   createFetchExportHandler,
   createPollRecognitionHandler,
@@ -788,6 +800,62 @@ function recognitionDeps(options: PipelineJobsOptions): RecognitionDeps {
  * репозиториев, потому что иначе правило «прямой запрос вне `db/repositories/`
  * запрещён» держалось бы аккуратностью, а не eslint'ом.
  */
+/**
+ * Порты задач 20–21.
+ *
+ * Провайдеры внешних реестров собираются один раз на реестр задач: в MVP это
+ * `internal` без источников данных (§9.5), и пересоздавать их на каждую задачу
+ * незачем. Параметра «подставь свои провайдеры» здесь НЕТ намеренно: он был,
+ * не использовался ни одним вызовом и оправдывался в докстринге подменой в
+ * тестах, которой не существовало. Когда появится реальный источник, он
+ * соберётся здесь же из `env` — тем же способом, что и провайдер модели, — а
+ * шов для тестов остаётся там, где он живой: `ChecksDeps.registries`, через
+ * который `resolveExternalRegistries` получает провайдеров в `checks.ts`.
+ */
+function checksDeps(options: PipelineJobsOptions): ChecksDeps {
+  const db = options.db;
+
+  const scopeOf = async (revisionId: string): Promise<AuthScope> => {
+    const scope = await pinScope(db, revisionId);
+    if (scope === null) {
+      throw new PipelineScopeError(`Ревизия ${revisionId} не найдена: задача адресована в никуда.`);
+    }
+    return scope;
+  };
+
+  return {
+    loadGraph: async (input) => loadCheckGraph(db, await scopeOf(input.revisionId), input),
+
+    saveDerivedMaterials: async (input) =>
+      saveDerivedMaterials(db, await scopeOf(input.revisionId), input),
+
+    // Набор правил и реестр правил — конфигурация портала, а не данные
+    // подрядчика: читаются системной областью, как и бюджет модели на S8.
+    loadActiveRuleset: async () => loadActiveRulesetSnapshot(db, SYSTEM_SCOPE),
+    listRuleDefinitionCodes: async () => listRuleDefinitionCodes(db),
+
+    startValidationRun: async (input) =>
+      startValidationRun(db, await scopeOf(input.revisionId), input),
+
+    saveFindings: async (input) => saveFindings(db, await scopeOf(input.revisionId), input),
+
+    saveRunJournal: async (input) => saveRunJournal(db, await scopeOf(input.revisionId), input),
+
+    loadRunJournal: async (input) => loadRunJournal(db, await scopeOf(input.revisionId), input),
+
+    listFindings: async (input) =>
+      listFindings(db, await scopeOf(input.revisionId), {
+        revisionId: input.revisionId,
+        validationRunId: input.validationRunId,
+      }),
+
+    finishValidationRun: async (input) =>
+      finishValidationRun(db, await scopeOf(input.revisionId), input),
+
+    registries: createInternalRegistryProviders(),
+  };
+}
+
 function segmentationDeps(options: PipelineJobsOptions): SegmentationDeps {
   const db = options.db;
 
@@ -1012,6 +1080,13 @@ export function registerPipelineJobs(
   registry.register('doc.parse_registry', createParseRegistryHandler(segmentation));
   registry.register('doc.match_registry', createMatchRegistryHandler(segmentation));
   registry.register('graph.build', createGraphBuildHandler(segmentation));
+
+  // Задачи 20–21 (§12): прогон правил и сводка. Регистрируются здесь и
+  // безусловно — по той же причине, что и остальные стадии: обработчик без
+  // регистрации выглядит зависшим конвейером, а не отсутствующей возможностью.
+  const checks = checksDeps(options);
+  registry.register('checks.run', createChecksRunHandler(checks));
+  registry.register('checks.summarize', createChecksSummarizeHandler(checks));
   return registry;
 }
 

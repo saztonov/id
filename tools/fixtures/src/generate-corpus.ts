@@ -17,17 +17,18 @@ import {
   PACKAGE_SPECS,
   REFERENCE_CORPUS_DIR,
   anonymizePackage,
+  auditByPiiScanner,
   auditCorpusPii,
   buildReferencePackage,
+  collectPackageMarkers,
   parseSourcePackage,
-  readPiiScanMarkers,
   referenceFileName,
   resolveGoldenCorpusDir,
   serializeReferencePackage,
   type SourcePage,
 } from './corpus-reference.js';
 
-function main(): void {
+async function main(): Promise<void> {
   const goldenDir = resolveGoldenCorpusDir();
   if (goldenDir === null) {
     console.warn(
@@ -42,7 +43,6 @@ function main(): void {
   const sources = readSources(goldenDir);
   console.log(`Закрытый корпус: ${goldenDir} (комплектов: ${sources.size})`);
 
-  const markers = readPiiScanMarkers();
   mkdirSync(REFERENCE_CORPUS_DIR, { recursive: true });
 
   let changed = 0;
@@ -55,10 +55,22 @@ function main(): void {
       );
     }
 
-    const anonymized = anonymizePackage(pages.map((page) => page.text));
-    const problems = anonymized.flatMap((text, index) =>
-      auditCorpusPii(text, markers).map((problem) => `стр. ${index + 1}: ${problem}`),
-    );
+    // Маркеры — значения, которые обезличиватель нашёл и заменил в ЭТОМ
+    // комплекте закрытого корпуса. Раньше их давал `pii-scan.mjs`, и ради
+    // этого страж ПДн хранил настоящие фамилии открытым текстом; теперь
+    // источник значений один — закрытый корпус, а сканер даёт только вердикт.
+    const source = pages.map((page) => page.text);
+    const markers = collectPackageMarkers(source);
+    const anonymized = anonymizePackage(source);
+    const problems = (
+      await Promise.all(
+        anonymized.map(async (text, index) =>
+          [...auditCorpusPii(text, markers), ...(await auditByPiiScanner(text))].map(
+            (problem) => `стр. ${index + 1}: ${problem}`,
+          ),
+        ),
+      )
+    ).flat();
     if (problems.length > 0) {
       console.error(`\n${spec.packageKey}: в обезличенном тексте остались персональные данные:`);
       for (const problem of problems.slice(0, 40)) console.error(`  ${problem}`);
@@ -117,9 +129,7 @@ function readSources(goldenDir: string): ReadonlyMap<number, readonly SourcePage
   return sources;
 }
 
-try {
-  main();
-} catch (err: unknown) {
+main().catch((err: unknown) => {
   console.error('Генерация эталона провалена:', err instanceof Error ? err.message : err);
   process.exitCode = 1;
-}
+});

@@ -34,6 +34,7 @@ export {
   matchPageRoles,
   normalizeLine,
   normalizeLines,
+  opensEnumeration,
   resolveDocType,
 } from './matching.js';
 export type { DocTypeMatch, MatchOptions, PageRoleMatch, ResolvedDocType } from './matching.js';

@@ -373,6 +373,35 @@ export type {
 } from './db/repositories/documents.js';
 
 export { observeDocTypeCandidate, normalizeObservedTitle } from './db/repositories/catalog.js';
+
+/**
+ * Проверки §9: сборка графа, прогон и замечания.
+ *
+ * Экспортируется в воркер, потому что задачи 20–21 живут там же, где остальные
+ * стадии конвейера, и второй реализации репозитория быть не должно. В списке —
+ * ровно то, что воркер вызывает: реэкспорт «на всякий случай» превращает
+ * публичную границу пакета в свалку, где не отличить используемое от забытого.
+ */
+export { assertRuleRegistryConsistent } from './checks/startup.js';
+export {
+  finishValidationRun,
+  listFindings,
+  listRuleDefinitionCodes,
+  listValidationRuns,
+  loadCheckGraph,
+  loadActiveRulesetSnapshot,
+  loadRunJournal,
+  saveDerivedMaterials,
+  saveFindings,
+  saveRunJournal,
+  startValidationRun,
+} from './db/repositories/checks.js';
+export type {
+  FindingView,
+  RuleExecutionJournal,
+  RulesetSnapshot,
+  ValidationSummary,
+} from './db/repositories/checks.js';
 export { listPromptTemplates } from './db/repositories/admin.js';
 export type { PromptTemplateRow } from './db/repositories/admin.js';
 

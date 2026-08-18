@@ -19,11 +19,12 @@ import {
   PACKAGE_SPECS,
   REFERENCE_CORPUS_DIR,
   anonymizePackage,
+  auditByPiiScanner,
   auditCorpusPii,
   buildReferencePackage,
+  collectPackageMarkers,
   loadReferenceCorpus,
   parseSourcePackage,
-  readPiiScanMarkers,
   resolveGoldenCorpusDir,
   serializeReferencePackage,
   referenceFileName,
@@ -32,7 +33,18 @@ import {
 } from './corpus-reference.js';
 
 const CORPUS = loadReferenceCorpus();
-const MARKERS = readPiiScanMarkers();
+
+/**
+ * Пустой список маркеров — заявление, а не умолчание.
+ *
+ * Значения закрытого корпуса на машине без `GOLDEN_CORPUS_DIR` недоступны, и
+ * раньше их подменял список из `pii-scan.mjs`: обезличиватель читал ИСХОДНИК
+ * сканера как справочник, а сканер ради этого хранил настоящие фамилии
+ * открытым текстом. Связь разорвана, поэтому здесь работают два оставшихся
+ * контролёра, которым значения не нужны: `containsPii` — по форме, сканер —
+ * по хэшам.
+ */
+const NO_MARKERS: readonly string[] = [];
 
 describe('закоммиченный эталон', () => {
   it('состоит из трёх комплектов с нейтральными ключами', () => {
@@ -142,19 +154,24 @@ describe('закоммиченный эталон', () => {
 });
 
 describe('барьер против персональных данных', () => {
-  it('не находит ПДн в закоммиченном эталоне', () => {
+  it('не находит ПДн в закоммиченном эталоне', async () => {
     const problems: string[] = [];
     for (const pkg of CORPUS) {
       for (const page of pkg.pages) {
-        for (const problem of auditCorpusPii(page.text, MARKERS)) {
+        for (const problem of auditCorpusPii(page.text, NO_MARKERS)) {
           problems.push(`${pkg.packageKey} стр. ${page.pageNo}: ${problem}`);
         }
       }
     }
+    // Сканер зовётся один раз на всём эталоне: он ищет по хэшам, и медленный
+    // KDF окупается только на дедуплицированном множестве кандидатов. Номер
+    // страницы для его вердикта не нужен — любая находка означает отказ.
+    const whole = CORPUS.flatMap((pkg) => pkg.pages.map((page) => page.text)).join('\n');
+    problems.push(...(await auditByPiiScanner(whole)));
     expect(problems).toEqual([]);
-  });
+  }, 120_000);
 
-  it('не находит ПДн в служебных полях эталона', () => {
+  it('не находит ПДн в служебных полях эталона', async () => {
     // Ключи документов, коды типов и ролей тоже отслеживаются git и тоже могут
     // унести с собой номер акта или фамилию, если разметку делать «как есть».
     const meta = CORPUS.flatMap((pkg) => [
@@ -166,24 +183,32 @@ describe('барьер против персональных данных', () =
         page.expected.pageRoleCode ?? '',
       ]),
     ]).join('\n');
-    expect(auditCorpusPii(meta, MARKERS)).toEqual([]);
+    expect(auditCorpusPii(meta, NO_MARKERS)).toEqual([]);
+    expect(await auditByPiiScanner(meta)).toEqual([]);
   });
 
   it('ловит подсаженный маркер и подсаженный реквизит', () => {
-    const marker = MARKERS[0] ?? '';
-    expect(auditCorpusPii(`Подпись: ${marker}`, MARKERS).length).toBeGreaterThan(0);
+    // Маркер вымышлен: настоящему в отслеживаемом файле теста не место.
+    expect(auditCorpusPii('Подпись: Верещалкин', ['Верещалкин']).length).toBeGreaterThan(0);
     // ИНН вне зарезервированного пространства `00…` считается настоящим.
-    expect(auditCorpusPii('ИНН 7712345671', MARKERS).length).toBeGreaterThan(0);
-    expect(auditCorpusPii('ИНН 0012345678', MARKERS)).toEqual([]);
+    expect(auditCorpusPii('ИНН 7712345671', NO_MARKERS).length).toBeGreaterThan(0);
+    expect(auditCorpusPii('ИНН 0012345678', NO_MARKERS)).toEqual([]);
   });
 
-  it('читает маркеры из самого сканера, а не из копии списка', () => {
-    const source = readFileSync(
-      join(REFERENCE_CORPUS_DIR, '..', '..', 'scripts', 'pii-scan.mjs'),
-      'utf8',
-    );
-    expect(MARKERS.length).toBeGreaterThan(30);
-    for (const marker of MARKERS) expect(source).toContain(marker);
+  it('берёт значения из комплекта, а не из исходника сканера', () => {
+    // Инвариант развязки, выраженный поведением. Прежде маркеры выковыривались
+    // регэкспом из `pii-scan.mjs`, и это была единственная причина, по которой
+    // страж ПДн держал у себя двенадцать настоящих фамилий. Теперь набор
+    // маркеров зависит РОВНО от переданного комплекта: чужой текст — чужие
+    // маркеры, пустой комплект — пустой набор.
+    const markers = collectPackageMarkers([
+      'ООО «Вымышленная Артель», в лице: генерального директора, Верещалкин Пров',
+    ]);
+    expect(markers.length).toBeGreaterThan(0);
+    for (const marker of markers) {
+      expect('ООО «Вымышленная Артель» Верещалкин Пров').toContain(marker);
+    }
+    expect(collectPackageMarkers([])).toEqual([]);
   });
 });
 
@@ -296,9 +321,20 @@ describe('обезличивание производного набора', () 
     expect(anonymized[0]?.split('\n')).toHaveLength(SAMPLE[0]?.split('\n').length ?? 0);
   });
 
-  it('не оставляет ПДн по мнению обоих контролёров', () => {
-    for (const text of anonymized) expect(auditCorpusPii(text, MARKERS)).toEqual([]);
-  });
+  it('не оставляет ни одного значения, которое сам же нашёл', async () => {
+    // Это и есть проверка полноты: `collectPackageMarkers` возвращает то, что
+    // обезличиватель нашёл в ИСХОДНОМ комплекте и обязался заменить, и ни одно
+    // из этих значений не должно пережить обезличивание. Раньше на этом месте
+    // стоял чужой список из `pii-scan.mjs`, который про конкретный комплект не
+    // знал ничего.
+    const markers = collectPackageMarkers(SAMPLE);
+    expect(markers.some((marker) => marker.includes('ВОСХОД'))).toBe(true);
+    // Каждый маркер обязан быть взят из самого комплекта, а не откуда-то ещё.
+    const source = SAMPLE.join('\n');
+    for (const marker of markers) expect(source).toContain(marker);
+    for (const text of anonymized) expect(auditCorpusPii(text, markers)).toEqual([]);
+    expect(await auditByPiiScanner(anonymized.join('\n'))).toEqual([]);
+  }, 120_000);
 });
 
 describe('сборка эталона из разметки', () => {

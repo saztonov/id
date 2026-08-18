@@ -265,6 +265,9 @@ importers:
       '@id/migrator':
         specifier: workspace:*
         version: link:../../tools/migrator
+      '@id/rules':
+        specifier: workspace:*
+        version: link:../rules
       '@types/node':
         specifier: 26.2.0
         version: 26.2.0

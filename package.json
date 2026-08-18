@@ -14,13 +14,14 @@
     "test": "pnpm -r test",
     "build": "pnpm -r build",
     "format": "prettier --write .",
-    "format:check": "prettier --check .",
+    "format:check": "node tools/scripts/format-check.mjs",
     "db:probe": "pnpm --filter @id/db-harness probe",
     "fixtures:generate": "pnpm --filter @id/fixtures generate",
     "corpus:generate": "pnpm --filter @id/fixtures generate:corpus",
     "pii:scan": "node tools/scripts/pii-scan.mjs",
     "db:schema:generate": "pnpm --filter @id/db schema:generate",
-    "seed:generate": "node tools/scripts/generate-seed-migration.mjs"
+    "seed:generate": "node tools/scripts/generate-seed-migration.mjs",
+    "rules:seed:generate": "node tools/scripts/generate-rules-seed-migration.mjs"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",

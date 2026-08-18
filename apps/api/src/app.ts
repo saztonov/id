@@ -49,6 +49,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import type { Pool } from 'pg';
 import { closePool, createPool } from '@id/db';
 import type { ProblemError } from '@id/contracts';
+import { assertRuleRegistryConsistent } from './checks/startup.js';
 import { loadEnv, trustProxyOption, type Env } from './config/env.js';
 import { createAuthProvider, type AuthProvider } from './auth/oidc.js';
 import { registerAuthRoutes } from './auth/routes.js';
@@ -95,6 +96,7 @@ import { registerObjectRuleProfileRoutes } from './modules/catalog/object-rule-p
 import { registerRevisionEventRoutes } from './modules/events/sse.js';
 import { registerFileRoutes } from './modules/files/routes.js';
 import { registerBundleRoutes } from './modules/bundles/routes.js';
+import { registerCheckRoutes } from './modules/checks/routes.js';
 import { registerLayoutRoutes } from './modules/layout/routes.js';
 import { registerRecognitionRoutes } from './modules/recognition/routes.js';
 import { registerDocumentRoutes } from './modules/documents/routes.js';
@@ -279,6 +281,22 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppInstan
   app.decorate('metrics', metrics);
   app.decorate('errorReporter', errorReporter);
   app.decorate('storage', storage);
+
+  /**
+   * Сверка реестра правил с реализациями (§9.6).
+   *
+   * Здесь, а не в `server.ts`: проверка обязана исполняться и в тестах, иначе
+   * она проверяет только боевой запуск, который тестами не покрыт. Расхождение
+   * роняет сборку приложения — это fail-fast, а не предупреждение.
+   */
+  await assertRuleRegistryConsistent(app.db, {
+    error: (details, message) => {
+      logger.error(details, message);
+    },
+    info: (details, message) => {
+      logger.info(details, message);
+    },
+  });
 
   app.decorateRequest('authSession', null);
   app.decorateRequest('authContext', null);
@@ -523,6 +541,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppInstan
   registerFileRoutes(app);
   // Рабочий документ ревизии: сборка (§6.1, подстадия 1) и карта страниц (§3.3).
   registerBundleRoutes(app);
+  registerCheckRoutes(app);
   // Разметка: кнопка «Разметить файл», ревизии разметки, правка блоков и
   // заморозка (§6.1, §7). Маршрут, не зарегистрированный здесь, недостижим —
   // это ровно тот отказ, которым закончились S3 и S5.

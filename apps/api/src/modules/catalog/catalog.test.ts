@@ -110,18 +110,9 @@ const FIXTURE: readonly string[] = [
      VALUES ('${ORG_CONTRACTOR}', 'ООО «Подрядная организация»', 'contractor')`,
   `INSERT INTO construction_objects (id, code, name, full_name)
      VALUES ('${OBJECT}', 'TST01', 'Объект 1', 'ЖК «Тест», корпус 1')`,
-  // Реестр правил заполняется сидом на S9, когда появятся реализации. До тех
-  // пор публикация профиля со ссылкой на правило требует фикстуры: сверка
-  // enabledRuleCodes с реестром намеренно fail-closed — опечатка в коде
-  // молча выключила бы проверку (§9.1).
-  `INSERT INTO rule_definitions (code, title, level, kind, default_severity)
-     VALUES ('AOSR.HDR', 'Шапка акта освидетельствования', 'document', 'deterministic', 'error')`,
-  `INSERT INTO rule_definitions (code, title, level, kind, default_severity)
-     VALUES ('AOSR.HDR.022', 'Контрольная сумма ОГРН', 'document', 'deterministic', 'error')`,
-  `INSERT INTO rule_definitions (code, title, level, kind, default_severity)
-     VALUES ('DATE.312', 'Дата изготовления партии не позже применения', 'document', 'deterministic', 'error')`,
-  `INSERT INTO rule_definitions (code, title, level, kind, default_severity)
-     VALUES ('MAT.100', 'Пакет подтверждения материала полон', 'document', 'deterministic', 'error')`,
+  // Реестр правил заполняется сидом 0017 из RULE_CATALOG (S9), поэтому здесь
+  // фикстур нет: собственная строка rule_definitions ломала бы сверку реестра
+  // с реализациями при старте приложения (§9.6). Коды ниже — настоящие.
 
   `INSERT INTO section_kinds (code, name) VALUES ('${KIND_ROOFING}', 'Кровля автостоянки')`,
   `INSERT INTO section_kinds (code, name)

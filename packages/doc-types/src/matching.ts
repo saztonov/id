@@ -91,6 +91,54 @@ function matchesAsHeading(pattern: RegExp, line: string): boolean {
   return trailing.length <= MAX_TRAILING_CHARS;
 }
 
+/**
+ * Открывает ли строка перечень: она кончается двоеточием.
+ *
+ * Двоеточие в конце строки — типографский признак того, что перечисление идёт
+ * НИЖЕ, а значит следующая строка принадлежит этому перечислению и заголовком
+ * самостоятельного документа не является. Печатные формы ИД устроены именно
+ * так и перечисляют в них ровно документы: «4. Предъявлены документы,
+ * подтверждающие соответствие работ предъявляемым к ним требованиям:»,
+ * «Приложения:», «Декларация принята на основании документов:». Строка под
+ * такой шапкой («Протокол об испытаниях № … от …») выглядит настоящим
+ * заголовком и по всем прочим признакам им и является — отличает её только
+ * то, что её ввели двоеточием.
+ *
+ * Это третий представитель того же класса дефектов, что уже описан в шапке
+ * файла: якорь не отличает ЗАГОЛОВОК документа от УПОМИНАНИЯ документа.
+ * Табличную строку от заголовка отделяет разметка таблицы, скобочную подсказку
+ * бланка — скобки, а элемент перечня — двоеточие строкой выше.
+ *
+ * ## Чего правило намеренно НЕ делает
+ *
+ * Оно снимает заголовок только с ПЕРВОЙ строки под двоеточием. Перечень из
+ * нескольких строк оно не отслеживает: `normalizeLines` выбрасывает пустые
+ * строки, поэтому в нормализованном виде конца абзаца не видно, и растягивание
+ * запрета вниз съедало бы настоящие заголовки вслепую.
+ *
+ * ## Чем правило платит
+ *
+ * Бланк, в котором собственное название документа напечатано в поле-строке под
+ * подписью поля («Вид документа:» / «СЕРТИФИКАТ СООТВЕТСТВИЯ»), потеряет якорь.
+ * В корпусе таких листов нет: правило снимает ровно одно совпадение из всех
+ * сработавших на 158 блоках, и это то самое ложное. Цена принята осознанно —
+ * §16 считает ложную высокоуверенную границу более дорогой, чем пропуск.
+ */
+export function opensEnumeration(line: string): boolean {
+  return /:$/u.test(line);
+}
+
+/**
+ * Отмечает строки зоны заголовка, введённые двоеточием.
+ *
+ * Индексы сохраняются: `DocTypeMatch.lineIndex` указывает в нормализованное
+ * представление целиком, и вызывающий (`classify.ts`) по нему находит исходную
+ * строку ради `char_span`. Поэтому строки не выбрасываются, а помечаются.
+ */
+function enumerationItemFlags(zone: readonly string[]): readonly boolean[] {
+  return zone.map((_, i) => i > 0 && opensEnumeration(zone[i - 1] as string));
+}
+
 /** Компилирует шаблон. Флаги фиксированы: регистронезависимо, юникод. */
 function compile(source: string): RegExp {
   try {
@@ -133,6 +181,11 @@ export function matchDocTypes(
 ): readonly DocTypeMatch[] {
   const lines = normalizeLines(text);
   const headingZone = lines.slice(0, options.headingLines ?? DEFAULT_HEADING_LINES);
+  // Строка под двоеточием — элемент перечня, а не заголовок. Запрет общий для
+  // положительных и отрицательных якорей: вопрос у них один и тот же — «эта
+  // строка является заголовком документа?», — и разойтись в ответе они не
+  // вправе, иначе упоминание в перечне снимало бы тип со всей страницы.
+  const isEnumerationItem = enumerationItemFlags(headingZone);
   const body = lines.join('\n');
   const matches: DocTypeMatch[] = [];
 
@@ -140,12 +193,18 @@ export function matchDocTypes(
     if (type.isFallback) continue;
 
     const negatives = (type.matchHints.negativeAnchors ?? []).map(compile);
-    if (negatives.some((re) => headingZone.some((l) => matchesAsHeading(re, l)))) continue;
+    if (
+      negatives.some((re) =>
+        headingZone.some((l, i) => !isEnumerationItem[i] && matchesAsHeading(re, l)),
+      )
+    ) {
+      continue;
+    }
 
     let hit: { line: string; index: number } | null = null;
     for (const source of type.matchHints.anchors) {
       const re = compile(source);
-      const idx = headingZone.findIndex((l) => matchesAsHeading(re, l));
+      const idx = headingZone.findIndex((l, i) => !isEnumerationItem[i] && matchesAsHeading(re, l));
       if (idx >= 0) {
         hit = { line: headingZone[idx] as string, index: idx };
         break;

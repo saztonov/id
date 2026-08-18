@@ -109,18 +109,9 @@ const FIXTURE: readonly string[] = [
      VALUES ('${OBJECT_A}', 'AUD01', 'Объект А', 'ЖК «Аудит», корпус 1')`,
   `INSERT INTO construction_objects (id, code, name, full_name)
      VALUES ('${OBJECT_B}', 'AUD02', 'Объект Б', 'ЖК «Аудит», корпус 2')`,
-  // Реестр правил заполняется сидом на S9, когда появятся реализации. До тех
-  // пор публикация профиля со ссылкой на правило требует фикстуры: сверка
-  // enabledRuleCodes с реестром намеренно fail-closed — опечатка в коде
-  // молча выключила бы проверку (§9.1).
-  `INSERT INTO rule_definitions (code, title, level, kind, default_severity)
-     VALUES ('AOSR.HDR', 'Шапка акта освидетельствования', 'document', 'deterministic', 'error')`,
-  `INSERT INTO rule_definitions (code, title, level, kind, default_severity)
-     VALUES ('AOSR.HDR.022', 'Контрольная сумма ОГРН', 'document', 'deterministic', 'error')`,
-  `INSERT INTO rule_definitions (code, title, level, kind, default_severity)
-     VALUES ('DATE.312', 'Дата изготовления партии не позже применения', 'document', 'deterministic', 'error')`,
-  `INSERT INTO rule_definitions (code, title, level, kind, default_severity)
-     VALUES ('MAT.100', 'Пакет подтверждения материала полон', 'document', 'deterministic', 'error')`,
+  // Реестр правил заполняется сидом 0017 из RULE_CATALOG (S9), поэтому здесь
+  // фикстур нет: собственная строка rule_definitions ломала бы сверку реестра
+  // с реализациями при старте приложения (§9.6). Коды ниже — настоящие.
 
   `INSERT INTO section_kinds (code, name) VALUES ('${KIND_ROOFING}', 'Кровля')`,
   `INSERT INTO section_kinds (code, name) VALUES ('${KIND_PILES}', 'Свайное основание')`,
@@ -142,7 +133,7 @@ const FIXTURE: readonly string[] = [
      VALUES ('${PROFILE_ROOFING}', '${KIND_ROOFING}', 1, '2026-01-01',
              '{aosr,cert_conformity}', '{roll_waterproofing}',
              '{"roll_waterproofing": {"documents": ["cert_conformity"]}}'::jsonb,
-             '{AOSR.HDR,DATE.312,MAT.100}',
+             '{AOSR.HDR.020,DATE.312,MAT.110}',
              '{"ageDays": 28, "minStrengthPct": 100}'::jsonb,
              'automatic', now())`,
 
@@ -684,7 +675,7 @@ describe('профили правил объекта и разрешение д�
       sectionProfileId: PROFILE_ROOFING,
       objectProfileIds: [],
       expectedDocTypes: ['aosr', 'cert_conformity'],
-      enabledRuleCodes: ['AOSR.HDR', 'DATE.312', 'MAT.100'],
+      enabledRuleCodes: ['AOSR.HDR.020', 'DATE.312', 'MAT.110'],
       autonomyLevel: 'automatic',
       // Основание релевантной даты по умолчанию — дата применения (§9.2).
       relevantDateBasis: 'application',
@@ -717,7 +708,7 @@ describe('профили правил объекта и разрешение д�
       overrides: {
         expectedDocTypes: ['aosr'],
         thresholds: { ageDays: 14 },
-        disabledRuleCodes: ['MAT.100'],
+        disabledRuleCodes: ['MAT.110'],
         relevantDateBasis: 'delivery',
         autonomyLevel: 'assisted',
       },
@@ -741,7 +732,7 @@ describe('профили правил объекта и разрешение д�
       // Списки заменяются целиком.
       expectedDocTypes: ['aosr'],
       // Пороги накладываются по ключам: `minStrengthPct` из профиля вида остался.
-      enabledRuleCodes: ['AOSR.HDR', 'DATE.312'],
+      enabledRuleCodes: ['AOSR.HDR.020', 'DATE.312'],
       relevantDateBasis: 'delivery',
       // Автоматизм понижен наложением объекта.
       autonomyLevel: 'assisted',

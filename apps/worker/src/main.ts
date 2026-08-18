@@ -27,6 +27,7 @@ import {
   createDatabase,
   createErrorReporter,
   createLogger,
+  assertRuleRegistryConsistent,
   createMetrics,
   createPdfLibToolkit,
   createPool,
@@ -166,6 +167,18 @@ async function main(): Promise<void> {
   // `null` при ненастроенной интеграции — портал обязан подниматься и принимать
   // файлы даже без доступа к RD WEB.
   const rdweb = createRdWeb(env, { metrics, logger });
+
+  // Сверка реестра правил с реализациями (§9.6). Воркер исполняет задачи 20–21,
+  // то есть именно он даёт заключение по комплекту, — подниматься с неполным
+  // набором правил ему нельзя тем более.
+  await assertRuleRegistryConsistent(db, {
+    error: (details, message) => {
+      logger.error(details, message);
+    },
+    info: (details, message) => {
+      logger.info(details, message);
+    },
+  });
 
   const registry = createWorkerRegistry({
     db,
