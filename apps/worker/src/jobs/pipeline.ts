@@ -32,19 +32,33 @@ import {
   blobKey,
   createBundle,
   createMaintenanceRegistry,
+  createRunDocument,
   evaluatePdfFile,
+  FALLBACK_LAYOUT_THRESHOLDS,
+  findBundle,
   findBundleByManifest,
   findFileContent,
+  findLayoutRevision,
   findRevisionForFiles,
+  findRunDocument,
+  importDetectedBlocks,
+  listBundlePages,
+  listLayoutBlocks,
   loadBundlePlan,
+  loadProfileForLayout,
+  previewPageKey,
   probePdf,
+  replaceRunDocument,
   saveFileVerdict,
+  savePageAttentionFlags,
   saveSignatureProbe,
   storableVerdict,
   type AuthScope,
   type Database,
   type JobRegistry,
+  type LayoutRevisionView,
   type PdfToolkit,
+  type RdWebPort,
   type StorageProvider,
 } from '@id/api';
 
@@ -61,6 +75,18 @@ import {
   type FileVerifyDeps,
 } from './file-verify.js';
 import { createSignatureProbeHandler, type SignatureProbeDeps } from './signature-probe.js';
+import {
+  createAnalyzeCoverageHandler,
+  createDetectPagesHandler,
+  createPreviewCacheHandler,
+  createRunDocumentHandler,
+  createUploadWorkingPdfHandler,
+  createWaitPagesHandler,
+  type MarkupDeps,
+  type MarkupTarget,
+  type PageBlocksSnapshot,
+  type WaitPagesOptions,
+} from './markup.js';
 
 /**
  * Актор фоновых задач.
@@ -97,6 +123,17 @@ export interface PipelineJobsOptions {
   readonly limits: PipelineLimits;
   /** Каталог временных копий при сборке; по умолчанию системный. */
   readonly workDirBase?: string | undefined;
+  /**
+   * Адаптер RD WEB (§5.1). `null` — интеграция не настроена: задачи 4–9 при
+   * этом честно падают с внятной причиной, а стадии приёма продолжают работать.
+   */
+  readonly rdweb?: RdWebPort | null | undefined;
+  /** Проект RD WEB, которым владеет портал (первый из `RDWEB_PROJECT_ALLOWLIST`). */
+  readonly rdProjectId?: string | null | undefined;
+  /** `PREVIEW_MODE=cached` (§7.1): только тогда ставится задача 9. */
+  readonly previewCached?: boolean | undefined;
+  /** Настройки поллинга рендера; в тестах ускоряются. */
+  readonly waitPages?: WaitPagesOptions | undefined;
 }
 
 export class PipelineScopeError extends Error {
@@ -329,6 +366,194 @@ function bundleBuildDeps(options: PipelineJobsOptions): BundleBuildDeps {
   };
 }
 
+// =====================================================================
+// Порты задач 4–9 (разметка)
+// =====================================================================
+
+/**
+ * Сборка цели задачи разметки из репозиториев.
+ *
+ * Всё читается закреплённой областью (`pinScope`), включая карту страниц и
+ * рабочий документ: задача, назвавшая в payload чужую ревизию, не находит
+ * ничего, а не работает с чужими данными от имени системы.
+ */
+async function buildMarkupTarget(
+  options: PipelineJobsOptions,
+  scope: AuthScope,
+  layout: LayoutRevisionView,
+): Promise<MarkupTarget | null> {
+  const { db, storage } = options;
+
+  const bundle = await findBundle(db, scope, layout.bundleId);
+  if (bundle === null) return null;
+
+  const pages = await listBundlePages(db, scope, layout.bundleId);
+  const key = blobKey(bundle.workingPdfBlobSha256);
+  const head = await storage.headObject(key);
+  const profile = await loadProfileForLayout(db, layout.layoutProfileId);
+
+  return {
+    layoutRevisionId: layout.id,
+    revisionId: layout.revisionId,
+    bundleId: layout.bundleId,
+    objectId: layout.objectId,
+    state: layout.state,
+    detectorProfile: layout.detectorProfile,
+    workingPdfSha256: bundle.workingPdfBlobSha256,
+    workingPdfKey: key,
+    workingPdfSizeBytes: head?.sizeBytes ?? 0,
+    pageIndices: pages.map((page) => page.workingPageIndex),
+    // Фолбэк берётся из репозитория, а не объявляется здесь второй раз:
+    // разошедшиеся значения дали бы флаги, не совпадающие с экраном.
+    thresholds: profile?.thresholds ?? FALLBACK_LAYOUT_THRESHOLDS,
+    layoutProfileVersion: profile?.version ?? null,
+  };
+}
+
+function markupDeps(options: PipelineJobsOptions): MarkupDeps {
+  const { db, storage } = options;
+
+  return {
+    rdweb: options.rdweb ?? null,
+    rdProjectId: options.rdProjectId ?? null,
+    previewCached: options.previewCached ?? false,
+
+    loadTargetByLayout: async ({ revisionId, layoutRevisionId }) => {
+      const scope = await pinScope(db, revisionId);
+      if (scope === null) return null;
+      const layout = await findLayoutRevision(db, scope, layoutRevisionId);
+      if (layout === null || layout.revisionId !== revisionId) return null;
+      return buildMarkupTarget(options, scope, layout);
+    },
+
+    findRunDocument: async (layoutRevisionId) => {
+      // Область берётся от ревизии разметки: у `rd_run_documents` собственных
+      // денормализованных колонок области нет.
+      const layout = await findLayoutRevisionSystemwide(db, layoutRevisionId);
+      if (layout === null) return null;
+      const scope = await pinScope(db, layout.revisionId);
+      if (scope === null) return null;
+      const found = await findRunDocument(db, scope, layoutRevisionId);
+      return found === null
+        ? null
+        : {
+            rdDocumentId: found.rdDocumentId,
+            rdProjectId: found.rdProjectId,
+            closed: found.closedAt !== null,
+          };
+    },
+
+    saveRunDocument: async (input) => {
+      const scope = await pinScope(db, input.revisionId);
+      if (scope === null) throw new PipelineScopeError('Ревизия исчезла до записи RD-документа.');
+      await createRunDocument(db, scope, {
+        layoutRevisionId: input.layoutRevisionId,
+        rdDocumentId: input.rdDocumentId,
+        rdProjectId: input.rdProjectId,
+      });
+    },
+
+    replaceRunDocument: async (input) => {
+      const scope = await pinScope(db, input.revisionId);
+      if (scope === null) throw new PipelineScopeError('Ревизия исчезла до замены RD-документа.');
+      await replaceRunDocument(db, scope, {
+        layoutRevisionId: input.layoutRevisionId,
+        rdDocumentId: input.rdDocumentId,
+        rdProjectId: input.rdProjectId,
+      });
+    },
+
+    openWorkingPdf: async (key) => {
+      const object = await storage.getObjectStream(key);
+      return { stream: () => object.stream, sizeBytes: object.sizeBytes };
+    },
+
+    importBlocks: async (input) => {
+      const scope = await pinScope(db, input.revisionId);
+      if (scope === null) throw new PipelineScopeError('Ревизия исчезла до импорта разметки.');
+      const result = await importDetectedBlocks(db, scope, {
+        layoutRevisionId: input.layoutRevisionId,
+        workingPageIndices: input.workingPageIndices,
+        blocks: input.blocks,
+        // Провенанс — факт происхождения, а не выдуманная уверенность: ни
+        // `confidence`, ни `model_id` в `BlockOut` нет (§0.1).
+        provenance: 'rf_detr',
+      });
+      return { imported: result.imported, skippedPages: result.skippedPages };
+    },
+
+    loadPageBlocks: async (input) => {
+      const scope = await pinScope(db, input.revisionId);
+      if (scope === null) return [];
+      const layout = await findLayoutRevision(db, scope, input.layoutRevisionId);
+      if (layout === null) return [];
+
+      const [pages, blocks] = await Promise.all([
+        listBundlePages(db, scope, layout.bundleId),
+        listLayoutBlocks(db, scope, layout.id),
+      ]);
+
+      const byPage = new Map<number, PageBlocksSnapshot['blocks'][number][]>();
+      for (const block of blocks) {
+        const list = byPage.get(block.workingPageIndex);
+        const entry = {
+          blockType: block.blockType,
+          x0: block.x0,
+          y0: block.y0,
+          x1: block.x1,
+          y1: block.y1,
+        };
+        if (list === undefined) byPage.set(block.workingPageIndex, [entry]);
+        else list.push(entry);
+      }
+
+      // Страницы берутся из КАРТЫ, а не из набора блоков: страница без единого
+      // блока обязана попасть в анализ — она и есть главный кандидат на флаг.
+      return pages.map((page) => ({
+        workingPageIndex: page.workingPageIndex,
+        sourcePageId: page.sourcePageId,
+        blocks: byPage.get(page.workingPageIndex) ?? [],
+      }));
+    },
+
+    saveFlags: async (input) => {
+      const scope = await pinScope(db, input.revisionId);
+      if (scope === null) return { written: false, reason: 'ревизия исчезла' };
+      const outcome = await savePageAttentionFlags(db, scope, {
+        revisionId: input.revisionId,
+        flags: input.flags,
+      });
+      return outcome.kind === 'written'
+        ? { written: true }
+        : { written: false, reason: outcome.reason };
+    },
+
+    storePreview: async (input) => {
+      const key = previewPageKey(input.bundleId, 'view', input.workingPageIndex);
+      await storage.putObject({
+        key,
+        body: Buffer.from(input.bytes),
+        contentType: 'image/png',
+        contentLength: input.bytes.byteLength,
+      });
+    },
+  };
+}
+
+/**
+ * Ревизия разметки без области видимости.
+ *
+ * Единственное системное чтение задач разметки и ровно в одном месте, как и
+ * `SYSTEM_SCOPE` выше: оно отвечает на вопрос «чьей поставке принадлежит эта
+ * ревизия разметки», после чего всё идёт закреплённой областью.
+ */
+async function findLayoutRevisionSystemwide(
+  db: Database,
+  layoutRevisionId: string,
+): Promise<LayoutRevisionView | null> {
+  return findLayoutRevision(db, SYSTEM_SCOPE, layoutRevisionId);
+}
+
 /**
  * Регистрация задач 1–3 в реестре воркера.
  *
@@ -346,6 +571,18 @@ export function registerPipelineJobs(
     createSignatureProbeHandler(signatureProbeDeps(options)),
   );
   registry.register('bundle.build', createBundleBuildHandler(bundleBuildDeps(options)));
+
+  // Задачи 4–9 (§12): рабочий документ в RD WEB, рендер, синхронная
+  // постраничная детекция, флаги внимания и кэш превью. Регистрируются здесь и
+  // безусловно: обработчик без регистрации — это задача, которая вечно ждёт в
+  // очереди воркера, который её «умеет», и выглядит как зависший конвейер.
+  const markup = markupDeps(options);
+  registry.register('rd.create_run_document', createRunDocumentHandler(markup));
+  registry.register('rd.upload_working_pdf', createUploadWorkingPdfHandler(markup));
+  registry.register('rd.wait_pages', createWaitPagesHandler(markup, options.waitPages ?? {}));
+  registry.register('layout.detect_pages', createDetectPagesHandler(markup));
+  registry.register('layout.analyze_coverage', createAnalyzeCoverageHandler(markup));
+  registry.register('preview.cache_pages', createPreviewCacheHandler(markup));
   return registry;
 }
 

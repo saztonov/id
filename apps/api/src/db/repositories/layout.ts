@@ -1,0 +1,1648 @@
+/**
+ * Ревизии разметки, блоки и RD-документ прогона (§3.4, §5.2, §6.1, §7).
+ *
+ * ## Что здесь считается источником правды
+ *
+ * Набор блоков ревизии разметки — это ЗАКАЗ на распознавание. Всё остальное
+ * (`blocks_hash`, удалённый набор блоков RD WEB, артефакты прогона) описывает
+ * его же с разных сторон, поэтому канонический хэш обязан считаться по одному
+ * правилу и в одном месте — `computeBlocksHash()`. Вторая реализация хэша
+ * означала бы, что цикл сверки §5.2 сравнивает два разных представления одного
+ * набора и либо вечно расходится, либо вечно совпадает.
+ *
+ * ## Почему у блока нет собственной версии
+ *
+ * Оптимистичная блокировка (§7.2, `If-Match`) ведётся по `layout_revisions.version`,
+ * а не по версии блока: в схеме S2 у `layout_blocks` колонки `version` нет, и
+ * добавлять её незачем. Единица конфликта на экране разметки — не блок, а
+ * страница целиком: пользователь двигает рамку, второй в это время удаляет
+ * соседнюю, и «моя версия блока не менялась» ничего не говорит о том, что набор
+ * страницы уже другой. Поэтому любая мутация поднимает версию ревизии разметки,
+ * и она же служит ETag.
+ *
+ * ## Область видимости
+ *
+ * У `layout_revisions` есть собственный денормализованный `object_id`, но
+ * `contractor_id` — только у ревизии поставки, поэтому область применяется
+ * соединением с `submission_revisions` (как в `bundles.ts`). Ни один запрос
+ * этого файла не выполняется без `withScope()`: подрядчик не видит чужую
+ * разметку ни списком, ни по прямому идентификатору (§16).
+ */
+import { createHash } from 'node:crypto';
+import { and, asc, eq, inArray, isNull, sql } from 'drizzle-orm';
+import {
+  layoutBlockPoints,
+  layoutBlocks,
+  layoutProfiles,
+  layoutRevisions,
+  processingBundlePages,
+  processingBundles,
+  rdRunDocuments,
+  sourcePages,
+  submissionRevisions,
+} from '@id/db';
+import {
+  attentionFlagSchema,
+  type AttentionFlag,
+  type BlockType,
+  type DetectorProvenance,
+  type ShapeType,
+} from '@id/contracts';
+import type { AuthScope } from '../../auth/scope.js';
+import { conflict, internal, notFound, preconditionFailed } from '../../lib/problem.js';
+import { withScope, type ScopeTarget } from '../scoped.js';
+import { appendRevisionEvent, type JobExecutor } from './jobs.js';
+import type { Database } from './users.js';
+
+const REVISION_SCOPE: ScopeTarget = {
+  objectId: submissionRevisions.objectId,
+  contractorId: submissionRevisions.contractorId,
+};
+
+/**
+ * Статусы ревизии поставки, в которых разметку менять можно.
+ *
+ * Разметка относится к классу `derived` (0008): её производит конвейер и правит
+ * проверяющий, поэтому она заперта только в терминальных состояниях, а не с
+ * момента подачи. Список продублирован здесь сознательно — отказ обязан
+ * приходить понятным текстом до дорогой работы, а не исключением триггера
+ * после неё.
+ */
+const LAYOUT_MUTABLE_STATUSES = new Set(['draft', 'submitted', 'in_review']);
+
+/** Код профиля разметки по умолчанию (миграция 0012). */
+export const DEFAULT_LAYOUT_PROFILE_CODE = 'default';
+
+// =====================================================================
+// Канонический хэш набора блоков
+// =====================================================================
+
+/**
+ * Версия канонической формы. Входит в хэш: изменив состав полей, мы обязаны
+ * получить другие хэши, иначе старый пин перестанет описывать то, что описывал.
+ */
+export const BLOCKS_HASH_VERSION = 1;
+
+/**
+ * Разрядность координат в каноническом виде.
+ *
+ * Координаты уезжают в RD WEB и возвращаются оттуда через JSON, то есть
+ * проходят через двоичное представление double и обратно. Сравнивать их
+ * побитово нельзя: `0.1 + 0.2` на одной стороне и разбор `0.30000000000000004`
+ * на другой дали бы вечное расхождение хэшей и `integrity_error` на исправном
+ * прогоне. Шесть знаков — это доля пикселя даже на странице 4000 px.
+ */
+const COORD_PRECISION = 6;
+
+function fixed(value: number): string {
+  // `toFixed` даёт «-0.000000» для отрицательного нуля; нормализуем, иначе
+  // одинаковая геометрия дала бы два разных хэша.
+  const text = value.toFixed(COORD_PRECISION);
+  return text === `-${(0).toFixed(COORD_PRECISION)}` ? (0).toFixed(COORD_PRECISION) : text;
+}
+
+/** Блок в том виде, в каком он участвует в хэше. Идентификаторов здесь нет. */
+export interface HashableBlock {
+  readonly workingPageIndex: number;
+  readonly blockType: string;
+  readonly shapeType: string;
+  readonly x0: number;
+  readonly y0: number;
+  readonly x1: number;
+  readonly y1: number;
+  readonly sortOrder: number;
+  readonly points: readonly { readonly x: number; readonly y: number }[];
+}
+
+function canonicalRow(block: HashableBlock): string {
+  const points = block.points.map((p) => `${fixed(p.x)},${fixed(p.y)}`).join(';');
+  return [
+    block.workingPageIndex,
+    block.blockType,
+    block.shapeType,
+    fixed(block.x0),
+    fixed(block.y0),
+    fixed(block.x1),
+    fixed(block.y1),
+    block.sortOrder,
+    points,
+  ].join('|');
+}
+
+/**
+ * Канонический хэш набора блоков.
+ *
+ * Детерминирован и не зависит ни от порядка строк в БД, ни от локальных
+ * идентификаторов: строки приводятся к каноническому виду и сортируются
+ * лексикографически. Это принципиально — удалённая сторона (RD WEB) своих
+ * `block_id` нам не сообщает заранее и порядок выдачи не гарантирует, а хэш
+ * обязан совпасть с локальным (§5.2, шаг 5).
+ *
+ * Порядок точек полигона, наоборот, значим и сохраняется: он задаёт саму форму.
+ */
+export function computeBlocksHash(blocks: readonly HashableBlock[]): string {
+  const rows = blocks.map(canonicalRow).sort();
+  const canonical = `v${BLOCKS_HASH_VERSION}\n${rows.join('\n')}`;
+  return createHash('sha256').update(canonical, 'utf8').digest('hex');
+}
+
+// =====================================================================
+// Профиль разметки
+// =====================================================================
+
+/**
+ * Пороги флагов внимания (§7.3).
+ *
+ * Живут в `layout_profiles`, а не константами: калибровка порога не должна быть
+ * релизом, а прошлый расчёт флагов обязан воспроизводиться по запиненному
+ * профилю. Значения по умолчанию здесь — фолбэк на случай, если профиль не
+ * заведён вовсе; они же лежат строкой в миграции 0012.
+ */
+export interface LayoutThresholds {
+  /** Ниже этой доли union-площади страница получает `low_coverage`. */
+  readonly minCoverageRatio: number;
+  /** Ниже этой доли страница — кандидат в пустые. */
+  readonly blankPageCoverageRatio: number;
+  /** Площадь блока ниже этой доли страницы — `tiny_block`. */
+  readonly tinyBlockAreaRatio: number;
+  /** IoU двух блоков ОДНОГО класса выше порога — `suspicious_overlap`. */
+  readonly overlapIouThreshold: number;
+  /** Сторона блока меньше этой доли страницы — вырожденная геометрия. */
+  readonly degenerateSideRatio: number;
+  /** Отклонение числа блоков от соседних страниц выше доли — `neighbor_mismatch`. */
+  readonly neighborCountDeltaRatio: number;
+  /** Ниже этого числа блоков сравнение с соседями не делается: шум. */
+  readonly neighborMinBlocks: number;
+  /** Ждать ли `stamp` на странице, где есть `image` (схемы). */
+  readonly expectStampOnImagePage: boolean;
+}
+
+export const FALLBACK_LAYOUT_THRESHOLDS: LayoutThresholds = {
+  minCoverageRatio: 0.12,
+  blankPageCoverageRatio: 0.02,
+  tinyBlockAreaRatio: 0.002,
+  overlapIouThreshold: 0.2,
+  degenerateSideRatio: 0.002,
+  neighborCountDeltaRatio: 0.6,
+  neighborMinBlocks: 3,
+  expectStampOnImagePage: false,
+};
+
+export interface LayoutProfileView {
+  readonly id: string;
+  readonly code: string;
+  readonly version: number;
+  readonly thresholds: LayoutThresholds;
+}
+
+function numberOr(source: Record<string, unknown>, key: keyof LayoutThresholds): number {
+  const value = source[key];
+  return typeof value === 'number' && Number.isFinite(value)
+    ? value
+    : (FALLBACK_LAYOUT_THRESHOLDS[key] as number);
+}
+
+/**
+ * Разбор порогов профиля.
+ *
+ * Отсутствующий или непригодный ключ заменяется фолбэком, а не роняет расчёт:
+ * флаг внимания — подсказка человеку, и потерять её из-за опечатки в jsonb
+ * хуже, чем посчитать по значению по умолчанию. Опечатка при этом видна —
+ * `layout.analyze_coverage` пишет применённый профиль в событие ревизии.
+ */
+export function parseThresholds(raw: unknown): LayoutThresholds {
+  if (typeof raw !== 'object' || raw === null) return FALLBACK_LAYOUT_THRESHOLDS;
+  const source = raw as Record<string, unknown>;
+  return {
+    minCoverageRatio: numberOr(source, 'minCoverageRatio'),
+    blankPageCoverageRatio: numberOr(source, 'blankPageCoverageRatio'),
+    tinyBlockAreaRatio: numberOr(source, 'tinyBlockAreaRatio'),
+    overlapIouThreshold: numberOr(source, 'overlapIouThreshold'),
+    degenerateSideRatio: numberOr(source, 'degenerateSideRatio'),
+    neighborCountDeltaRatio: numberOr(source, 'neighborCountDeltaRatio'),
+    neighborMinBlocks: numberOr(source, 'neighborMinBlocks'),
+    expectStampOnImagePage:
+      typeof source.expectStampOnImagePage === 'boolean'
+        ? source.expectStampOnImagePage
+        : FALLBACK_LAYOUT_THRESHOLDS.expectStampOnImagePage,
+  };
+}
+
+/**
+ * Профиль, действующий на дату.
+ *
+ * Справочник конфигурации, а не коммерческие данные: областью видимости не
+ * ограничивается — по той же границе, что на S4 отделила профили разделов от
+ * контрагентов.
+ */
+export async function findActiveLayoutProfile(
+  db: Database,
+  code: string = DEFAULT_LAYOUT_PROFILE_CODE,
+  onDate?: string,
+): Promise<LayoutProfileView | null> {
+  const day = onDate ?? new Date().toISOString().slice(0, 10);
+  const rows = await db
+    .select({
+      id: layoutProfiles.id,
+      code: layoutProfiles.code,
+      version: layoutProfiles.version,
+      thresholds: layoutProfiles.thresholds,
+    })
+    .from(layoutProfiles)
+    .where(
+      and(
+        eq(layoutProfiles.code, code),
+        sql`${layoutProfiles.effectiveFrom} <= ${day}::date`,
+        sql`(${layoutProfiles.effectiveTo} is null or ${layoutProfiles.effectiveTo} > ${day}::date)`,
+      ),
+    )
+    .limit(1);
+
+  const row = rows[0];
+  if (row === undefined) return null;
+  return {
+    id: row.id,
+    code: row.code,
+    version: row.version,
+    thresholds: parseThresholds(row.thresholds),
+  };
+}
+
+/** Профиль, запиненный ревизией разметки; иначе — действующий сейчас. */
+export async function loadProfileForLayout(
+  db: Database,
+  layoutProfileId: string | null,
+): Promise<LayoutProfileView | null> {
+  if (layoutProfileId === null) return findActiveLayoutProfile(db);
+  const rows = await db
+    .select({
+      id: layoutProfiles.id,
+      code: layoutProfiles.code,
+      version: layoutProfiles.version,
+      thresholds: layoutProfiles.thresholds,
+    })
+    .from(layoutProfiles)
+    .where(eq(layoutProfiles.id, layoutProfileId))
+    .limit(1);
+  const row = rows[0];
+  if (row === undefined) return findActiveLayoutProfile(db);
+  return {
+    id: row.id,
+    code: row.code,
+    version: row.version,
+    thresholds: parseThresholds(row.thresholds),
+  };
+}
+
+// =====================================================================
+// Чтение ревизии разметки
+// =====================================================================
+
+export interface LayoutRevisionView {
+  readonly id: string;
+  readonly revisionId: string;
+  readonly objectId: string;
+  readonly bundleId: string;
+  readonly revisionNo: number;
+  readonly state: string;
+  readonly blocksHash: string | null;
+  readonly version: number;
+  readonly detectorProfile: string;
+  readonly layoutProfileId: string | null;
+  readonly firstManualEditAt: string | null;
+  readonly frozenAt: string | null;
+  readonly frozenBy: string | null;
+  readonly createdAt: string;
+  /** Статус ревизии поставки: от него зависит, можно ли вообще править. */
+  readonly submissionStatus: string;
+}
+
+const LAYOUT_SELECTION = {
+  id: layoutRevisions.id,
+  revisionId: layoutRevisions.revisionId,
+  objectId: layoutRevisions.objectId,
+  bundleId: layoutRevisions.bundleId,
+  revisionNo: layoutRevisions.revisionNo,
+  state: layoutRevisions.state,
+  blocksHash: layoutRevisions.blocksHash,
+  version: layoutRevisions.version,
+  detectorProfile: layoutRevisions.detectorProfile,
+  layoutProfileId: layoutRevisions.layoutProfileId,
+  firstManualEditAt: sql<
+    string | null
+  >`to_char(${layoutRevisions.firstManualEditAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`.as(
+    'first_manual_edit_at_iso',
+  ),
+  frozenAt: sql<
+    string | null
+  >`to_char(${layoutRevisions.frozenAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`.as(
+    'frozen_at_iso',
+  ),
+  frozenBy: layoutRevisions.frozenBy,
+  createdAt:
+    sql<string>`to_char(${layoutRevisions.createdAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`.as(
+      'created_at_iso',
+    ),
+  submissionStatus: submissionRevisions.status,
+};
+
+export async function findLayoutRevision(
+  db: Database,
+  scope: AuthScope,
+  layoutRevisionId: string,
+): Promise<LayoutRevisionView | null> {
+  const rows = await db
+    .select(LAYOUT_SELECTION)
+    .from(layoutRevisions)
+    .innerJoin(submissionRevisions, eq(layoutRevisions.revisionId, submissionRevisions.id))
+    .where(withScope(scope, REVISION_SCOPE, eq(layoutRevisions.id, layoutRevisionId)))
+    .limit(1);
+  return rows[0] ?? null;
+}
+
+export async function listLayoutRevisions(
+  db: Database,
+  scope: AuthScope,
+  revisionId: string,
+): Promise<readonly LayoutRevisionView[]> {
+  return db
+    .select(LAYOUT_SELECTION)
+    .from(layoutRevisions)
+    .innerJoin(submissionRevisions, eq(layoutRevisions.revisionId, submissionRevisions.id))
+    .where(withScope(scope, REVISION_SCOPE, eq(layoutRevisions.revisionId, revisionId)))
+    .orderBy(asc(layoutRevisions.revisionNo));
+}
+
+/** Единственная незамороженная ревизия разметки поставки (частичный UNIQUE, 0004). */
+export async function findDraftLayout(
+  db: Database,
+  scope: AuthScope,
+  revisionId: string,
+): Promise<LayoutRevisionView | null> {
+  const rows = await db
+    .select(LAYOUT_SELECTION)
+    .from(layoutRevisions)
+    .innerJoin(submissionRevisions, eq(layoutRevisions.revisionId, submissionRevisions.id))
+    .where(
+      withScope(
+        scope,
+        REVISION_SCOPE,
+        eq(layoutRevisions.revisionId, revisionId),
+        eq(layoutRevisions.state, 'draft'),
+      ),
+    )
+    .limit(1);
+  return rows[0] ?? null;
+}
+
+// =====================================================================
+// Создание черновика
+// =====================================================================
+
+export interface EnsureDraftLayoutInput {
+  readonly revisionId: string;
+  readonly bundleId: string;
+  /** §5.3: `full_page` допустим только на однородных текстовых комплектах. */
+  readonly detectorProfile?: 'rf_detr' | 'full_page';
+}
+
+export interface EnsureDraftLayoutResult {
+  readonly layout: LayoutRevisionView;
+  readonly created: boolean;
+}
+
+/**
+ * Черновик разметки под рабочий документ: найти или создать.
+ *
+ * Идемпотентно по построению — частичный уникальный индекс не даёт двум
+ * черновикам сосуществовать, и повторное нажатие «Разметить файл» обязано
+ * попасть в тот же черновик, а не получить 409.
+ *
+ * Профиль порогов пиннится ЗДЕСЬ, а не в момент расчёта флагов: иначе
+ * перепубликация профиля между детекцией и анализом дала бы флаги, посчитанные
+ * по одному профилю, и запись о другом.
+ */
+export async function ensureDraftLayout(
+  db: Database,
+  scope: AuthScope,
+  input: EnsureDraftLayoutInput,
+): Promise<EnsureDraftLayoutResult> {
+  const existing = await findDraftLayout(db, scope, input.revisionId);
+  if (existing !== null) {
+    if (existing.bundleId !== input.bundleId) {
+      throw conflict(
+        'Для этой поставки уже есть незамороженная разметка по другому рабочему документу: ' +
+          'заморозьте её или отмените, прежде чем размечать новый.',
+      );
+    }
+    return { layout: existing, created: false };
+  }
+
+  const profile = await findActiveLayoutProfile(db);
+
+  const layoutId = await db.transaction(async (tx) => {
+    // Область проверяется внутри транзакции: строка ревизии и разрешение писать
+    // — одно решение, и разносить их нельзя.
+    const bundles = await tx
+      .select({
+        bundleId: processingBundles.id,
+        revisionId: processingBundles.revisionId,
+        objectId: submissionRevisions.objectId,
+        status: submissionRevisions.status,
+      })
+      .from(processingBundles)
+      .innerJoin(submissionRevisions, eq(processingBundles.revisionId, submissionRevisions.id))
+      .where(
+        withScope(
+          scope,
+          REVISION_SCOPE,
+          eq(processingBundles.id, input.bundleId),
+          eq(processingBundles.revisionId, input.revisionId),
+        ),
+      )
+      .limit(1);
+
+    const bundle = bundles[0];
+    if (bundle === undefined) throw notFound('Рабочий документ не найден.');
+    if (!LAYOUT_MUTABLE_STATUSES.has(bundle.status)) {
+      throw conflict(
+        `Разметку нельзя начать для ревизии в статусе «${bundle.status}»: она уже закрыта.`,
+      );
+    }
+
+    const maxRows = await tx
+      .select({ maxNo: sql<number>`coalesce(max(${layoutRevisions.revisionNo}), 0)::int` })
+      .from(layoutRevisions)
+      .where(eq(layoutRevisions.revisionId, input.revisionId));
+
+    const inserted = await tx
+      .insert(layoutRevisions)
+      .values({
+        revisionId: bundle.revisionId,
+        objectId: bundle.objectId,
+        bundleId: bundle.bundleId,
+        revisionNo: (maxRows[0]?.maxNo ?? 0) + 1,
+        state: 'draft',
+        detectorProfile: input.detectorProfile ?? 'rf_detr',
+        ...(profile !== null ? { layoutProfileId: profile.id } : {}),
+      })
+      .returning({ id: layoutRevisions.id });
+
+    const row = inserted[0];
+    if (row === undefined) {
+      throw internal({ logDetail: 'INSERT ревизии разметки не вернул строку' });
+    }
+
+    await appendRevisionEvent(tx, {
+      revisionId: bundle.revisionId,
+      eventType: 'layout.draft_created',
+      payload: {
+        layoutRevisionId: row.id,
+        bundleId: bundle.bundleId,
+        layoutProfileVersion: profile?.version ?? null,
+      },
+    });
+
+    return row.id;
+  });
+
+  const layout = await findLayoutRevision(db, scope, layoutId);
+  if (layout === null) {
+    throw internal({ logDetail: 'ревизия разметки не читается сразу после записи' });
+  }
+  return { layout, created: true };
+}
+
+// =====================================================================
+// Блоки
+// =====================================================================
+
+export interface LayoutBlockView {
+  readonly id: string;
+  readonly layoutRevisionId: string;
+  readonly sourcePageId: string;
+  readonly workingPageIndex: number;
+  readonly blockType: BlockType;
+  readonly shapeType: ShapeType;
+  readonly x0: number;
+  readonly y0: number;
+  readonly x1: number;
+  readonly y1: number;
+  readonly sortOrder: number;
+  readonly source: 'auto' | 'user';
+  readonly detectorProvenance: DetectorProvenance;
+  readonly points: readonly { readonly pointNo: number; readonly x: number; readonly y: number }[];
+}
+
+const BLOCK_SELECTION = {
+  id: layoutBlocks.id,
+  layoutRevisionId: layoutBlocks.layoutRevisionId,
+  sourcePageId: layoutBlocks.sourcePageId,
+  workingPageIndex: layoutBlocks.workingPageIndex,
+  blockType: layoutBlocks.blockType,
+  shapeType: layoutBlocks.shapeType,
+  x0: layoutBlocks.x0,
+  y0: layoutBlocks.y0,
+  x1: layoutBlocks.x1,
+  y1: layoutBlocks.y1,
+  sortOrder: layoutBlocks.sortOrder,
+  source: layoutBlocks.source,
+  detectorProvenance: layoutBlocks.detectorProvenance,
+};
+
+/**
+ * Блоки ревизии разметки вместе с точками полигонов.
+ *
+ * Точки читаются вторым запросом, а не JOIN'ом: соединение размножило бы каждый
+ * прямоугольник на число точек его бывшей формы, а полигонов в комплекте
+ * единицы. Порядок точек берётся из `point_no` — он и есть форма.
+ */
+export async function listLayoutBlocks(
+  db: Database,
+  scope: AuthScope,
+  layoutRevisionId: string,
+  workingPageIndex?: number,
+): Promise<readonly LayoutBlockView[]> {
+  const conditions = [eq(layoutBlocks.layoutRevisionId, layoutRevisionId)];
+  if (workingPageIndex !== undefined) {
+    conditions.push(eq(layoutBlocks.workingPageIndex, workingPageIndex));
+  }
+
+  const rows = await db
+    .select(BLOCK_SELECTION)
+    .from(layoutBlocks)
+    .innerJoin(submissionRevisions, eq(layoutBlocks.revisionId, submissionRevisions.id))
+    .where(withScope(scope, REVISION_SCOPE, ...conditions))
+    .orderBy(asc(layoutBlocks.workingPageIndex), asc(layoutBlocks.sortOrder), asc(layoutBlocks.id));
+
+  if (rows.length === 0) return [];
+
+  const points = await db
+    .select({
+      blockId: layoutBlockPoints.blockId,
+      pointNo: layoutBlockPoints.pointNo,
+      x: layoutBlockPoints.x,
+      y: layoutBlockPoints.y,
+    })
+    .from(layoutBlockPoints)
+    .where(
+      inArray(
+        layoutBlockPoints.blockId,
+        rows.map((row) => row.id),
+      ),
+    )
+    .orderBy(asc(layoutBlockPoints.blockId), asc(layoutBlockPoints.pointNo));
+
+  const byBlock = new Map<string, { pointNo: number; x: number; y: number }[]>();
+  for (const point of points) {
+    const list = byBlock.get(point.blockId);
+    if (list === undefined) byBlock.set(point.blockId, [point]);
+    else list.push(point);
+  }
+
+  return rows.map((row) => ({
+    ...row,
+    blockType: row.blockType as BlockType,
+    shapeType: row.shapeType as ShapeType,
+    source: row.source as 'auto' | 'user',
+    detectorProvenance: row.detectorProvenance as DetectorProvenance,
+    // У прямоугольника точки могут остаться от прежней формы — их отдаёт только
+    // полигон. Та же гарда стоит у RD WEB в `blocks_json.py`.
+    points: row.shapeType === 'polygon' ? (byBlock.get(row.id) ?? []) : [],
+  }));
+}
+
+/** Блок вместе со своей ревизией разметки — вход всех правок. */
+export interface BlockWithLayout {
+  readonly block: LayoutBlockView;
+  readonly layout: LayoutRevisionView;
+}
+
+export async function findLayoutBlock(
+  db: Database,
+  scope: AuthScope,
+  blockId: string,
+): Promise<BlockWithLayout | null> {
+  const rows = await db
+    .select({ ...BLOCK_SELECTION, ...LAYOUT_SELECTION, blockId: layoutBlocks.id })
+    .from(layoutBlocks)
+    .innerJoin(layoutRevisions, eq(layoutBlocks.layoutRevisionId, layoutRevisions.id))
+    .innerJoin(submissionRevisions, eq(layoutBlocks.revisionId, submissionRevisions.id))
+    .where(withScope(scope, REVISION_SCOPE, eq(layoutBlocks.id, blockId)))
+    .limit(1);
+
+  const row = rows[0];
+  if (row === undefined) return null;
+
+  const blocks = await listLayoutBlocks(db, scope, row.layoutRevisionId, row.workingPageIndex);
+  const block = blocks.find((candidate) => candidate.id === row.blockId);
+  if (block === undefined) return null;
+
+  return {
+    block,
+    layout: {
+      id: row.id,
+      revisionId: row.revisionId,
+      objectId: row.objectId,
+      bundleId: row.bundleId,
+      revisionNo: row.revisionNo,
+      state: row.state,
+      blocksHash: row.blocksHash,
+      version: row.version,
+      detectorProfile: row.detectorProfile,
+      layoutProfileId: row.layoutProfileId,
+      firstManualEditAt: row.firstManualEditAt,
+      frozenAt: row.frozenAt,
+      frozenBy: row.frozenBy,
+      createdAt: row.createdAt,
+      submissionStatus: row.submissionStatus,
+    },
+  };
+}
+
+// =====================================================================
+// Разрешение на правку и оптимистичная блокировка
+// =====================================================================
+
+/**
+ * Ревизия разметки, пригодная для правки, с проверкой ожидаемой версии.
+ *
+ * Три отказа, и они разные по смыслу: `404` — не нашли или не наше, `409` —
+ * разметка заморожена либо ревизия поставки закрыта, `412` — версия устарела.
+ * Сваливать их в один код нельзя: на `412` клиент перечитывает и показывает
+ * сравнение (§7.2), на `409` перечитывать бессмысленно.
+ */
+async function requireEditableLayout(
+  db: Database,
+  scope: AuthScope,
+  layoutRevisionId: string,
+  expectedVersion: number | undefined,
+): Promise<LayoutRevisionView> {
+  const layout = await findLayoutRevision(db, scope, layoutRevisionId);
+  if (layout === null) throw notFound('Ревизия разметки не найдена.');
+  assertEditableLayout(layout);
+  if (expectedVersion !== undefined && expectedVersion !== layout.version) {
+    throw preconditionFailed(
+      `Разметка изменилась: ожидалась версия ${expectedVersion}, текущая ${layout.version}.`,
+    );
+  }
+  return layout;
+}
+
+export function assertEditableLayout(layout: LayoutRevisionView): void {
+  if (layout.state !== 'draft') {
+    throw conflict(
+      `Разметка в состоянии «${layout.state}» неизменяема: правка создаёт новую ревизию разметки.`,
+    );
+  }
+  if (!LAYOUT_MUTABLE_STATUSES.has(layout.submissionStatus)) {
+    throw conflict(
+      `Ревизия поставки в статусе «${layout.submissionStatus}»: её разметка больше не правится.`,
+    );
+  }
+}
+
+/**
+ * Отметка «человек трогал разметку».
+ *
+ * Ставится один раз и больше не переписывается: важен ФАКТ и момент первой
+ * правки, потому что именно с него `full-page-text` на стороне RD WEB
+ * становится опасным — он удаляет прежние блоки страницы (§5.3, подтверждено по
+ * `blocks_bulk.py`).
+ */
+async function bumpVersion(
+  tx: JobExecutor,
+  layoutRevisionId: string,
+  actorUserId: string | null,
+  manual: boolean,
+): Promise<number> {
+  const updated = await tx.execute<{ version: number }>(sql`
+    update ${layoutRevisions}
+       set version = ${layoutRevisions.version} + 1,
+           updated_at = now(),
+           first_manual_edit_at = case
+             when ${manual} and ${layoutRevisions.firstManualEditAt} is null then now()
+             else ${layoutRevisions.firstManualEditAt} end,
+           first_manual_edit_by = case
+             when ${manual} and ${layoutRevisions.firstManualEditAt} is null
+               then ${actorUserId}::uuid
+             else ${layoutRevisions.firstManualEditBy} end
+     where ${layoutRevisions.id} = ${layoutRevisionId}::uuid
+       and ${layoutRevisions.state} = 'draft'
+    returning version
+  `);
+  const row = updated.rows[0];
+  if (row === undefined) {
+    throw conflict('Разметка перестала быть черновиком в ходе правки.');
+  }
+  return Number(row.version);
+}
+
+// =====================================================================
+// Импорт результатов детекции
+// =====================================================================
+
+export interface DetectedBlockInput {
+  readonly workingPageIndex: number;
+  readonly blockType: BlockType;
+  readonly shapeType: ShapeType;
+  readonly x0: number;
+  readonly y0: number;
+  readonly x1: number;
+  readonly y1: number;
+  readonly sortOrder: number;
+  readonly points: readonly { readonly x: number; readonly y: number }[];
+}
+
+export interface ImportDetectionInput {
+  readonly layoutRevisionId: string;
+  /** Страницы пачки: их прежние авто-блоки заменяются целиком. */
+  readonly workingPageIndices: readonly number[];
+  readonly blocks: readonly DetectedBlockInput[];
+  readonly provenance: DetectorProvenance;
+}
+
+export interface ImportDetectionResult {
+  readonly imported: number;
+  readonly replaced: number;
+  readonly version: number;
+  readonly skippedPages: readonly number[];
+}
+
+/**
+ * Импорт координат детекции в черновик разметки (§6.1, подстадия «Импорт»).
+ *
+ * Заменяются только АВТОМАТИЧЕСКИЕ блоки страницы: ручная правка приоритетна
+ * внутри текущей ревизии (§8.2, фаза 3) и повторная детекция не имеет права её
+ * стереть. Страница, на которой человек уже что-то создал, пропускается целиком
+ * и попадает в `skippedPages` — ровно так же ведёт себя и удалённая сторона,
+ * возвращая `skipped_pages` без `overwrite_existing`.
+ */
+export async function importDetectedBlocks(
+  db: Database,
+  scope: AuthScope,
+  input: ImportDetectionInput,
+): Promise<ImportDetectionResult> {
+  const layout = await requireEditableLayout(db, scope, input.layoutRevisionId, undefined);
+
+  const pages = await loadPageMap(db, scope, layout.bundleId, input.workingPageIndices);
+  const manualPages = await pagesWithManualBlocks(db, layout.id, input.workingPageIndices);
+  const targetPages = input.workingPageIndices.filter((page) => !manualPages.has(page));
+  const skippedPages = input.workingPageIndices.filter((page) => manualPages.has(page));
+
+  if (targetPages.length === 0) {
+    return { imported: 0, replaced: 0, version: layout.version, skippedPages };
+  }
+
+  const targetSet = new Set(targetPages);
+  const accepted = input.blocks.filter((block) => targetSet.has(block.workingPageIndex));
+
+  return db.transaction(async (tx) => {
+    const removed = await tx.execute<{ id: string }>(sql`
+      delete from ${layoutBlocks}
+       where ${layoutBlocks.layoutRevisionId} = ${layout.id}::uuid
+         and ${layoutBlocks.source} = 'auto'
+         and ${layoutBlocks.workingPageIndex} = any(${sql.raw(intArrayLiteral(targetPages))}::int[])
+      returning id
+    `);
+
+    for (const block of accepted) {
+      const page = pages.get(block.workingPageIndex);
+      if (page === undefined) {
+        throw conflict(
+          `Страница ${block.workingPageIndex} отсутствует в карте рабочего документа: ` +
+            'разметка не может лечь на страницу, которой нет.',
+        );
+      }
+      await insertBlock(tx, {
+        layoutRevisionId: layout.id,
+        revisionId: layout.revisionId,
+        bundleId: layout.bundleId,
+        objectId: layout.objectId,
+        sourcePageId: page,
+        block,
+        source: 'auto',
+        provenance: input.provenance,
+      });
+    }
+
+    const version = await bumpVersion(tx, layout.id, null, false);
+
+    await appendRevisionEvent(tx, {
+      revisionId: layout.revisionId,
+      eventType: 'layout.detected',
+      payload: {
+        layoutRevisionId: layout.id,
+        pages: targetPages,
+        imported: accepted.length,
+        skippedPages,
+        detectorProvenance: input.provenance,
+      },
+    });
+
+    return {
+      imported: accepted.length,
+      replaced: removed.rows.length,
+      version,
+      skippedPages,
+    };
+  });
+}
+
+/** Литерал массива int для `= any(...)`: значения приходят из уже разобранной схемы. */
+function intArrayLiteral(values: readonly number[]): string {
+  return `array[${values.map((value) => String(Math.trunc(value))).join(',') || 'null'}]`;
+}
+
+async function pagesWithManualBlocks(
+  db: Database,
+  layoutRevisionId: string,
+  workingPageIndices: readonly number[],
+): Promise<ReadonlySet<number>> {
+  if (workingPageIndices.length === 0) return new Set();
+  const rows = await db
+    .select({ page: layoutBlocks.workingPageIndex })
+    .from(layoutBlocks)
+    .where(
+      and(
+        eq(layoutBlocks.layoutRevisionId, layoutRevisionId),
+        eq(layoutBlocks.source, 'user'),
+        inArray(layoutBlocks.workingPageIndex, [...workingPageIndices]),
+      ),
+    );
+  return new Set(rows.map((row) => row.page));
+}
+
+/** Карта «индекс страницы рабочего PDF → id исходной страницы» под областью. */
+async function loadPageMap(
+  db: Database,
+  scope: AuthScope,
+  bundleId: string,
+  workingPageIndices: readonly number[],
+): Promise<ReadonlyMap<number, string>> {
+  const conditions = [eq(processingBundlePages.bundleId, bundleId)];
+  if (workingPageIndices.length > 0) {
+    conditions.push(inArray(processingBundlePages.workingPageIndex, [...workingPageIndices]));
+  }
+  const rows = await db
+    .select({
+      workingPageIndex: processingBundlePages.workingPageIndex,
+      sourcePageId: processingBundlePages.sourcePageId,
+    })
+    .from(processingBundlePages)
+    .innerJoin(processingBundles, eq(processingBundlePages.bundleId, processingBundles.id))
+    .innerJoin(submissionRevisions, eq(processingBundles.revisionId, submissionRevisions.id))
+    .where(withScope(scope, REVISION_SCOPE, ...conditions));
+
+  return new Map(rows.map((row) => [row.workingPageIndex, row.sourcePageId]));
+}
+
+interface InsertBlockInput {
+  readonly layoutRevisionId: string;
+  readonly revisionId: string;
+  readonly bundleId: string;
+  readonly objectId: string;
+  readonly sourcePageId: string;
+  readonly block: DetectedBlockInput;
+  readonly source: 'auto' | 'user';
+  readonly provenance: DetectorProvenance;
+}
+
+async function insertBlock(tx: JobExecutor, input: InsertBlockInput): Promise<string> {
+  const b = input.block;
+  const inserted = await tx.execute<{ id: string }>(sql`
+    insert into ${layoutBlocks}
+      (layout_revision_id, revision_id, bundle_id, source_page_id, working_page_index,
+       object_id, block_type, shape_type, x0, y0, x1, y1, sort_order, source,
+       detector_provenance)
+    values (${input.layoutRevisionId}::uuid, ${input.revisionId}::uuid, ${input.bundleId}::uuid,
+            ${input.sourcePageId}::uuid, ${b.workingPageIndex}, ${input.objectId}::uuid,
+            ${b.blockType}, ${b.shapeType}, ${b.x0}, ${b.y0}, ${b.x1}, ${b.y1},
+            ${b.sortOrder}, ${input.source}, ${input.provenance})
+    returning id
+  `);
+  const row = inserted.rows[0];
+  if (row === undefined) throw internal({ logDetail: 'INSERT блока разметки не вернул строку' });
+
+  if (b.shapeType === 'polygon') {
+    if (b.points.length < 3) {
+      throw conflict('Полигон описывается не менее чем тремя точками.');
+    }
+    for (const [index, point] of b.points.entries()) {
+      await tx.execute(sql`
+        insert into ${layoutBlockPoints} (block_id, point_no, x, y)
+        values (${row.id}::uuid, ${index}, ${point.x}, ${point.y})
+      `);
+    }
+  }
+  return row.id;
+}
+
+// =====================================================================
+// Ручная правка
+// =====================================================================
+
+export interface CreateBlockInput {
+  readonly layoutRevisionId: string;
+  readonly expectedVersion: number;
+  readonly actorUserId: string;
+  readonly workingPageIndex: number;
+  readonly blockType: BlockType;
+  readonly shapeType: ShapeType;
+  readonly x0: number;
+  readonly y0: number;
+  readonly x1: number;
+  readonly y1: number;
+  readonly points: readonly { readonly x: number; readonly y: number }[];
+}
+
+export interface BlockMutationResult {
+  readonly blockId: string;
+  readonly version: number;
+}
+
+export async function createLayoutBlock(
+  db: Database,
+  scope: AuthScope,
+  input: CreateBlockInput,
+): Promise<BlockMutationResult> {
+  const layout = await requireEditableLayout(
+    db,
+    scope,
+    input.layoutRevisionId,
+    input.expectedVersion,
+  );
+  const pages = await loadPageMap(db, scope, layout.bundleId, [input.workingPageIndex]);
+  const sourcePageId = pages.get(input.workingPageIndex);
+  if (sourcePageId === undefined) {
+    throw conflict(`Страницы ${input.workingPageIndex} нет в рабочем документе.`);
+  }
+
+  const sortOrder = await nextSortOrder(db, layout.id, input.workingPageIndex, input.blockType);
+
+  return db.transaction(async (tx) => {
+    const blockId = await insertBlock(tx, {
+      layoutRevisionId: layout.id,
+      revisionId: layout.revisionId,
+      bundleId: layout.bundleId,
+      objectId: layout.objectId,
+      sourcePageId,
+      block: { ...input, sortOrder },
+      source: 'user',
+      // Блок, нарисованный человеком, детектор не порождал: провенанс `user`
+      // (§0.1 — выдуманной уверенности здесь быть не может).
+      provenance: 'user',
+    });
+    const version = await bumpVersion(tx, layout.id, input.actorUserId, true);
+    await appendRevisionEvent(tx, {
+      revisionId: layout.revisionId,
+      eventType: 'layout.block_created',
+      payload: { layoutRevisionId: layout.id, blockId, page: input.workingPageIndex },
+    });
+    return { blockId, version };
+  });
+}
+
+async function nextSortOrder(
+  db: Database,
+  layoutRevisionId: string,
+  workingPageIndex: number,
+  blockType: BlockType,
+): Promise<number> {
+  const rows = await db
+    .select({ maxOrder: sql<number>`coalesce(max(${layoutBlocks.sortOrder}), -1)::int` })
+    .from(layoutBlocks)
+    .where(
+      and(
+        eq(layoutBlocks.layoutRevisionId, layoutRevisionId),
+        eq(layoutBlocks.workingPageIndex, workingPageIndex),
+        eq(layoutBlocks.blockType, blockType),
+      ),
+    );
+  return (rows[0]?.maxOrder ?? -1) + 1;
+}
+
+export interface UpdateBlockInput {
+  readonly blockId: string;
+  /**
+   * Ревизия разметки из адреса.
+   *
+   * Проверяется, а не игнорируется: блок адресуется собственным uuid, поэтому
+   * без сверки маршрут `/layouts/A/blocks/{из B}` правил бы блок ревизии B,
+   * а `If-Match` при этом сверялся бы с версией B — то есть адрес говорил бы
+   * одно, а происходило другое.
+   */
+  readonly layoutRevisionId: string;
+  readonly expectedVersion: number;
+  readonly actorUserId: string;
+  readonly blockType?: BlockType | undefined;
+  readonly shapeType?: ShapeType | undefined;
+  readonly coords?:
+    | { readonly x0: number; readonly y0: number; readonly x1: number; readonly y1: number }
+    | undefined;
+  readonly points?: readonly { readonly x: number; readonly y: number }[] | undefined;
+  readonly sortOrder?: number | undefined;
+}
+
+/**
+ * Правка блока: перемещение, растягивание, смена типа, полигон.
+ *
+ * Одна функция на все четыре операции намеренно: у них общая проверка версии,
+ * общая отметка ручной правки и общий подъём версии ревизии. Разнесённые по
+ * четырём функциям, они разошлись бы в том, что именно считается ручной
+ * правкой.
+ */
+export async function updateLayoutBlock(
+  db: Database,
+  scope: AuthScope,
+  input: UpdateBlockInput,
+): Promise<BlockMutationResult> {
+  const found = await findLayoutBlock(db, scope, input.blockId);
+  if (found === null || found.layout.id !== input.layoutRevisionId) {
+    throw notFound('Блок разметки не найден.');
+  }
+  assertEditableLayout(found.layout);
+  if (found.layout.version !== input.expectedVersion) {
+    throw preconditionFailed(
+      `Разметка изменилась: ожидалась версия ${input.expectedVersion}, ` +
+        `текущая ${found.layout.version}.`,
+    );
+  }
+
+  const shapeType = input.shapeType ?? found.block.shapeType;
+  const points = input.points ?? found.block.points;
+  if (shapeType === 'polygon' && points.length < 3) {
+    throw conflict('Полигон описывается не менее чем тремя точками.');
+  }
+  const coords = input.coords ?? {
+    x0: found.block.x0,
+    y0: found.block.y0,
+    x1: found.block.x1,
+    y1: found.block.y1,
+  };
+
+  return db.transaction(async (tx) => {
+    await tx.execute(sql`
+      update ${layoutBlocks}
+         set block_type = ${input.blockType ?? found.block.blockType},
+             shape_type = ${shapeType},
+             x0 = ${coords.x0}, y0 = ${coords.y0}, x1 = ${coords.x1}, y1 = ${coords.y1},
+             sort_order = ${input.sortOrder ?? found.block.sortOrder},
+             source = 'user',
+             detector_provenance = 'user',
+             updated_at = now()
+       where ${layoutBlocks.id} = ${input.blockId}::uuid
+    `);
+
+    if (input.points !== undefined || input.shapeType !== undefined) {
+      await tx.execute(sql`
+        delete from ${layoutBlockPoints}
+         where ${layoutBlockPoints.blockId} = ${input.blockId}::uuid
+      `);
+      if (shapeType === 'polygon') {
+        for (const [index, point] of points.entries()) {
+          await tx.execute(sql`
+            insert into ${layoutBlockPoints} (block_id, point_no, x, y)
+            values (${input.blockId}::uuid, ${index}, ${point.x}, ${point.y})
+          `);
+        }
+      }
+    }
+
+    const version = await bumpVersion(tx, found.layout.id, input.actorUserId, true);
+    await appendRevisionEvent(tx, {
+      revisionId: found.layout.revisionId,
+      eventType: 'layout.block_updated',
+      payload: {
+        layoutRevisionId: found.layout.id,
+        blockId: input.blockId,
+        page: found.block.workingPageIndex,
+      },
+    });
+    return { blockId: input.blockId, version };
+  });
+}
+
+export async function deleteLayoutBlock(
+  db: Database,
+  scope: AuthScope,
+  input: {
+    readonly blockId: string;
+    readonly layoutRevisionId: string;
+    readonly expectedVersion: number;
+    readonly actorUserId: string;
+  },
+): Promise<{ readonly version: number }> {
+  const found = await findLayoutBlock(db, scope, input.blockId);
+  if (found === null || found.layout.id !== input.layoutRevisionId) {
+    throw notFound('Блок разметки не найден.');
+  }
+  assertEditableLayout(found.layout);
+  if (found.layout.version !== input.expectedVersion) {
+    throw preconditionFailed(
+      `Разметка изменилась: ожидалась версия ${input.expectedVersion}, ` +
+        `текущая ${found.layout.version}.`,
+    );
+  }
+
+  return db.transaction(async (tx) => {
+    await tx.execute(sql`
+      delete from ${layoutBlocks} where ${layoutBlocks.id} = ${input.blockId}::uuid
+    `);
+    const version = await bumpVersion(tx, found.layout.id, input.actorUserId, true);
+    await appendRevisionEvent(tx, {
+      revisionId: found.layout.revisionId,
+      eventType: 'layout.block_deleted',
+      payload: {
+        layoutRevisionId: found.layout.id,
+        blockId: input.blockId,
+        page: found.block.workingPageIndex,
+      },
+    });
+    return { version };
+  });
+}
+
+/**
+ * Замена страницы одним TEXT-блоком — ЯВНОЕ действие пользователя (§5.3).
+ *
+ * Автоматически такой блок не добавляется никогда: страница с блоками на 30%
+ * площади получила бы перекрытие, и один и тот же текст попал бы в md дважды.
+ * Поэтому операция живёт отдельной функцией с отдельным правом на маршруте, а
+ * не веткой внутри импорта детекции.
+ */
+export async function replacePageWithFullPageBlock(
+  db: Database,
+  scope: AuthScope,
+  input: {
+    readonly layoutRevisionId: string;
+    readonly expectedVersion: number;
+    readonly actorUserId: string;
+    readonly workingPageIndex: number;
+  },
+): Promise<BlockMutationResult> {
+  const layout = await requireEditableLayout(
+    db,
+    scope,
+    input.layoutRevisionId,
+    input.expectedVersion,
+  );
+  const pages = await loadPageMap(db, scope, layout.bundleId, [input.workingPageIndex]);
+  const sourcePageId = pages.get(input.workingPageIndex);
+  if (sourcePageId === undefined) {
+    throw conflict(`Страницы ${input.workingPageIndex} нет в рабочем документе.`);
+  }
+
+  return db.transaction(async (tx) => {
+    await tx.execute(sql`
+      delete from ${layoutBlocks}
+       where ${layoutBlocks.layoutRevisionId} = ${layout.id}::uuid
+         and ${layoutBlocks.workingPageIndex} = ${input.workingPageIndex}
+    `);
+    const blockId = await insertBlock(tx, {
+      layoutRevisionId: layout.id,
+      revisionId: layout.revisionId,
+      bundleId: layout.bundleId,
+      objectId: layout.objectId,
+      sourcePageId,
+      block: {
+        workingPageIndex: input.workingPageIndex,
+        blockType: 'text',
+        shapeType: 'rectangle',
+        x0: 0,
+        y0: 0,
+        x1: 1,
+        y1: 1,
+        sortOrder: 0,
+        points: [],
+      },
+      source: 'user',
+      // Полностраничная заплатка — не результат детектора: провенанс `full_page`
+      // отличает её и от `rf_detr`, и от нарисованного человеком блока.
+      provenance: 'full_page',
+    });
+    const version = await bumpVersion(tx, layout.id, input.actorUserId, true);
+    await appendRevisionEvent(tx, {
+      revisionId: layout.revisionId,
+      eventType: 'layout.page_replaced',
+      payload: { layoutRevisionId: layout.id, page: input.workingPageIndex, blockId },
+    });
+    return { blockId, version };
+  });
+}
+
+/**
+ * Режим `full-page-text` на весь комплект (§5.3).
+ *
+ * Соответствует их `POST /blocks/full-page-text` и повторяет его семантику: все
+ * прежние блоки страницы УДАЛЯЮТСЯ, вместо них — один TEXT на всю страницу.
+ * Именно поэтому режим запрещён после первой ручной правки: он молча уничтожил
+ * бы работу человека, а на их стороне это подтверждено чтением `blocks_bulk.py`.
+ *
+ * Локально, а не вызовом их эндпоинта: перед распознаванием портал всё равно
+ * приводит удалённый набор к своему (§5.2, шаг 5), поэтому лишний заезд на их
+ * сторону ничего не добавил бы, кроме риска рассинхрона.
+ */
+export async function applyFullPageTextProfile(
+  db: Database,
+  scope: AuthScope,
+  input: {
+    readonly layoutRevisionId: string;
+    readonly expectedVersion: number;
+    readonly actorUserId: string;
+  },
+): Promise<{ readonly version: number; readonly pages: number }> {
+  const layout = await requireEditableLayout(
+    db,
+    scope,
+    input.layoutRevisionId,
+    input.expectedVersion,
+  );
+
+  if (layout.firstManualEditAt !== null) {
+    throw conflict(
+      'Режим «вся страница одним текстовым блоком» недоступен после ручной правки: ' +
+        'он удаляет прежние блоки страницы и стёр бы уже сделанную разметку.',
+    );
+  }
+
+  const pages = await loadPageMap(db, scope, layout.bundleId, []);
+  if (pages.size === 0) throw conflict('У рабочего документа нет карты страниц.');
+
+  return db.transaction(async (tx) => {
+    await tx.execute(sql`
+      delete from ${layoutBlocks}
+       where ${layoutBlocks.layoutRevisionId} = ${layout.id}::uuid
+    `);
+    for (const [workingPageIndex, sourcePageId] of pages) {
+      await insertBlock(tx, {
+        layoutRevisionId: layout.id,
+        revisionId: layout.revisionId,
+        bundleId: layout.bundleId,
+        objectId: layout.objectId,
+        sourcePageId,
+        block: {
+          workingPageIndex,
+          blockType: 'text',
+          shapeType: 'rectangle',
+          x0: 0,
+          y0: 0,
+          x1: 1,
+          y1: 1,
+          sortOrder: 0,
+          points: [],
+        },
+        source: 'auto',
+        provenance: 'full_page',
+      });
+    }
+    await tx.execute(sql`
+      update ${layoutRevisions}
+         set detector_profile = 'full_page'
+       where ${layoutRevisions.id} = ${layout.id}::uuid
+    `);
+    // Профиль применяет конвейер по требованию пользователя, но САМА расстановка
+    // блоков ручной правкой не является: иначе повторный вызов режима стал бы
+    // невозможен сразу после первого.
+    const version = await bumpVersion(tx, layout.id, null, false);
+    await appendRevisionEvent(tx, {
+      revisionId: layout.revisionId,
+      eventType: 'layout.full_page_text_applied',
+      payload: { layoutRevisionId: layout.id, pages: pages.size },
+    });
+    return { version, pages: pages.size };
+  });
+}
+
+// =====================================================================
+// Заморозка
+// =====================================================================
+
+export interface FreezeLayoutResult {
+  readonly layoutRevisionId: string;
+  readonly blocksHash: string;
+  readonly version: number;
+  readonly blockCount: number;
+}
+
+/**
+ * Заморозка разметки с вычислением `blocks_hash` (§6.2).
+ *
+ * Набор блоков читается ДО транзакции, и это осознанно: `listLayoutBlocks()`
+ * работает с областью видимости и двумя запросами, а тащить их внутрь
+ * транзакции ради чтения, которое всё равно не блокирует строки, смысла нет.
+ * Окно «блок добавлен после чтения, а хэш уже посчитан» закрывает не
+ * транзакция, а условие `and version = expectedVersion` в самом UPDATE: любая
+ * правка блоков поднимает версию ревизии (`bumpVersion`), поэтому заморозка по
+ * устаревшему набору не проходит вовсе и отвечает 412. После заморозки блоки
+ * заперты триггером `layout_blocks_frozen_content_immutable` — но это второй
+ * рубеж, а не первый.
+ */
+export async function freezeLayout(
+  db: Database,
+  scope: AuthScope,
+  input: {
+    readonly layoutRevisionId: string;
+    readonly expectedVersion: number;
+    readonly actorUserId: string;
+  },
+): Promise<FreezeLayoutResult> {
+  const layout = await requireEditableLayout(
+    db,
+    scope,
+    input.layoutRevisionId,
+    input.expectedVersion,
+  );
+
+  const blocks = await listLayoutBlocks(db, scope, layout.id);
+  if (blocks.length === 0) {
+    throw conflict('Разметка без единого блока не замораживается: распознавать было бы нечего.');
+  }
+  const blocksHash = computeBlocksHash(blocks);
+
+  return db.transaction(async (tx) => {
+    const updated = await tx.execute<{ version: number }>(sql`
+      update ${layoutRevisions}
+         set state = 'frozen',
+             blocks_hash = ${blocksHash},
+             version = ${layoutRevisions.version} + 1,
+             frozen_at = now(),
+             frozen_by = ${input.actorUserId}::uuid,
+             updated_at = now()
+       where ${layoutRevisions.id} = ${layout.id}::uuid
+         and ${layoutRevisions.state} = 'draft'
+         and ${layoutRevisions.version} = ${input.expectedVersion}
+      returning version
+    `);
+    const row = updated.rows[0];
+    if (row === undefined) {
+      throw preconditionFailed('Разметка изменилась между проверкой версии и заморозкой.');
+    }
+
+    await appendRevisionEvent(tx, {
+      revisionId: layout.revisionId,
+      eventType: 'layout.frozen',
+      payload: {
+        layoutRevisionId: layout.id,
+        blocksHash,
+        blockCount: blocks.length,
+      },
+    });
+
+    return {
+      layoutRevisionId: layout.id,
+      blocksHash,
+      version: Number(row.version),
+      blockCount: blocks.length,
+    };
+  });
+}
+
+// =====================================================================
+// Флаги внимания страниц
+// =====================================================================
+
+export interface SaveAttentionFlagsInput {
+  readonly revisionId: string;
+  readonly flags: ReadonlyMap<string, readonly AttentionFlag[]>;
+}
+
+export type SaveFlagsOutcome =
+  | { readonly kind: 'written'; readonly pages: number }
+  | { readonly kind: 'skipped'; readonly reason: string };
+
+/**
+ * Запись флагов внимания в `source_pages`.
+ *
+ * ## Почему запись разрешена не только в черновике
+ *
+ * `attention_flags` — данные ПРОИЗВОДНЫЕ: их считает конвейер по текущей
+ * разметке, они не входят в `aggregate_manifest_hash` и не описывают состав
+ * поставки. Разметку же по модели прав правит и инженер (`markup.edit`:
+ * contractor, engineer), а на проверке ревизия уже `submitted`. Запрет на всё,
+ * кроме черновика, означал ровно то, что S2 назвал перерасширением запрета:
+ * детекция отрабатывает, флаги не пишутся, экран показывает «флагов нет» — и
+ * это неотличимо от «флаги не записаны».
+ *
+ * Поэтому колонка отнесена к классу `derived` отдельным триггером (0013), и
+ * список статусов здесь тот же, что у остальной разметки (`LAYOUT_MUTABLE_STATUSES`).
+ * Состав поставки при этом остаётся запертым с момента подачи: триггер
+ * пропускает UPDATE только тогда, когда `attention_flags` — ЕДИНСТВЕННОЕ
+ * изменённое поле строки.
+ *
+ * `skipped` с причиной сохраняется для терминальных статусов: разница между
+ * «нельзя писать» и «не удалось записать» обязана быть видна в журнале.
+ */
+export async function savePageAttentionFlags(
+  db: Database,
+  scope: AuthScope,
+  input: SaveAttentionFlagsInput,
+): Promise<SaveFlagsOutcome> {
+  const revisions = await db
+    .select({ status: submissionRevisions.status })
+    .from(submissionRevisions)
+    .where(withScope(scope, REVISION_SCOPE, eq(submissionRevisions.id, input.revisionId)))
+    .limit(1);
+
+  const status = revisions[0]?.status;
+  if (status === undefined) return { kind: 'skipped', reason: 'ревизия недоступна' };
+  if (!LAYOUT_MUTABLE_STATUSES.has(status)) {
+    return {
+      kind: 'skipped',
+      reason: `ревизия в статусе «${status}» закрыта, флаги страниц не записаны`,
+    };
+  }
+
+  let written = 0;
+  for (const [sourcePageId, flags] of input.flags) {
+    // Значения собираются в литерал массива (параметризованного `text[]` у
+    // Drizzle тут нет), поэтому каждое сверяется с закрытым перечнем контрактов.
+    // Флаги приходят из нашего же анализатора, но литерал, собранный из
+    // непроверенной строки, — это класс дефекта, а не конкретная строка.
+    for (const flag of flags) {
+      if (!attentionFlagSchema.safeParse(flag).success) {
+        throw internal({ logDetail: 'неизвестный флаг внимания страницы' });
+      }
+    }
+    const literal = `array[${flags.map((flag) => `'${flag}'`).join(',')}]::text[]`;
+    const updated = await db.execute<{ id: string }>(sql`
+      update ${sourcePages}
+         set attention_flags = ${sql.raw(flags.length === 0 ? `'{}'::text[]` : literal)}
+       where ${sourcePages.id} = ${sourcePageId}::uuid
+         and ${sourcePages.revisionId} = ${input.revisionId}::uuid
+      returning id
+    `);
+    written += updated.rows.length;
+  }
+  return { kind: 'written', pages: written };
+}
+
+/** Флаги страниц ревизии — для экрана разметки и ленты миниатюр (§7.2). */
+export async function listPageAttentionFlags(
+  db: Database,
+  scope: AuthScope,
+  bundleId: string,
+): Promise<readonly { readonly workingPageIndex: number; readonly flags: readonly string[] }[]> {
+  const rows = await db
+    .select({
+      workingPageIndex: processingBundlePages.workingPageIndex,
+      flags: sourcePages.attentionFlags,
+    })
+    .from(processingBundlePages)
+    .innerJoin(processingBundles, eq(processingBundlePages.bundleId, processingBundles.id))
+    .innerJoin(submissionRevisions, eq(processingBundles.revisionId, submissionRevisions.id))
+    .innerJoin(sourcePages, eq(processingBundlePages.sourcePageId, sourcePages.id))
+    .where(withScope(scope, REVISION_SCOPE, eq(processingBundlePages.bundleId, bundleId)))
+    .orderBy(asc(processingBundlePages.workingPageIndex));
+
+  return rows.map((row) => ({
+    workingPageIndex: row.workingPageIndex,
+    flags: (row.flags ?? []) as readonly string[],
+  }));
+}
+
+// =====================================================================
+// RD-документ прогона
+// =====================================================================
+
+export interface RunDocumentView {
+  readonly id: string;
+  readonly layoutRevisionId: string;
+  readonly rdDocumentId: string;
+  readonly rdProjectId: string;
+  readonly closedAt: string | null;
+}
+
+const RUN_DOCUMENT_SELECTION = {
+  id: rdRunDocuments.id,
+  layoutRevisionId: rdRunDocuments.layoutRevisionId,
+  rdDocumentId: rdRunDocuments.rdDocumentId,
+  rdProjectId: rdRunDocuments.rdProjectId,
+  closedAt: sql<
+    string | null
+  >`to_char(${rdRunDocuments.closedAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`.as(
+    'closed_at_iso',
+  ),
+};
+
+export async function findRunDocument(
+  db: Database,
+  scope: AuthScope,
+  layoutRevisionId: string,
+): Promise<RunDocumentView | null> {
+  const rows = await db
+    .select(RUN_DOCUMENT_SELECTION)
+    .from(rdRunDocuments)
+    .innerJoin(layoutRevisions, eq(rdRunDocuments.layoutRevisionId, layoutRevisions.id))
+    .innerJoin(submissionRevisions, eq(layoutRevisions.revisionId, submissionRevisions.id))
+    .where(withScope(scope, REVISION_SCOPE, eq(rdRunDocuments.layoutRevisionId, layoutRevisionId)))
+    .limit(1);
+  return rows[0] ?? null;
+}
+
+/**
+ * Регистрация RD-документа прогона.
+ *
+ * Идемпотентна: `rd.create_run_document` перезапускается при падении воркера, и
+ * второй документ на ту же разметку означал бы второй заезд 86 МБ и
+ * неоднозначность «какой из двух распознавали». Уникальность держит и БД
+ * (`rd_run_documents.layout_revision_id UNIQUE`), но узнавать об этом из
+ * нарушения ограничения — плохой способ.
+ */
+export async function createRunDocument(
+  db: Database,
+  scope: AuthScope,
+  input: {
+    readonly layoutRevisionId: string;
+    readonly rdDocumentId: string;
+    readonly rdProjectId: string;
+  },
+): Promise<{ readonly runDocument: RunDocumentView; readonly created: boolean }> {
+  const existing = await findRunDocument(db, scope, input.layoutRevisionId);
+  if (existing !== null) return { runDocument: existing, created: false };
+
+  const layout = await findLayoutRevision(db, scope, input.layoutRevisionId);
+  if (layout === null) throw notFound('Ревизия разметки не найдена.');
+
+  await db.transaction(async (tx) => {
+    await tx
+      .insert(rdRunDocuments)
+      .values({
+        layoutRevisionId: input.layoutRevisionId,
+        rdDocumentId: input.rdDocumentId,
+        rdProjectId: input.rdProjectId,
+      })
+      .onConflictDoNothing();
+    await appendRevisionEvent(tx, {
+      revisionId: layout.revisionId,
+      eventType: 'layout.run_document_created',
+      payload: { layoutRevisionId: layout.id, rdProjectId: input.rdProjectId },
+    });
+  });
+
+  const created = await findRunDocument(db, scope, input.layoutRevisionId);
+  if (created === null) {
+    throw internal({ logDetail: 'RD-документ прогона не читается сразу после записи' });
+  }
+  return { runDocument: created, created: true };
+}
+
+/**
+ * Замена брошенного RD-документа новым в ТОЙ ЖЕ строке (ADR-0004 §2).
+ *
+ * Возникает ровно в одном случае: документ на их стороне заведён, но байтов у
+ * него нет (задача 4 упала между `init` и `complete`), а повторно выдать талон
+ * их API не умеет. Второй строкой такой документ записать нельзя —
+ * `layout_revision_id` уникален, — да и не нужно: одна ревизия разметки, один
+ * действующий документ. Брошенный при этом не исчезает бесследно: его
+ * идентификатор уходит в журнал (`rd_run_document_orphaned`) и в событие
+ * ревизии, иначе он остался бы на их стороне неназванным.
+ */
+export async function replaceRunDocument(
+  db: Database,
+  scope: AuthScope,
+  input: {
+    readonly layoutRevisionId: string;
+    readonly rdDocumentId: string;
+    readonly rdProjectId: string;
+  },
+): Promise<{ readonly previousRdDocumentId: string | null }> {
+  const existing = await findRunDocument(db, scope, input.layoutRevisionId);
+  if (existing === null) throw notFound('RD-документ прогона не найден.');
+  if (existing.rdDocumentId === input.rdDocumentId) {
+    return { previousRdDocumentId: null };
+  }
+
+  const layout = await findLayoutRevision(db, scope, input.layoutRevisionId);
+  if (layout === null) throw notFound('Ревизия разметки не найдена.');
+
+  await db.transaction(async (tx) => {
+    const updated = await tx
+      .update(rdRunDocuments)
+      .set({ rdDocumentId: input.rdDocumentId, rdProjectId: input.rdProjectId })
+      .where(
+        and(
+          eq(rdRunDocuments.id, existing.id),
+          eq(rdRunDocuments.rdDocumentId, existing.rdDocumentId),
+          isNull(rdRunDocuments.closedAt),
+        ),
+      )
+      .returning({ id: rdRunDocuments.id });
+    if (updated.length === 0) {
+      throw conflict('RD-документ прогона изменился или закрыт: замена не выполнена.');
+    }
+
+    await appendRevisionEvent(tx, {
+      revisionId: layout.revisionId,
+      eventType: 'layout.run_document_replaced',
+      payload: {
+        layoutRevisionId: layout.id,
+        rdProjectId: input.rdProjectId,
+        // Брошенный документ назван: без этого он неотличим от несуществующего.
+        orphanedRdDocumentId: existing.rdDocumentId,
+      },
+    });
+  });
+
+  return { previousRdDocumentId: existing.rdDocumentId };
+}

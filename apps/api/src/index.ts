@@ -104,6 +104,74 @@ export type {
 } from './db/repositories/bundles.js';
 
 export {
+  applyFullPageTextProfile,
+  BLOCKS_HASH_VERSION,
+  computeBlocksHash,
+  createLayoutBlock,
+  createRunDocument,
+  deleteLayoutBlock,
+  DEFAULT_LAYOUT_PROFILE_CODE,
+  ensureDraftLayout,
+  FALLBACK_LAYOUT_THRESHOLDS,
+  findActiveLayoutProfile,
+  findDraftLayout,
+  findLayoutBlock,
+  findLayoutRevision,
+  findRunDocument,
+  freezeLayout,
+  importDetectedBlocks,
+  listLayoutBlocks,
+  listLayoutRevisions,
+  listPageAttentionFlags,
+  loadProfileForLayout,
+  parseThresholds,
+  replacePageWithFullPageBlock,
+  replaceRunDocument,
+  savePageAttentionFlags,
+  updateLayoutBlock,
+} from './db/repositories/layout.js';
+export type {
+  DetectedBlockInput,
+  HashableBlock,
+  ImportDetectionResult,
+  LayoutBlockView,
+  LayoutProfileView,
+  LayoutRevisionView,
+  LayoutThresholds,
+  RunDocumentView,
+  SaveFlagsOutcome,
+} from './db/repositories/layout.js';
+
+export { analyzePages, unionArea } from './layout/attention.js';
+export type { AnalyzedBlock, AnalyzedPage, PageAnalysis } from './layout/attention.js';
+
+export {
+  createRdWeb,
+  DETECT_BATCH_LIMIT,
+  firstAllowedProject,
+  LegacyRdWebAdapter,
+  RdWebClient,
+  RdWebError,
+  RDWEB_SERVICE,
+} from './integrations/rdweb/index.js';
+export type {
+  CreateRunDocumentInput,
+  CreateRunDocumentResult,
+  DesiredBlock,
+  DetectPagesInput,
+  DetectPagesResult,
+  ExportPayload,
+  RdWebPort,
+  RecognitionStatus,
+  ReconcileLayoutResult,
+  RemoteBlock,
+  RemoteDocument,
+  RemotePage,
+} from './integrations/rdweb/index.js';
+
+export { previewPageKey } from './storage/keys.js';
+
+export {
   findFileContent,
   findRevisionForFiles,
   listSourceFiles,

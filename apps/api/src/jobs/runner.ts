@@ -57,6 +57,7 @@ import {
   type ClaimedJob,
 } from '../db/repositories/jobs.js';
 import type { Database } from '../db/repositories/users.js';
+import { RdWebError } from '../integrations/rdweb/port.js';
 import { emitRevisionEvent, type JobContext, type JobRegistry } from './registry.js';
 import {
   backoffDelayMs,
@@ -93,6 +94,34 @@ export class LeaseLostError extends Error {
     super('аренда задачи потеряна: её подобрал другой воркер');
     this.name = 'LeaseLost';
   }
+}
+
+/**
+ * Класс отказа и решение о повторе — одним местом.
+ *
+ * Раньше повторялось ВСЁ: пять попыток на 401 означали пять одинаковых входов
+ * служебного аккаунта при отозванном доступе — то есть шум в чужом аудите и
+ * четверть часа «конвейер работает» вместо немедленного отказа. Ответ на вопрос
+ * «повторять ли» у `RdWebError` уже был (`retriable`: 5xx, 429 и сетевой сбой —
+ * да, прочие 4xx — нет), но его никто не спрашивал.
+ *
+ * HTTP-статус попадает в `error_class`, а не только в текст: `normalizeErrorMessage()`
+ * вычёркивает из сообщения все числа (и правильно делает — там бывают значения
+ * параметров), поэтому в `job_runs.error_message` от «RD WEB ответил 401»
+ * остаётся «RD WEB ответил <n>», и отличить отозванный доступ от падения их
+ * сервера по журналу нечем. `RdWebError:401` против `RdWebError:503` — можно.
+ */
+export function classifyFailure(error: unknown): {
+  readonly errorClass: string;
+  readonly permanent: boolean;
+} {
+  if (error instanceof RdWebError) {
+    // `network` вместо статуса: соединение не состоялось, кода ответа нет —
+    // и это отдельный диагноз, а не «неизвестно какой».
+    const kind = error.status === undefined ? 'network' : String(error.status);
+    return { errorClass: `RdWebError:${kind}`, permanent: !error.retriable };
+  }
+  return { errorClass: errorClassOf(error), permanent: false };
 }
 
 export interface JobRunnerOptions {
@@ -519,10 +548,11 @@ export class JobRunner {
           logger.info({ event: 'job_done', duration_ms: durationMs }, 'задача выполнена');
           await this.#emitLifecycle(job, logger, 'job.succeeded', { durationMs });
         } catch (error) {
+          const { errorClass, permanent } = classifyFailure(error);
           await this.#finishFailed(job, startedAt, logger, {
-            errorClass: errorClassOf(error),
+            errorClass,
             message: normalizeErrorMessage(error instanceof Error ? error.message : String(error)),
-            permanent: false,
+            permanent,
             error,
           });
         } finally {

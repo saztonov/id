@@ -70,6 +70,8 @@ const EXPECTED_TABLES: readonly string[] = [
   'layout_blocks',
   'layout_block_points',
   'rd_run_documents',
+  // §7.3: пороги флагов внимания принадлежат версионному профилю, а не коду.
+  'layout_profiles',
   // §3.5 прогоны и неизменяемые артефакты
   'recognition_runs',
   'artifact_versions',

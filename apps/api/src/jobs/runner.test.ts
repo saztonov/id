@@ -53,6 +53,7 @@ import {
   enqueueSystemJob,
   findJob,
 } from '../db/repositories/jobs.js';
+import { RdWebError } from '../integrations/rdweb/port.js';
 import { JobRegistry, type JobContext } from './registry.js';
 import { JobRunner } from './runner.js';
 import { dedupeKeyFor } from './types.js';
@@ -490,6 +491,61 @@ describe('повторы упавшей задачи', () => {
     expect(still['status']).toBe('failed');
     expect(still['attempts']).toBe(2);
     expect(await runsOf(enqueued.jobId)).toHaveLength(2);
+
+    await drainQueue();
+  });
+
+  /**
+   * Отказ по существу запроса повторять нечем: пять попыток на 401 — это пять
+   * одинаковых входов служебного аккаунта при отозванном доступе. Решение о
+   * повторе теперь принимает `RdWebError.retriable`, а не «повторяем всё».
+   */
+  it('4xx от RD WEB уходит в dead с первой попытки, 5xx повторяется', async () => {
+    const denied = await enqueueSystemJob(app.db, {
+      type: 'checks.run',
+      payload: { revisionId: REVISION_A },
+      maxAttempts: 5,
+    });
+    behaviours.set(denied.jobId, () =>
+      Promise.reject(
+        new RdWebError('RD WEB ответил 401', { status: 401, operation: 'document_read' }),
+      ),
+    );
+
+    await runner.runOnce();
+    const dead = await rawJob(denied.jobId);
+    expect(dead['status']).toBe('failed');
+    expect(dead['attempts']).toBe(1);
+
+    // Статус сохранён в КЛАССЕ ошибки: `normalizeErrorMessage()` вычёркивает из
+    // текста все числа, и в `error_message` от «401» остаётся «<n>».
+    const deniedRuns = await runsOf(denied.jobId);
+    expect(deniedRuns[0]?.['error_class']).toBe('RdWebError:401');
+    expect(String(deniedRuns[0]?.['error_message'])).not.toContain('401');
+
+    // Положительный контроль: преходящий отказ по-прежнему повторяется, иначе
+    // ремонт превратил бы минутную недоступность в отказ поставки.
+    const flaky = await enqueueSystemJob(app.db, {
+      type: 'checks.run',
+      payload: { revisionId: REVISION_A },
+      maxAttempts: 5,
+    });
+    behaviours.set(flaky.jobId, () =>
+      Promise.reject(
+        new RdWebError('RD WEB ответил 503', { status: 503, operation: 'document_read' }),
+      ),
+    );
+
+    await runner.runOnce();
+    const queued = await rawJob(flaky.jobId);
+    expect(queued['status']).toBe('queued');
+    expect(queued['attempts']).toBe(1);
+    expect((await runsOf(flaky.jobId))[0]?.['error_class']).toBe('RdWebError:503');
+
+    behaviours.set(flaky.jobId, () => Promise.resolve());
+    await makeRunnable(flaky.jobId);
+    await runner.runOnce();
+    expect((await rawJob(flaky.jobId))['status']).toBe('done');
 
     await drainQueue();
   });

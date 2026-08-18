@@ -586,10 +586,16 @@ export const layoutRevisions = pgTable("layout_revisions", {
 	updatedAt: timestamp("updated_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
 	frozenAt: timestamp("frozen_at", { withTimezone: true, mode: 'string' }),
 	frozenBy: uuid("frozen_by"),
+	layoutProfileId: uuid("layout_profile_id"),
+	detectorProfile: text("detector_profile").default('rf_detr').notNull(),
+	firstManualEditAt: timestamp("first_manual_edit_at", { withTimezone: true, mode: 'string' }),
+	firstManualEditBy: uuid("first_manual_edit_by"),
 }, (table) => [
 	index("ix_layout_revisions_bundle").using("btree", table.bundleId.asc().nullsLast().op("uuid_ops")),
 	index("ix_layout_revisions_frozen_by").using("btree", table.frozenBy.asc().nullsLast().op("uuid_ops")),
+	index("ix_layout_revisions_manual_editor").using("btree", table.firstManualEditBy.asc().nullsLast().op("uuid_ops")),
 	index("ix_layout_revisions_object").using("btree", table.objectId.asc().nullsLast().op("uuid_ops")),
+	index("ix_layout_revisions_profile").using("btree", table.layoutProfileId.asc().nullsLast().op("uuid_ops")),
 	uniqueIndex("ux_layout_revisions_single_draft").using("btree", table.revisionId.asc().nullsLast().op("uuid_ops")).where(sql`(state = 'draft'::text)`),
 	foreignKey({
 			columns: [table.revisionId],
@@ -616,6 +622,11 @@ export const layoutRevisions = pgTable("layout_revisions", {
 			foreignColumns: [processingBundles.id, processingBundles.revisionId],
 			name: "layout_revisions_bundle_fk"
 		}),
+	foreignKey({
+			columns: [table.firstManualEditBy],
+			foreignColumns: [users.id],
+			name: "layout_revisions_first_manual_edit_by_fkey"
+		}),
 	unique("layout_revisions_no_uq").on(table.revisionId, table.revisionNo),
 	unique("layout_revisions_revision_id_uq").on(table.id, table.revisionId),
 	unique("layout_revisions_scope_uq").on(table.bundleId, table.id, table.objectId, table.revisionId),
@@ -624,6 +635,8 @@ export const layoutRevisions = pgTable("layout_revisions", {
 	check("layout_revisions_state_chk", sql`state = ANY (ARRAY['draft'::text, 'frozen'::text, 'superseded'::text])`),
 	check("layout_revisions_blocks_hash_chk", sql`blocks_hash ~ '^[0-9a-f]{64}$'::text`),
 	check("layout_revisions_frozen_chk", sql`(state = 'draft'::text) OR ((blocks_hash IS NOT NULL) AND (frozen_at IS NOT NULL))`),
+	check("layout_revisions_detector_profile_chk", sql`detector_profile = ANY (ARRAY['rf_detr'::text, 'full_page'::text])`),
+	check("layout_revisions_manual_edit_chk", sql`(first_manual_edit_at IS NULL) = (first_manual_edit_by IS NULL)`),
 ]);
 
 export const layoutBlocks = pgTable("layout_blocks", {
@@ -1524,6 +1537,31 @@ export const outbox = pgTable("outbox", {
 }, (table) => [
 	index("ix_outbox_aggregate").using("btree", table.aggregateType.asc().nullsLast().op("text_ops"), table.aggregateId.asc().nullsLast().op("text_ops")),
 	index("ix_outbox_unpublished").using("btree", table.id.asc().nullsLast().op("int8_ops")).where(sql`(published_at IS NULL)`),
+]);
+
+export const layoutProfiles = pgTable("layout_profiles", {
+	id: uuid().defaultRandom().primaryKey().notNull(),
+	code: text().notNull(),
+	version: integer().notNull(),
+	effectiveFrom: date("effective_from").notNull(),
+	effectiveTo: date("effective_to"),
+	thresholds: jsonb().notNull(),
+	notes: text(),
+	publishedAt: timestamp("published_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	publishedBy: uuid("published_by"),
+}, (table) => [
+	index("ix_layout_profiles_published_by").using("btree", table.publishedBy.asc().nullsLast().op("uuid_ops")),
+	uniqueIndex("ux_layout_profiles_open").using("btree", table.code.asc().nullsLast().op("text_ops")).where(sql`(effective_to IS NULL)`),
+	foreignKey({
+			columns: [table.publishedBy],
+			foreignColumns: [users.id],
+			name: "layout_profiles_published_by_fkey"
+		}),
+	unique("layout_profiles_code_version_uq").on(table.code, table.version),
+	check("layout_profiles_code_chk", sql`code ~ '^[a-z][a-z0-9_]{0,63}$'::text`),
+	check("layout_profiles_version_chk", sql`version > 0`),
+	check("layout_profiles_thresholds_chk", sql`jsonb_typeof(thresholds) = 'object'::text`),
+	check("layout_profiles_period_chk", sql`(effective_to IS NULL) OR (effective_to > effective_from)`),
 ]);
 
 export const userRoles = pgTable("user_roles", {

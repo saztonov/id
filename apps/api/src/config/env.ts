@@ -78,7 +78,23 @@ const envSchema = z.object({
 
   RDWEB_BASE_URL: z.string().url().optional(),
   RDWEB_USER: z.string().optional(),
-  RDWEB_PASSWORD: z.string().optional(),
+  /**
+   * Пароль служебного аккаунта RD WEB (§5.1).
+   *
+   * M2M-аутентификации у них нет, поэтому портал ходит сессией служебной
+   * учётной записи. Пароль живёт ТОЛЬКО здесь: ни в `app_settings` (§10), ни в
+   * журнале его быть не должно — `nonPlaceholder` заодно не даёт доехать до
+   * стенда значению из `.env.example`.
+   */
+  RDWEB_PASSWORD: nonPlaceholder('RDWEB_PASSWORD').optional(),
+  /**
+   * Проекты RD WEB, которыми владеет портал.
+   *
+   * Это ограничение прав служебного аккаунта, а не выбор из многих: документы
+   * прогонов создаются в первом проекте списка. Без явного списка нечем
+   * проверить, что аккаунт не пишет в проекты, где работают люди.
+   */
+  RDWEB_PROJECT_ALLOWLIST: z.string().optional(),
 
   LLM_PROVIDER: z.enum(['proxy_llm', 'recorded', 'none']).default('none'),
   PROXY_LLM_BASE_URL: z.string().url().optional(),
@@ -192,6 +208,15 @@ function crossChecks(env: Env): string[] {
     }
   } else if (!env.LOCAL_STORAGE_DIR) {
     errors.push('LOCAL_STORAGE_DIR обязателен при STORAGE_DRIVER=local');
+  }
+
+  // Интеграция RD WEB включается наличием адреса. Половина конфигурации хуже
+  // её отсутствия: портал поднялся бы, кнопка «Разметить файл» ставила бы
+  // задачи, и каждая падала бы на входе служебным аккаунтом.
+  if (env.RDWEB_BASE_URL !== undefined) {
+    for (const key of ['RDWEB_USER', 'RDWEB_PASSWORD', 'RDWEB_PROJECT_ALLOWLIST'] as const) {
+      if (!env[key]) errors.push(`${key} обязателен при заданном RDWEB_BASE_URL`);
+    }
   }
 
   if (env.LLM_PROVIDER === 'proxy_llm') {

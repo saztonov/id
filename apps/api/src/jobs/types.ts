@@ -87,7 +87,20 @@ const revisionPayload = basePayload.extend({ revisionId: uuid });
 
 const filePayload = revisionPayload.extend({ sourceFileId: uuid });
 
-const bundlePayload = revisionPayload.extend({ bundleId: uuid });
+/**
+ * Задачи разметки 4–6 и 9: рабочий документ И ревизия разметки.
+ *
+ * `layoutRevisionId` обязателен, хотя «текущий черновик этого bundle» найти
+ * можно и без него. Нельзя: черновик у поставки один, но за время жизни
+ * поставки их сменяется несколько (заморозка №1 → создание №2), и задача,
+ * поставленная для первой ревизии, отработала бы по второй, выдав диагностику,
+ * противоположную факту. Цель обязана адресоваться явно — так же, как её уже
+ * адресуют задачи 7 и 8.
+ */
+const markupPayload = revisionPayload.extend({
+  bundleId: uuid,
+  layoutRevisionId: uuid,
+});
 
 const layoutPayload = revisionPayload.extend({
   layoutRevisionId: uuid,
@@ -96,6 +109,15 @@ const layoutPayload = revisionPayload.extend({
    * поэтому одна задача = одна пачка, а не весь комплект.
    */
   pageIndices: z.array(z.int().nonnegative()).min(1).max(20).optional(),
+  /**
+   * Перезаписать уже размеченные страницы (§5.3, «повторить детекцию»).
+   *
+   * Ставится ТОЛЬКО явным действием пользователя (`POST /layouts/{id}/detect`).
+   * Первичная цепочка «Разметить файл» его не ставит: автоматическая
+   * переразметка не имеет права стирать сделанное. Без флага удалённая сторона
+   * возвращает такие страницы в `skipped_pages`, и импорт их не трогает.
+   */
+  overwriteExisting: z.boolean().optional(),
 });
 
 const recognitionPayload = revisionPayload.extend({ recognitionRunId: uuid });
@@ -176,7 +198,7 @@ export const JOB_DEFINITIONS = {
   // 4–9. Разметка (§6.1).
   'rd.create_run_document': {
     queue: 'io',
-    payload: bundlePayload,
+    payload: markupPayload,
     stage: 'layout',
     maxAttempts: DEFAULT_MAX_ATTEMPTS,
     leaseMs: EXTERNAL_LEASE_MS,
@@ -184,7 +206,7 @@ export const JOB_DEFINITIONS = {
   },
   'rd.upload_working_pdf': {
     queue: 'io',
-    payload: bundlePayload,
+    payload: markupPayload,
     stage: 'layout',
     maxAttempts: DEFAULT_MAX_ATTEMPTS,
     leaseMs: 900_000,
@@ -192,7 +214,7 @@ export const JOB_DEFINITIONS = {
   },
   'rd.wait_pages': {
     queue: 'io',
-    payload: bundlePayload,
+    payload: markupPayload,
     stage: 'layout',
     maxAttempts: 30,
     leaseMs: EXTERNAL_LEASE_MS,
@@ -216,7 +238,7 @@ export const JOB_DEFINITIONS = {
   },
   'preview.cache_pages': {
     queue: 'cpu',
-    payload: bundlePayload,
+    payload: markupPayload,
     stage: 'layout',
     maxAttempts: 3,
     leaseMs: 600_000,

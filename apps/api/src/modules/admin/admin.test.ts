@@ -259,6 +259,10 @@ const TEST_ENV = loadEnv({
   RDWEB_BASE_URL: 'https://rdweb.invalid',
   RDWEB_USER: 'rdweb-service',
   RDWEB_PASSWORD: RDWEB_PASSWORD_VALUE,
+  // Allowlist обязателен вместе с адресом (§5.1): служебный аккаунт RD WEB
+  // ограничен portal-owned проектами, и половина конфигурации хуже её
+  // отсутствия — портал поднялся бы, а каждая задача разметки падала бы.
+  RDWEB_PROJECT_ALLOWLIST: 'prj-portal',
   RATE_LIMIT_MAX: '100000',
 });
 

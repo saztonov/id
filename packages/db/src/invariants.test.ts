@@ -166,6 +166,10 @@ const ID = {
   reviewSubmission: id(27),
   reviewRevision: id(28),
   reviewDocument: id(29),
+  reviewFile: id(30),
+  reviewPage: id(31),
+  approvedFile: id(32),
+  approvedPage: id(33),
 } as const;
 
 /**
@@ -259,6 +263,13 @@ const FIXTURE: readonly string[] = [
   `INSERT INTO logical_documents (id, revision_id, object_id, contractor_id, ordinal)
      VALUES ('${ID.approvedDocument}', '${ID.approvedRevision}', '${ID.object}',
              '${ID.contractor}', 1)`,
+  // Страница согласованной ревизии: нужна, чтобы проверить, что даже
+  // производные флаги внимания в терминальном состоянии уже не пишутся.
+  `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order)
+     VALUES ('${ID.approvedFile}', '${ID.approvedRevision}', '${sha('a')}', 'komplekt.pdf', 0)`,
+  `INSERT INTO source_pages (id, revision_id, source_file_id, file_page_index,
+                             revision_ordinal, width_px, height_px)
+     VALUES ('${ID.approvedPage}', '${ID.approvedRevision}', '${ID.approvedFile}', 0, 0, 1654, 2339)`,
   `UPDATE submission_revisions
       SET status = 'submitted', submitted_at = now(), submitted_by = '${ID.user}'
     WHERE id = '${ID.approvedRevision}'`,
@@ -273,10 +284,21 @@ const FIXTURE: readonly string[] = [
   `INSERT INTO submissions (id, volume_id, object_id, contractor_id, title, created_by)
      VALUES ('${ID.reviewSubmission}', '${ID.volume}', '${ID.object}', '${ID.contractor}',
              'Поставка 4', '${ID.user}')`,
-  `INSERT INTO submission_revisions (id, submission_id, object_id, contractor_id, revision_no,
-                                     status, submitted_at, submitted_by)
+  // Состав подаётся черновиком и только потом ревизия уходит на проверку:
+  // вставить файл и страницы прямо в in_review нельзя — это и есть запрет,
+  // который проверяется ниже.
+  `INSERT INTO submission_revisions (id, submission_id, object_id, contractor_id, revision_no)
      VALUES ('${ID.reviewRevision}', '${ID.reviewSubmission}', '${ID.object}',
-             '${ID.contractor}', 1, 'in_review', now(), '${ID.user}')`,
+             '${ID.contractor}', 1)`,
+  `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order)
+     VALUES ('${ID.reviewFile}', '${ID.reviewRevision}', '${sha('a')}', 'komplekt.pdf', 0)`,
+  `INSERT INTO source_pages (id, revision_id, source_file_id, file_page_index,
+                             revision_ordinal, width_px, height_px)
+     VALUES ('${ID.reviewPage}', '${ID.reviewRevision}', '${ID.reviewFile}', 0, 0, 1654, 2339)`,
+  `UPDATE submission_revisions
+      SET status = 'submitted', submitted_at = now(), submitted_by = '${ID.user}'
+    WHERE id = '${ID.reviewRevision}'`,
+  `UPDATE submission_revisions SET status = 'in_review' WHERE id = '${ID.reviewRevision}'`,
   `INSERT INTO logical_documents (id, revision_id, object_id, contractor_id, ordinal)
      VALUES ('${ID.reviewDocument}', '${ID.reviewRevision}', '${ID.object}',
              '${ID.contractor}', 1)`,
@@ -518,6 +540,61 @@ describe('неизменяемость на уровне БД (§3.9)', () => {
            VALUES ('${ID.reviewRevision}', '${sha('a')}', 'подмена.pdf', 1)`,
       ),
     ).rejects.toThrow(/исходный файл/u);
+  });
+
+  /**
+   * Флаги внимания — производные данные, а не состав поставки (миграция 0013).
+   *
+   * Разметку правит и инженер, а на проверке ревизия уже `submitted`/`in_review`.
+   * Запрет на запись флагов там означал, что детекция отрабатывает, а
+   * `attention_flags` остаётся пуст, и «флагов нет» становится неотличимо от
+   * «флаги не записаны».
+   */
+  it('разрешает записать флаги внимания страницы на ревизии в проверке', async () => {
+    await db.query(
+      `UPDATE source_pages SET attention_flags = ARRAY['no_blocks','low_coverage']::text[]
+         WHERE id = '${ID.reviewPage}'`,
+    );
+    const rows = await db.query<{ flags: string[] }>(
+      `SELECT attention_flags AS flags FROM source_pages WHERE id = '${ID.reviewPage}'`,
+    );
+    expect(rows[0]?.flags).toEqual(['no_blocks', 'low_coverage']);
+  });
+
+  it('состав страницы в проверке по-прежнему заперт', async () => {
+    // Обратная сторона того же послабления: производной объявлена ОДНА колонка,
+    // а не строка целиком. Иначе ремонт открыл бы дыру шире дефекта.
+    await expect(
+      db.query(`UPDATE source_pages SET rotation = 90 WHERE id = '${ID.reviewPage}'`),
+    ).rejects.toThrow(/страницу исходного файла/u);
+
+    await expect(
+      db.query(
+        `UPDATE source_pages SET attention_flags = ARRAY['tiny_block']::text[], width_px = 100
+           WHERE id = '${ID.reviewPage}'`,
+      ),
+    ).rejects.toThrow(/страницу исходного файла/u);
+
+    await expect(
+      db.query(
+        `INSERT INTO source_pages (revision_id, source_file_id, file_page_index,
+                                   revision_ordinal, width_px, height_px)
+           VALUES ('${ID.reviewRevision}', '${ID.reviewFile}', 9, 9, 1654, 2339)`,
+      ),
+    ).rejects.toThrow(/страницу исходного файла/u);
+
+    await expect(
+      db.query(`DELETE FROM source_pages WHERE id = '${ID.reviewPage}'`),
+    ).rejects.toThrow(/страницу исходного файла/u);
+  });
+
+  it('в согласованной ревизии не пишутся даже флаги внимания', async () => {
+    await expect(
+      db.query(
+        `UPDATE source_pages SET attention_flags = ARRAY['no_blocks']::text[]
+           WHERE id = '${ID.approvedPage}'`,
+      ),
+    ).rejects.toThrow(/страницу исходного файла/u);
   });
 
   it('запрещает правку документа в согласованной ревизии', async () => {

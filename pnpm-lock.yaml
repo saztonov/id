@@ -209,6 +209,9 @@ importers:
       '@id/db-harness':
         specifier: workspace:*
         version: link:../../tools/db-harness
+      '@id/fake-rdweb':
+        specifier: workspace:*
+        version: link:../../tools/fake-rdweb
       '@id/migrator':
         specifier: workspace:*
         version: link:../../tools/migrator

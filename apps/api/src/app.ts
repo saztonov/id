@@ -95,6 +95,7 @@ import { registerObjectRuleProfileRoutes } from './modules/catalog/object-rule-p
 import { registerRevisionEventRoutes } from './modules/events/sse.js';
 import { registerFileRoutes } from './modules/files/routes.js';
 import { registerBundleRoutes } from './modules/bundles/routes.js';
+import { registerLayoutRoutes } from './modules/layout/routes.js';
 import { queueSnapshot } from './db/repositories/jobs.js';
 import { createStorage, type StorageProvider } from './storage/provider.js';
 import { LOCAL_UPLOAD_PATH } from './storage/local.js';
@@ -520,6 +521,10 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppInstan
   registerFileRoutes(app);
   // Рабочий документ ревизии: сборка (§6.1, подстадия 1) и карта страниц (§3.3).
   registerBundleRoutes(app);
+  // Разметка: кнопка «Разметить файл», ревизии разметки, правка блоков и
+  // заморозка (§6.1, §7). Маршрут, не зарегистрированный здесь, недостижим —
+  // это ровно тот отказ, которым закончились S3 и S5.
+  registerLayoutRoutes(app);
 
   app.addHook('onClose', async () => {
     // Пул, полученный извне, принадлежит вызывающему: закрыть его здесь значит

@@ -31,9 +31,11 @@ import {
   createPdfLibToolkit,
   createPool,
   createQpdfToolkit,
+  createRdWeb,
   createStorage,
   detectQpdf,
   EnvError,
+  firstAllowedProject,
   errorDigest,
   installProcessErrorHandlers,
   instrumentPool,
@@ -158,11 +160,20 @@ async function main(): Promise<void> {
   // Остальные стадии (`rd.*`, `doc.*`, `checks.*`) добавляются сюда же по мере
   // появления; типы без обработчика воркер не захватывает — их задачи ждут в
   // очереди воркера, который их умеет, и видны в консоли как `queued`.
+  // Адаптер RD WEB собирается фабрикой, а не на месте вызова: только так он
+  // получает метрики, порог `SLOW_EXTERNAL_MS` и сквозной `request_id` (§11).
+  // `null` при ненастроенной интеграции — портал обязан подниматься и принимать
+  // файлы даже без доступа к RD WEB.
+  const rdweb = createRdWeb(env, { metrics, logger });
+
   const registry = createWorkerRegistry({
     db,
     storage,
     toolkit,
     limits: { maxBytes: env.MAX_UPLOAD_BYTES, maxPages: env.MAX_PAGES_PER_FILE },
+    rdweb,
+    rdProjectId: firstAllowedProject(env) ?? null,
+    previewCached: env.PREVIEW_MODE === 'cached',
   });
 
   const runner = new JobRunner({
@@ -251,6 +262,9 @@ async function main(): Promise<void> {
       unhandled_types: registry.unhandled().length,
       pdf_toolkit: toolkit.kind,
       storage_driver: storage.driver,
+      // Факт настроенности, а не адрес и тем более не учётные данные (§11).
+      rdweb_configured: rdweb !== null,
+      preview_mode: env.PREVIEW_MODE,
       metrics_port: worker.WORKER_METRICS_PORT ?? null,
     },
     'воркер готов принимать задачи',
