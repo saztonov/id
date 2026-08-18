@@ -197,8 +197,8 @@ export {
 } from './recognition/redaction.js';
 export type { Redacted, RedactableArtifactKind } from './recognition/redaction.js';
 export type { MatchableBlock, MatchResult } from './recognition/match.js';
-export { crc32, readZipEntries, ZipError } from './lib/zip.js';
-export type { ZipEntry } from './lib/zip.js';
+export { crc32, readZipEntries, writeZipStream, ZipError } from './lib/zip.js';
+export type { ZipEntry, ZipSourceEntry } from './lib/zip.js';
 
 export {
   closeRunDocument,
@@ -223,8 +223,37 @@ export type {
   RecognitionRunView,
 } from './db/repositories/recognition.js';
 
-export { artifactKey, previewPageKey } from './storage/keys.js';
+export { archiveKey, artifactKey, documentPdfKey, previewPageKey } from './storage/keys.js';
 export type { ArtifactKind } from './storage/keys.js';
+
+/**
+ * Выдача (§12, задачи 22–23; §13).
+ *
+ * Экспортируется в воркер по той же причине, что и остальные репозитории: обе
+ * задачи живут там, где остальные стадии конвейера, а второй реализации
+ * репозитория быть не должно. В списке — ровно то, что воркер вызывает: выдача
+ * нарезки и архива наружу (`findDerivedDocument`, `requireReadyArchive`) живёт
+ * в HTTP-слое и импортируется им напрямую, а реэкспорт «на всякий случай»
+ * превращает публичную границу пакета в свалку.
+ */
+export {
+  findArchive,
+  findReusableBundle,
+  isContiguous,
+  loadArchivePlan,
+  loadMaterializationPlan,
+  recordArchive,
+  requireVisibleRevisionOfDocument,
+  saveDerivedPdf,
+} from './db/repositories/delivery.js';
+export type {
+  ArchivePlan,
+  ArchiveView,
+  MaterializationPlan,
+  MaterializationTarget,
+  RecordArchiveOutcome,
+  SaveDerivedOutcome,
+} from './db/repositories/delivery.js';
 
 export {
   findFileContent,

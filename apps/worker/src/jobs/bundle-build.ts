@@ -116,6 +116,15 @@ export interface BundleRef {
   readonly pageCount: number;
 }
 
+/** Рабочий документ ревизии-предка, пригодный к переиспользованию (§3). */
+export interface ReusableWorkingPdf {
+  readonly revisionId: string;
+  readonly workingPdfBlobSha256: string;
+  readonly sizeBytes: number;
+  readonly s3Key: string;
+  readonly pageCount: number;
+}
+
 export interface BundleBuildDeps {
   readonly loadPlan: (revisionId: string) => Promise<BundlePlan | null>;
   readonly findExistingBundle: (target: {
@@ -123,6 +132,20 @@ export interface BundleBuildDeps {
     readonly aggregateManifestHash: string;
     readonly builderVersion: string;
   }) => Promise<BundleRef | null>;
+  /**
+   * Рабочий документ предыдущей ревизии с тем же составом (§3).
+   *
+   * `null` — переиспользовать нечего, собираем заново. Это единственное место,
+   * где план разрешает переиспользование результатов прошлой ревизии, и условие
+   * у него ровно одно: совпадение `aggregate_manifest_hash`.
+   */
+  readonly findReusableWorkingPdf: (target: {
+    readonly revisionId: string;
+    readonly aggregateManifestHash: string;
+    readonly builderVersion: string;
+  }) => Promise<ReusableWorkingPdf | null>;
+  /** Есть ли объект в хранилище: строка в БД не доказывает наличие байтов. */
+  readonly workingPdfExists: (storageKey: string) => Promise<boolean>;
   /** Выкладывает оригинал из хранилища во временный файл. */
   readonly fetchOriginal: (storageKey: string, destinationPath: string) => Promise<void>;
   /** Кладёт собранный документ в хранилище; хэш и ключ считает адаптер. */
@@ -200,6 +223,66 @@ export function createBundleBuildHandler(deps: BundleBuildDeps): JobHandler<'bun
     const pageIds = indexPages(files, revisionId);
     const startedAt = Date.now();
 
+    // §3: результаты предыдущей ревизии переиспользуются ТОЛЬКО при совпадении
+    // `aggregate_manifest_hash`. Совпал — значит подрядчик подал те же файлы в
+    // том же порядке, и склейка дала бы побайтово тот же документ (сборка
+    // детерминирована обеими реализациями). Тогда 86 МБ не качаются и не
+    // склеиваются заново; своя строка `processing_bundles` и своя карта страниц
+    // ревизии всё равно создаются — идентификаторы страниц у неё свои.
+    const map = planPages(files);
+    const reusable = await deps.findReusableWorkingPdf({
+      revisionId,
+      aggregateManifestHash: plan.aggregateManifestHash,
+      builderVersion,
+    });
+
+    if (reusable !== null && reusable.pageCount === map.length) {
+      // Строка в БД не доказывает наличие байтов: объект мог быть удалён
+      // сборкой мусора. Проверка дешёвая, а её отсутствие означало бы bundle,
+      // ссылающийся в пустоту, — и выяснилось бы это только в RD WEB.
+      if (await deps.workingPdfExists(reusable.s3Key)) {
+        const pages = map.map((entry) => ({
+          workingPageIndex: entry.workingPageIndex,
+          sourcePageId: pageIdOf(pageIds, entry, revisionId),
+        }));
+        const { bundle, created } = await deps.createBundle({
+          revisionId,
+          aggregateManifestHash: plan.aggregateManifestHash,
+          builderVersion,
+          workingPdf: {
+            sha256: reusable.workingPdfBlobSha256,
+            sizeBytes: reusable.sizeBytes,
+            s3Key: reusable.s3Key,
+          },
+          pages,
+        });
+
+        ctx.logger.info(
+          {
+            event: 'bundle_reused_from_parent',
+            bundle_id: bundle.id,
+            source_revision_id: reusable.revisionId,
+            page_count: map.length,
+            created,
+          },
+          'состав совпал с предыдущей ревизией: рабочий документ переиспользован',
+        );
+        await ctx.emit('bundle.ready', {
+          bundleId: bundle.id,
+          pageCount: map.length,
+          fileCount: files.length,
+          reused: true,
+          reusedFromRevisionId: reusable.revisionId,
+        });
+        return;
+      }
+
+      ctx.logger.warn(
+        { event: 'bundle_reuse_skipped', source_revision_id: reusable.revisionId },
+        'рабочий документ предыдущей ревизии числится в БД, но отсутствует в хранилище',
+      );
+    }
+
     const workDir = await mkdtemp(join(deps.workDirBase ?? tmpdir(), 'id-bundle-'));
     try {
       const parts: WorkingPdfPart[] = [];
@@ -272,6 +355,29 @@ export function createBundleBuildHandler(deps: BundleBuildDeps): JobHandler<'bun
       await rm(workDir, { recursive: true, force: true });
     }
   };
+}
+
+/**
+ * Карта страниц по составу и порядку файлов, без обращения к инструменту.
+ *
+ * Та же величина, что возвращает `planWorkingPdf()` в `toolkit.ts`, но
+ * считаемая из плана ревизии. Нужна пути переиспользования: там сборки не
+ * происходит вовсе, а карта ревизии обязана появиться. Расхождение с реальным
+ * документом закрыто сверкой числа страниц с переиспользуемым bundle.
+ */
+function planPages(files: readonly BundlePlanFile[]): readonly WorkingPageMapping[] {
+  const map: WorkingPageMapping[] = [];
+  for (const file of files) {
+    const pages = [...file.pages].sort((a, b) => a.filePageIndex - b.filePageIndex);
+    for (const page of pages) {
+      map.push({
+        workingPageIndex: map.length,
+        sourceFileId: file.sourceFileId,
+        filePageIndex: page.filePageIndex,
+      });
+    }
+  }
+  return map;
 }
 
 /** Соответствие «файл + страница в файле» → идентификатор строки `source_pages`. */

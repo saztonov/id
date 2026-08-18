@@ -22,6 +22,8 @@
  * Поэтому 3 — это успех с записью в журнал, а не провал.
  */
 import { spawn } from 'node:child_process';
+import { rm, writeFile } from 'node:fs/promises';
+import { buildDerivedNotePdf, verifyDerivedNote } from './derived-note.js';
 import {
   assertPageCountMatches,
   assertWithinLimits,
@@ -185,6 +187,29 @@ export function createQpdfToolkit(options: QpdfToolkitOptions = {}): PdfToolkit 
     return pages;
   };
 
+  /**
+   * Первичный вход qpdf: либо `--empty`, либо шаблон с отметкой (§13).
+   *
+   * Шаблон живёт ровно на время вызова и удаляется в `finally`: временный файл
+   * рядом с выходом на очереди `cpu` — это тот же класс мусора, что оставляла
+   * неудачная сборка bundle на S5.
+   */
+  const withPrimaryInput = async <T>(
+    outputPath: string,
+    note: string | undefined,
+    run: (primary: readonly string[]) => Promise<T>,
+  ): Promise<T> => {
+    if (note === undefined) return run(['--empty']);
+
+    const templatePath = `${outputPath}.derived-note.pdf`;
+    await writeFile(templatePath, buildDerivedNotePdf(note));
+    try {
+      return await run([templatePath]);
+    } finally {
+      await rm(templatePath, { force: true });
+    }
+  };
+
   const toolkit: PdfToolkit = {
     kind: 'qpdf',
     // Ради этого qpdf и нужен: ограничения по размеру у боевой реализации нет.
@@ -195,15 +220,18 @@ export function createQpdfToolkit(options: QpdfToolkitOptions = {}): PdfToolkit 
       const map = planWorkingPdf(input.parts);
       assertWithinLimits(toolkit, input.parts);
 
-      await execute(buildArgs(input), 'сборка рабочего PDF');
+      await withPrimaryInput(input.outputPath, input.derivedNote, (primary) =>
+        execute(buildArgs(input, primary), 'сборка рабочего PDF'),
+      );
       assertPageCountMatches(map.length, await countPages(input.outputPath));
 
       return {
         pageCount: map.length,
         map,
         toolkit: 'qpdf',
-        // qpdf не пишет /Info: отметка о производности остаётся флагом в БД.
-        derivedNoteApplied: false,
+        derivedNoteApplied:
+          input.derivedNote !== undefined &&
+          (await verifyDerivedNote(input.outputPath, input.derivedNote)),
       };
     },
 
@@ -223,11 +251,19 @@ export function createQpdfToolkit(options: QpdfToolkitOptions = {}): PdfToolkit 
         );
       }
 
-      await execute(extractArgs(input), 'нарезка документа');
+      await withPrimaryInput(input.outputPath, input.derivedNote, (primary) =>
+        execute(extractArgs(input, primary), 'нарезка документа'),
+      );
       const produced = input.lastPageIndex - input.firstPageIndex + 1;
       assertPageCountMatches(produced, await countPages(input.outputPath));
 
-      return { pageCount: produced, toolkit: 'qpdf', derivedNoteApplied: false };
+      return {
+        pageCount: produced,
+        toolkit: 'qpdf',
+        derivedNoteApplied:
+          input.derivedNote !== undefined &&
+          (await verifyDerivedNote(input.outputPath, input.derivedNote)),
+      };
     },
   };
 
@@ -239,19 +275,27 @@ export function createQpdfToolkit(options: QpdfToolkitOptions = {}): PdfToolkit 
 // =====================================================================
 
 /**
- * `qpdf --empty --pages f1 1-z f2 1-z -- out.pdf`.
+ * `qpdf <первичный вход> --deterministic-id --pages f1 1-z f2 1-z -- out.pdf`.
  *
  * `--deterministic-id` заменяет случайный `/ID` хэшем содержимого: одинаковый
  * состав даёт побайтово одинаковый рабочий PDF, а значит тот же SHA-256 и ту же
  * запись в `stored_blobs`. Без него повторная сборка того же состава плодила бы
  * копии одного документа под разными хэшами.
  *
+ * Первичный вход приходит аргументом, а не пишется здесь: `--empty` означает
+ * «никаких document-level данных», а шаблон с `/Info` — «отметка о
+ * производности» (§13, `derived-note.ts`). Страницы в обоих случаях берутся
+ * только из спецификаций `--pages`.
+ *
  * Экспортируется ради проверки состава аргументов: выполнить qpdf на машине
  * разработки нельзя, а вот убедиться, что диапазоны и порядок файлов собраны
  * верно, — можно и нужно.
  */
-export function buildArgs(input: BuildWorkingPdfInput): readonly string[] {
-  const args = ['--empty', '--deterministic-id', '--pages'];
+export function buildArgs(
+  input: BuildWorkingPdfInput,
+  primary: readonly string[] = ['--empty'],
+): readonly string[] {
+  const args = [...primary, '--deterministic-id', '--pages'];
   for (const part of input.parts) {
     args.push(part.path, '1-z');
   }
@@ -260,9 +304,12 @@ export function buildArgs(input: BuildWorkingPdfInput): readonly string[] {
 }
 
 /** Диапазон qpdf задаётся 1-based и включительно с обеих сторон. */
-export function extractArgs(input: ExtractPagesInput): readonly string[] {
+export function extractArgs(
+  input: ExtractPagesInput,
+  primary: readonly string[] = ['--empty'],
+): readonly string[] {
   return [
-    '--empty',
+    ...primary,
     '--deterministic-id',
     '--pages',
     input.sourcePath,

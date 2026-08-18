@@ -869,9 +869,21 @@ const ORG_LATIN_RE =
 /**
  * Слова, которые не являются собственным именем организации.
  *
- * Заменять их бессмысленно и вредно: «ЗАВОД» или «ГРУПП» встречаются в десятке
- * наименований и в обычном тексте, а замена сделала бы производный корпус
+ * Список БОЛЬШЕ НЕ является основной защитой и пополняться не должен: общие
+ * слова отсеивает измеримый критерий `occursAsProse`, и именно он обязан
+ * держать удар на новом корпусе. Здесь остались слова, которые критерий один не
+ * ловит, — те, что в этом корпусе не встречаются в связном тексте ни разу и
+ * потому неотличимы от имени собственного по одному лишь регистру: «МОСКВА»,
+ * «ГРУПП», «ЦЕНТР», «СТАЛЬ». Заменять их бессмысленно и вредно: они встречаются
+ * в десятке наименований сразу, а замена сделала бы производный корпус
  * нечитаемым, ничего не скрыв.
+ *
+ * Измерено на закрытом корпусе: из слов списка критерий сам отсеивает
+ * «качества», «системы», «центр» и «строительство», а нужен список ровно для
+ * двенадцати: group, russia, бетон, бюро, групп, завод, москва, проектное,
+ * системы, сталь, строительные, строй. Весь словарь документов, добавленный на
+ * S9 («сертификат», «паспорт», «протокол», …), критерию не нужен и оставлен
+ * нижней границей, а не механизмом.
  */
 const GENERIC_ORG_WORDS: ReadonlySet<string> = new Set([
   'завод',
@@ -967,6 +979,79 @@ interface OrgVocabulary {
   readonly words: readonly string[];
 }
 
+/** Полузакрытый интервал текста `[start, end)`. */
+type TextSpan = readonly [number, number];
+
+/**
+ * Кавычки как признак имени.
+ *
+ * В деловом документе в кавычки берут именно название — организации, системы
+ * сертификации, продукта. Шаблон нужен там, где организационно-правовая форма
+ * стоит не перед наименованием, а после него («Филиал «Технофлекс» ООО») или
+ * не печатается вовсе («компания „РОКВУЛ“ (Rockwool)» в описании печати).
+ */
+const QUOTED_NAME_RE = /[«"“]([^«»"“”\n]{2,90})[»”"]/g;
+
+/**
+ * Интервалы текста, распознанные как контекст наименования организации.
+ *
+ * Три источника: совпадение ORG-шаблона (само наименование), любой отрывок в
+ * кавычках и доменное имя. Домен здесь не случаен: он идентифицирует
+ * организацию не хуже наименования — ровно поэтому существует `scrubWebsites`,
+ * — и `www.rockwool.ru` обязан считаться упоминанием организации, а не прозой.
+ */
+function nameContextSpans(text: string): readonly TextSpan[] {
+  const spans: TextSpan[] = [];
+  for (const re of [ORG_QUOTED_RE, ORG_BARE_RE, ORG_LATIN_RE]) {
+    re.lastIndex = 0;
+    for (const match of text.matchAll(re)) {
+      const core = match[1];
+      if (core === undefined) continue;
+      const start = match.index + match[0].indexOf(core);
+      spans.push([start, start + core.length]);
+    }
+  }
+  for (const re of [QUOTED_NAME_RE, WEBSITE_RE]) {
+    re.lastIndex = 0;
+    for (const match of text.matchAll(re)) spans.push([match.index, match.index + match[0].length]);
+  }
+  return spans;
+}
+
+/**
+ * Встречается ли слово в закрытом корпусе ХОТЬ РАЗ как обычная проза.
+ *
+ * Прозаическим считается вхождение, которое лежит вне всякого распознанного
+ * контекста наименования И записано со строчной буквы. Строчная буква — не
+ * эвристика вкуса, а машинный признак нарицательного: в русском деловом
+ * документе собственное имя пишут с прописной или капсом, а нарицательное в
+ * связном тексте — со строчной. Именно этим «сертификации» из фразы «в рамках
+ * систем добровольной сертификации» отличается от «ПРОМСОРТ» из логотипа.
+ *
+ * Проверка идёт по вхождениям, а не по частоте: порога здесь нет и быть не
+ * может. Измерено, что доля не разделяет классы — «ТехноНИКОЛЬ» встречается вне
+ * шаблона чаще, чем «Корпус», хотя первое имя собственное, а второе нет.
+ */
+function occursAsProse(
+  word: string,
+  texts: readonly string[],
+  contexts: readonly (readonly TextSpan[])[],
+): boolean {
+  const re = new RegExp(`${WB}${escapeRegExp(word)}${WA}`, 'gi');
+  for (const [index, text] of texts.entries()) {
+    const spans = contexts[index] ?? [];
+    re.lastIndex = 0;
+    for (const match of text.matchAll(re)) {
+      const start = match.index;
+      const end = start + match[0].length;
+      if (spans.some(([from, to]) => start >= from && end <= to)) continue;
+      const first = match[0].charAt(0);
+      if (first === first.toLowerCase() && first !== first.toUpperCase()) return true;
+    }
+  }
+  return false;
+}
+
 /**
  * Собирает наименования организаций по всему комплекту сразу.
  *
@@ -975,10 +1060,24 @@ interface OrgVocabulary {
  * штампах «КОПИЯ ВЕРНА». Если заменять постранично, одна организация получит
  * разные синтетические имена, и сверка реестра с комплектом в производном
  * наборе развалится — а именно её этот набор и должен позволять измерять.
+ *
+ * Основной путь — замена ФРАЗОЙ: участника скрывает наименование целиком, а не
+ * отдельное нарицательное слово в его составе. Пословная замена нужна только
+ * там, где фраза не собирается: «ПромСорт-Тула» напечатано в логотипе двумя
+ * строками, и дефиса между ними нет.
+ *
+ * Поэтому слово попадает в словарь замены, только если ИЗМЕРЕНО, что оно не
+ * встречается в комплекте как обычная проза (`occursAsProse`). Стоп-лист общих
+ * слов решением не был: он пополнялся после каждого нового корпуса, а цена
+ * пропуска — молча испорченный эталон. Так «КАЧЕСТВА» на S8 уехало в пословную
+ * замену и стёрло заголовок «СЕРТИФИКАТ КАЧЕСТВА №…» на тринадцати страницах, а
+ * на S9 то же самое повторили «сертификации», «строительстве» и «менеджмента» —
+ * формы слов, которых в списке не оказалось.
  */
 function collectOrganizations(texts: readonly string[]): OrgVocabulary {
+  const contexts = texts.map(nameContextSpans);
   const phrases = new Set<string>();
-  const words = new Set<string>();
+  const candidates = new Set<string>();
   for (const text of texts) {
     for (const re of [ORG_QUOTED_RE, ORG_BARE_RE, ORG_LATIN_RE]) {
       re.lastIndex = 0;
@@ -991,14 +1090,15 @@ function collectOrganizations(texts: readonly string[]): OrgVocabulary {
         for (const word of core.split(/[^A-Za-zА-Яа-яЁё0-9]+/)) {
           if (word.length < 4) continue;
           if (GENERIC_ORG_WORDS.has(word.toLowerCase())) continue;
-          words.add(word);
+          candidates.add(word);
         }
       }
     }
   }
+  const words = [...candidates].filter((word) => !occursAsProse(word, texts, contexts));
   // Длинные раньше коротких: иначе замена слова разрушит объемлющую фразу.
   const byLength = (a: string, b: string): number => b.length - a.length || a.localeCompare(b);
-  return { phrases: [...phrases].sort(byLength), words: [...words].sort(byLength) };
+  return { phrases: [...phrases].sort(byLength), words: words.sort(byLength) };
 }
 
 function escapeRegExp(value: string): string {
@@ -1280,7 +1380,16 @@ function scrubRegions(text: string, seed: string): string {
  */
 // Метка телефона либо код в скобках: в корпусе есть строки, где номер стоит
 // в конце адреса вообще без слова «тел», и без второго признака они уцелели бы.
-const PHONE_LABEL_RE = /(?:тел|факс|phone|fax|call-centre)|\(\d{3,5}\)\s*\d{2}/i;
+//
+// Метка ищется с НАЧАЛА слова. Без этого «тел» находился внутри «строительстве»,
+// «изготовитель», «потребитель», «свидетельство» — и вся строка объявлялась
+// телефонной. Цена измерена: строка «ГОСТ 32314-2012 … применяемые в
+// строительстве» попадала под `PHONE_RUN_RE`, и номер ГОСТа превращался в
+// «ГОСТ 40001-0691» на 51 позиции. Дефект был не виден только потому, что
+// пословная замена уже стёрла слово «строительстве» и метка не срабатывала:
+// одна ошибка обезличивания маскировала другую.
+const PHONE_LABEL_RE =
+  /(?<![А-Яа-яЁёA-Za-z])(?:тел|факс|phone|fax|call-centre)|\(\d{3,5}\)\s*\d{2}/i;
 const PHONE_RUN_RE = /(?<![\d.,])[+(]?\d[\d\s()-]{6,}\d(?!\d)/g;
 
 /**
@@ -1339,6 +1448,44 @@ function scrubBareOgrn(text: string, seed: string): string {
 }
 
 /**
+ * Номер специалиста в национальном реестре (НРС НОСТРОЙ, НОПРИЗ).
+ *
+ * Это идентификатор ФИЗИЧЕСКОГО ЛИЦА: реестр специалистов публичен, и по номеру
+ * восстанавливается фамилия, которую обезличиватель только что заменил. Без
+ * этого прохода замена ФИО в акте была бы декоративной.
+ *
+ * Проход появился не от полноты, а по измерению. В корпусе таких номеров два.
+ * Один (`С-69103647`) сплошной, и `scrubLabelledPhones` его не трогал никогда —
+ * он пропускает непрерывные цифровые последовательности. Второй (`С-77-271747`)
+ * с дефисами, и он гасился СЛУЧАЙНО: строка с ним содержит слово
+ * «строительного», внутри которого прежний `PHONE_LABEL_RE` находил подстроку
+ * «тел» и объявлял всю строку телефонной. Как только метка телефона стала
+ * искаться с начала слова, номер проступил — то есть защиты у него не было
+ * вовсе, была маскировка одной ошибки другой.
+ */
+const REGISTRY_ID_RE = /((?:НРС|НОСТРОЙ|НОПРИЗ)[^\n]{0,40}?№?\s*[СC]-)(\d[\d-]{5,}\d)/g;
+
+function scrubRegistryIds(text: string, seed: string): string {
+  return text.replace(REGISTRY_ID_RE, (_match, label: string, id: string) => {
+    const rng = rngFor(seed, 'registry', id);
+    return label + id.replace(/\d/g, () => String(Math.floor(rng() * 10)));
+  });
+}
+
+/** Номера специалистов, найденные в комплекте, — для само-аудита. */
+function collectRegistryIds(texts: readonly string[]): readonly string[] {
+  const ids = new Set<string>();
+  for (const text of texts) {
+    REGISTRY_ID_RE.lastIndex = 0;
+    for (const match of text.matchAll(REGISTRY_ID_RE)) {
+      const id = match[2];
+      if (id !== undefined) ids.add(id);
+    }
+  }
+  return [...ids];
+}
+
+/**
  * Сайты организаций.
  *
  * Домен идентифицирует организацию так же, как её наименование, а `EMAIL_RE`
@@ -1380,6 +1527,7 @@ export function anonymizePackage(
     out = scrubRegions(out, seed);
     out = scrubStreets(out, seed);
     out = scrubBareOgrn(out, seed);
+    out = scrubRegistryIds(out, seed);
     out = scrubLabelledPhones(out, seed);
     out = scrubWebsites(out, seed);
     return out;
@@ -1400,10 +1548,10 @@ export function anonymizePackage(
  * текстом в отслеживаемом git файле, то есть делала стража ПДн их носителем.
  *
  * Источник значений у обезличивателя свой и законный: закрытый корпус, который
- * он и так читает (`resolveGoldenCorpusDir`). Наименования организаций и ФИО он
- * находит сам — иначе не смог бы их заменить, — и найденное здесь просто
- * возвращается наружу как набор для само-аудита. Никакого нового источника
- * данных не появляется, а связь со сканером исчезает.
+ * он и так читает (`resolveGoldenCorpusDir`). Наименования организаций, ФИО и
+ * номера специалистов в НРС он находит сам — иначе не смог бы их заменить, — и
+ * найденное здесь просто возвращается наружу как набор для само-аудита.
+ * Никакого нового источника данных не появляется, а связь со сканером исчезает.
  *
  * Считается по тем же шагам, что и в `anonymizePackage`, и по той же причине:
  * собирать словарь надо ПОСЛЕ `anonymizeText` и ПО ВСЕМУ комплекту сразу.
@@ -1415,7 +1563,12 @@ export function collectPackageMarkers(
   const base = texts.map((text) => anonymizeText(text, { seed }));
   const vocabulary = collectOrganizations(base);
   const persons = collectPersons(base, seed);
-  return [...vocabulary.phrases, ...vocabulary.words, ...persons.keys()];
+  return [
+    ...vocabulary.phrases,
+    ...vocabulary.words,
+    ...persons.keys(),
+    ...collectRegistryIds(base),
+  ];
 }
 
 /**
@@ -1433,7 +1586,20 @@ export function collectPackageMarkers(
 export function auditCorpusPii(text: string, markers: readonly string[]): readonly string[] {
   const problems: string[] = [...containsPii(text).findings];
   for (const marker of markers) {
-    if (text.includes(marker)) problems.push(`маркер обезличивателя: «${marker}»`);
+    // Маркер ищется как ОТДЕЛЬНОЕ слово и без учёта регистра — ровно тем же
+    // предикатом, каким `replaceOrganizations` его заменяет. Иначе аудит
+    // спрашивает не то, на что отвечает замена, и барьер срабатывает на шуме.
+    //
+    // Подстрочное `includes` именно так и провалило генерацию на S9: маркер
+    // «УРАЛ» нашёлся внутри СИНТЕТИЧЕСКОГО имени «ПАНУРАЛОХИ», которое сам же
+    // обезличиватель и сочинил из случайных букв, «НИЦ» — внутри слова
+    // «МУНИЦИПАЛЬНЫЙ», а «сертификации» — внутри «Мостройсертификации». Ни
+    // одно из трёх не является пережившим обезличивание значением, а барьер
+    // при этом становился зависимым от зерна: вероятность подстроки из четырёх
+    // букв в случайном имени не нулевая.
+    if (new RegExp(`${WB}${escapeRegExp(marker)}${WA}`, 'i').test(text)) {
+      problems.push(`маркер обезличивателя: «${marker}»`);
+    }
   }
   return problems;
 }

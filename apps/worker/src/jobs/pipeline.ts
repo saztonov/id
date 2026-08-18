@@ -29,9 +29,18 @@ import { stat } from 'node:fs/promises';
 import { pipeline } from 'node:stream/promises';
 
 import {
+  archiveKey,
   artifactKey,
   blobKey,
   closeRunDocument,
+  documentPdfKey,
+  findArchive,
+  findReusableBundle,
+  loadArchivePlan,
+  loadMaterializationPlan,
+  recordArchive,
+  requireVisibleRevisionOfDocument,
+  saveDerivedPdf,
   createBundle,
   createMaintenanceRegistry,
   createRunDocument,
@@ -116,6 +125,12 @@ import {
   type FileVerifyDeps,
 } from './file-verify.js';
 import { createSignatureProbeHandler, type SignatureProbeDeps } from './signature-probe.js';
+import {
+  createBuildArchiveHandler,
+  createMaterializePdfHandler,
+  type ArchiveDeps,
+  type MaterializeDeps,
+} from './delivery.js';
 import { createInternalRegistryProviders } from '@id/rules';
 import { createChecksRunHandler, createChecksSummarizeHandler, type ChecksDeps } from './checks.js';
 import {
@@ -170,6 +185,7 @@ const WORKER_ACTOR_ID = '00000000-0000-0000-0000-000000000000';
 const SYSTEM_SCOPE: AuthScope = { kind: 'admin', userId: WORKER_ACTOR_ID };
 
 const PDF_CONTENT_TYPE = 'application/pdf';
+const ZIP_CONTENT_TYPE = 'application/zip';
 
 export interface PipelineLimits {
   /** Потолок размера одного исходного файла (`MAX_UPLOAD_BYTES`). */
@@ -424,6 +440,22 @@ function bundleBuildDeps(options: PipelineJobsOptions): BundleBuildDeps {
       const bundle = await findBundleByManifest(db, scope, target);
       return bundle === null ? null : { id: bundle.id, pageCount: bundle.pageCount };
     },
+
+    findReusableWorkingPdf: async (target) => {
+      const scope = await pinScope(db, target.revisionId);
+      if (scope === null) return null;
+      const reusable = await findReusableBundle(db, scope, target);
+      if (reusable === null) return null;
+      return {
+        revisionId: reusable.revisionId,
+        workingPdfBlobSha256: reusable.workingPdfBlobSha256,
+        sizeBytes: reusable.sizeBytes,
+        s3Key: blobKey(reusable.workingPdfBlobSha256),
+        pageCount: reusable.pageCount,
+      };
+    },
+
+    workingPdfExists: async (storageKey) => (await storage.headObject(storageKey)) !== null,
 
     fetchOriginal: (storageKey, destinationPath) =>
       fetchOriginal(storage, storageKey, destinationPath),
@@ -856,6 +888,143 @@ function checksDeps(options: PipelineJobsOptions): ChecksDeps {
   };
 }
 
+/**
+ * Задачи 22–23: нарезка и архив (§12, §13).
+ *
+ * Порты связываются здесь, как и у остальных стадий. Отдельно стоит отметить
+ * ключи хранилища: нарезка адресуется документом (`documents/{id}.pdf`), архив
+ * — ревизией (`archive/{revisionId}/rev{N}-approved.zip`), и оба
+ * детерминированы. Это и есть второй рубеж однократности: повтор задачи
+ * перезаписывает свой объект, а не плодит сироты (урок S5).
+ */
+function materializeDeps(options: PipelineJobsOptions): MaterializeDeps {
+  const { db, storage } = options;
+
+  const scopeOf = async (revisionId: string): Promise<AuthScope> => {
+    const scope = await pinScope(db, revisionId);
+    if (scope === null) {
+      throw new PipelineScopeError(`Ревизия ${revisionId} не найдена: задача адресована в никуда.`);
+    }
+    return scope;
+  };
+
+  return {
+    loadPlan: async (revisionId) => {
+      const scope = await pinScope(db, revisionId);
+      if (scope === null) return null;
+      return loadMaterializationPlan(db, scope, revisionId);
+    },
+
+    fetchWorkingPdf: (storageKey, destinationPath) =>
+      fetchOriginal(storage, storageKey, destinationPath),
+
+    extractPages: async (input) => {
+      const produced = await options.toolkit.extractPages({
+        sourcePath: input.sourcePath,
+        outputPath: input.outputPath,
+        firstPageIndex: input.firstPageIndex,
+        lastPageIndex: input.lastPageIndex,
+        derivedNote: input.derivedNote,
+      });
+      return {
+        pageCount: produced.pageCount,
+        toolkit: produced.toolkit,
+        derivedNoteApplied: produced.derivedNoteApplied,
+      };
+    },
+
+    storeDerivedPdf: async (documentId, localPath) => {
+      const sha256 = await hashFile(localPath);
+      const { size: sizeBytes } = await stat(localPath);
+      const key = documentPdfKey(documentId);
+      await storage.putObject({
+        key,
+        body: createReadStream(localPath),
+        contentType: PDF_CONTENT_TYPE,
+        contentLength: sizeBytes,
+      });
+      return { sha256, byteSize: sizeBytes, s3Key: key };
+    },
+
+    saveDerivedPdf: async (input) => {
+      const document = await findDocumentRevision(db, input.documentId);
+      if (document === null) {
+        return { kind: 'rejected', reason: 'документ исчез между нарезкой и записью' };
+      }
+      return saveDerivedPdf(db, await scopeOf(document.revisionId), input);
+    },
+
+    ...(options.workDirBase === undefined ? {} : { workDirBase: options.workDirBase }),
+  };
+}
+
+function archiveDeps(options: PipelineJobsOptions): ArchiveDeps {
+  const { db, storage } = options;
+
+  const scopeOf = async (revisionId: string): Promise<AuthScope> => {
+    const scope = await pinScope(db, revisionId);
+    if (scope === null) {
+      throw new PipelineScopeError(`Ревизия ${revisionId} не найдена: задача адресована в никуда.`);
+    }
+    return scope;
+  };
+
+  return {
+    loadPlan: async (revisionId) => {
+      const scope = await pinScope(db, revisionId);
+      if (scope === null) return null;
+      return loadArchivePlan(db, scope, revisionId);
+    },
+
+    findArchive: async (revisionId) => findArchive(db, await scopeOf(revisionId), revisionId),
+
+    openDocumentPdf: (documentId) => streamStorageObject(storage, documentPdfKey(documentId)),
+
+    storeArchive: async (revisionId, revisionNo, localPath) => {
+      const sha256 = await hashFile(localPath);
+      const { size: sizeBytes } = await stat(localPath);
+      const key = archiveKey(revisionId, revisionNo);
+      await storage.putObject({
+        key,
+        body: createReadStream(localPath),
+        contentType: ZIP_CONTENT_TYPE,
+        contentLength: sizeBytes,
+      });
+      return { sha256, byteSize: sizeBytes, s3Key: key };
+    },
+
+    // Область здесь не применяется намеренно: запись идёт по ревизии, которая
+    // уже разрешена чтением плана этой же задачей, а сам INSERT дополнительно
+    // проверяется триггером `submission_archives_approved_only`.
+    recordArchive: (input) => recordArchive(db, input),
+
+    ...(options.workDirBase === undefined ? {} : { workDirBase: options.workDirBase }),
+  };
+}
+
+/** Ревизия документа системным чтением: нужна, чтобы построить область записи. */
+async function findDocumentRevision(
+  db: Database,
+  documentId: string,
+): Promise<{ readonly revisionId: string } | null> {
+  try {
+    return await requireVisibleRevisionOfDocument(db, SYSTEM_SCOPE, documentId);
+  } catch {
+    return null;
+  }
+}
+
+/** Поток объекта хранилища как асинхронная последовательность байтов. */
+async function* streamStorageObject(
+  storage: StorageProvider,
+  key: string,
+): AsyncGenerator<Uint8Array> {
+  const object = await storage.getObjectStream(key);
+  for await (const chunk of object.stream) {
+    yield chunk as Uint8Array;
+  }
+}
+
 function segmentationDeps(options: PipelineJobsOptions): SegmentationDeps {
   const db = options.db;
 
@@ -1087,6 +1256,12 @@ export function registerPipelineJobs(
   const checks = checksDeps(options);
   registry.register('checks.run', createChecksRunHandler(checks));
   registry.register('checks.summarize', createChecksSummarizeHandler(checks));
+
+  // Задачи 22–23 (§12): нарезка логических документов после подтверждения
+  // границ и архив согласованной ревизии. Регистрируются здесь и безусловно —
+  // по той же причине, что и остальные стадии.
+  registry.register('doc.materialize_pdf', createMaterializePdfHandler(materializeDeps(options)));
+  registry.register('submission.build_archive', createBuildArchiveHandler(archiveDeps(options)));
   return registry;
 }
 

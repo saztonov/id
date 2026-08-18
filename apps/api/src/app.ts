@@ -100,6 +100,7 @@ import { registerCheckRoutes } from './modules/checks/routes.js';
 import { registerLayoutRoutes } from './modules/layout/routes.js';
 import { registerRecognitionRoutes } from './modules/recognition/routes.js';
 import { registerDocumentRoutes } from './modules/documents/routes.js';
+import { registerWorkflowRoutes } from './modules/workflow/routes.js';
 import { queueSnapshot } from './db/repositories/jobs.js';
 import { createStorage, type StorageProvider } from './storage/provider.js';
 import { LOCAL_UPLOAD_PATH } from './storage/local.js';
@@ -553,6 +554,11 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppInstan
   // регистрации экран «Документы» остался бы кодом, который проходит
   // собственные тесты и недостижим снаружи — отказ S3 в чистом виде.
   registerDocumentRoutes(app);
+  // Согласование, нарезка, архив, retention и legal hold (§4.1, §4.2, §9.6,
+  // §13). До S10 права `submission.submit`, `revision.return`,
+  // `revision.override` и `archive.download` были объявлены в матрице и не
+  // имели ни одного маршрута — то есть выглядели защитой, ничего не защищая.
+  registerWorkflowRoutes(app);
 
   app.addHook('onClose', async () => {
     // Пул, полученный извне, принадлежит вызывающему: закрыть его здесь значит

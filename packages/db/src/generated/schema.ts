@@ -927,62 +927,6 @@ export const aiRuns = pgTable("ai_runs", {
 	check("ai_runs_tokens_chk", sql`((tokens_in IS NULL) OR (tokens_in >= 0)) AND ((tokens_out IS NULL) OR (tokens_out >= 0))`),
 ]);
 
-export const logicalDocuments = pgTable("logical_documents", {
-	id: uuid().defaultRandom().primaryKey().notNull(),
-	revisionId: uuid("revision_id").notNull(),
-	objectId: uuid("object_id").notNull(),
-	contractorId: uuid("contractor_id").notNull(),
-	docTypeCode: text("doc_type_code"),
-	ordinal: integer().notNull(),
-	title: text(),
-	folderGroup: text("folder_group"),
-	typeConfidence: doublePrecision("type_confidence"),
-	boundaryConfidence: doublePrecision("boundary_confidence"),
-	needsReview: boolean("needs_review").default(false).notNull(),
-	isConfirmed: boolean("is_confirmed").default(false).notNull(),
-	confirmedBy: uuid("confirmed_by"),
-	confirmedAt: timestamp("confirmed_at", { withTimezone: true, mode: 'string' }),
-	derivedPdfBlobSha256: text("derived_pdf_blob_sha256"),
-	isDerivedCopy: boolean("is_derived_copy").default(true).notNull(),
-	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-	updatedAt: timestamp("updated_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-	version: integer().default(0).notNull(),
-}, (table) => [
-	index("ix_logical_documents_confirmed_by").using("btree", table.confirmedBy.asc().nullsLast().op("uuid_ops")),
-	index("ix_logical_documents_contractor").using("btree", table.contractorId.asc().nullsLast().op("uuid_ops")),
-	index("ix_logical_documents_doc_type").using("btree", table.docTypeCode.asc().nullsLast().op("text_ops")),
-	index("ix_logical_documents_needs_review").using("btree", table.revisionId.asc().nullsLast().op("uuid_ops")).where(sql`needs_review`),
-	index("ix_logical_documents_object").using("btree", table.objectId.asc().nullsLast().op("uuid_ops")),
-	index("ix_logical_documents_revision").using("btree", table.revisionId.asc().nullsLast().op("int4_ops"), table.ordinal.asc().nullsLast().op("uuid_ops")),
-	foreignKey({
-			columns: [table.revisionId],
-			foreignColumns: [submissionRevisions.id],
-			name: "logical_documents_revision_id_fkey"
-		}),
-	foreignKey({
-			columns: [table.docTypeCode],
-			foreignColumns: [docTypes.code],
-			name: "logical_documents_doc_type_code_fkey"
-		}),
-	foreignKey({
-			columns: [table.confirmedBy],
-			foreignColumns: [users.id],
-			name: "logical_documents_confirmed_by_fkey"
-		}),
-	foreignKey({
-			columns: [table.revisionId, table.objectId, table.contractorId],
-			foreignColumns: [submissionRevisions.contractorId, submissionRevisions.id, submissionRevisions.objectId],
-			name: "logical_documents_scope_fk"
-		}),
-	unique("logical_documents_revision_id_uq").on(table.id, table.revisionId),
-	check("logical_documents_ordinal_chk", sql`ordinal >= 0`),
-	check("logical_documents_type_confidence_chk", sql`(type_confidence IS NULL) OR ((type_confidence >= (0)::double precision) AND (type_confidence <= (1)::double precision))`),
-	check("logical_documents_boundary_confidence_chk", sql`(boundary_confidence IS NULL) OR ((boundary_confidence >= (0)::double precision) AND (boundary_confidence <= (1)::double precision))`),
-	check("logical_documents_confirmed_chk", sql`(NOT is_confirmed) OR (confirmed_by IS NOT NULL)`),
-	check("logical_documents_derived_pdf_chk", sql`derived_pdf_blob_sha256 ~ '^[0-9a-f]{64}$'::text`),
-	check("logical_documents_version_chk", sql`version >= 0`),
-]);
-
 export const pageAssignments = pgTable("page_assignments", {
 	id: uuid().defaultRandom().primaryKey().notNull(),
 	revisionId: uuid("revision_id").notNull(),
@@ -1003,11 +947,6 @@ export const pageAssignments = pgTable("page_assignments", {
 			foreignColumns: [pageRoles.code],
 			name: "page_assignments_page_role_code_fkey"
 		}),
-	foreignKey({
-			columns: [table.revisionId, table.documentId],
-			foreignColumns: [logicalDocuments.id, logicalDocuments.revisionId],
-			name: "page_assignments_document_fk"
-		}).onDelete("cascade"),
 	foreignKey({
 			columns: [table.revisionId, table.sourcePageId],
 			foreignColumns: [sourcePages.id, sourcePages.revisionId],
@@ -1043,16 +982,6 @@ export const registryRows = pgTable("registry_rows", {
 	index("ix_registry_rows_no_folded").using("btree", table.docNoFolded.asc().nullsLast().op("text_ops")),
 	index("ix_registry_rows_no_norm").using("btree", table.docNoNorm.asc().nullsLast().op("text_ops")),
 	index("ix_registry_rows_revision").using("btree", table.revisionId.asc().nullsLast().op("uuid_ops")),
-	foreignKey({
-			columns: [table.revisionId, table.documentId],
-			foreignColumns: [logicalDocuments.id, logicalDocuments.revisionId],
-			name: "registry_rows_document_fk"
-		}).onDelete("cascade"),
-	foreignKey({
-			columns: [table.revisionId, table.matchedDocumentId],
-			foreignColumns: [logicalDocuments.id, logicalDocuments.revisionId],
-			name: "registry_rows_matched_document_fk"
-		}),
 	unique("registry_rows_ordinal_uq").on(table.documentId, table.ordinal),
 	check("registry_rows_row_no_chk", sql`row_no > 0`),
 	check("registry_rows_match_score_chk", sql`(match_score IS NULL) OR ((match_score >= (0)::double precision) AND (match_score <= (1)::double precision))`),
@@ -1085,11 +1014,6 @@ export const fieldValues = pgTable("field_values", {
 	index("ix_field_values_revision").using("btree", table.revisionId.asc().nullsLast().op("uuid_ops")),
 	index("ix_field_values_source_block").using("btree", table.sourceBlockId.asc().nullsLast().op("uuid_ops")),
 	foreignKey({
-			columns: [table.documentId],
-			foreignColumns: [logicalDocuments.id],
-			name: "field_values_document_id_fkey"
-		}).onDelete("cascade"),
-	foreignKey({
 			columns: [table.pageTextVersionId],
 			foreignColumns: [pageTextVersions.id],
 			name: "field_values_page_text_version_id_fkey"
@@ -1099,11 +1023,6 @@ export const fieldValues = pgTable("field_values", {
 			foreignColumns: [layoutBlocks.id],
 			name: "field_values_source_block_id_fkey"
 		}),
-	foreignKey({
-			columns: [table.revisionId, table.documentId],
-			foreignColumns: [logicalDocuments.id, logicalDocuments.revisionId],
-			name: "field_values_document_fk"
-		}).onDelete("cascade"),
 	foreignKey({
 			columns: [table.revisionId, table.pageTextVersionId],
 			foreignColumns: [pageTextVersions.id, pageTextVersions.revisionId],
@@ -1184,11 +1103,6 @@ export const materialDocuments = pgTable("material_documents", {
 			name: "material_documents_material_id_fkey"
 		}).onDelete("cascade"),
 	foreignKey({
-			columns: [table.documentId],
-			foreignColumns: [logicalDocuments.id],
-			name: "material_documents_document_id_fkey"
-		}).onDelete("cascade"),
-	foreignKey({
 			columns: [table.materialId, table.batchId],
 			foreignColumns: [batches.id, batches.materialId],
 			name: "material_documents_batch_fk"
@@ -1197,11 +1111,6 @@ export const materialDocuments = pgTable("material_documents", {
 			columns: [table.revisionId, table.materialId],
 			foreignColumns: [materials.id, materials.revisionId],
 			name: "material_documents_material_fk"
-		}).onDelete("cascade"),
-	foreignKey({
-			columns: [table.revisionId, table.documentId],
-			foreignColumns: [logicalDocuments.id, logicalDocuments.revisionId],
-			name: "material_documents_document_fk"
 		}).onDelete("cascade"),
 	check("material_documents_relation_chk", sql`relation ~ '^[a-z][a-z0-9_]*$'::text`),
 ]);
@@ -1567,6 +1476,142 @@ export const layoutProfiles = pgTable("layout_profiles", {
 	check("layout_profiles_version_chk", sql`version > 0`),
 	check("layout_profiles_thresholds_chk", sql`jsonb_typeof(thresholds) = 'object'::text`),
 	check("layout_profiles_period_chk", sql`(effective_to IS NULL) OR (effective_to > effective_from)`),
+]);
+
+export const logicalDocuments = pgTable("logical_documents", {
+	id: uuid().defaultRandom().primaryKey().notNull(),
+	revisionId: uuid("revision_id").notNull(),
+	objectId: uuid("object_id").notNull(),
+	contractorId: uuid("contractor_id").notNull(),
+	docTypeCode: text("doc_type_code"),
+	ordinal: integer().notNull(),
+	title: text(),
+	folderGroup: text("folder_group"),
+	typeConfidence: doublePrecision("type_confidence"),
+	boundaryConfidence: doublePrecision("boundary_confidence"),
+	needsReview: boolean("needs_review").default(false).notNull(),
+	isConfirmed: boolean("is_confirmed").default(false).notNull(),
+	confirmedBy: uuid("confirmed_by"),
+	confirmedAt: timestamp("confirmed_at", { withTimezone: true, mode: 'string' }),
+	derivedPdfBlobSha256: text("derived_pdf_blob_sha256"),
+	isDerivedCopy: boolean("is_derived_copy").default(true).notNull(),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	updatedAt: timestamp("updated_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	version: integer().default(0).notNull(),
+	derivedPdfPageCount: integer("derived_pdf_page_count"),
+	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
+	derivedPdfBytes: bigint("derived_pdf_bytes", { mode: "number" }),
+	derivedPdfBuiltAt: timestamp("derived_pdf_built_at", { withTimezone: true, mode: 'string' }),
+	derivedPdfToolkit: text("derived_pdf_toolkit"),
+	derivedNoteApplied: boolean("derived_note_applied"),
+}, (table) => [
+	index("ix_logical_documents_confirmed_by").using("btree", table.confirmedBy.asc().nullsLast().op("uuid_ops")),
+	index("ix_logical_documents_contractor").using("btree", table.contractorId.asc().nullsLast().op("uuid_ops")),
+	index("ix_logical_documents_doc_type").using("btree", table.docTypeCode.asc().nullsLast().op("text_ops")),
+	index("ix_logical_documents_needs_review").using("btree", table.revisionId.asc().nullsLast().op("uuid_ops")).where(sql`needs_review`),
+	index("ix_logical_documents_object").using("btree", table.objectId.asc().nullsLast().op("uuid_ops")),
+	index("ix_logical_documents_revision").using("btree", table.revisionId.asc().nullsLast().op("int4_ops"), table.ordinal.asc().nullsLast().op("uuid_ops")),
+	foreignKey({
+			columns: [table.revisionId],
+			foreignColumns: [submissionRevisions.id],
+			name: "logical_documents_revision_id_fkey"
+		}),
+	foreignKey({
+			columns: [table.docTypeCode],
+			foreignColumns: [docTypes.code],
+			name: "logical_documents_doc_type_code_fkey"
+		}),
+	foreignKey({
+			columns: [table.confirmedBy],
+			foreignColumns: [users.id],
+			name: "logical_documents_confirmed_by_fkey"
+		}),
+	foreignKey({
+			columns: [table.revisionId, table.objectId, table.contractorId],
+			foreignColumns: [submissionRevisions.contractorId, submissionRevisions.id, submissionRevisions.objectId],
+			name: "logical_documents_scope_fk"
+		}),
+	unique("logical_documents_revision_id_uq").on(table.id, table.revisionId),
+	check("logical_documents_ordinal_chk", sql`ordinal >= 0`),
+	check("logical_documents_type_confidence_chk", sql`(type_confidence IS NULL) OR ((type_confidence >= (0)::double precision) AND (type_confidence <= (1)::double precision))`),
+	check("logical_documents_boundary_confidence_chk", sql`(boundary_confidence IS NULL) OR ((boundary_confidence >= (0)::double precision) AND (boundary_confidence <= (1)::double precision))`),
+	check("logical_documents_confirmed_chk", sql`(NOT is_confirmed) OR (confirmed_by IS NOT NULL)`),
+	check("logical_documents_derived_pdf_chk", sql`derived_pdf_blob_sha256 ~ '^[0-9a-f]{64}$'::text`),
+	check("logical_documents_version_chk", sql`version >= 0`),
+	check("logical_documents_derived_marked_chk", sql`(derived_pdf_blob_sha256 IS NULL) OR is_derived_copy`),
+	check("logical_documents_derived_confirmed_chk", sql`(derived_pdf_blob_sha256 IS NULL) OR is_confirmed`),
+	check("logical_documents_derived_provenance_chk", sql`((derived_pdf_blob_sha256 IS NULL) AND (derived_pdf_page_count IS NULL) AND (derived_pdf_bytes IS NULL) AND (derived_pdf_built_at IS NULL) AND (derived_pdf_toolkit IS NULL) AND (derived_note_applied IS NULL)) OR ((derived_pdf_blob_sha256 IS NOT NULL) AND (derived_pdf_page_count IS NOT NULL) AND (derived_pdf_bytes IS NOT NULL) AND (derived_pdf_built_at IS NOT NULL) AND (derived_pdf_toolkit IS NOT NULL) AND (derived_note_applied IS NOT NULL))`),
+	check("logical_documents_derived_sizes_chk", sql`((derived_pdf_page_count IS NULL) OR (derived_pdf_page_count > 0)) AND ((derived_pdf_bytes IS NULL) OR (derived_pdf_bytes > 0))`),
+]);
+
+export const submissionArchives = pgTable("submission_archives", {
+	id: uuid().defaultRandom().primaryKey().notNull(),
+	revisionId: uuid("revision_id").notNull(),
+	objectId: uuid("object_id").notNull(),
+	contractorId: uuid("contractor_id").notNull(),
+	s3Key: text("s3_key").notNull(),
+	archiveSha256: text("archive_sha256").notNull(),
+	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
+	byteSize: bigint("byte_size", { mode: "number" }).notNull(),
+	entryCount: integer("entry_count").notNull(),
+	builderVersion: text("builder_version").notNull(),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+}, (table) => [
+	index("ix_submission_archives_contractor").using("btree", table.contractorId.asc().nullsLast().op("uuid_ops")),
+	index("ix_submission_archives_object").using("btree", table.objectId.asc().nullsLast().op("uuid_ops")),
+	foreignKey({
+			columns: [table.revisionId],
+			foreignColumns: [submissionRevisions.id],
+			name: "submission_archives_revision_id_fkey"
+		}),
+	foreignKey({
+			columns: [table.revisionId, table.objectId, table.contractorId],
+			foreignColumns: [submissionRevisions.contractorId, submissionRevisions.id, submissionRevisions.objectId],
+			name: "submission_archives_scope_fk"
+		}),
+	unique("submission_archives_revision_id_key").on(table.revisionId),
+	unique("submission_archives_s3_key_key").on(table.s3Key),
+	check("submission_archives_sha_chk", sql`archive_sha256 ~ '^[0-9a-f]{64}$'::text`),
+	check("submission_archives_size_chk", sql`byte_size > 0`),
+	check("submission_archives_entries_chk", sql`entry_count > 0`),
+]);
+
+export const legalHolds = pgTable("legal_holds", {
+	id: uuid().defaultRandom().primaryKey().notNull(),
+	revisionId: uuid("revision_id").notNull(),
+	objectId: uuid("object_id").notNull(),
+	reason: text().notNull(),
+	placedBy: uuid("placed_by").notNull(),
+	placedAt: timestamp("placed_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	releasedBy: uuid("released_by"),
+	releasedAt: timestamp("released_at", { withTimezone: true, mode: 'string' }),
+	releaseNote: text("release_note"),
+}, (table) => [
+	index("ix_legal_holds_object").using("btree", table.objectId.asc().nullsLast().op("uuid_ops")),
+	index("ix_legal_holds_placed_by").using("btree", table.placedBy.asc().nullsLast().op("uuid_ops")),
+	uniqueIndex("ux_legal_holds_active").using("btree", table.revisionId.asc().nullsLast().op("uuid_ops")).where(sql`(released_at IS NULL)`),
+	foreignKey({
+			columns: [table.revisionId],
+			foreignColumns: [submissionRevisions.id],
+			name: "legal_holds_revision_id_fkey"
+		}),
+	foreignKey({
+			columns: [table.placedBy],
+			foreignColumns: [users.id],
+			name: "legal_holds_placed_by_fkey"
+		}),
+	foreignKey({
+			columns: [table.releasedBy],
+			foreignColumns: [users.id],
+			name: "legal_holds_released_by_fkey"
+		}),
+	foreignKey({
+			columns: [table.revisionId, table.objectId],
+			foreignColumns: [submissionRevisions.id, submissionRevisions.objectId],
+			name: "legal_holds_object_fk"
+		}),
+	check("legal_holds_reason_chk", sql`length(btrim(reason)) >= 10`),
+	check("legal_holds_release_chk", sql`(released_by IS NULL) = (released_at IS NULL)`),
 ]);
 
 export const userRoles = pgTable("user_roles", {

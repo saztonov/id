@@ -1154,3 +1154,43 @@ describe('порядок файлов до и после подачи', () => {
     expect(after.map((f) => f.sortOrder)).toEqual([0, 1]);
   });
 });
+
+describe('состав черновика фиксируется собранным рабочим документом', () => {
+  /**
+   * Регрессия дефекта, найденного на S10.
+   *
+   * `RevisionForFiles.hasBundle` вычислялся коррелирующим подзапросом, в котором
+   * ссылка на внешнюю таблицу шла через `${submissionRevisions.id}`. В запросе
+   * БЕЗ джойнов Drizzle рендерит колонку без имени таблицы, поэтому условие
+   * превращалось в `pb.revision_id = "id"` и связывалось с `pb.id` — то есть
+   * было ложным ВСЕГДА. Следствие: запрет «состав и порядок зафиксированы
+   * разметкой» (§3.3) не срабатывал ни разу, и подрядчик мог переставить файлы
+   * уже после того, как рабочий документ уехал в RD WEB, — при неизменном
+   * `aggregate_manifest_hash` рабочего документа.
+   */
+  it('после сборки рабочего документа порядок файлов не переставляется', async () => {
+    const files = await listFiles(KC.contractor, REVISION_DRAFT);
+    expect(files.length).toBeGreaterThan(1);
+
+    const blobs = await db.query<{ sha256: string }>(`SELECT sha256 FROM stored_blobs LIMIT 1`);
+    const blobSha = blobs[0]?.sha256;
+    expect(blobSha).toBeDefined();
+    await db.query(
+      `INSERT INTO processing_bundles (revision_id, aggregate_manifest_hash, working_pdf_blob_sha256, builder_version)
+         VALUES ('${REVISION_DRAFT}', '${'f'.repeat(64)}', '${blobSha}', 'bundle/1+pdf-lib')`,
+    );
+
+    const response = await as(
+      KC.contractor,
+      'PUT',
+      `/api/v1/revisions/${REVISION_DRAFT}/files/order`,
+      { fileIds: [...files].reverse().map((file) => file.id) },
+    );
+    expect(response.statusCode).toBe(409);
+    expect(response.json<{ detail?: string }>().detail).toMatch(/рабочий документ/i);
+
+    // Порядок не изменился: отказ обязан быть настоящим, а не косметическим.
+    const after = await listFiles(KC.contractor, REVISION_DRAFT);
+    expect(after.map((file) => file.id)).toEqual(files.map((file) => file.id));
+  });
+});

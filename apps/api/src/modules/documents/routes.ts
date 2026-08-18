@@ -371,6 +371,38 @@ function registerConfirmRoute(app: AppInstance): void {
       });
       updateContext({ revisionId: document.revisionId, objectId: document.objectId });
 
+      // §12: нарезка идёт СРАЗУ после подтверждения границ, и ставит её именно
+      // подтверждение. Иначе задача 22 осталась бы написанным и никем не
+      // вызываемым обработчиком — отказ S5 в чистом виде. Отказ постановки не
+      // отменяет подтверждение: решение человека уже записано, а пересобрать
+      // нарезку можно `POST /revisions/{id}/materialize`.
+      try {
+        const { jobId, created } = await enqueueJob(app.db, scope, {
+          type: 'doc.materialize_pdf',
+          payload: tracePayload({ revisionId: document.revisionId, documentId }),
+          dedupeKey: dedupeKeyFor('doc.materialize_pdf', documentId, String(document.version)),
+        });
+        request.log.info(
+          {
+            event: 'job_enqueued',
+            job_type: 'doc.materialize_pdf',
+            job_id: jobId,
+            created,
+            revision_id: document.revisionId,
+          },
+          'нарезка подтверждённого документа поставлена в очередь',
+        );
+      } catch (error) {
+        request.log.error(
+          {
+            event: 'materialize_job_not_enqueued',
+            revision_id: document.revisionId,
+            reason: (error as Error).name,
+          },
+          'нарезка подтверждённого документа не поставлена в очередь',
+        );
+      }
+
       const assignments = await listPageAssignments(app.db, scope, document.revisionId);
       const relations = await listDocumentRelations(app.db, scope, document.revisionId);
 

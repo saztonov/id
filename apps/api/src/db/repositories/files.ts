@@ -175,7 +175,14 @@ export async function findRevisionForFiles(
       contractorId: submissionRevisions.contractorId,
       revisionNo: submissionRevisions.revisionNo,
       status: submissionRevisions.status,
-      hasBundle: sql<boolean>`exists (select 1 from processing_bundles pb where pb.revision_id = ${submissionRevisions.id})`,
+      // Ссылка на внешнюю таблицу написана ТЕКСТОМ, а не через
+      // `${submissionRevisions.id}`. Причина проверена дампом SQL: в запросе
+      // БЕЗ джойнов Drizzle рендерит колонку без имени таблицы, и коррелирующее
+      // условие превращалось в `pb.revision_id = "id"`, где `"id"` связывался с
+      // `pb.id` внутри подзапроса. Условие было ложным всегда, то есть
+      // `hasBundle` был вечным `false`, и запрет «состав зафиксирован
+      // разметкой» (`requireEditableRevision`) не срабатывал ни разу.
+      hasBundle: sql<boolean>`exists (select 1 from processing_bundles pb where pb.revision_id = submission_revisions.id)`,
     })
     .from(submissionRevisions)
     .where(withScope(scope, REVISION_SCOPE, eq(submissionRevisions.id, revisionId)))

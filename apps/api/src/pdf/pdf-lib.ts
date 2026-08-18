@@ -22,6 +22,7 @@
  * к обычному импорту, а всё остальное здесь останется неизменным.
  */
 import { readFile, writeFile } from 'node:fs/promises';
+import { verifyDerivedNote } from './derived-note.js';
 import {
   assertPageCountMatches,
   assertWithinLimits,
@@ -52,8 +53,6 @@ export interface PdfLibDocumentLike {
   setProducer(value: string): void;
   setCreator(value: string): void;
   setSubject(value: string): void;
-  setCreationDate(value: Date): void;
-  setModificationDate(value: Date): void;
 }
 
 export interface PdfLibModule {
@@ -136,8 +135,6 @@ export function asPdfLibModule(loaded: unknown): PdfLibModule {
 export interface PdfLibToolkitOptions {
   readonly maxInputBytes?: number;
   readonly maxTotalInputBytes?: number;
-  /** Подставляется в тестах, чтобы метаданные производной копии были сравнимы. */
-  readonly now?: () => Date;
 }
 
 export function createPdfLibToolkit(
@@ -146,7 +143,6 @@ export function createPdfLibToolkit(
 ): PdfToolkit {
   const maxInputBytes = options.maxInputBytes ?? PDF_LIB_MAX_INPUT_BYTES;
   const maxTotalInputBytes = options.maxTotalInputBytes ?? PDF_LIB_MAX_TOTAL_BYTES;
-  const now = options.now ?? ((): Date => new Date());
 
   const toolkit: PdfToolkit = {
     kind: 'pdf-lib',
@@ -180,7 +176,7 @@ export function createPdfLibToolkit(
         for (const page of copied) target.addPage(page);
       }
 
-      applyDerivedMetadata(target, input.derivedNote, now());
+      applyDerivedMetadata(target, input.derivedNote);
       await writeFile(input.outputPath, await target.save({ useObjectStreams: false }));
       assertPageCountMatches(map.length, target.getPageCount());
 
@@ -188,7 +184,12 @@ export function createPdfLibToolkit(
         pageCount: map.length,
         map,
         toolkit: 'pdf-lib',
-        derivedNoteApplied: input.derivedNote !== undefined,
+        // Проверкой готового файла, а не фактом вызова `setProducer()`: правило
+        // одно на обе реализации (`verifyDerivedNote`), иначе «отметку
+        // поставили» означало бы у каждой своё.
+        derivedNoteApplied:
+          input.derivedNote !== undefined &&
+          (await verifyDerivedNote(input.outputPath, input.derivedNote)),
       };
     },
 
@@ -219,13 +220,15 @@ export function createPdfLibToolkit(
       const copied = await target.copyPages(source, indices);
       for (const page of copied) target.addPage(page);
 
-      applyDerivedMetadata(target, input.derivedNote, now());
+      applyDerivedMetadata(target, input.derivedNote);
       await writeFile(input.outputPath, await target.save({ useObjectStreams: false }));
 
       return {
         pageCount: indices.length,
         toolkit: 'pdf-lib',
-        derivedNoteApplied: input.derivedNote !== undefined,
+        derivedNoteApplied:
+          input.derivedNote !== undefined &&
+          (await verifyDerivedNote(input.outputPath, input.derivedNote)),
       };
     },
   };
@@ -263,16 +266,26 @@ async function loadDocument(
  * встроенная подпись оригинала (если бы она была) к ней не относится. Отметка
  * в метаданных — вспомогательная: источник правды — флаг в БД, потому что
  * метаданные PDF любой редактор перепишет.
+ *
+ * ## Почему дат здесь больше нет
+ *
+ * Раньше сюда писались `/CreationDate` и `/ModDate` текущим временем, а тесты
+ * подставляли фиксированные часы, чтобы результат был сравним. Это и было
+ * признаком дефекта: в тестах документ получался детерминированным, в бою —
+ * нет. Последствие не косметическое. Сборка того же состава второй раз давала
+ * ДРУГИЕ байты, значит другой sha256, значит вторую строку `stored_blobs` и
+ * второй объект в хранилище — при том что докстринг сборки рабочего документа
+ * прямо обещает «та же сборка второй раз пишет тот же объект». Повторная
+ * нарезка по той же причине меняла бы `derived_pdf_blob_sha256`, и хэши
+ * документов в уже собранном архиве переставали бы описывать то, что лежит в
+ * хранилище.
+ *
+ * Дата производства копии — не то, ради чего §13 требует отметки, и хранится
+ * она в БД (`derived_pdf_built_at`), где ей и место.
  */
-function applyDerivedMetadata(
-  document: PdfLibDocumentLike,
-  note: string | undefined,
-  timestamp: Date,
-): void {
+function applyDerivedMetadata(document: PdfLibDocumentLike, note: string | undefined): void {
   if (note === undefined) return;
   document.setProducer(note);
   document.setCreator(note);
   document.setSubject(note);
-  document.setCreationDate(timestamp);
-  document.setModificationDate(timestamp);
 }

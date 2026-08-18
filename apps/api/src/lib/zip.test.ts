@@ -9,7 +9,16 @@
 import { deflateRawSync } from 'node:zlib';
 import { describe, expect, it } from 'vitest';
 
-import { crc32, readZipEntries, ZipError } from './zip.js';
+import {
+  crc32,
+  crc32Finish,
+  crc32Update,
+  readZipEntries,
+  writeZipStream,
+  ZipError,
+  type ZipSink,
+  type ZipSourceEntry,
+} from './zip.js';
 
 const LIMIT = 1024 * 1024;
 
@@ -108,5 +117,93 @@ describe('чтение архива экспорта', () => {
   it('отвергает пустой и бессигнатурный вход', () => {
     expect(() => readZipEntries(new Uint8Array(4), LIMIT)).toThrow(ZipError);
     expect(() => readZipEntries(Buffer.alloc(64, 0x00), LIMIT)).toThrow(/EOCD/);
+  });
+});
+
+// =====================================================================
+// Сборка архива согласованной ревизии (§13, задача 23)
+// =====================================================================
+
+/**
+ * Писатель проверяется ЧИТАТЕЛЕМ, а не собственным утверждением.
+ *
+ * Обе стороны написаны здесь же, и «мой архив разбирается моим же разбором» —
+ * слабое доказательство ровно до тех пор, пока читатель не проверяет CRC-32,
+ * размеры и структуру каталога. Он проверяет всё три, поэтому круг замыкается
+ * содержательно: испорченный писатель роняет чтение.
+ */
+function collect(): { sink: ZipSink; bytes: () => Buffer } {
+  const chunks: Buffer[] = [];
+  return {
+    sink: {
+      write: (chunk) => {
+        chunks.push(Buffer.from(chunk));
+      },
+    },
+    bytes: () => Buffer.concat(chunks),
+  };
+}
+
+function entry(name: string, content: Buffer, chunkSize = content.length): ZipSourceEntry {
+  return {
+    name,
+    byteLength: content.length,
+    open: function* () {
+      for (let offset = 0; offset < content.length; offset += Math.max(1, chunkSize)) {
+        yield content.subarray(offset, offset + Math.max(1, chunkSize));
+      }
+    },
+  };
+}
+
+describe('сборка архива', () => {
+  it('собирает архив, который читается обратно побайтово', async () => {
+    const { sink, bytes } = collect();
+    const result = await writeZipStream(
+      [entry('manifest.json', MD), entry('documents/001.pdf', HTML)],
+      sink,
+    );
+
+    const archive = bytes();
+    expect(result.entryCount).toBe(2);
+    expect(result.byteSize).toBe(archive.length);
+
+    const entries = readZipEntries(archive, LIMIT);
+    expect(entries.map((item) => item.name)).toEqual(['manifest.json', 'documents/001.pdf']);
+    expect(entries[0]?.bytes.toString('utf8')).toBe(MD.toString('utf8'));
+    expect(entries[1]?.bytes.toString('utf8')).toBe(HTML.toString('utf8'));
+  });
+
+  it('содержимое, приходящее кусками, не меняет результат', async () => {
+    const whole = collect();
+    await writeZipStream([entry('a.bin', MD)], whole.sink);
+    const chunked = collect();
+    await writeZipStream([entry('a.bin', MD, 3)], chunked.sink);
+    // Побайтовое совпадение — это ещё и детерминизм: время записей
+    // зафиксировано, поэтому sha256 архива описывает содержимое, а не момент.
+    expect(chunked.bytes().equals(whole.bytes())).toBe(true);
+  });
+
+  it('расхождение заявленного и фактического размера — отказ, а не битый архив', async () => {
+    const lying: ZipSourceEntry = {
+      name: 'a.bin',
+      byteLength: MD.length + 1,
+      open: () => [MD],
+    };
+    await expect(writeZipStream([lying], collect().sink)).rejects.toThrow(/заявленных/);
+  });
+
+  it('пустой архив и повтор имени отвергаются', async () => {
+    await expect(writeZipStream([], collect().sink)).rejects.toThrow(/без записей/);
+    await expect(
+      writeZipStream([entry('a.bin', MD), entry('a.bin', HTML)], collect().sink),
+    ).rejects.toThrow(/дважды/);
+  });
+
+  it('накопительный CRC-32 совпадает с одноразовым', () => {
+    const halves = [MD.subarray(0, 5), MD.subarray(5)];
+    let crc = 0xffffffff;
+    for (const half of halves) crc = crc32Update(crc, half);
+    expect(crc32Finish(crc)).toBe(crc32(MD));
   });
 });

@@ -331,6 +331,9 @@ describe('bundle.build', () => {
     return {
       loadPlan: () => Promise.resolve(PLAN),
       findExistingBundle: () => Promise.resolve(null),
+      // По умолчанию переиспользовать нечего: у ревизии нет предков.
+      findReusableWorkingPdf: () => Promise.resolve(null),
+      workingPdfExists: () => Promise.resolve(true),
       fetchOriginal: (_key, path) => writeFile(path, 'PDF'),
       storeWorkingPdf: () =>
         Promise.resolve({ sha256: 'e'.repeat(64), sizeBytes: 4096, s3Key: 'blobs/ee' }),
@@ -389,6 +392,84 @@ describe('bundle.build', () => {
 
     expect(fetchOriginal).not.toHaveBeenCalled();
     expect(emitted[0]?.payload).toMatchObject({ bundleId: 'bundle-0', reused: true });
+  });
+
+  /**
+   * §3: «результаты предыдущей ревизии переиспользуются только при совпадении
+   * `aggregate_manifest_hash`». Совпадение ищет репозиторий по цепочке
+   * `parent_revision_id`; здесь проверяется поведение задачи при найденном и
+   * при негодном кандидате.
+   */
+  const REUSABLE = {
+    revisionId: 'parent-revision',
+    workingPdfBlobSha256: 'f'.repeat(64),
+    sizeBytes: 8192,
+    s3Key: `blobs/ff/ff/${'f'.repeat(64)}`,
+    pageCount: 3,
+  };
+
+  it('состав, совпавший с предыдущей ревизией, не пересобирается заново', async () => {
+    const emitted: Emitted[] = [];
+    const fetchOriginal = vi.fn(() => Promise.resolve());
+    const storeWorkingPdf = vi.fn(() =>
+      Promise.resolve({ sha256: 'e'.repeat(64), sizeBytes: 4096, s3Key: 'blobs/ee' }),
+    );
+    const createBundle = vi.fn((_input: CreateBundleInput) =>
+      Promise.resolve({ bundle: { id: 'bundle-2', pageCount: 3 }, created: true }),
+    );
+
+    const handler = createBundleBuildHandler(
+      bundleDeps({
+        fetchOriginal,
+        storeWorkingPdf,
+        createBundle,
+        findReusableWorkingPdf: () => Promise.resolve(REUSABLE),
+      }),
+    );
+    await handler(makeContext({ revisionId: REVISION }, emitted));
+
+    // 86 МБ не качаются и не склеиваются, но своя строка bundle и своя карта
+    // страниц у ревизии появляются: идентификаторы страниц у неё собственные.
+    expect(fetchOriginal).not.toHaveBeenCalled();
+    expect(storeWorkingPdf).not.toHaveBeenCalled();
+    const input = createBundle.mock.calls[0]?.[0];
+    expect(input?.workingPdf.sha256).toBe(REUSABLE.workingPdfBlobSha256);
+    expect(input?.pages).toEqual([
+      { workingPageIndex: 0, sourcePageId: 'page-1' },
+      { workingPageIndex: 1, sourcePageId: 'page-2' },
+      { workingPageIndex: 2, sourcePageId: 'page-3' },
+    ]);
+    expect(emitted[0]?.payload).toMatchObject({
+      reused: true,
+      reusedFromRevisionId: 'parent-revision',
+    });
+  });
+
+  it('переиспользование не берётся на веру: без объекта в хранилище идёт обычная сборка', async () => {
+    const fetchOriginal = vi.fn((_key: string, path: string) => writeFile(path, 'PDF'));
+    const handler = createBundleBuildHandler(
+      bundleDeps({
+        fetchOriginal,
+        findReusableWorkingPdf: () => Promise.resolve(REUSABLE),
+        workingPdfExists: () => Promise.resolve(false),
+      }),
+    );
+
+    await handler(makeContext({ revisionId: REVISION }, []));
+    expect(fetchOriginal).toHaveBeenCalled();
+  });
+
+  it('расхождение числа страниц отменяет переиспользование', async () => {
+    const fetchOriginal = vi.fn((_key: string, path: string) => writeFile(path, 'PDF'));
+    const handler = createBundleBuildHandler(
+      bundleDeps({
+        fetchOriginal,
+        findReusableWorkingPdf: () => Promise.resolve({ ...REUSABLE, pageCount: 2 }),
+      }),
+    );
+
+    await handler(makeContext({ revisionId: REVISION }, []));
+    expect(fetchOriginal).toHaveBeenCalled();
   });
 
   it('препятствия состава отвергают сборку до скачивания файлов', async () => {

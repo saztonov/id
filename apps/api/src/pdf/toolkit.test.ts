@@ -192,6 +192,34 @@ describe('аргументы qpdf', () => {
     expect(args).toContain('1-3');
   });
 
+  it('первичным входом при отметке о производности идёт шаблон, а не --empty', () => {
+    // §13 требует отметку в метаданных, а у qpdf нет опции для `/Info`. Её
+    // источник — первичный вход: документация прямо говорит, что
+    // document-level данные берутся из него, а `--empty` от них ОТКАЗЫВАЕТСЯ.
+    // Проверяется состав аргументов, потому что выполнить qpdf на этой машине
+    // нельзя (ADR-0003), а собрать команду неверно — можно.
+    const build = buildArgs({ parts: [part('f1', 2)], outputPath: '/tmp/out.pdf' }, [
+      '/tmp/note.pdf',
+    ]);
+    expect(build[0]).toBe('/tmp/note.pdf');
+    expect(build).not.toContain('--empty');
+    // Страницы по-прежнему берутся только из спецификаций --pages: шаблон в
+    // список страниц не попадает, иначе в выходе оказался бы лишний лист.
+    expect(build.filter((arg) => arg === '/tmp/note.pdf')).toHaveLength(1);
+
+    const extract = extractArgs(
+      {
+        sourcePath: '/tmp/in.pdf',
+        outputPath: '/tmp/out.pdf',
+        firstPageIndex: 3,
+        lastPageIndex: 3,
+      },
+      ['/tmp/note.pdf'],
+    );
+    expect(extract[0]).toBe('/tmp/note.pdf');
+    expect(extract).toContain('4-4');
+  });
+
   it('detectQpdf не бросает и честно отвечает о наличии бинарника', async () => {
     // На машине разработки qpdf отсутствует (ADR-0003), в образе воркера он
     // есть. Тест проверяет форму ответа, а не состояние конкретной машины.

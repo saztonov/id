@@ -225,7 +225,7 @@ describe.skipIf(PDF_LIB_PATH === null)('рабочий документ реви
     const pdfLib: PdfLibModule = asPdfLibModule(loaded);
     // Фиксированное «сейчас»: иначе метаданные производной копии зависели бы от
     // момента прогона и повторная сборка давала бы другие байты.
-    toolkit = createPdfLibToolkit(pdfLib, { now: () => new Date(Date.UTC(2026, 0, 1)) });
+    toolkit = createPdfLibToolkit(pdfLib);
     workDir = await mkdtemp(join(tmpdir(), 'id-bundle-test-'));
     // Запас по времени задан явно: `pdf-lib` — крупный CJS-пакет, и на полном
     // прогоне сьюта его загрузка конкурирует за процессор с двумя десятками

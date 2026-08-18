@@ -143,6 +143,56 @@ export function artifactKey(recognitionRunId: string, kind: ArtifactKind): strin
   return `${ARTIFACT_PREFIX}/${recognitionRunId}/${kind}.${ARTIFACT_EXTENSIONS[kind]}`;
 }
 
+/** Производная нарезка логического документа (§13, задача 22). */
+const DOCUMENT_PREFIX = 'documents';
+
+/**
+ * Ключ производного PDF логического документа: `documents/{documentId}.pdf`.
+ *
+ * Адресуется ДОКУМЕНТОМ, а не содержимым, в отличие от оригиналов. Причин две.
+ *
+ * Во-первых, нарезка принадлежит ровно одному документу. Content-addressing
+ * склеил бы две побайтово одинаковых нарезки разных документов (а такое бывает:
+ * один и тот же сертификат, приложенный к двум актам, даёт одинаковые байты) в
+ * один объект, и удаление по retention одной ревизии унесло бы файл другой.
+ * `storage.gc` пришлось бы считать ссылки на объект, которых в схеме нет:
+ * `logical_documents.derived_pdf_blob_sha256` — это хэш ЦЕЛОСТНОСТИ, а не
+ * внешний ключ на `stored_blobs`, и заводить его таковым значило бы объявить
+ * производную копию блобом наравне с оригиналом.
+ *
+ * Во-вторых, ключ детерминирован, поэтому повторная нарезка того же документа
+ * перезаписывает свой файл, а не плодит осиротевшие копии при каждом повторе
+ * задачи. Именно этим порядком закрыт мусор от неудачной сборки bundle (S5).
+ */
+export function documentPdfKey(documentId: string): string {
+  if (!UUID_PATTERN.test(documentId)) {
+    throw new InvalidStorageKeyError('Идентификатор логического документа обязан быть uuid');
+  }
+  return `${DOCUMENT_PREFIX}/${documentId}.pdf`;
+}
+
+/** Архив согласованной ревизии (§13, задача 23). */
+const ARCHIVE_PREFIX = 'archive';
+
+/**
+ * Ключ архива: `archive/{revisionId}/rev{N}-approved.zip` (§13).
+ *
+ * §13 рисует имя `rev{N}-approved.zip` внутри поддерева ревизии; поддерево у
+ * нас выражено идентификатором ревизии, потому что код объекта и номер поставки
+ * в ключ не попадают (см. заголовок файла). Номер ревизии в имени остаётся: он
+ * не является сведением об участниках, зато делает выгруженный файл узнаваемым
+ * без обращения к порталу — ровно то, ради чего §13 его и называет.
+ */
+export function archiveKey(revisionId: string, revisionNo: number): string {
+  if (!UUID_PATTERN.test(revisionId)) {
+    throw new InvalidStorageKeyError('Идентификатор ревизии поставки обязан быть uuid');
+  }
+  if (!Number.isInteger(revisionNo) || revisionNo <= 0) {
+    throw new InvalidStorageKeyError('Номер ревизии обязан быть положительным целым');
+  }
+  return `${ARCHIVE_PREFIX}/${revisionId}/rev${revisionNo}-approved.zip`;
+}
+
 /** Кэш превью страниц (§13) — только при `PREVIEW_MODE=cached`. */
 const PREVIEW_PREFIX = 'preview';
 

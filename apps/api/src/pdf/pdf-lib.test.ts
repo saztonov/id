@@ -73,7 +73,7 @@ describe.skipIf(PDF_LIB_PATH === null)('createPdfLibToolkit на настоящ�
   beforeAll(async () => {
     const loaded: unknown = await import(pathToFileURL(PDF_LIB_PATH ?? '').href);
     const pdfLib: PdfLibModule = asPdfLibModule(loaded);
-    toolkit = createPdfLibToolkit(pdfLib, { now: () => new Date(Date.UTC(2026, 0, 1)) });
+    toolkit = createPdfLibToolkit(pdfLib);
     workDir = await mkdtemp(join(tmpdir(), 'id-pdf-lib-'));
   });
 
