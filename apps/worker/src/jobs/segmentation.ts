@@ -267,7 +267,10 @@ function toPageInputs(input: SegmentationInput): readonly PageInput[] {
     text: page.text,
     blockTypes: page.blockTypes,
     rotation: page.rotation,
-    manual: null,
+    // Ручная метка (§8.2, фаза 3): репозиторий поднимает её из
+    // `page_classifications` (source='manual'), фаза 1 не переопределяет и
+    // при пересборке записывает обратно — метка переживает прогоны.
+    manual: page.manual,
   }));
 }
 

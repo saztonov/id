@@ -198,3 +198,33 @@ export const confirmRequestSchema = z.object({
     .optional(),
   needsReview: z.boolean().optional(),
 });
+
+// =====================================================================
+// Ручная разметка страницы (§8.2, фаза 3)
+// =====================================================================
+
+export const manualLabelParamSchema = z.object({
+  revisionId: z.uuid(),
+  sourcePageId: z.uuid(),
+});
+
+/**
+ * Тело ручной метки. Метки закрыты CHECK-ом БД и здесь: значение приходит из
+ * рук, а не из конвейера, и опечатка обязана быть отвергнута на входе.
+ * Совместность полей (роль только у A-ROLE, тип только у B-DOC/I-DOC)
+ * проверяет репозиторий — единственная реализация правила на оба маршрута.
+ */
+export const manualLabelRequestSchema = z.object({
+  label: z.enum(['B-DOC', 'I-DOC', 'A-ROLE', 'U']),
+  docTypeCode: z.string().min(1).max(64).nullable().default(null),
+  pageRoleCode: z.string().min(1).max(64).nullable().default(null),
+});
+
+export const manualLabelResponseSchema = z.object({
+  revisionId: z.uuid(),
+  sourcePageId: z.uuid(),
+  label: z.string(),
+  docTypeCode: z.string().nullable(),
+  pageRoleCode: z.string().nullable(),
+  source: z.literal('manual'),
+});

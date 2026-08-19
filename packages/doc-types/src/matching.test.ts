@@ -200,6 +200,43 @@ describe('matchDocTypes — зона заголовка', () => {
     expect(codesOf(matchDocTypes(last, [QUALITY_DOC]))).toEqual(['fake_quality_doc']);
     expect(matchDocTypes(past, [QUALITY_DOC])).toEqual([]);
   });
+
+  // Класс дефекта temp/MD/new: в бланке АОСР по приказу №344/пр титул стоит
+  // 28–31-й строкой, ниже общего окна. Индивидуальное окно типа обязано его
+  // доставать, НЕ расширяя зону соседним типам.
+  it('индивидуальное окно типа достаёт заголовок ниже общего окна', () => {
+    const deep = fakeType('fake_deep', {
+      anchors: ['ДОКУМЕНТ\\s+О\\s+КАЧЕСТВЕ'],
+      headingLines: 40,
+    });
+    const text = `${filler(30)}\nДОКУМЕНТ О КАЧЕСТВЕ № 1`;
+
+    expect(codesOf(matchDocTypes(text, [deep, QUALITY_DOC]))).toEqual(['fake_deep']);
+  });
+
+  it('индивидуальное окно не может СУЗИТЬ зону: явная опция задаёт минимум', () => {
+    const narrow = fakeType('fake_narrow', {
+      anchors: ['ДОКУМЕНТ\\s+О\\s+КАЧЕСТВЕ'],
+      headingLines: 3,
+    });
+    const text = `${filler(10)}\nДОКУМЕНТ О КАЧЕСТВЕ № 1`;
+
+    expect(codesOf(matchDocTypes(text, [narrow]))).toEqual(['fake_narrow']);
+  });
+
+  it('индивидуальное окно работает и при явной опции вызывающего', () => {
+    // classify всегда передаёт общее окно явно; «явная опция побеждает»
+    // означала бы, что индивидуальное окно не работает нигде в проде.
+    const deep = fakeType('fake_deep', {
+      anchors: ['ДОКУМЕНТ\\s+О\\s+КАЧЕСТВЕ'],
+      headingLines: 40,
+    });
+    const text = `${filler(30)}\nДОКУМЕНТ О КАЧЕСТВЕ № 1`;
+
+    expect(codesOf(matchDocTypes(text, [deep], { headingLines: DEFAULT_HEADING_LINES }))).toEqual([
+      'fake_deep',
+    ]);
+  });
 });
 
 describe('matchDocTypes — отрицательные якоря', () => {

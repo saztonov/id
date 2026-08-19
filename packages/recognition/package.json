@@ -1,5 +1,5 @@
 {
-  "name": "@id/fixtures",
+  "name": "@id/recognition",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -15,14 +15,10 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint src --max-warnings 0",
-    "test": "vitest run --passWithNoTests",
-    "generate": "tsc -p tsconfig.build.json && node dist/generate.js",
-    "generate:corpus": "tsc -p tsconfig.build.json && node dist/generate-corpus.js"
+    "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
-    "@id/contracts": "workspace:*",
-    "@id/recognition": "workspace:*",
-    "pdf-lib": "1.17.1"
+    "zod": "4.4.3"
   },
   "devDependencies": {
     "@types/node": "26.2.0",

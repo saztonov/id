@@ -359,6 +359,104 @@ export function normalizeRegistryName(value: string): string {
 }
 
 // =====================================================================
+// Раскладка граф
+// =====================================================================
+
+/** Где в строке реестра наименование, номер, организация и дата. */
+interface RegistryColumns {
+  readonly name: number;
+  readonly number: number;
+  readonly org: number | null;
+  readonly date: number | null;
+}
+
+/** Историческая раскладка корпуса: №пп | наименование | номер | организация. */
+const POSITIONAL_COLUMNS: RegistryColumns = { name: 1, number: 2, org: 3, date: null };
+
+/**
+ * Раскладка граф по ЗАГОЛОВКУ, а не по позиции.
+ *
+ * Формы реестров расходятся: канонический реестр приложений корпуса держит
+ * номер в третьей графе и организацию в четвёртой, а реестры temp/MD/new
+ * («№ п/п | Наименование материала | Наименование документа | Номер документа |
+ * Дата») сдвигают номер в четвёртую графу, и позиционный разбор читал
+ * НАЗВАНИЕ документа как его номер. Шапка при этом есть всегда — реестр
+ * открывается только канонической шапкой, — и она же называет графы.
+ *
+ * Наименованием документа считается графа со словами «наименование» и
+ * «документ» (в реестре материалов первая «наименование…» — это материал, а
+ * не документ). Из даты исключается графа номера: в корпусе её заголовок —
+ * «№ чертежа, акта, разрешения и дата…», и дата оттуда разбирается вместе с
+ * номером (`parseNumberCell`).
+ */
+function mapColumns(header: readonly string[] | null): RegistryColumns {
+  if (header === null) return POSITIONAL_COLUMNS;
+  const lower = header.map((cell) => cell.toLowerCase());
+
+  const nameDoc = lower.findIndex((c) => c.includes('наименован') && c.includes('документ'));
+  const name = nameDoc >= 0 ? nameDoc : lower.findIndex((c) => c.includes('наименован'));
+  const number = lower.findIndex(
+    (c, i) => i > 0 && i !== name && (c.includes('номер') || c.includes('№')),
+  );
+  const org = lower.findIndex((c) => c.includes('организац'));
+  const date = lower.findIndex(
+    (c, i) => i !== number && i !== name && (c.includes('дата') || c.includes('срок')),
+  );
+
+  return {
+    name: name >= 0 ? name : POSITIONAL_COLUMNS.name,
+    number: number >= 0 ? number : POSITIONAL_COLUMNS.number,
+    org: org >= 0 ? org : number >= 0 ? null : POSITIONAL_COLUMNS.org,
+    date: date >= 0 ? date : null,
+  };
+}
+
+interface CellDates {
+  readonly validFrom: string | null;
+  readonly validTo: string | null;
+  readonly issuedAt: string | null;
+}
+
+const ANY_DATE = new RegExp(DATE_PART, 'gu');
+
+/** Есть ли в ячейке хоть что-то похожее на дату. Без флага `g` — для `test`. */
+const HAS_DATE = new RegExp(DATE_PART, 'u');
+
+/**
+ * Разбирает отдельную графу «Дата».
+ *
+ * В отличие от графы номера, здесь дата бывает и голой («31.12.2024 г.»), без
+ * «от» и «с … по». Две даты в одной ячейке читаются как интервал действия.
+ * Невозможная дата («31.04.2026») даёт null — решение о предупреждении
+ * принимает вызывающий, у него есть номер строки.
+ */
+function parseDateCell(cell: string): CellDates {
+  const range = VALIDITY_RANGE.exec(cell);
+  if (range !== null) {
+    return {
+      validFrom: toIsoDate(range[1], range[2], range[3]),
+      validTo: toIsoDate(range[4], range[5], range[6]),
+      issuedAt: null,
+    };
+  }
+  const found = [...cell.matchAll(ANY_DATE)];
+  if (found.length >= 2) {
+    const [first, second] = found;
+    return {
+      validFrom: toIsoDate(first?.[1], first?.[2], first?.[3]),
+      validTo: toIsoDate(second?.[1], second?.[2], second?.[3]),
+      issuedAt: null,
+    };
+  }
+  const single = found[0];
+  return {
+    validFrom: null,
+    validTo: null,
+    issuedAt: single === undefined ? null : toIsoDate(single[1], single[2], single[3]),
+  };
+}
+
+// =====================================================================
 // Разбор реестра
 // =====================================================================
 
@@ -376,7 +474,9 @@ export function parseAnnexRegistry(input: RegistryParseInput): RegistryParseResu
 
   let open = false;
   let columns = 0;
+  let layout: RegistryColumns = POSITIONAL_COLUMNS;
   let sectionTitle: string | null = null;
+  const continuationRows = new Set<number>();
 
   for (const page of input.pages) {
     let accepted = 0;
@@ -416,13 +516,14 @@ export function parseAnnexRegistry(input: RegistryParseInput): RegistryParseResu
         }
         open = true;
         columns = (table.header ?? []).length;
+        layout = mapColumns(table.header);
         sectionTitle = null;
       } else if (!looksLikeRegistryTable(table, columns)) {
         continue;
       }
 
       accepted += 1;
-      collectRows(table, columns, sectionTitle, page, rows, warnings);
+      collectRows(table, columns, layout, sectionTitle, page, rows, warnings, continuationRows);
     }
 
     // Страница без единой строки закрывает реестр. Иначе состояние «реестр
@@ -438,7 +539,7 @@ export function parseAnnexRegistry(input: RegistryParseInput): RegistryParseResu
     }
   }
 
-  warnings.push(...auditNumbering(rows));
+  warnings.push(...auditNumbering(rows, continuationRows));
 
   return { rows, warnings };
 }
@@ -446,11 +547,46 @@ export function parseAnnexRegistry(input: RegistryParseInput): RegistryParseResu
 function collectRows(
   table: MdTable,
   columns: number,
+  layout: RegistryColumns,
   sectionTitle: string | null,
   page: RegistryPageInput,
   rows: ParsedRegistryRow[],
   warnings: string[],
+  continuationRows: Set<number>,
 ): void {
+  const buildRow = (cells: readonly string[], rowNo: number): ParsedRegistryRow => {
+    const number = parseNumberCell(cells[layout.number] ?? '');
+    const dateCellRaw = layout.date === null ? '' : (cells[layout.date] ?? '');
+    const dates = parseDateCell(dateCellRaw);
+    if (
+      HAS_DATE.test(dateCellRaw) &&
+      dates.validFrom === null &&
+      dates.validTo === null &&
+      dates.issuedAt === null
+    ) {
+      warnings.push(`строка ${rowNo}: дата «${dateCellRaw}» не распознана или невозможна`);
+    }
+
+    const normalized =
+      number.comparable && number.docNoRaw !== null ? normalizeDocNo(number.docNoRaw) : null;
+    const orgCell = layout.org === null ? undefined : cells[layout.org];
+
+    return {
+      rowNo,
+      sectionTitle,
+      docNameRaw: cells[layout.name] ?? '',
+      docNoRaw: number.docNoRaw,
+      orgRaw: orgCell === undefined || orgCell === '' ? null : orgCell,
+      docNoNorm: normalized?.normalized ?? null,
+      docNoFolded: normalized?.folded ?? null,
+      // Даты из графы номера точнее датой из отдельной графы «Дата»: форма
+      // записи («от…», «с… по…») определяет тип, а голая дата — только заливка.
+      validFrom: number.validFrom ?? dates.validFrom,
+      validTo: number.validTo ?? dates.validTo,
+      issuedAt: number.issuedAt ?? dates.issuedAt,
+    };
+  };
+
   for (const cells of table.rows) {
     if (cells.every((cell) => cell === '')) continue;
 
@@ -464,8 +600,19 @@ function collectRows(
 
     const rowNoRaw = cells[0] ?? '';
     if (!POSITION_NO.test(rowNoRaw)) {
-      // Хвост переноса ячейки: `| | A240C, д.8 | | |`. Это НЕ строка реестра, и
-      // нумерацию она не сдвигает — иначе позиция 18 стала бы позицией 19, и
+      // Строка без номера позиции — это либо хвост переноса ячейки
+      // (`| | A240C, д.8 | | |`), либо ДОПОЛНИТЕЛЬНЫЙ документ той же позиции:
+      // реестр материалов temp/MD/new пишет у одного материала несколько
+      // документов, и только первая строка несёт № п/п. Различает их графа
+      // номера: у хвоста переноса она пуста, у документа — сравнима.
+      const continuation = parseNumberCell(cells[layout.number] ?? '');
+      const previous = rows[rows.length - 1];
+      if (continuation.comparable && previous !== undefined) {
+        rows.push(buildRow(cells, previous.rowNo));
+        continuationRows.add(rows.length - 1);
+        continue;
+      }
+      // Нумерацию хвост не сдвигает — иначе позиция 18 стала бы позицией 19, и
       // сверка разъехалась бы на всём продолжении таблицы.
       warnings.push(
         `страница ${page.sourcePageId}: строка без номера позиции отброшена как хвост переноса ячейки` +
@@ -474,27 +621,12 @@ function collectRows(
       continue;
     }
 
-    const number = parseNumberCell(cells[2] ?? '');
     const rowNo = Number(rowNoRaw);
-    if (number.docNoRaw === null) {
+    const row = buildRow(cells, rowNo);
+    if (row.docNoRaw === null) {
       warnings.push(`строка ${rowNo}: номер документа не указан — сверка по номеру невозможна`);
     }
-
-    const normalized =
-      number.comparable && number.docNoRaw !== null ? normalizeDocNo(number.docNoRaw) : null;
-
-    rows.push({
-      rowNo,
-      sectionTitle,
-      docNameRaw: cells[1] ?? '',
-      docNoRaw: number.docNoRaw,
-      orgRaw: cells[3] === undefined || cells[3] === '' ? null : cells[3],
-      docNoNorm: normalized?.normalized ?? null,
-      docNoFolded: normalized?.folded ?? null,
-      validFrom: number.validFrom,
-      validTo: number.validTo,
-      issuedAt: number.issuedAt,
-    });
+    rows.push(row);
   }
 }
 
@@ -506,11 +638,18 @@ function collectRows(
  * дублями двенадцать нормальных строк, а такое предупреждение инженер
  * перестаёт читать вместе со всеми остальными (§9.1).
  */
-function auditNumbering(rows: readonly ParsedRegistryRow[]): string[] {
+function auditNumbering(
+  rows: readonly ParsedRegistryRow[],
+  continuationRows: ReadonlySet<number>,
+): string[] {
   const warnings: string[] = [];
   const bySection = new Map<string, number[]>();
 
-  for (const row of rows) {
+  for (const [index, row] of rows.entries()) {
+    // Строка-продолжение позиции (дополнительный документ, см. `collectRows`)
+    // номер позиции не несёт и в аудите нумерации не участвует: её повтор —
+    // конструкция разбора, а не сбой реестра.
+    if (continuationRows.has(index)) continue;
     const key = row.sectionTitle ?? '';
     const list = bySection.get(key);
     if (list === undefined) bySection.set(key, [row.rowNo]);

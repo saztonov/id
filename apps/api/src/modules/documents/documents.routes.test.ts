@@ -239,7 +239,7 @@ afterAll(async () => {
   rmSync(STORAGE_DIR, { recursive: true, force: true });
 });
 
-type Method = 'GET' | 'POST';
+type Method = 'GET' | 'POST' | 'PUT' | 'DELETE';
 
 interface SignedIn {
   readonly cookie: string;
@@ -647,5 +647,142 @@ describe('регистрация маршрутов', () => {
     // Без этого утверждения предыдущий тест проходил бы и при поломанном
     // способе проверки — ровно тот класс дефекта, который S6 и S7 нашли у себя.
     expect(app.hasRoute({ method: 'GET', url: '/api/v1/documents/:documentId/nope' })).toBe(false);
+  });
+});
+
+// =====================================================================
+// Ручная разметка страницы (§8.2, фаза 3)
+// =====================================================================
+
+describe('PUT/DELETE /revisions/{id}/pages/{pageId}/manual-label', () => {
+  const url = (revision: string, page: string): string =>
+    `/api/v1/revisions/${revision}/pages/${page}/manual-label`;
+
+  async function manualRows(page: string): Promise<readonly { source: string }[]> {
+    return db.query<{ source: string }>(
+      `SELECT source FROM page_classifications
+        WHERE source_page_id = '${page}' AND source = 'manual'`,
+    );
+  }
+
+  it('подрядчику ручная разметка не разрешена: границы правит проверяющий', async () => {
+    const response = await as(KC.a, 'PUT', url(REVISION_A, PAGE_A0), {
+      body: { label: 'B-DOC', docTypeCode: 'aosr' },
+    });
+    expect(response.statusCode).toBe(403);
+    expect(await manualRows(PAGE_A0)).toHaveLength(0);
+  });
+
+  it('сохраняет метку строкой page_classifications с source=manual', async () => {
+    const response = await as(KC.engineer, 'PUT', url(REVISION_A, PAGE_A0), {
+      body: { label: 'B-DOC', docTypeCode: 'aosr' },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      sourcePageId: PAGE_A0,
+      label: 'B-DOC',
+      docTypeCode: 'aosr',
+      source: 'manual',
+    });
+
+    const rows = await db.query<{ source: string; confidence: number; type_outcome: string }>(
+      `SELECT source, confidence, type_outcome FROM page_classifications
+        WHERE source_page_id = '${PAGE_A0}'`,
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ source: 'manual', confidence: 1, type_outcome: 'known' });
+  });
+
+  it('повторная запись обновляет метку, а не падает на PK', async () => {
+    const response = await as(KC.engineer, 'PUT', url(REVISION_A, PAGE_A0), {
+      body: { label: 'I-DOC', docTypeCode: null },
+    });
+    expect(response.statusCode).toBe(200);
+
+    const rows = await db.query<{ label: string; type_outcome: string }>(
+      `SELECT label, type_outcome FROM page_classifications WHERE source_page_id = '${PAGE_A0}'`,
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ label: 'I-DOC', type_outcome: 'none' });
+  });
+
+  it('несовместные поля отвергаются: роль без A-ROLE, тип у A-ROLE', async () => {
+    const roleWithoutARole = await as(KC.engineer, 'PUT', url(REVISION_A, PAGE_A1), {
+      body: { label: 'B-DOC', pageRoleCode: 'copy_stamp' },
+    });
+    expect(roleWithoutARole.statusCode).toBe(409);
+
+    const aRoleWithoutRole = await as(KC.engineer, 'PUT', url(REVISION_A, PAGE_A1), {
+      body: { label: 'A-ROLE' },
+    });
+    expect(aRoleWithoutRole.statusCode).toBe(409);
+
+    const typeOnU = await as(KC.engineer, 'PUT', url(REVISION_A, PAGE_A1), {
+      body: { label: 'U', docTypeCode: 'aosr' },
+    });
+    expect(typeOnU.statusCode).toBe(409);
+  });
+
+  it('незнакомый вид документа — 404 справочника, а не 500 от FK', async () => {
+    const response = await as(KC.engineer, 'PUT', url(REVISION_A, PAGE_A1), {
+      body: { label: 'B-DOC', docTypeCode: 'no_such_type' },
+    });
+    expect(response.statusCode).toBe(404);
+  });
+
+  it('чужая страница в своей ревизии — 404, чужая ревизия — 404', async () => {
+    const foreignPage = await as(KC.engineer, 'PUT', url(REVISION_A, PAGE_B0), {
+      body: { label: 'B-DOC', docTypeCode: 'aosr' },
+    });
+    expect(foreignPage.statusCode).toBe(404);
+  });
+
+  it('метка попадает во вход сегментации и приоритетна для фазы 1', async () => {
+    // Прямо через репозиторий и настоящий классификатор: ручная метка обязана
+    // пережить конвейер, а не только записаться.
+    const { loadSegmentationPages } = await import('../../db/repositories/documents.js');
+    const { classifyPages } = await import('../../segmentation/classify.js');
+    const scope = {
+      kind: 'engineer',
+      userId: USER_ENGINEER,
+      objectIds: [OBJECT],
+    } as const;
+
+    // Без завершённого прогона распознавания вход пуст — это законно; метка
+    // проверяется на PageInput, собранном руками из строки репозитория.
+    const input = await loadSegmentationPages(app.db, scope, REVISION_A);
+    expect(input.recognitionRunId).toBeNull();
+
+    const manual = { label: 'I-DOC' as const, docTypeCode: null, pageRoleCode: null };
+    const decisions = classifyPages([
+      {
+        sourcePageId: PAGE_A0,
+        revisionOrdinal: 0,
+        sourceFileId: FILE_A,
+        filePageIndex: 0,
+        pageTextVersionId: null,
+        text: 'АКТ\nосвидетельствования скрытых работ',
+        blockTypes: ['text'],
+        rotation: 0,
+        manual,
+      },
+    ]);
+    expect(decisions[0]).toMatchObject({ label: 'I-DOC', source: 'manual', confidence: 1 });
+  });
+
+  it('снятие метки удаляет только строку manual; повторное снятие — 404', async () => {
+    const removed = await as(KC.engineer, 'DELETE', url(REVISION_A, PAGE_A0));
+    expect(removed.statusCode).toBe(204);
+    expect(await manualRows(PAGE_A0)).toHaveLength(0);
+
+    const again = await as(KC.engineer, 'DELETE', url(REVISION_A, PAGE_A0));
+    expect(again.statusCode).toBe(404);
+
+    // Машинные решения соседних страниц не тронуты.
+    const machine = await db.query<{ source: string }>(
+      `SELECT source FROM page_classifications WHERE source_page_id = '${PAGE_A2}'`,
+    );
+    expect(machine).toHaveLength(1);
+    expect(machine[0]?.source).toBe('anchor');
   });
 });

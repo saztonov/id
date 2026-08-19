@@ -16,6 +16,7 @@
     "format": "prettier --write .",
     "format:check": "node tools/scripts/format-check.mjs",
     "db:probe": "pnpm --filter @id/db-harness probe",
+    "harness:run": "pnpm --filter @id/check-harness... build && pnpm --filter @id/check-harness harness",
     "fixtures:generate": "pnpm --filter @id/fixtures generate",
     "corpus:generate": "pnpm --filter @id/fixtures generate:corpus",
     "pii:scan": "node tools/scripts/pii-scan.mjs",

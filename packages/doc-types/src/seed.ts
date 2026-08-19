@@ -49,13 +49,16 @@ function jsonbLiteral(value: unknown): string {
  * опускаются, а не пишутся как `null`, чтобы разобранный из БД объект совпадал
  * с объектом каталога.
  */
-function matchHintsJson(hints: MatchHints): Record<string, readonly string[]> {
-  const json: Record<string, readonly string[]> = { anchors: hints.anchors };
+function matchHintsJson(hints: MatchHints): Record<string, readonly string[] | number> {
+  const json: Record<string, readonly string[] | number> = { anchors: hints.anchors };
   if (hints.negativeAnchors !== undefined) {
     json['negativeAnchors'] = hints.negativeAnchors;
   }
   if (hints.bodyHints !== undefined) {
     json['bodyHints'] = hints.bodyHints;
+  }
+  if (hints.headingLines !== undefined) {
+    json['headingLines'] = hints.headingLines;
   }
   return json;
 }

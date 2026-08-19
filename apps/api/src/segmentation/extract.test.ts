@@ -365,3 +365,74 @@ describe('номер документа с пробелами внутри', () 
     expect(valueOf(fields, 'number')).toMatchObject({ valueText: 'RU.ТЕСТ.001.Н.00042' });
   });
 });
+
+// =====================================================================
+// Подписи граф печатных форм номером не являются (temp/MD/new)
+// =====================================================================
+
+describe('подписи граф бланков не выдаются за номер документа', () => {
+  it('«№ док» из штампа чертежа по ГОСТ Р 21.101 отклоняется', () => {
+    // Описание штампа исполнительной схемы попадает в текст IMAGE-блока:
+    // «Изм. Кол-во. Лист № док Подпись Дата». Захват «док» давал схеме номер
+    // «док» с уверенностью 0.9 и ломал сверку с реестром.
+    const fields = extractBaseFields(
+      input('Строка таблицы: «Изм. Кол-во. Лист № док Подпись Дата», «Разраб. Синтетов С.С.»'),
+    );
+
+    expect(valueOf(fields, 'number')).toBeUndefined();
+  });
+
+  it('«№ п/п» — графа таблицы, а не номер', () => {
+    const fields = extractBaseFields(input('Таблица показателей: № п/п, наименование, значение'));
+
+    expect(valueOf(fields, 'number')).toBeUndefined();
+  });
+
+  it('«№ партии: 7» — реквизит партии, у него своё правило', () => {
+    const fields = extractBaseFields(input('ПАСПОРТ КАЧЕСТВА\n№ партии: 7 от 01.02.2026'));
+
+    expect(valueOf(fields, 'number')).toBeUndefined();
+    expect(valueOf(fields, 'batch_no')).toMatchObject({ valueText: '7' });
+  });
+
+  it('одинокая кавычка после «№» номером не является', () => {
+    const fields = extractBaseFields(input('Схема к акту № » от 21.11.2024'));
+
+    expect(valueOf(fields, 'number')).toBeUndefined();
+  });
+
+  it('настоящий номер при этом извлекается как раньше', () => {
+    const fields = extractBaseFields(input('СЕРТИФИКАТ № РОСС RU Д-RU.PA01.B.17254/23'));
+
+    expect(valueOf(fields, 'number')).toMatchObject({ valueText: 'РОСС RU Д-RU.PA01.B.17254/23' });
+  });
+});
+
+describe('штамп электронной подписи не отравляет даты документа', () => {
+  const ESIGN_ROW =
+    '| Представитель лица | СИНТЕТОВ СИНТЕТ СИНТЕТОВИЧ,; ГЕНЕРАЛЬНЫЙ ДИРЕКТОР | ' +
+    '14ACABDFF4E0954028EF68626CDD386F; BD4E4CC2; Действителен с 03.03.2025 по 03.06.2026; ' +
+    'Выдан Федеральная налоговая служба | 22.05.2026 13:08 UTC +00 |';
+
+  it('срок действия сертификата подписи не становится сроком документа', () => {
+    const fields = extractBaseFields(input(ESIGN_ROW));
+
+    expect(valueOf(fields, 'valid_from')).toBeUndefined();
+    expect(valueOf(fields, 'valid_to')).toBeUndefined();
+  });
+
+  it('время подписания с UTC не становится датой выдачи', () => {
+    const fields = extractBaseFields(input(ESIGN_ROW));
+
+    expect(valueOf(fields, 'issued_at')).toBeUndefined();
+  });
+
+  it('настоящий срок действия документа при этом извлекается', () => {
+    const fields = extractBaseFields(
+      input('СЕРТИФИКАТ СООТВЕТСТВИЯ № С-1\nСрок действия с 01.10.2024 по 01.10.2028'),
+    );
+
+    expect(valueOf(fields, 'valid_from')).toMatchObject({ valueDate: '2024-10-01' });
+    expect(valueOf(fields, 'valid_to')).toMatchObject({ valueDate: '2028-10-01' });
+  });
+});

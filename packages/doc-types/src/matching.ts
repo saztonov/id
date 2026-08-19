@@ -180,17 +180,28 @@ export function matchDocTypes(
   options: MatchOptions = {},
 ): readonly DocTypeMatch[] {
   const lines = normalizeLines(text);
-  const headingZone = lines.slice(0, options.headingLines ?? DEFAULT_HEADING_LINES);
   // Строка под двоеточием — элемент перечня, а не заголовок. Запрет общий для
   // положительных и отрицательных якорей: вопрос у них один и тот же — «эта
   // строка является заголовком документа?», — и разойтись в ответе они не
   // вправе, иначе упоминание в перечне снимало бы тип со всей страницы.
-  const isEnumerationItem = enumerationItemFlags(headingZone);
+  //
+  // Зона заголовка у типов разная (`MatchHints.headingLines`), поэтому зона и
+  // флаги перечня считаются на максимум и режутся по месту. Индивидуальное
+  // окно типа — МИНИМУМ его зоны: вызывающий (classify) всегда передаёт общее
+  // окно явно, и «явная опция побеждает» означала бы, что индивидуальное окно
+  // не работает нигде, кроме прямых вызовов без опций.
+  const baseZone = options.headingLines ?? DEFAULT_HEADING_LINES;
+  const zoneSizeOf = (type: DocTypeDefinition): number =>
+    Math.max(baseZone, type.matchHints.headingLines ?? 0);
+  const maxZone = Math.max(DEFAULT_HEADING_LINES, ...types.map(zoneSizeOf));
+  const fullZone = lines.slice(0, maxZone);
+  const isEnumerationItem = enumerationItemFlags(fullZone);
   const body = lines.join('\n');
   const matches: DocTypeMatch[] = [];
 
   for (const type of types) {
     if (type.isFallback) continue;
+    const headingZone = fullZone.slice(0, zoneSizeOf(type));
 
     const negatives = (type.matchHints.negativeAnchors ?? []).map(compile);
     if (

@@ -131,6 +131,32 @@ export function DocumentsTab({ revisionId }: { revisionId: string }): ReactNode 
     onError: (error) => message.error(describeError(error)),
   });
 
+  const refreshClassifications = async (): Promise<void> => {
+    await queryClient.invalidateQueries({ queryKey: revisionKeys.classifications(revisionId) });
+  };
+
+  const setManual = useMutation({
+    mutationFn: (input: { sourcePageId: string; label: string; docTypeCode: string | null }) =>
+      documents.setManualLabel(revisionId, input.sourcePageId, {
+        label: input.label,
+        docTypeCode: input.docTypeCode,
+      }),
+    onSuccess: async () => {
+      message.success('Метка страницы сохранена; пересборка — кнопкой «Собрать документы»');
+      await refreshClassifications();
+    },
+    onError: (error) => message.error(describeError(error)),
+  });
+
+  const clearManual = useMutation({
+    mutationFn: (sourcePageId: string) => documents.clearManualLabel(revisionId, sourcePageId),
+    onSuccess: async () => {
+      message.success('Ручная метка снята: страница классифицируется при следующей сборке');
+      await refreshClassifications();
+    },
+    onError: (error) => message.error(describeError(error)),
+  });
+
   if (list.isPending) return <LoadingState label="Загрузка документов…" />;
   if (list.isError) return <ErrorState error={list.error} />;
 
@@ -294,7 +320,21 @@ export function DocumentsTab({ revisionId }: { revisionId: string }): ReactNode 
         {classifications.isError && (
           <ErrorState error={classifications.error} title="Классификации недоступны" />
         )}
-        {classifications.isSuccess && <ClassificationTable items={classifications.data} />}
+        {classifications.isSuccess && (
+          <ClassificationTable
+            items={classifications.data}
+            manual={{
+              canEdit: can('document.edit'),
+              typeOptions,
+              pending: setManual.isPending || clearManual.isPending,
+              onSetType: (sourcePageId, docTypeCode) =>
+                setManual.mutate({ sourcePageId, label: 'B-DOC', docTypeCode }),
+              onSetContinuation: (sourcePageId) =>
+                setManual.mutate({ sourcePageId, label: 'I-DOC', docTypeCode: null }),
+              onClear: (sourcePageId) => clearManual.mutate(sourcePageId),
+            }}
+          />
+        )}
       </Card>
 
       <Card size="small" title="Реестр приложений">
@@ -536,7 +576,22 @@ function DocumentCard({ documentId }: { documentId: string }): ReactNode {
  * которой две гипотезы разошлись на сотую долю, и страница с уверенным выводом —
  * это разные поводы для проверки человеком (§8).
  */
-function ClassificationTable({ items }: { items: readonly PageClassification[] }): ReactNode {
+interface ManualLabelControls {
+  readonly canEdit: boolean;
+  readonly typeOptions: readonly { value: string; label: string }[];
+  readonly pending: boolean;
+  readonly onSetType: (sourcePageId: string, docTypeCode: string) => void;
+  readonly onSetContinuation: (sourcePageId: string) => void;
+  readonly onClear: (sourcePageId: string) => void;
+}
+
+function ClassificationTable({
+  items,
+  manual,
+}: {
+  items: readonly PageClassification[];
+  manual: ManualLabelControls;
+}): ReactNode {
   return (
     <Table<PageClassification>
       rowKey="sourcePageId"
@@ -572,6 +627,7 @@ function ClassificationTable({ items }: { items: readonly PageClassification[] }
           render: (_value, row) => (
             <Space size={4} wrap>
               <ToneTag tone="neutral">{row.typeOutcome}</ToneTag>
+              {row.source === 'manual' && <ToneTag tone="success">вручную</ToneTag>}
               {row.ambiguous && <ToneTag tone="danger">неоднозначно</ToneTag>}
               {row.alternatives.length > 0 && (
                 <ToneTag tone="neutral">ещё гипотез: {row.alternatives.length}</ToneTag>
@@ -590,6 +646,46 @@ function ClassificationTable({ items }: { items: readonly PageClassification[] }
           dataIndex: 'reason',
           key: 'reason',
           render: (value: string | null) => value ?? '—',
+        },
+        {
+          title: 'Разметка вручную',
+          key: 'manual',
+          render: (_value, row) => (
+            <Space size={4} wrap>
+              <Select
+                size="small"
+                style={{ minWidth: 200 }}
+                placeholder="тип страницы…"
+                {...(row.source === 'manual' && row.docTypeCode !== null
+                  ? { value: row.docTypeCode }
+                  : {})}
+                options={[...manual.typeOptions]}
+                showSearch
+                optionFilterProp="label"
+                disabled={!manual.canEdit || manual.pending}
+                onChange={(value: string) => manual.onSetType(row.sourcePageId, value)}
+                aria-label={`Тип страницы ${String(row.revisionOrdinal + 1)} вручную`}
+              />
+              <Button
+                size="small"
+                disabled={!manual.canEdit || manual.pending}
+                title="Страница продолжает предыдущий документ (I-DOC, без собственного типа)"
+                onClick={() => manual.onSetContinuation(row.sourcePageId)}
+              >
+                Продолжение
+              </Button>
+              {row.source === 'manual' && (
+                <Button
+                  size="small"
+                  danger
+                  disabled={!manual.canEdit || manual.pending}
+                  onClick={() => manual.onClear(row.sourcePageId)}
+                >
+                  Снять
+                </Button>
+              )}
+            </Space>
+          ),
         },
       ]}
     />

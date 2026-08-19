@@ -43,6 +43,7 @@
  */
 import { and, asc, eq, inArray, isNotNull, sql, type SQL } from 'drizzle-orm';
 import {
+  docTypes,
   documentRelations,
   fieldValues,
   layoutBlocks,
@@ -50,6 +51,7 @@ import {
   logicalDocuments,
   pageAssignments,
   pageClassifications,
+  pageRoles,
   pageTextVersions,
   processingBundlePages,
   recognitionRuns,
@@ -72,6 +74,7 @@ import type {
   DecodedDocument,
   DecodedUnassigned,
   ExtractedField,
+  ManualLabel,
   PageClassification,
   PageLabel,
   ParsedRegistryRow,
@@ -411,6 +414,190 @@ export async function listPageClassifications(
 }
 
 // =====================================================================
+// Ручная разметка страницы (§8.2, фаза 3)
+// =====================================================================
+
+export interface ManualPageLabelInput {
+  readonly revisionId: string;
+  readonly sourcePageId: string;
+  readonly label: PageLabel;
+  readonly docTypeCode: string | null;
+  readonly pageRoleCode: string | null;
+  readonly actor: AuditActor;
+}
+
+export interface ManualPageLabelView {
+  readonly revisionId: string;
+  readonly sourcePageId: string;
+  readonly label: PageLabel;
+  readonly docTypeCode: string | null;
+  readonly pageRoleCode: string | null;
+  readonly source: 'manual';
+}
+
+/**
+ * Ручная метка страницы: инженер указывает тип каждой страницы сам.
+ *
+ * Хранится строкой `page_classifications` с `source = 'manual'` — это
+ * задуманная точка входа фазы 3 (§8.2): `loadSegmentationPages` поднимает её в
+ * `PageInput.manual`, фаза 1 её не переопределяет (`classifyOne`, приоритет 1)
+ * и при пересборке записывает обратно с тем же источником — метка переживает
+ * повторные прогоны без специальной защиты.
+ *
+ * Пересборка документов НЕ запускается отсюда: она стоит прогона LLM по всем
+ * страницам, и запуск остаётся за явной кнопкой (`POST …/segment`) — тот же
+ * принцип, что у переизвлечения реквизитов.
+ */
+export async function saveManualPageLabel(
+  db: Database,
+  scope: AuthScope,
+  input: ManualPageLabelInput,
+): Promise<ManualPageLabelView> {
+  const revision = await requireMutableRevision(db, scope, input.revisionId);
+
+  // Совместность полей — то, что CHECK таблицы выразить не может: роль без
+  // A-ROLE и тип у служебной страницы дали бы декодеру противоречивый вход.
+  if (input.label === 'A-ROLE' && input.pageRoleCode === null) {
+    throw conflict('Метка A-ROLE требует код роли страницы.');
+  }
+  if (input.label !== 'A-ROLE' && input.pageRoleCode !== null) {
+    throw conflict('Код роли страницы допустим только при метке A-ROLE.');
+  }
+  if ((input.label === 'A-ROLE' || input.label === 'U') && input.docTypeCode !== null) {
+    throw conflict('Вид документа указывается только у меток B-DOC и I-DOC.');
+  }
+
+  const pageRows = await db
+    .select({ id: sourcePages.id })
+    .from(sourcePages)
+    .where(
+      and(eq(sourcePages.id, input.sourcePageId), eq(sourcePages.revisionId, input.revisionId)),
+    )
+    .limit(1);
+  if (pageRows[0] === undefined) throw notFound('Страница не принадлежит этой ревизии.');
+
+  if (input.docTypeCode !== null) {
+    const known = await db
+      .select({ code: docTypes.code })
+      .from(docTypes)
+      .where(eq(docTypes.code, input.docTypeCode))
+      .limit(1);
+    if (known[0] === undefined) {
+      throw notFound(`Вид документа «${input.docTypeCode}» не найден в справочнике.`);
+    }
+  }
+  if (input.pageRoleCode !== null) {
+    const known = await db
+      .select({ code: pageRoles.code })
+      .from(pageRoles)
+      .where(eq(pageRoles.code, input.pageRoleCode))
+      .limit(1);
+    if (known[0] === undefined) {
+      throw notFound(`Роль страницы «${input.pageRoleCode}» не найдена в справочнике.`);
+    }
+  }
+
+  const values = {
+    revisionId: input.revisionId,
+    sourcePageId: input.sourcePageId,
+    label: input.label,
+    docTypeCode: input.docTypeCode,
+    // Тип задан человеком — исход `known`; без типа сигнал типовой отсутствует.
+    typeOutcome: input.docTypeCode === null ? 'none' : 'known',
+    observedTitle: null,
+    pageRoleCode: input.pageRoleCode,
+    parentRef: null,
+    confidence: 1,
+    reason: 'ручная разметка страницы',
+    source: 'manual',
+    pageTextVersionId: null,
+    charSpan: null,
+    quote: null,
+    alternatives: [],
+    ambiguous: false,
+  };
+
+  await guardWrites(() =>
+    db.transaction(async (tx) => {
+      await tx
+        .insert(pageClassifications)
+        .values(values)
+        .onConflictDoUpdate({
+          target: [pageClassifications.revisionId, pageClassifications.sourcePageId],
+          set: values,
+        });
+      await appendAudit(tx, scope, {
+        ...input.actor,
+        action: 'page.manual_label_set',
+        entityType: 'source_page',
+        entityId: input.sourcePageId,
+        objectId: revision.objectId,
+        payload: {
+          label: input.label,
+          docTypeCode: input.docTypeCode,
+          pageRoleCode: input.pageRoleCode,
+        },
+      });
+    }),
+  );
+
+  return {
+    revisionId: input.revisionId,
+    sourcePageId: input.sourcePageId,
+    label: input.label,
+    docTypeCode: input.docTypeCode,
+    pageRoleCode: input.pageRoleCode,
+    source: 'manual',
+  };
+}
+
+/**
+ * Снятие ручной метки.
+ *
+ * Удаляется ТОЛЬКО строка с `source = 'manual'`: машинное решение (если
+ * инженер его перекрыл) уже перезаписано и не восстанавливается — страница
+ * остаётся без классификации до следующей пересборки, и это честнее, чем
+ * воскрешать решение, которого больше никто не видел.
+ */
+export async function deleteManualPageLabel(
+  db: Database,
+  scope: AuthScope,
+  input: {
+    readonly revisionId: string;
+    readonly sourcePageId: string;
+    readonly actor: AuditActor;
+  },
+): Promise<void> {
+  const revision = await requireMutableRevision(db, scope, input.revisionId);
+
+  await guardWrites(() =>
+    db.transaction(async (tx) => {
+      const removed = await tx
+        .delete(pageClassifications)
+        .where(
+          and(
+            eq(pageClassifications.revisionId, input.revisionId),
+            eq(pageClassifications.sourcePageId, input.sourcePageId),
+            eq(pageClassifications.source, 'manual'),
+          ),
+        )
+        .returning({ sourcePageId: pageClassifications.sourcePageId });
+      if (removed.length === 0) {
+        throw notFound('Ручная разметка этой страницы не найдена.');
+      }
+      await appendAudit(tx, scope, {
+        ...input.actor,
+        action: 'page.manual_label_cleared',
+        entityType: 'source_page',
+        entityId: input.sourcePageId,
+        objectId: revision.objectId,
+        payload: {},
+      });
+    }),
+  );
+}
+
+// =====================================================================
 // Вход сегментации (задачи 14–19)
 // =====================================================================
 
@@ -425,6 +612,8 @@ export interface SegmentationPageRow {
   readonly text: string;
   readonly blockTypes: readonly SegmentationBlockType[];
   readonly rotation: number;
+  /** Ручная метка (`page_classifications.source = 'manual'`): фазы 1–2 её не переопределяют. */
+  readonly manual: ManualLabel | null;
 }
 
 export interface SegmentationInput {
@@ -514,6 +703,9 @@ export async function loadSegmentationPages(
          where b.layout_revision_id = ${run.layoutRevisionId}::uuid
            and b.source_page_id = ${sourcePages.id}
       )`.as('block_types'),
+      manualLabel: pageClassifications.label,
+      manualDocTypeCode: pageClassifications.docTypeCode,
+      manualPageRoleCode: pageClassifications.pageRoleCode,
     })
     .from(sourcePages)
     .innerJoin(submissionRevisions, eq(sourcePages.revisionId, submissionRevisions.id))
@@ -529,6 +721,16 @@ export async function loadSegmentationPages(
       and(
         eq(processingBundlePages.sourcePageId, sourcePages.id),
         eq(processingBundlePages.bundleId, run.bundleId),
+      ),
+    )
+    // Ручная разметка приоритетна внутри ревизии (§8.2, фаза 3): она и есть
+    // причина, по которой вход сегментации читает `page_classifications`.
+    .leftJoin(
+      pageClassifications,
+      and(
+        eq(pageClassifications.sourcePageId, sourcePages.id),
+        eq(pageClassifications.revisionId, sourcePages.revisionId),
+        eq(pageClassifications.source, 'manual'),
       ),
     )
     .where(withScope(scope, REVISION_SCOPE, eq(sourcePages.revisionId, revisionId)))
@@ -549,6 +751,14 @@ export async function loadSegmentationPages(
       text: row.textMd ?? '',
       blockTypes: (row.blockTypes ?? []) as readonly SegmentationBlockType[],
       rotation: Number(row.rotation),
+      manual:
+        row.manualLabel === null
+          ? null
+          : {
+              label: row.manualLabel as PageLabel,
+              docTypeCode: row.manualDocTypeCode,
+              pageRoleCode: row.manualPageRoleCode,
+            },
     })),
   };
 }

@@ -35,6 +35,7 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { canonicalFromArchiveEntries } from '@id/recognition';
 import { anonymizeText, containsPii } from './anonymize.js';
 
 // ---------------------------------------------------------------------------
@@ -648,31 +649,25 @@ export interface SourcePage {
 }
 
 interface BlocksJson {
-  readonly pages?: readonly {
-    page_index: number;
-    width_px: number;
-    height_px: number;
-    rotation: number;
-  }[];
-  readonly blocks?: readonly { page_index: number; ordinal: number; block_type: string }[];
-}
-
-const BLOCK_TYPES: readonly string[] = ['text', 'image', 'stamp'];
-
-function isBlockType(value: string): value is ReferenceBlockType {
-  return BLOCK_TYPES.includes(value);
+  readonly pages?: readonly unknown[];
 }
 
 /**
  * Разбирает один комплект: `*_results.md` даёт текст по страницам и блокам,
  * `*_blocks.json` — геометрию и состав блоков.
  *
- * Из текста выбрасываются служебные строки экспорта (`> **Created:**`,
- * `> **Crop:**`, `> **Stamp:**`) и заголовки блоков. Первые две — метаданные
- * прогона со ссылками на чужой сервер, третья — разбор штампа их парсером, а
- * не текст страницы. Всё остальное сохраняется дословно: markdown-префиксы
- * `#####`, разрывы строк, таблицы и точки с запятой от OCR — те самые
- * структурные признаки, на которых ломались якоря S1.
+ * Разбор делает адаптер `@id/recognition` (`canonicalFromArchiveEntries`) —
+ * единственная реализация чтения legacy-формата на весь репозиторий; здесь
+ * канонический результат приводится к исторической форме `SourcePage`.
+ * Гарантии те же, что были у собственного парсера: текст страницы дословный
+ * (markdown-префиксы `#####`, переносы и `;` от OCR сохранены), служебные
+ * строки экспорта и заголовки блоков выброшены, страница без блоков законно
+ * отсутствует в md и получает пустой текст, усечённый экспорт — ошибка.
+ *
+ * Порядок `blockTypes` сохраняет историческое поведение: сортировка по
+ * `ordinal`, где у stamp-блоков он `null` и считается нулём (арифметика с
+ * `null` в старом компараторе) — штампы идут первыми. Эталонный корпус
+ * зафиксировал этот порядок, менять его без пересборки эталона нельзя.
  */
 export function parseSourcePackage(dir: string): readonly SourcePage[] {
   const files = readdirSync(dir);
@@ -682,56 +677,31 @@ export function parseSourcePackage(dir: string): readonly SourcePage[] {
     throw new Error(`В ${dir} нет пары *_results.md и *_blocks.json`);
   }
 
-  const blocks = JSON.parse(readFileSync(join(dir, jsonName), 'utf8')) as BlocksJson;
-  const geometry = blocks.pages ?? [];
-  const typesByPage = new Map<number, { ordinal: number; type: ReferenceBlockType }[]>();
-  for (const block of blocks.blocks ?? []) {
-    if (!isBlockType(block.block_type)) continue;
-    const list = typesByPage.get(block.page_index) ?? [];
-    list.push({ ordinal: block.ordinal, type: block.block_type });
-    typesByPage.set(block.page_index, list);
+  const blocksRaw = readFileSync(join(dir, jsonName), 'utf8');
+  const geometryCount = ((JSON.parse(blocksRaw) as BlocksJson).pages ?? []).length;
+  if (geometryCount === 0) {
+    throw new Error(`${dir}: blocks.json без страниц — комплект не собрать`);
   }
 
-  const bodies = parseMarkdownPages(readFileSync(join(dir, mdName), 'utf8'));
-  if (bodies.length !== geometry.length) {
-    throw new Error(`${dir}: страниц в md ${bodies.length}, в blocks.json ${geometry.length}`);
+  let canonical: ReturnType<typeof canonicalFromArchiveEntries>;
+  try {
+    canonical = canonicalFromArchiveEntries(readFileSync(join(dir, mdName), 'utf8'), blocksRaw);
+  } catch (cause) {
+    throw new Error(`${dir}: ${cause instanceof Error ? cause.message : String(cause)}`, {
+      cause,
+    });
   }
 
-  return geometry.map((page, index) => {
-    const types = (typesByPage.get(page.page_index) ?? [])
-      .sort((a, b) => a.ordinal - b.ordinal)
-      .map((b) => b.type);
-    return {
-      pageNo: index + 1,
-      text: bodies[index] ?? '',
-      blockTypes: types,
-      widthPx: page.width_px,
-      heightPx: page.height_px,
-      rotation: page.rotation,
-    };
-  });
-}
-
-function parseMarkdownPages(markdown: string): readonly string[] {
-  const pages: string[][] = [];
-  let current: string[] | null = null;
-  for (const line of markdown.split('\n')) {
-    if (/^## Page \d+\s*$/.test(line)) {
-      current = [];
-      pages.push(current);
-      continue;
-    }
-    if (current === null) continue;
-    if (/^### BLOCK #\d+ \[/.test(line)) continue;
-    if (/^> \*\*/.test(line)) continue;
-    current.push(line);
-  }
-  return pages.map((lines) =>
-    lines
-      .join('\n')
-      .replace(/\n{3,}/g, '\n\n')
-      .trim(),
-  );
+  return canonical.pages.map((page, index) => ({
+    pageNo: index + 1,
+    text: page.text ?? '',
+    blockTypes: [...page.blocks]
+      .sort((a, b) => (a.ordinal ?? 0) - (b.ordinal ?? 0))
+      .map((block) => block.blockType),
+    widthPx: page.widthPx ?? 0,
+    heightPx: page.heightPx ?? 0,
+    rotation: page.rotation,
+  }));
 }
 
 // ---------------------------------------------------------------------------

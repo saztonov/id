@@ -348,6 +348,16 @@ export interface PageClassification {
   ambiguous: boolean;
 }
 
+/** Метка страницы, поставленная инженером вручную (§8.2, фаза 3). */
+export interface ManualPageLabel {
+  revisionId: string;
+  sourcePageId: string;
+  label: string;
+  docTypeCode: string | null;
+  pageRoleCode: string | null;
+  source: 'manual';
+}
+
 // =====================================================================
 // Проверка
 // =====================================================================

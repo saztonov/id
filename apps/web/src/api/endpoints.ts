@@ -37,6 +37,7 @@ import type {
   LayoutDetail,
   LayoutRevision,
   LogicalDocument,
+  ManualPageLabel,
   Me,
   NormalizedCoords,
   ObjectSection,
@@ -283,6 +284,24 @@ export const documents = {
     get<{ items: PageClassification[] }>(`${V1}/revisions/${revisionId}/classifications`).then(
       (r) => r.items,
     ),
+
+  /** Ручная метка страницы: приоритетна для сегментации и переживает пересборку. */
+  setManualLabel: (
+    revisionId: string,
+    sourcePageId: string,
+    body: { label: string; docTypeCode?: string | null; pageRoleCode?: string | null },
+  ) =>
+    request<ManualPageLabel>(
+      'PUT',
+      `${V1}/revisions/${revisionId}/pages/${sourcePageId}/manual-label`,
+      { body },
+    ).then((r) => r.data),
+
+  clearManualLabel: (revisionId: string, sourcePageId: string) =>
+    request<undefined>(
+      'DELETE',
+      `${V1}/revisions/${revisionId}/pages/${sourcePageId}/manual-label`,
+    ).then(() => undefined),
 
   confirm: (
     documentId: string,

@@ -11,9 +11,10 @@
  * под нужные контрольные суммы, наименования и фамилии придуманы. Настоящих
  * строк корпуса здесь нет и быть не может — иначе тест сам стал бы утечкой.
  */
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, it, expect } from 'vitest';
+import { afterAll, describe, it, expect } from 'vitest';
 import { checkOgrn } from '@id/contracts';
 import {
   PACKAGE_SPECS,
@@ -457,3 +458,97 @@ function listPackageDirs(dir: string): readonly string[] {
     .filter((path) => statSync(path).isDirectory())
     .filter((path) => readdirSync(path).some((file) => file.endsWith('_results.md')));
 }
+
+// =====================================================================
+// Разбор исходного комплекта: страницы без блоков (синтетика)
+// =====================================================================
+
+describe('parseSourcePackage — страницы, отсутствующие в md', () => {
+  const dirs: string[] = [];
+
+  afterAll(() => {
+    for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
+  });
+
+  function packageOf(markdown: string, blocks: unknown): string {
+    const dir = mkdtempSync(join(tmpdir(), 'fixtures-source-'));
+    dirs.push(dir);
+    writeFileSync(join(dir, 'syn_results.md'), markdown, 'utf8');
+    writeFileSync(join(dir, 'syn_blocks.json'), JSON.stringify(blocks), 'utf8');
+    return dir;
+  }
+
+  const page = (index: number) => ({
+    page_index: index,
+    width_px: 2480,
+    height_px: 3507,
+    rotation: 0,
+  });
+
+  it('страница без единого блока законно отсутствует в md и получает пустой текст', () => {
+    // Генератор md не печатает `## Page N` для страницы, на которой нет
+    // блоков: в temp/MD/new таких три (пустые листы сканов). Требование
+    // «страниц в md столько же, сколько в blocks.json» роняло весь комплект.
+    const dir = packageOf(
+      '# Document: syn.pdf\n\n## Page 1\n\nтекст первой страницы\n\n## Page 3\n\nтекст третьей страницы\n',
+      {
+        schema_version: 1,
+        pages: [page(0), page(1), page(2)],
+        blocks: [
+          { page_index: 0, ordinal: 1, block_type: 'text' },
+          { page_index: 2, ordinal: 1, block_type: 'text' },
+        ],
+      },
+    );
+
+    const parsed = parseSourcePackage(dir);
+    expect(parsed).toHaveLength(3);
+    expect(parsed[0]?.text).toContain('первой');
+    expect(parsed[1]?.text).toBe('');
+    expect(parsed[1]?.blockTypes).toEqual([]);
+    expect(parsed[2]?.text).toContain('третьей');
+  });
+
+  it('страница с не-stamp блоками, отсутствующая в md, — усечённый экспорт', () => {
+    const dir = packageOf('# Document: syn.pdf\n\n## Page 1\n\nтекст\n', {
+      schema_version: 1,
+      pages: [page(0), page(1)],
+      blocks: [
+        { page_index: 0, ordinal: 1, block_type: 'text' },
+        { page_index: 1, ordinal: 1, block_type: 'text' },
+      ],
+    });
+
+    expect(() => parseSourcePackage(dir)).toThrow(/усечён/u);
+  });
+
+  it('страница md, которой нет в blocks.json, — ошибка', () => {
+    const dir = packageOf(
+      '# Document: syn.pdf\n\n## Page 1\n\nтекст\n\n## Page 5\n\nчужая страница\n',
+      {
+        schema_version: 1,
+        pages: [page(0)],
+        blocks: [{ page_index: 0, ordinal: 1, block_type: 'text' }],
+      },
+    );
+
+    expect(() => parseSourcePackage(dir)).toThrow(/нет в blocks\.json/u);
+  });
+
+  it('страница только со stamp-блоками может отсутствовать в md', () => {
+    // stamp-блоки не имеют собственных секций в md; страница из одних штампов
+    // в md не печатается, и это не усечение.
+    const dir = packageOf('# Document: syn.pdf\n\n## Page 1\n\nтекст\n', {
+      schema_version: 1,
+      pages: [page(0), page(1)],
+      blocks: [
+        { page_index: 0, ordinal: 1, block_type: 'text' },
+        { page_index: 1, ordinal: null, block_type: 'stamp' },
+      ],
+    });
+
+    const parsed = parseSourcePackage(dir);
+    expect(parsed).toHaveLength(2);
+    expect(parsed[1]?.text).toBe('');
+  });
+});

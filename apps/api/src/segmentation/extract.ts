@@ -249,6 +249,57 @@ const NUMBER_STRONG = new RegExp(
 );
 const NUMBER_WEAK = /(?:^|\n)\s*N\s*([^\s|]+)/dgu;
 
+/**
+ * Первые токены, которые номером НЕ являются, хотя стоят сразу за «№».
+ *
+ * Это подписи граф печатных форм, а не значения: «Лист | № док. | Подпись |
+ * Дата» — штамп чертежа по ГОСТ Р 21.101 (описание штампа попадает в текст
+ * IMAGE-блока исполнительной схемы), «№ п/п» — графа любой таблицы. «Партии»
+ * и «плавки» — чужие реквизиты с собственными правилами (`batch_no`,
+ * `heat_no`): их захват номером документа ломал сверку с реестром на
+ * temp/MD/new («ПАСПОРТ КАЧЕСТВА» получал номер «партии: 7»).
+ */
+const NUMBER_STOP_TOKENS: ReadonlySet<string> = new Set(['док', 'п/п', 'пп', 'партии', 'плавки']);
+
+/** Обрамляющие кавычки и пунктуация, прилипающие к номеру в OCR-тексте. */
+function cleanNumberValue(value: string): string {
+  return value
+    .replace(/^[«»"'‚„]+/u, '')
+    .replace(/[«»"'‚„.,;:]+$/u, '')
+    .trim();
+}
+
+/** Похоже ли захваченное на номер документа, а не на подпись графы бланка. */
+function plausibleNumber(hit: RawHit): boolean {
+  const cleaned = cleanNumberValue(hit.value);
+  if (cleaned === '') return false;
+  const first = (cleaned.split(/\s+/u)[0] ?? '').replace(/[.:]+$/u, '').toLowerCase();
+  return !NUMBER_STOP_TOKENS.has(first);
+}
+
+/**
+ * Контекст штампа электронной подписи.
+ *
+ * Таблица подписантов («лист сертификатов» систем ЭДО, приклеенный к документу
+ * как продолжение) несёт «Действителен с DD.MM.YYYY по DD.MM.YYYY» — срок
+ * СЕРТИФИКАТА ПОДПИСИ, а не документа. На temp/MD/new он извлекался как
+ * `valid_to` исполнительной схемы и давал ложное «документ истёк». Признак
+ * узкий: отпечаток сертификата — 16+ шестнадцатеричных символов подряд —
+ * в содержательных реквизитах ИД не встречается; вторая форма — время
+ * подписания с «UTC» сразу после даты.
+ */
+const ESIGN_BEFORE = /[0-9A-F]{16,}|ЭЛЕКТРОННОЙ\s+ПОДПИСЬЮ|Отпечаток\s+и\s+реквизиты/iu;
+const ESIGN_AFTER = /^\s*\d{1,2}:\d{2}\s*UTC|^\s*UTC/iu;
+
+function outsideEsignStamp(text: string): (hit: RawHit) => boolean {
+  return (hit) => {
+    const before = text.slice(Math.max(0, hit.start - 160), hit.start);
+    if (ESIGN_BEFORE.test(before)) return false;
+    const after = text.slice(hit.end, hit.end + 24);
+    return !ESIGN_AFTER.test(after);
+  };
+}
+
 const BLANK_NUMBER = /бланк[а-я]*\s*(?:№|N)?\s*([0-9]{4,}[^\s|]*)/dgiu;
 
 /** ГОСТ, ГОСТ Р, СТО, ТУ. Список: в одном документе их обычно несколько. */
@@ -283,10 +334,12 @@ const BASE_RULES: readonly RuleSpec[] = [
   {
     fieldCode: 'number',
     merge: 'text',
+    // Значение НЕ чистится от кавычек — иначе `evidence` перестал бы совпадать
+    // со спаном текста; чистка участвует только в решении «номер ли это».
     find: (text) =>
       firstOf(
-        sweep(text, NUMBER_STRONG, CONFIDENCE.labelled),
-        sweep(text, NUMBER_WEAK, CONFIDENCE.weak),
+        sweep(text, NUMBER_STRONG, CONFIDENCE.labelled).filter(plausibleNumber),
+        sweep(text, NUMBER_WEAK, CONFIDENCE.weak).filter(plausibleNumber),
       ),
   },
   {
@@ -311,7 +364,11 @@ const BASE_RULES: readonly RuleSpec[] = [
         ),
         // Голая дата без подписи: в документе она может быть чем угодно —
         // датой поверки, сроком аккредитации, датой протокола-основания.
-        sweep(text, new RegExp(`(${DATE_NUMERIC})`, 'gdu'), CONFIDENCE.weak),
+        sweep(text, new RegExp(`(${DATE_NUMERIC})`, 'gdu'), CONFIDENCE.weak).filter(
+          // Время подписания «22.05.2026 13:08 UTC» из штампа ЭП — не дата
+          // выдачи документа.
+          outsideEsignStamp(text),
+        ),
       ),
   },
   {
@@ -322,7 +379,7 @@ const BASE_RULES: readonly RuleSpec[] = [
         text,
         new RegExp(String.raw`(?:^|[\s|(])[сc]\s*[;,]?\s*(${ANY_DATE})\s*[;,]?\s*по\s`, 'gidu'),
         CONFIDENCE.labelled,
-      ),
+      ).filter(outsideEsignStamp(text)),
   },
   {
     fieldCode: 'valid_to',
@@ -333,12 +390,12 @@ const BASE_RULES: readonly RuleSpec[] = [
           text,
           new RegExp(String.raw`\sпо\s*[;,]?\s*(${ANY_DATE})`, 'gidu'),
           CONFIDENCE.labelled,
-        ),
+        ).filter(outsideEsignStamp(text)),
         sweep(
           text,
           new RegExp(String.raw`действ[а-я]*\s+до\s*[;,]?\s*(${ANY_DATE})`, 'gidu'),
           CONFIDENCE.labelled,
-        ),
+        ).filter(outsideEsignStamp(text)),
       ),
   },
   {

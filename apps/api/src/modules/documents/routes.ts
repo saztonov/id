@@ -37,6 +37,7 @@ import { dedupeKeyFor } from '../../jobs/types.js';
 import { tracePayload, updateContext } from '../../observability/context.js';
 import {
   confirmDocument,
+  deleteManualPageLabel,
   findLogicalDocument,
   listDocumentRelations,
   listFieldValues,
@@ -45,6 +46,7 @@ import {
   listPageClassifications,
   listRegistryRows,
   listUnaccountedPages,
+  saveManualPageLabel,
   type LogicalDocumentView,
 } from '../../db/repositories/documents.js';
 import {
@@ -54,6 +56,9 @@ import {
   documentIdParamSchema,
   documentListSchema,
   fieldValueListSchema,
+  manualLabelParamSchema,
+  manualLabelRequestSchema,
+  manualLabelResponseSchema,
   pageAccountingSchema,
   registryListSchema,
   revisionIdParamSchema,
@@ -70,6 +75,7 @@ export function registerDocumentRoutes(app: AppInstance): void {
   registerSegmentRoute(app);
   registerReadRoutes(app);
   registerConfirmRoute(app);
+  registerManualLabelRoutes(app);
 }
 
 function toView(document: LogicalDocumentView) {
@@ -426,6 +432,89 @@ function registerConfirmRoute(app: AppInstance): void {
             )
             .map((edge) => ({ ...edge })),
         });
+    },
+  );
+}
+
+// =====================================================================
+// Ручная разметка страницы (§8.2, фаза 3)
+// =====================================================================
+
+/**
+ * Инженер указывает метку и тип КАЖДОЙ страницы сам — на первых порах это
+ * основной режим работы с многостраничными документами (решение заказчика).
+ * Метка хранится строкой `page_classifications` с `source='manual'`,
+ * приоритетна для фаз 1–2 и переживает пересборку. Пересборка документов
+ * отсюда НЕ запускается: она стоит прогона LLM по всем страницам и остаётся
+ * за явной кнопкой `POST …/segment`.
+ */
+function registerManualLabelRoutes(app: AppInstance): void {
+  app.put(
+    `${PREFIX}/revisions/:revisionId/pages/:sourcePageId/manual-label`,
+    {
+      preHandler: editDocuments,
+      schema: {
+        params: manualLabelParamSchema,
+        body: manualLabelRequestSchema,
+        response: { 200: manualLabelResponseSchema },
+      },
+    },
+    async (request, reply) => {
+      const { scope } = currentAuth(request);
+      const { revisionId, sourcePageId } = request.params;
+      updateContext({ revisionId });
+
+      const view = await saveManualPageLabel(app.db, scope, {
+        revisionId,
+        sourcePageId,
+        label: request.body.label,
+        docTypeCode: request.body.docTypeCode,
+        pageRoleCode: request.body.pageRoleCode,
+        actor: auditActor(app, request),
+      });
+
+      request.log.info(
+        {
+          event: 'manual_page_label_set',
+          revision_id: revisionId,
+          source_page_id: sourcePageId,
+          label: view.label,
+          doc_type_code: view.docTypeCode,
+        },
+        'ручная метка страницы сохранена',
+      );
+
+      return reply.code(200).send(view);
+    },
+  );
+
+  app.delete(
+    `${PREFIX}/revisions/:revisionId/pages/:sourcePageId/manual-label`,
+    {
+      preHandler: editDocuments,
+      schema: { params: manualLabelParamSchema },
+    },
+    async (request, reply) => {
+      const { scope } = currentAuth(request);
+      const { revisionId, sourcePageId } = request.params;
+      updateContext({ revisionId });
+
+      await deleteManualPageLabel(app.db, scope, {
+        revisionId,
+        sourcePageId,
+        actor: auditActor(app, request),
+      });
+
+      request.log.info(
+        {
+          event: 'manual_page_label_cleared',
+          revision_id: revisionId,
+          source_page_id: sourcePageId,
+        },
+        'ручная метка страницы снята',
+      );
+
+      return reply.code(204).send();
     },
   );
 }

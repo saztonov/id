@@ -413,6 +413,7 @@ export { observeDocTypeCandidate, normalizeObservedTitle } from './db/repositori
  */
 export { assertRuleRegistryConsistent } from './checks/startup.js';
 export {
+  KNOWN_TYPE_MIN_CONFIDENCE,
   finishValidationRun,
   listFindings,
   listRuleDefinitionCodes,
