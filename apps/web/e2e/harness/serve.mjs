@@ -1,0 +1,221 @@
+/**
+ * Стенд сквозного прогона: НАСТОЯЩЕЕ приложение портала на настоящей схеме.
+ *
+ * ## Почему не мок
+ *
+ * Задание требует прямо: тест обязан ходить в настоящее API. Причина — не
+ * строгость ради строгости, а восемь этапов журнала исполнения, где зелёные
+ * тесты сосуществовали с неработающим кодом. Мок отвечает тем, что в него
+ * положили, и потому не замечает ни опечатки в пути, ни отсутствия права, ни
+ * несовпадения формы ответа, ни того, что маршрут вообще не зарегистрирован.
+ *
+ * Поэтому здесь поднимается `buildApp()` из `apps/api` — тот же, что слушает
+ * порт в бою, — на pglite под настоящими миграциями из `migrations/`, с
+ * файловым хранилищем и `AUTH_MODE=dev-stub`. Ни один порт не подменяется.
+ *
+ * ## Один origin, а не два
+ *
+ * Статика SPA и API отдаются ОДНИМ сервером. Это не удобство: cookie сессии
+ * помечена `SameSite=Lax`, а CSRF-токен читается JavaScript из cookie `id_csrf`
+ * (§4.1). На двух origin браузер вёл бы себя иначе, чем в бою, и прогон
+ * проверял бы не ту модель безопасности. Поэтому фронтовый сервер сам
+ * проксирует `/api`, `/auth`, `/me`, `/health` и `/metrics` в приложение.
+ *
+ * ## Импорт `buildApp` относительным путём
+ *
+ * `@id/api` объявляет в `exports` только корень, а `buildApp` живёт в `app.ts` и
+ * из индекса не экспортируется намеренно (воркеру Fastify не нужен). Подпуть
+ * через имя пакета карта экспорта закрывает, поэтому берётся файл собранного
+ * пакета. Требование к порядку одно: `pnpm -r build` до прогона; при его
+ * отсутствии стенд падает с внятным текстом, а не с `ERR_MODULE_NOT_FOUND`.
+ */
+/*
+ * Файл — Node-скрипт (`.mjs`), а не модуль SPA, поэтому глобалии среды
+ * объявляются здесь. Общий flat-конфиг ESLint лежит в корне монорепозитория и
+ * знает про Node только для `*.ts`; править его ради одного файла воркспейса
+ * значило бы менять правила всем одиннадцати пакетам.
+ */
+/* global process, console, URL */
+import { createServer, request as httpRequest } from 'node:http';
+import { existsSync, mkdtempSync, readFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, extname, join, resolve, sep } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+
+import { createPgliteDatabase, createTestPool } from '@id/db-harness';
+import { loadMigrations } from '@id/migrator';
+
+import { fixtureSql, sha256Of } from './fixture.mjs';
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const WEB_ROOT = resolve(HERE, '..', '..');
+const REPO_ROOT = resolve(WEB_ROOT, '..', '..');
+const MIGRATIONS_DIR = join(REPO_ROOT, 'migrations');
+const DIST_DIR = join(WEB_ROOT, 'dist');
+const API_APP = join(REPO_ROOT, 'apps', 'api', 'dist', 'app.js');
+const ROTATED_PDF = join(REPO_ROOT, 'tools', 'fixtures', 'pdf', 'rotated.pdf');
+
+const FRONT_PORT = Number(process.env['E2E_PORT'] ?? 4173);
+const API_PORT = Number(process.env['E2E_API_PORT'] ?? 4174);
+
+const MIME = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.map': 'application/json; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.woff2': 'font/woff2',
+  '.png': 'image/png',
+  '.ico': 'image/x-icon',
+};
+
+/** Пути, которые обслуживает приложение, а не статика. */
+const API_PREFIXES = ['/api/', '/auth/', '/me', '/health', '/metrics'];
+
+function isApiPath(url) {
+  return API_PREFIXES.some((prefix) => url === prefix || url.startsWith(prefix));
+}
+
+function fail(message) {
+  console.error(`[стенд] ${message}`);
+  process.exit(1);
+}
+
+async function startApi() {
+  if (!existsSync(API_APP)) {
+    fail(
+      `не найден собранный пакет API: ${API_APP}\n` +
+        'Стенд поднимает настоящее приложение, поэтому перед прогоном нужен `pnpm -r build`.',
+    );
+  }
+  if (!existsSync(ROTATED_PDF)) {
+    fail(
+      `не найдена фикстура ${ROTATED_PDF}\n` +
+        'Синтетические PDF генерируются командой `pnpm fixtures:generate`.',
+    );
+  }
+
+  const storageDir = mkdtempSync(join(tmpdir(), 'id-e2e-storage-'));
+  const pdfBytes = readFileSync(ROTATED_PDF);
+  const sha = sha256Of(pdfBytes);
+
+  // Байты кладутся ровно по тому ключу, который записан в `stored_blobs`:
+  // `blobs/{aa}/{bb}/{sha256}` (см. `apps/api/src/storage/keys.ts`).
+  const blobPath = join(storageDir, 'blobs', sha.slice(0, 2), sha.slice(2, 4), sha);
+  mkdirSync(dirname(blobPath), { recursive: true });
+  writeFileSync(blobPath, pdfBytes);
+
+  const db = await createPgliteDatabase();
+  for (const migration of loadMigrations(MIGRATIONS_DIR)) {
+    await db.exec(migration.sql);
+  }
+  for (const statement of fixtureSql({ sha, size: pdfBytes.byteLength })) {
+    await db.query(statement);
+  }
+
+  const { buildApp } = await import(pathToFileURL(API_APP).href);
+  const { loadEnv } = await import(
+    pathToFileURL(join(REPO_ROOT, 'apps', 'api', 'dist', 'index.js')).href
+  );
+
+  const env = loadEnv({
+    NODE_ENV: 'test',
+    PUBLIC_URL: `http://127.0.0.1:${String(FRONT_PORT)}`,
+    DATABASE_URL: 'postgresql://pglite/id-portal-e2e',
+    AUTH_MODE: 'dev-stub',
+    CSRF_SECRET: 'csrf-secret-of-playwright-run-0123456789',
+    STORAGE_DRIVER: 'local',
+    LOCAL_STORAGE_DIR: storageDir,
+    AUDIT_HMAC_KEY: 'audit-hmac-key-of-playwright-run',
+    // Лимит запросов сняли бы весь прогон целиком: сценарии открывают десятки
+    // страниц с одного адреса.
+    RATE_LIMIT_MAX: '1000000',
+    PREVIEW_MODE: 'pdfjs',
+    LOG_LEVEL: 'warn',
+  });
+
+  const app = await buildApp({ env, pool: createTestPool(db) });
+  await app.listen({ port: API_PORT, host: '127.0.0.1' });
+  return { app, db, storageDir };
+}
+
+function proxy(clientRequest, clientResponse) {
+  const upstream = httpRequest(
+    {
+      host: '127.0.0.1',
+      port: API_PORT,
+      method: clientRequest.method,
+      path: clientRequest.url,
+      headers: { ...clientRequest.headers, host: `127.0.0.1:${String(API_PORT)}` },
+    },
+    (upstreamResponse) => {
+      clientResponse.writeHead(upstreamResponse.statusCode ?? 502, upstreamResponse.headers);
+      upstreamResponse.pipe(clientResponse);
+    },
+  );
+  upstream.on('error', (error) => {
+    clientResponse.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' });
+    clientResponse.end(`Приложение недоступно: ${error.message}`);
+  });
+  clientRequest.pipe(upstream);
+}
+
+function serveStatic(clientRequest, clientResponse) {
+  const url = new URL(clientRequest.url ?? '/', 'http://localhost');
+  const relative = url.pathname === '/' ? '/index.html' : url.pathname;
+  const candidate = resolve(join(DIST_DIR, relative));
+
+  // Единственный путь наружу из `dist` — обход каталогов; сборка сюда не пишет
+  // ничего, что стоило бы прятать, но проверка стоит там, где ключ становится
+  // путём, как и в драйвере хранилища.
+  const inside = candidate === DIST_DIR || candidate.startsWith(DIST_DIR + sep);
+  const path =
+    inside && existsSync(candidate) && extname(candidate) !== ''
+      ? candidate
+      : join(DIST_DIR, 'index.html');
+
+  const body = readFileSync(path);
+  clientResponse.writeHead(200, {
+    'content-type': MIME[extname(path)] ?? 'application/octet-stream',
+    // Прогон открывает страницы много раз; кэш браузера прятал бы правку сборки.
+    'cache-control': 'no-store',
+  });
+  clientResponse.end(body);
+}
+
+async function main() {
+  if (!existsSync(join(DIST_DIR, 'index.html'))) {
+    fail(
+      `не найдена сборка SPA: ${DIST_DIR}\nПеред прогоном нужен \`pnpm --filter @id/web build\`.`,
+    );
+  }
+
+  const started = await startApi();
+
+  const front = createServer((clientRequest, clientResponse) => {
+    try {
+      if (isApiPath(clientRequest.url ?? '/')) proxy(clientRequest, clientResponse);
+      else serveStatic(clientRequest, clientResponse);
+    } catch (error) {
+      clientResponse.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' });
+      clientResponse.end(String(error));
+    }
+  });
+
+  front.listen(FRONT_PORT, '127.0.0.1', () => {
+    console.error(`[стенд] портал на http://127.0.0.1:${String(FRONT_PORT)}`);
+  });
+
+  const shutdown = async () => {
+    front.close();
+    await started.app.close();
+    await started.db.close();
+    process.exit(0);
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+}
+
+await main();

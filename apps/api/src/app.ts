@@ -94,6 +94,7 @@ import { registerHealthRoutes } from './routes/health.js';
 import { registerCatalogRoutes } from './modules/catalog/routes.js';
 import { registerObjectRuleProfileRoutes } from './modules/catalog/object-rule-profiles.js';
 import { registerRevisionEventRoutes } from './modules/events/sse.js';
+import { registerNavigationRoutes } from './modules/navigation/routes.js';
 import { registerFileRoutes } from './modules/files/routes.js';
 import { registerBundleRoutes } from './modules/bundles/routes.js';
 import { registerCheckRoutes } from './modules/checks/routes.js';
@@ -536,6 +537,11 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppInstan
   // форма наложений и своё разрешение «правила на дату» (§9.2).
   registerObjectRuleProfileRoutes(app);
   registerAuditRoutes(app);
+  // Навигация «тома → поставки → ревизия» (§3, §14). До неё корневой экран «ИД»
+  // построить было нечем: таблицы существовали с S2 и использовались
+  // репозиториями, но ни один маршрут их наружу не выводил, а идентификатор
+  // ревизии в остальных маршрутах брался неизвестно откуда.
+  registerNavigationRoutes(app);
   // Приём файлов и выдача содержимого (§4.2). Маршрут приёма байтов для драйвера
   // `local` регистрируется внутри и только при этом драйвере: в боевой
   // конфигурации такого пути в приложении нет вовсе.

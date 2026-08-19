@@ -12,12 +12,21 @@
  * ссылкой. Первые два закрываются `withScope()`, вторые два — `allowsRow()`,
  * потому что там строка уже прочитана, и добавить условие в запрос нечем.
  *
- * Почему маршруты объявлены здесь, а не взяты из `routes/`. Прикладных
- * маршрутов ИД на этом этапе нет, а гейт проверяет не URL, а то, что изоляция
- * держится, когда маршрут собран из положенных деталей: `requirePermission` →
- * `withScope`/`allowsRow` → problem+json. Каждый маршрут ниже — минимальная
- * копия того, что обязан делать боевой обработчик; ни одна проверка доступа в
- * них не написана заново.
+ * Почему маршруты объявлены здесь, а не взяты из `routes/`. Гейт проверяет не
+ * URL, а то, что изоляция держится, когда маршрут собран из положенных деталей:
+ * `requirePermission` → `withScope`/`allowsRow` → problem+json. Каждый маршрут
+ * ниже — минимальная копия того, что обязан делать боевой обработчик; ни одна
+ * проверка доступа в них не написана заново.
+ *
+ * **Пути перенесены в пространство `_isolation`.** Когда файл писался, боевых
+ * маршрутов поставок не существовало вовсе, и заглушки занимали их будущие
+ * адреса. Теперь `/api/v1/submissions` и `/api/v1/submissions/{id}` — настоящие
+ * маршруты (`modules/navigation/routes.ts`), и второе объявление того же метода
+ * Fastify отвергает. То же решение уже было принято здесь для SSE и для
+ * администрирования по той же причине. Изоляция САМИХ боевых маршрутов
+ * навигации проверена в `modules/navigation/navigation.routes.test.ts` — по всем
+ * тем же путям и с положительным контролем; этот файл остаётся проверкой
+ * композиции деталей, из которых они собраны.
  */
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -243,7 +252,7 @@ function registerIsolationRoutes(app: AppInstance): void {
 
   // Путь 1: список.
   app.get(
-    '/api/v1/submissions',
+    '/api/v1/_isolation/submissions',
     { preHandler: requirePermission('submission.read') },
     async (request) => {
       const { scope } = currentAuth(request);
@@ -261,7 +270,7 @@ function registerIsolationRoutes(app: AppInstance): void {
 
   // Путь 2: прямой доступ по идентификатору.
   app.get(
-    '/api/v1/submissions/:id',
+    '/api/v1/_isolation/submissions/:id',
     { schema: { params: idParams }, preHandler: requirePermission('submission.read') },
     async (request) => {
       const { scope } = currentAuth(request);
@@ -374,7 +383,7 @@ function registerIsolationRoutes(app: AppInstance): void {
   // Небезопасный метод: нужен для проверки CSRF и того, что запись подчиняется
   // той же области видимости, что и чтение.
   app.post(
-    '/api/v1/submissions/:id/submit',
+    '/api/v1/_isolation/submissions/:id/submit',
     { schema: { params: idParams }, preHandler: requirePermission('submission.submit') },
     async (request) => {
       const { scope } = currentAuth(request);
@@ -537,21 +546,21 @@ const SECRETS_OF_B = [TITLE_B, OBJECT_B, CONTRACTOR_B, S3_KEY_B, EVENT_MARKER_B]
 
 describe('путь 1: список', () => {
   it('подрядчик А не видит поставку подрядчика Б', async () => {
-    const response = await get('/api/v1/submissions', await sessionFor(KC.contractorA));
+    const response = await get('/api/v1/_isolation/submissions', await sessionFor(KC.contractorA));
     expect(response.statusCode).toBe(200);
     expect(submissionIds(response)).toEqual([SUBMISSION_A]);
     expectNoLeak(response, SECRETS_OF_B);
   });
 
   it('подрядчик Б не видит поставку подрядчика А', async () => {
-    const response = await get('/api/v1/submissions', await sessionFor(KC.contractorB));
+    const response = await get('/api/v1/_isolation/submissions', await sessionFor(KC.contractorB));
     expect(response.statusCode).toBe(200);
     expect(submissionIds(response)).toEqual([SUBMISSION_B]);
     expectNoLeak(response, [TITLE_A, OBJECT_A, CONTRACTOR_A]);
   });
 
   it('администратор видит обе поставки: список не пуст сам по себе', async () => {
-    const response = await get('/api/v1/submissions', await sessionFor(KC.admin));
+    const response = await get('/api/v1/_isolation/submissions', await sessionFor(KC.admin));
     expect(response.statusCode).toBe(200);
     expect(submissionIds(response)).toEqual([SUBMISSION_A, SUBMISSION_B]);
   });
@@ -564,7 +573,7 @@ describe('путь 1: список', () => {
 describe('путь 2: прямой доступ по id', () => {
   it('подрядчик А не получает поставку Б и не узнаёт о ней из ошибки', async () => {
     const response = await get(
-      `/api/v1/submissions/${SUBMISSION_B}`,
+      `/api/v1/_isolation/submissions/${SUBMISSION_B}`,
       await sessionFor(KC.contractorA),
     );
     expect(response.statusCode).not.toBe(200);
@@ -574,7 +583,7 @@ describe('путь 2: прямой доступ по id', () => {
 
   it('свою поставку по тому же маршруту получает: отказ выше не про маршрут', async () => {
     const response = await get(
-      `/api/v1/submissions/${SUBMISSION_A}`,
+      `/api/v1/_isolation/submissions/${SUBMISSION_A}`,
       await sessionFor(KC.contractorA),
     );
     expect(response.statusCode).toBe(200);
@@ -658,7 +667,7 @@ describe('путь 4: файл и presigned URL', () => {
 
 describe('инженер и область объектов', () => {
   it('видит поставку своего объекта и не видит поставку чужого', async () => {
-    const response = await get('/api/v1/submissions', await sessionFor(KC.engineerA));
+    const response = await get('/api/v1/_isolation/submissions', await sessionFor(KC.engineerA));
     expect(response.statusCode).toBe(200);
     // Инженер видит всех подрядчиков, но только на назначенных объектах (§4.1).
     expect(submissionIds(response)).toEqual([SUBMISSION_A]);
@@ -667,7 +676,7 @@ describe('инженер и область объектов', () => {
 
   it('не получает поставку чужого объекта по прямому id', async () => {
     const response = await get(
-      `/api/v1/submissions/${SUBMISSION_B}`,
+      `/api/v1/_isolation/submissions/${SUBMISSION_B}`,
       await sessionFor(KC.engineerA),
     );
     expect([403, 404]).toContain(response.statusCode);
@@ -677,13 +686,13 @@ describe('инженер и область объектов', () => {
   it('инженер без назначенных объектов не видит ни одной поставки', async () => {
     const session = await sessionFor(KC.engineerWithoutObjects);
 
-    const list = await get('/api/v1/submissions', session);
+    const list = await get('/api/v1/_isolation/submissions', session);
     expect(list.statusCode).toBe(200);
     // Пустая область — это ноль строк, а не отсутствие ограничения.
     expect(submissionIds(list)).toEqual([]);
     expectNoLeak(list, [TITLE_A, TITLE_B]);
 
-    const direct = await get(`/api/v1/submissions/${SUBMISSION_A}`, session);
+    const direct = await get(`/api/v1/_isolation/submissions/${SUBMISSION_A}`, session);
     expect([403, 404]).toContain(direct.statusCode);
     expectNoLeak(direct, [TITLE_A]);
   });
@@ -707,7 +716,7 @@ describe('роль из токена', () => {
 
     expect((await get(ADMIN_PROBE_ROUTE, session)).statusCode).toBe(403);
 
-    const list = await get('/api/v1/submissions', session);
+    const list = await get('/api/v1/_isolation/submissions', session);
     expect(list.statusCode).toBe(403);
     expectNoLeak(list, [TITLE_A, TITLE_B]);
   });
@@ -731,13 +740,13 @@ describe('подрядчик без users.contractor_id', () => {
   it('не видит ничего, а не всё', async () => {
     const session = await signIn(KC.withoutOrganization);
 
-    const list = await get('/api/v1/submissions', session);
+    const list = await get('/api/v1/_isolation/submissions', session);
     // Область видимости за него не придумывается: без организации у роли
     // `contractor` её нет, и запрос отклоняется целиком.
     expect(list.statusCode).toBe(403);
     expectNoLeak(list, [TITLE_A, TITLE_B, S3_KEY_A, S3_KEY_B]);
 
-    const direct = await get(`/api/v1/submissions/${SUBMISSION_A}`, session);
+    const direct = await get(`/api/v1/_isolation/submissions/${SUBMISSION_A}`, session);
     expect(direct.statusCode).toBe(403);
     expectNoLeak(direct, [TITLE_A]);
   });
@@ -759,7 +768,7 @@ describe('CSRF', () => {
     const session = await sessionFor(KC.contractorA);
     const response = await app.inject({
       method: 'POST',
-      url: `/api/v1/submissions/${SUBMISSION_A}/submit`,
+      url: `/api/v1/_isolation/submissions/${SUBMISSION_A}/submit`,
       headers: { cookie: session.cookie },
     });
     expect(response.statusCode).toBe(403);
@@ -770,7 +779,7 @@ describe('CSRF', () => {
     const session = await sessionFor(KC.contractorA);
     const response = await app.inject({
       method: 'POST',
-      url: `/api/v1/submissions/${SUBMISSION_A}/submit`,
+      url: `/api/v1/_isolation/submissions/${SUBMISSION_A}/submit`,
       headers: { cookie: session.cookie, [CSRF_HEADER]: 'postoronnij-token' },
     });
     expect(response.statusCode).toBe(403);
@@ -781,7 +790,7 @@ describe('CSRF', () => {
     const session = await sessionFor(KC.contractorA);
     const response = await app.inject({
       method: 'POST',
-      url: `/api/v1/submissions/${SUBMISSION_A}/submit`,
+      url: `/api/v1/_isolation/submissions/${SUBMISSION_A}/submit`,
       headers: { cookie: session.cookie, [CSRF_HEADER]: session.csrfToken },
     });
     expect(response.statusCode).toBe(200);
@@ -792,7 +801,7 @@ describe('CSRF', () => {
     const session = await sessionFor(KC.contractorA);
     const response = await app.inject({
       method: 'POST',
-      url: `/api/v1/submissions/${SUBMISSION_B}/submit`,
+      url: `/api/v1/_isolation/submissions/${SUBMISSION_B}/submit`,
       headers: { cookie: session.cookie, [CSRF_HEADER]: session.csrfToken },
     });
     expect([403, 404]).toContain(response.statusCode);
@@ -806,7 +815,7 @@ describe('CSRF', () => {
 
 describe('сессия', () => {
   it('без cookie сессии — 401', async () => {
-    const response = await get('/api/v1/submissions', null);
+    const response = await get('/api/v1/_isolation/submissions', null);
     expect(response.statusCode).toBe(401);
     // Без WWW-Authenticate клиент не отличает «войди» от «этот маршрут открыт».
     expect(response.headers['www-authenticate']).toBeDefined();
@@ -816,7 +825,7 @@ describe('сессия', () => {
   it('неподписанное значение в cookie сессии — 401, а не 500', async () => {
     const response = await app.inject({
       method: 'GET',
-      url: '/api/v1/submissions',
+      url: '/api/v1/_isolation/submissions',
       headers: { cookie: `${SESSION_COOKIE}=00000000-0000-4000-8000-000000000099` },
     });
     expect(response.statusCode).toBe(401);
@@ -824,7 +833,7 @@ describe('сессия', () => {
 
   it('истёкшая сессия — 401', async () => {
     const session = await signIn(KC.sessionProbe);
-    expect((await get('/api/v1/submissions', session)).statusCode).toBe(200);
+    expect((await get('/api/v1/_isolation/submissions', session)).statusCode).toBe(200);
 
     // Истекает только эта сессия: у остальных пользователей свои строки.
     await db.query(
@@ -835,7 +844,7 @@ describe('сессия', () => {
       [USER_SESSION_PROBE],
     );
 
-    const response = await get('/api/v1/submissions', session);
+    const response = await get('/api/v1/_isolation/submissions', session);
     expect(response.statusCode).toBe(401);
     expectNoLeak(response, [TITLE_A]);
   });

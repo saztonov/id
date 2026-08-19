@@ -1,0 +1,73 @@
+/**
+ * Ключи кэша TanStack Query.
+ *
+ * Собраны в одном месте, чтобы инвалидация после мутации попадала в тот же
+ * ключ, которым читали. Ключи, написанные по месту, расходятся на одну букву, и
+ * тогда экран показывает старые данные после успешной правки — дефект, который
+ * выглядит как «сервер не сохранил».
+ */
+export const layoutKeys = {
+  revisions: (revisionId: string) => ['layouts', 'of-revision', revisionId] as const,
+  detail: (layoutId: string) => ['layouts', layoutId] as const,
+  blocks: (layoutId: string) => ['layouts', layoutId, 'blocks'] as const,
+};
+
+export const revisionKeys = {
+  files: (revisionId: string) => ['revisions', revisionId, 'files'] as const,
+  bundles: (revisionId: string) => ['revisions', revisionId, 'bundles'] as const,
+  bundlePages: (bundleId: string) => ['bundles', bundleId, 'pages'] as const,
+  workflow: (revisionId: string) => ['revisions', revisionId, 'workflow'] as const,
+  processingStatus: (revisionId: string) => ['revisions', revisionId, 'processing-status'] as const,
+  documents: (revisionId: string) => ['revisions', revisionId, 'documents'] as const,
+  pages: (revisionId: string) => ['revisions', revisionId, 'pages'] as const,
+  registry: (revisionId: string) => ['revisions', revisionId, 'registry'] as const,
+  classifications: (revisionId: string) => ['revisions', revisionId, 'classifications'] as const,
+  checkRuns: (revisionId: string) => ['revisions', revisionId, 'check-runs'] as const,
+  findings: (revisionId: string) => ['revisions', revisionId, 'findings'] as const,
+  recognitionRuns: (revisionId: string) => ['revisions', revisionId, 'recognition-runs'] as const,
+  archive: (revisionId: string) => ['revisions', revisionId, 'archive'] as const,
+};
+
+export const documentKeys = {
+  detail: (documentId: string) => ['documents', documentId] as const,
+  fields: (documentId: string) => ['documents', documentId, 'fields'] as const,
+};
+
+export const catalogKeys = {
+  objects: (search: string) => ['catalog', 'objects', search] as const,
+  object: (objectId: string) => ['catalog', 'objects', objectId] as const,
+  counterparties: (search: string, kind: string) =>
+    ['catalog', 'counterparties', search, kind] as const,
+  sections: (objectId: string) => ['catalog', 'sections', objectId] as const,
+  sectionKinds: () => ['catalog', 'section-kinds'] as const,
+  rdDocuments: (objectId: string, search: string) =>
+    ['catalog', 'rd-documents', objectId, search] as const,
+  sectionProfiles: (sectionKindCode: string) =>
+    ['catalog', 'section-profiles', sectionKindCode] as const,
+  effectiveSectionProfile: (sectionKindCode: string, at: string) =>
+    ['catalog', 'section-profiles', 'effective', sectionKindCode, at] as const,
+  docTypes: (includeInactive: boolean) => ['catalog', 'doc-types', includeInactive] as const,
+  candidates: (status: string) => ['catalog', 'doc-type-candidates', status] as const,
+};
+
+export const navigationKeys = {
+  volumes: (filter: string) => ['nav', 'volumes', filter] as const,
+  volume: (volumeId: string) => ['nav', 'volumes', 'one', volumeId] as const,
+  submissions: (filter: string) => ['nav', 'submissions', filter] as const,
+  revisions: (submissionId: string) => ['nav', 'revisions', submissionId] as const,
+};
+
+export const adminKeys = {
+  users: (search: string) => ['admin', 'users', search] as const,
+  user: (userId: string) => ['admin', 'users', userId] as const,
+  settings: () => ['admin', 'settings'] as const,
+  rules: () => ['admin', 'rules'] as const,
+  rulesets: () => ['admin', 'rulesets'] as const,
+  ruleset: (rulesetId: string) => ['admin', 'rulesets', 'one', rulesetId] as const,
+  prompts: (filter: string) => ['admin', 'prompts', filter] as const,
+  jobs: (filter: string) => ['admin', 'jobs', filter] as const,
+  job: (jobId: string) => ['admin', 'jobs', 'one', jobId] as const,
+  queues: () => ['admin', 'queues'] as const,
+  audit: (filter: string) => ['admin', 'audit', filter] as const,
+  ruleCatalog: () => ['admin', 'rule-catalog'] as const,
+};
