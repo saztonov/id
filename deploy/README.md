@@ -86,6 +86,18 @@ openssl rand -base64 48   # AUDIT_HMAC_KEY
 
 `TRUST_PROXY=172.18.0.0/16` — подсеть `edge` (проверить `docker network inspect edge`).
 
+### LLM (proxy_llm)
+
+- `LLM_PROVIDER=proxy_llm`
+- `PROXY_LLM_BASE_URL=https://proxyllm.fvds.ru/api/v1` (тот же шлюз, что у estimat)
+- `LLM_MODEL=deepseek/deepseek-v4-flash-0731`
+- `LLM_MODEL_ALLOWLIST=deepseek/deepseek-v4-flash-0731` (в production пустой allowlist запрещает всё)
+- `PROXY_LLM_TOKEN` — только в `/etc/id/id.env`, не в git/чат
+
+RD WEB (`RDWEB_*`) на первом подъёме не обязателен.
+
+Миграции: `deploy-id --migrate` (или `compose … run --rm migrate`) — по желанию оператора.
+
 ## 3. Код и симлинк
 
 ```bash
