@@ -39,6 +39,7 @@ const packageRoots: Readonly<Record<string, string>> = {
   '@id/worker': 'apps/worker',
   '@id/contracts': 'packages/contracts',
   '@id/db': 'packages/db',
+  '@id/detection': 'packages/detection',
   '@id/doc-types': 'packages/doc-types',
   '@id/recognition': 'packages/recognition',
   '@id/rules': 'packages/rules',

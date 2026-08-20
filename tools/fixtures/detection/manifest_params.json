@@ -1,0 +1,120 @@
+{
+  "case": "manifest_params + resolve_inference_mode(auto)",
+  "input": {
+    "manifests": {
+      "full": {
+        "manifest_version": 2,
+        "num_classes": 3,
+        "resolution": 560,
+        "class_mapping": {
+          "text": 0,
+          "image": 1,
+          "stamp": 2
+        },
+        "preprocessing": {
+          "mean": [0.485, 0.456, 0.406],
+          "std": [0.229, 0.224, 0.225],
+          "input_name": "input"
+        },
+        "box_format": "cxcywh_normalized",
+        "score_activation": "sigmoid",
+        "num_select": 200,
+        "dynamic_batch": true,
+        "tiling": {
+          "tile_size": 768,
+          "overlap": 96,
+          "mode": "whole_page_and_tiles",
+          "min_visibility": 0.3
+        }
+      },
+      "legacy_minimal": {
+        "num_classes": 3,
+        "resolution": 640,
+        "class_mapping": {
+          "text": 0,
+          "image": 1,
+          "stamp": 2
+        },
+        "preprocessing": {
+          "mean": [0.485, 0.456, 0.406],
+          "std": [0.229, 0.224, 0.225]
+        }
+      },
+      "garbage_mode": {
+        "num_classes": 3,
+        "resolution": 512,
+        "class_mapping": {
+          "text": 0,
+          "image": 1,
+          "stamp": 2
+        },
+        "preprocessing": {
+          "mean": [0.5, 0.5, 0.5],
+          "std": [0.25, 0.25, 0.25]
+        },
+        "tiling": {
+          "tile_size": 512,
+          "overlap": 64,
+          "mode": "мусор"
+        }
+      }
+    }
+  },
+  "params": {},
+  "expected": {
+    "full": {
+      "mean": [0.485, 0.456, 0.406],
+      "std": [0.229, 0.224, 0.225],
+      "inputName": "input",
+      "boxFormat": "cxcywh_normalized",
+      "activation": "sigmoid",
+      "numSelect": 200,
+      "tileSize": 768,
+      "overlap": 96,
+      "resolution": 560,
+      "dynamicBatch": true,
+      "trainingMode": "whole_page_and_tiles",
+      "minVisibility": 0.3,
+      "resolvedAuto": {
+        "mode": "tiles",
+        "source": "manifest"
+      }
+    },
+    "legacy_minimal": {
+      "mean": [0.485, 0.456, 0.406],
+      "std": [0.229, 0.224, 0.225],
+      "inputName": "input",
+      "boxFormat": "cxcywh_normalized",
+      "activation": "sigmoid",
+      "numSelect": 300,
+      "tileSize": 1024,
+      "overlap": 128,
+      "resolution": 640,
+      "dynamicBatch": false,
+      "trainingMode": null,
+      "minVisibility": null,
+      "resolvedAuto": {
+        "mode": "tiles",
+        "source": "legacy_default"
+      }
+    },
+    "garbage_mode": {
+      "mean": [0.5, 0.5, 0.5],
+      "std": [0.25, 0.25, 0.25],
+      "inputName": "input",
+      "boxFormat": "cxcywh_normalized",
+      "activation": "sigmoid",
+      "numSelect": 300,
+      "tileSize": 512,
+      "overlap": 64,
+      "resolution": 512,
+      "dynamicBatch": false,
+      "trainingMode": null,
+      "minVisibility": null,
+      "resolvedAuto": {
+        "mode": "tiles",
+        "source": "legacy_default"
+      }
+    }
+  }
+}

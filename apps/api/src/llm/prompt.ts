@@ -46,8 +46,15 @@ const USER_MARK = '--USER--';
 const CONTEXT_MARK = '--CONTEXT--';
 const END_MARK = '--END--';
 
-/** CRLF и одиночный CR приводятся к LF: вид перевода строки не меняет смысл. */
-function normalizeNewlines(value: string): string {
+/**
+ * CRLF и одиночный CR приводятся к LF: вид перевода строки не меняет смысл.
+ *
+ * Экспортируется для VLM-канонизации (`vlm-prompt.ts`): у неё свой формат и
+ * своя версия, но правило «перевод строки не меняет хэш» обязано быть общим —
+ * иначе один и тот же промт на Windows и Linux давал бы разные `input_hash`
+ * только в одном из двух путей.
+ */
+export function normalizeNewlines(value: string): string {
   return value.replace(/\r\n?/g, '\n');
 }
 
@@ -89,8 +96,19 @@ export function buildEffectivePrompt(request: EffectivePromptInput): string {
   ].join('\n');
 }
 
-function sha256Hex(value: string): string {
-  return createHash('sha256').update(value, 'utf8').digest('hex');
+/**
+ * sha256 в hex — единственная хэш-функция обоих путей (текстового и VLM).
+ *
+ * Принимает и байты: VLM-канонизация хэширует PNG кропа как есть, без
+ * перекодировок. Строки хэшируются в utf8 — это закреплено явно, потому что
+ * от кодировки зависит каждый `input_hash` в `ai_runs` и каждый ключ
+ * записанных ответов двойника.
+ */
+export function sha256Hex(value: string | Uint8Array): string {
+  const hash = createHash('sha256');
+  if (typeof value === 'string') hash.update(value, 'utf8');
+  else hash.update(value);
+  return hash.digest('hex');
 }
 
 /** sha256 полного эффективного промта. Он же `ai_runs.input_hash`. */

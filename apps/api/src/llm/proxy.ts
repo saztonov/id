@@ -40,6 +40,7 @@ import {
   cacheKey,
   promptHash,
   responseHash,
+  sha256Hex,
   type LruCache,
 } from './prompt.js';
 
@@ -47,6 +48,31 @@ import {
 export const LLM_SERVICE = 'llm';
 
 const PROVIDER = 'proxy_llm' as const;
+
+/**
+ * `error.code` шлюза: ответ модели превысил потолок тела ответа (~2 MiB).
+ *
+ * Приходит со статусом 502, то есть выглядел бы повторяемым транспортным
+ * сбоем — но повтор детерминированного промта даст такой же большой ответ и
+ * снова оплатит его. Поэтому код различается явно и превращается в
+ * `LlmProtocolError` (не повторяется): чинится уменьшением `max_tokens` или
+ * объёма запрашиваемого ответа, а не ретраем.
+ */
+export const UPSTREAM_RESPONSE_TOO_LARGE = 'upstream_response_too_large';
+
+/**
+ * Идемпотентный ключ вызова — обязательный `X-Idempotency-Key` шлюза.
+ *
+ * Считается из хэша эффективного входа и модели, то есть детерминирован:
+ * все сетевые попытки ОДНОГО вызова несут один ключ, и шлюз вправе не
+ * исполнять (и не оплачивать) повтор уже выполненного. Этим он отличается от
+ * `X-Request-Id`, который нарочно новый на каждую попытку и связывает попытку
+ * с журналом. Это третий рубеж идемпотентности плана v3: после UNIQUE в БД и
+ * LRU-кэша, но единственный, который переживает рестарт процесса.
+ */
+export function idempotencyKey(inputHash: string, model: string): string {
+  return sha256Hex(`${inputHash}:${model}`);
+}
 
 /** Кэшируется всё, кроме измеренного времени и самого признака попадания. */
 export type CachedCompletion = Omit<LlmResponse, 'latencyMs' | 'cacheHit'>;
@@ -68,7 +94,10 @@ export interface ProxyLlmProviderOptions {
 }
 
 interface ChatCompletionPayload {
-  readonly choices?: readonly { readonly message?: { readonly content?: unknown } }[];
+  readonly choices?: readonly {
+    readonly message?: { readonly content?: unknown };
+    readonly finish_reason?: unknown;
+  }[];
   readonly usage?: {
     readonly prompt_tokens?: unknown;
     readonly completion_tokens?: unknown;
@@ -121,9 +150,14 @@ export class ProxyLlmProvider implements LlmPort {
     // обязан унести с собой хэш промта и модель: иначе таймаут не оставляет в
     // `ai_runs` ни строки, и «вызов был» доказывать нечем.
     let payload: ChatCompletionPayload;
+    let text: string;
     try {
       await this.#options.policy.ensureCallPermitted({ model });
-      payload = await this.#send(request, model);
+      payload = await this.#send(request, model, inputHash);
+      // Разбор ответа — внутри той же ловушки: оборванный по `max_tokens` или
+      // пустой ответ означает СОСТОЯВШИЙСЯ оплаченный вызов, и его попытка
+      // обязана дойти до `ai_runs` так же, как таймаут или 5xx.
+      text = extractText(payload);
     } catch (error) {
       throw withAttempt(error, {
         provider: PROVIDER,
@@ -133,7 +167,6 @@ export class ProxyLlmProvider implements LlmPort {
       });
     }
 
-    const text = extractText(payload);
     const tokensIn = optionalCount(payload.usage?.prompt_tokens);
     const tokensOut = optionalCount(payload.usage?.completion_tokens);
     const cost = optionalCost(payload.usage?.cost);
@@ -163,7 +196,11 @@ export class ProxyLlmProvider implements LlmPort {
     return { ...completion, latencyMs: this.#now() - startedAt, cacheHit: false };
   }
 
-  async #send(request: LlmRequest, model: string): Promise<ChatCompletionPayload> {
+  async #send(
+    request: LlmRequest,
+    model: string,
+    inputHash: string,
+  ): Promise<ChatCompletionPayload> {
     const timeoutMs = request.timeoutMs ?? this.#options.timeoutMs;
     /**
      * Тело запроса. Ровно четыре поля, и все — текст либо число.
@@ -198,8 +235,13 @@ export class ProxyLlmProvider implements LlmPort {
               accept: 'application/json',
               'content-type': 'application/json',
               authorization: `Bearer ${this.#options.token}`,
+              // Обязателен по контракту шлюза: одинаков на всех попытках
+              // одного вызова, чтобы повтор не исполнился и не оплатился
+              // второй раз. См. `idempotencyKey`.
+              'X-Idempotency-Key': idempotencyKey(inputHash, model),
               // Сквозной `request_id` (§11): без него вызов LLM не связать ни с
-              // поставкой, ни со строкой `ai_runs`.
+              // поставкой, ни со строкой `ai_runs`. Новый на каждую попытку —
+              // в отличие от идемпотентного ключа.
               ...traceHeaders(),
             },
             body: JSON.stringify(body),
@@ -214,7 +256,17 @@ export class ProxyLlmProvider implements LlmPort {
           throw new LlmRateLimitError('Шлюз LLM ответил 429: слишком много запросов.');
         }
         if (!response.ok) {
-          throw new LlmTransportError(this.#scrub(await describeFailure(response)), {
+          const failure = await describeFailure(response);
+          if (response.status === 502 && failure.code === UPSTREAM_RESPONSE_TOO_LARGE) {
+            // См. UPSTREAM_RESPONSE_TOO_LARGE: 502 здесь врёт про природу
+            // отказа, повтор оплатил бы тот же слишком большой ответ.
+            throw new LlmProtocolError(
+              `Шлюз LLM ответил 502 ${UPSTREAM_RESPONSE_TOO_LARGE}: ответ модели превысил ` +
+                'потолок размера на шлюзе. Повтор не поможет — уменьшите max_tokens ' +
+                'или объём запрашиваемого ответа.',
+            );
+          }
+          throw new LlmTransportError(this.#scrub(failure.message), {
             status: response.status,
           });
         }
@@ -230,24 +282,38 @@ export class ProxyLlmProvider implements LlmPort {
   }
 
   #networkFailure(error: unknown, timeoutMs: number): Error {
-    const name = error instanceof Error ? error.name : typeof error;
-    if (name === 'TimeoutError' || name === 'AbortError') {
-      return new LlmTimeoutError(timeoutMs, `Шлюз LLM не ответил за ${timeoutMs} мс.`);
-    }
-    return new LlmTransportError(`Вызов шлюза LLM не состоялся (${name}).`);
+    return networkFailure(error, timeoutMs);
   }
 
-  /**
-   * Вычёркивает токен из текста, который поедет в журнал или в ошибку.
-   *
-   * Шлюз вправе вернуть присланный заголовок эхом в сообщении об ошибке — так
-   * делают и nginx, и часть прокси при 401. Без этой замены секрет попал бы в
-   * `error_events`, то есть в таблицу без срока хранения (находка S3, п. 3).
-   */
   #scrub(value: string): string {
-    const token = this.#options.token;
-    return token.length === 0 ? value : value.split(token).join('***');
+    return scrubToken(value, this.#options.token);
   }
+}
+
+/**
+ * Классифицирует сбой самого `fetch`: таймаут отличим от прочей сети.
+ *
+ * Общая функция обоих путей (текстового и VLM): у них один шлюз, один вид
+ * таймаута и одна семантика повторов — расхождение классификации означало бы,
+ * что одинаковый сбой в одном пути повторяется, а в другом нет.
+ */
+export function networkFailure(error: unknown, timeoutMs: number): Error {
+  const name = error instanceof Error ? error.name : typeof error;
+  if (name === 'TimeoutError' || name === 'AbortError') {
+    return new LlmTimeoutError(timeoutMs, `Шлюз LLM не ответил за ${timeoutMs} мс.`);
+  }
+  return new LlmTransportError(`Вызов шлюза LLM не состоялся (${name}).`);
+}
+
+/**
+ * Вычёркивает токен из текста, который поедет в журнал или в ошибку.
+ *
+ * Шлюз вправе вернуть присланный заголовок эхом в сообщении об ошибке — так
+ * делают и nginx, и часть прокси при 401. Без этой замены секрет попал бы в
+ * `error_events`, то есть в таблицу без срока хранения (находка S3, п. 3).
+ */
+export function scrubToken(value: string, token: string): string {
+  return token.length === 0 ? value : value.split(token).join('***');
 }
 
 /**
@@ -262,24 +328,54 @@ export function chatCompletionsUrl(baseUrl: string): string {
   return `${baseUrl.replace(/\/+$/, '')}/chat/completions`;
 }
 
+/**
+ * Текст ответа с проверкой признака завершения.
+ *
+ * `finish_reason === 'length'` — модель упёрлась в `max_tokens`: JSON в этом
+ * месте гарантированно оборван, вызов уже оплачен, а повтор того же промта
+ * оборвётся на том же токене. Пустой ответ непригоден по той же причине:
+ * стадии §10 ждут JSON, и «успех с пустой строкой» превратился бы уровнем выше
+ * в загадочный отказ парсера без указания на виновника. Оба случая — не успех
+ * и не повторяемый сбой, а `LlmProtocolError`: чинится промтом или лимитом
+ * токенов, руками.
+ */
 function extractText(payload: ChatCompletionPayload): string {
-  const content = payload.choices?.[0]?.message?.content;
-  if (typeof content !== 'string') {
-    throw new LlmProtocolError('В ответе шлюза LLM нет текста (choices[0].message.content).');
+  const choice = payload.choices?.[0];
+  const finishReason = typeof choice?.finish_reason === 'string' ? choice.finish_reason : null;
+  if (finishReason === 'length') {
+    throw new LlmProtocolError(
+      'Ответ модели оборван по max_tokens (finish_reason=length): вызов оплачен, но JSON ' +
+        'неполон. Повтор не поможет — увеличьте лимит токенов либо сократите промт.',
+    );
+  }
+  const content = choice?.message?.content;
+  if (typeof content !== 'string' || content === '') {
+    throw new LlmProtocolError(
+      'Пустой ответ модели: в choices[0].message.content нет текста. ' +
+        'Вызов оплачен, но результата нет — это дефект промта или модели, а не сети.',
+    );
   }
   return content;
 }
 
 /** Токены: только конечное неотрицательное целое, иначе «не сообщили». */
-function optionalCount(value: unknown): number | null {
+export function optionalCount(value: unknown): number | null {
   if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return null;
   return Math.trunc(value);
 }
 
 /** Стоимость: `numeric(12,4)` в БД, поэтому здесь же округляется до 4 знаков. */
-function optionalCost(value: unknown): number | null {
+export function optionalCost(value: unknown): number | null {
   if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return null;
   return Number(value.toFixed(4));
+}
+
+/** Разобранный отказ шлюза: текст для ошибки и машиночитаемый код. */
+export interface GatewayFailure {
+  /** Готовая строка отказа: статус и усечённая причина шлюза. */
+  readonly message: string;
+  /** `error.code` из тела, если шлюз его прислал; по нему ветвится 502. */
+  readonly code: string | null;
 }
 
 /**
@@ -287,21 +383,29 @@ function optionalCost(value: unknown): number | null {
  *
  * Берётся только `error.message` либо `detail` и только начало строки: тело
  * ответа шлюза — это эхо промта, то есть текст ИД, и ему в журнале не место.
+ * Код ошибки возвращается отдельно: `upstream_response_too_large` меняет класс
+ * отказа, и распознавать его по подстроке текста было бы гаданием.
  */
-async function describeFailure(response: Response): Promise<string> {
+export async function describeFailure(response: Response): Promise<GatewayFailure> {
   let detail = '';
+  let code: string | null = null;
   try {
     const text = await response.text();
     const parsed: unknown = text.length > 0 ? JSON.parse(text) : null;
     if (typeof parsed === 'object' && parsed !== null) {
-      const record = parsed as { error?: { message?: unknown }; detail?: unknown };
+      const record = parsed as { error?: { message?: unknown; code?: unknown }; detail?: unknown };
       const candidate = record.error?.message ?? record.detail;
       if (typeof candidate === 'string') detail = candidate.slice(0, 200);
+      if (typeof record.error?.code === 'string') code = record.error.code;
     }
   } catch {
     detail = '';
   }
-  return detail === ''
-    ? `Шлюз LLM ответил ${response.status}`
-    : `Шлюз LLM ответил ${response.status}: ${detail}`;
+  return {
+    message:
+      detail === ''
+        ? `Шлюз LLM ответил ${response.status}`
+        : `Шлюз LLM ответил ${response.status}: ${detail}`,
+    code,
+  };
 }

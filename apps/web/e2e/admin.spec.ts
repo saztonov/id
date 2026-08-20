@@ -10,7 +10,7 @@
  * Файл идёт `serial`: состояние накапливается — сначала публикуется версия,
  * потом действующей делается прежняя.
  */
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 import { KC, signIn } from './support/session.js';
 
 test.describe.configure({ mode: 'serial' });
@@ -151,4 +151,78 @@ test('«Связь проверена» показывает значение с
 
   await expect(page.getByText('нет: живой пробы подключения не выполнялось').first()).toBeVisible();
   await expect(page.getByText('сервер не прислал признак')).toHaveCount(0);
+});
+
+/** Значение и источник одного настроечного ключа из GET /admin/settings. */
+async function settingOf(
+  page: Page,
+  key: string,
+): Promise<{ value: unknown; isDefault: boolean } | null> {
+  const response = await page.request.get('/api/v1/admin/settings');
+  const body = (await response.json()) as {
+    settings: { key: string; value: unknown; isDefault: boolean }[];
+  };
+  const found = body.settings.find((item) => item.key === key);
+  return found === undefined ? null : { value: found.value, isDefault: found.isDefault };
+}
+
+test('переключение провайдера распознавания доходит до настроек и предупреждает о шлюзе', async ({
+  page,
+}) => {
+  await signIn(page, KC.admin, '/admin?tab=settings');
+
+  // До переключения ключ отвечает значением реестра: строки в app_settings нет.
+  expect(await settingOf(page, 'recognition.provider')).toEqual({
+    value: 'rdweb',
+    isDefault: true,
+  });
+
+  await page.getByTestId('recognition-provider-select').click();
+  await page.locator('.ant-select-dropdown:visible').getByTitle('VLM через OpenRouter').click();
+
+  // Последствие в базе, а не надпись: значение записано и перестало быть
+  // умолчанием. Настройка действует только на новые прогоны, поэтому больше
+  // ничего от переключения не ждётся.
+  await expect
+    .poll(async () => {
+      const setting = await settingOf(page, 'recognition.provider');
+      return setting === null ? 'нет' : `${String(setting.value)}:${String(setting.isDefault)}`;
+    })
+    .toBe('openrouter_vlm:false');
+
+  // Стенд поднят без PROXY_LLM_* (LLM_PROVIDER=none): предупреждение о шлюзе
+  // обязано быть видно, пока канал OpenRouter не через что вести.
+  await expect(page.getByTestId('proxy-llm-warning')).toBeVisible();
+});
+
+test('невалидный слаг модели ловится у поля и не пишется; валидный сохраняется', async ({
+  page,
+}) => {
+  await signIn(page, KC.admin, '/admin?tab=settings');
+
+  // Поле модели видно: провайдер openrouter_vlm выбран предыдущим тестом.
+  const input = page.getByTestId('recognition-model-input');
+  await expect(input).toBeVisible();
+
+  await input.fill('слаг без вендора');
+  await page.getByTestId('recognition-model-save').click();
+
+  // Ошибка стоит У ПОЛЯ — тем же текстом, что ответил бы сервер, — и записи
+  // не было: ключ по-прежнему отвечает умолчанием.
+  await expect(page.getByTestId('setting-error-recognition.vlm_model')).toContainText(
+    'vendor/model',
+  );
+  expect(await settingOf(page, 'recognition.vlm_model')).toEqual({ value: '', isDefault: true });
+
+  await input.fill('qwen/qwen3-vl-235b');
+  await page.getByTestId('recognition-model-save').click();
+
+  await expect
+    .poll(async () => {
+      const setting = await settingOf(page, 'recognition.vlm_model');
+      return setting === null ? 'нет' : `${String(setting.value)}:${String(setting.isDefault)}`;
+    })
+    .toBe('qwen/qwen3-vl-235b:false');
+  // Ошибка поля снята: сохранённое значение прошло и клиентское зеркало, и сервер.
+  await expect(page.getByTestId('setting-error-recognition.vlm_model')).toHaveCount(0);
 });

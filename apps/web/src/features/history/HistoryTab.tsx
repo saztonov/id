@@ -58,6 +58,7 @@ import type {
 import { useSession } from '../../app/session.js';
 import { ErrorState, LoadingState } from '../../shared/ui.js';
 import { usePollingInterval } from '../revision/stream.js';
+import { isDryRun, isVlmRun, recognitionProviderLabel, runProviderOf } from './runProvider.js';
 import {
   PROCESSING_STAGE_LABELS,
   RECOGNITION_STATUS_LABELS,
@@ -283,16 +284,33 @@ export function HistoryTab({ revisionId }: { revisionId: string }): ReactNode {
                 title: 'Статус',
                 dataIndex: 'status',
                 key: 'status',
-                render: (value: RecognitionRun['status']) => (
-                  <Tag color={value === 'done' ? 'green' : value === 'running' ? 'blue' : 'red'}>
-                    {RECOGNITION_STATUS_LABELS[value]}
-                  </Tag>
+                render: (value: RecognitionRun['status'], row) => (
+                  <Space size={4} wrap>
+                    <Tag color={value === 'done' ? 'green' : value === 'running' ? 'blue' : 'red'}>
+                      {RECOGNITION_STATUS_LABELS[value]}
+                    </Tag>
+                    {isDryRun(row) && (
+                      // Dry-run завершается как `done`, но публикации результатов
+                      // не было — без пометки такой прогон неотличим от боевого.
+                      <Tag>dry-run: без публикации</Tag>
+                    )}
+                  </Space>
                 ),
+              },
+              {
+                title: 'Провайдер',
+                key: 'provider',
+                render: (_value, row) => recognitionProviderLabel(row),
               },
               {
                 title: 'Сверка хэшей',
                 key: 'hashes',
                 render: (_value, row) => {
+                  // Сверка локального и удалённого хэша — механизм RD WEB-ветки:
+                  // у VLM-прогона удалённой разметки нет по построению, и вечное
+                  // «сверка не завершена» утверждало бы незавершённость того,
+                  // что не начиналось.
+                  if (isVlmRun(row)) return <Tag>не применима (VLM)</Tag>;
                   const before = row.remoteLayoutHashBefore;
                   const after = row.remoteLayoutHashAfter;
                   const agree = before === row.localLayoutHash && after === row.localLayoutHash;
@@ -369,20 +387,34 @@ function RecognitionRunDetail({ runId }: { runId: string }): ReactNode {
   if (run.isError) return <ErrorState error={run.error} />;
 
   const current = (blocks.data ?? []).filter((block) => block.isCurrent);
+  const provider = runProviderOf(run.data);
+  // Задача RD WEB и удалённые хэши — атрибуты legacy-ветки: у VLM-прогона их
+  // нет по построению, и строка с вечным «—» читалась бы как «не заполнили».
+  const vlm = isVlmRun(run.data);
 
   return (
     <Space direction="vertical" size={12} style={{ width: '100%' }}>
       <Descriptions size="small" column={2}>
-        <Descriptions.Item label="Задача RD WEB">{run.data.rdJobId ?? '—'}</Descriptions.Item>
+        <Descriptions.Item label="Провайдер">
+          {recognitionProviderLabel(run.data)}
+        </Descriptions.Item>
+        <Descriptions.Item label="Модель">{provider.model ?? '—'}</Descriptions.Item>
+        {!vlm && (
+          <Descriptions.Item label="Задача RD WEB">{run.data.rdJobId ?? '—'}</Descriptions.Item>
+        )}
         <Descriptions.Item label="Хэш разметки (локальный)">
           {run.data.localLayoutHash.slice(0, 12)}…
         </Descriptions.Item>
-        <Descriptions.Item label="Хэш до прогона (удалённый)">
-          {run.data.remoteLayoutHashBefore?.slice(0, 12) ?? '—'}
-        </Descriptions.Item>
-        <Descriptions.Item label="Хэш после прогона (удалённый)">
-          {run.data.remoteLayoutHashAfter?.slice(0, 12) ?? '—'}
-        </Descriptions.Item>
+        {!vlm && (
+          <Descriptions.Item label="Хэш до прогона (удалённый)">
+            {run.data.remoteLayoutHashBefore?.slice(0, 12) ?? '—'}
+          </Descriptions.Item>
+        )}
+        {!vlm && (
+          <Descriptions.Item label="Хэш после прогона (удалённый)">
+            {run.data.remoteLayoutHashAfter?.slice(0, 12) ?? '—'}
+          </Descriptions.Item>
+        )}
         <Descriptions.Item label="Страниц с текстом">
           {pages.isSuccess ? pages.data.length : '…'}
         </Descriptions.Item>

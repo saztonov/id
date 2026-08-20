@@ -45,6 +45,12 @@ test('раздел ИД проходит проверку axe', async ({ page })
 test('экран разметки проходит проверку axe', async ({ page }) => {
   await signIn(page, KC.engineer, `/ids/revisions/${IDS.revisionMarkup}?tab=markup`);
   await expect(page.getByRole('application')).toBeVisible();
+  // Комбобокс типа страницы обязан иметь доступное имя с номером страницы:
+  // панель стоит над канвой Konva, и это единственный путь к действию для
+  // скринридера.
+  await expect(
+    page.getByTestId('page-type-panel').getByRole('combobox', { name: 'Вид ИД страницы 1' }),
+  ).toBeVisible();
   await analyze(page);
 });
 

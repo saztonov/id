@@ -206,14 +206,22 @@ export {
   findRecognitionRun,
   findRunForLayout,
   finishRecognitionRun,
+  insertBlockResultIdempotent,
   listArtifacts,
   listBlockResults,
   listPageTexts,
   listRecognitionRuns,
+  listRunBlockEnvelopes,
+  listRunBlockIds,
+  listRunPages,
+  markRunPage,
+  mergeRunSettingsSnapshot,
+  publishVlmRunResults,
   recordArtifact,
   saveRdJobId,
   saveRecognitionResults,
   saveRemoteHashBefore,
+  seedRunPages,
   startRecognitionRun,
 } from './db/repositories/recognition.js';
 export type {
@@ -221,7 +229,37 @@ export type {
   PageTextView,
   RecognitionRunStatus,
   RecognitionRunView,
+  RunPageState,
+  RunPageStatus,
 } from './db/repositories/recognition.js';
+
+/** Ветвление конвейера по настройкам портала (ADR-0007/0008). */
+export {
+  parseModelAllowlist,
+  readAiDryRunOnly,
+  readRecognitionSettings,
+} from './config/portal-settings.js';
+export type { RecognitionProviderSettings } from './config/portal-settings.js';
+
+/** VLM-распознавание по кропам блоков (ADR-0007, план v3). */
+export {
+  RECOGNITION_PROMPT_DEFAULTS,
+  substitutePlaceholders,
+} from './recognition/vlm/prompts.js';
+export type { PromptSubstitutionContext, RecognitionPromptDefault } from './recognition/vlm/prompts.js';
+export { schemaHash } from './recognition/vlm/schemas.js';
+export { recognizeBlock } from './recognition/vlm/recognize-block.js';
+export type {
+  RecognizeBlockInput,
+  RecognizeBlockPrompt,
+  VlmBlockOutcome,
+} from './recognition/vlm/recognize-block.js';
+export { assembleRecognitionResult, RecognitionAssembleError } from './recognition/assemble.js';
+export type {
+  AssembleFrozenBlock,
+  AssemblePageInput,
+  AssembleRecognitionInput,
+} from './recognition/assemble.js';
 
 export { archiveKey, artifactKey, documentPdfKey, previewPageKey } from './storage/keys.js';
 export type { ArtifactKind } from './storage/keys.js';
@@ -299,6 +337,17 @@ export type {
 } from './pdf/toolkit.js';
 export { createQpdfToolkit, detectQpdf } from './pdf/qpdf.js';
 export { createPdfLibToolkit, loadPdfLibModule } from './pdf/pdf-lib.js';
+export { RASTER_DPI, RasterizerError, readPngSize } from './pdf/raster.js';
+export type {
+  PageRasterizer,
+  RasterizerKind,
+  RenderPageInput,
+  RenderPageResult,
+} from './pdf/raster.js';
+export { selectRasterizer } from './pdf/pdftoppm.js';
+export { detectionManifestKey, detectionModelKey } from './storage/keys.js';
+export { readDetectionSettings } from './config/portal-settings.js';
+export type { DetectionProviderSettings } from './config/portal-settings.js';
 
 /**
  * Сегментация, извлечение реквизитов и модель (§8, §10).
@@ -438,18 +487,22 @@ export type { PromptTemplateRow } from './db/repositories/admin.js';
 export {
   createAiSpendReader,
   createLlmProvider,
+  createVlmProvider,
   LlmBlockedProviderError,
   LlmBudgetError,
   LlmDisabledError,
   LlmError,
   LlmModelNotAllowedError,
+  LlmPayloadTooLargeError,
   LlmProtocolError,
   LlmRateLimitError,
   LlmRecordingMissingError,
   LlmTimeoutError,
   LlmTransportError,
   ProxyLlmProvider,
+  ProxyVlmProvider,
   RecordedLlmProvider,
+  RecordedVlmProvider,
 } from './llm/index.js';
 export type {
   LlmAttempt,
@@ -459,8 +512,21 @@ export type {
   LlmResponse,
   LlmStage,
   RecordedBehaviour,
+  VlmDeps,
+  VlmImage,
+  VlmJsonSchemaFormat,
+  VlmPort,
+  VlmRecordedResponse,
+  VlmRequest,
+  VlmResponse,
+  VlmStage,
 } from './llm/index.js';
 export { buildEffectivePrompt, cacheKey, promptHash } from './llm/prompt.js';
+export {
+  buildVlmCanonicalInput,
+  vlmInputHash,
+  VLM_PROMPT_CANON_VERSION,
+} from './llm/vlm-prompt.js';
 export { listAiRuns, monthlyAiSpend, recordAiRun } from './db/repositories/ai-runs.js';
 
 export {

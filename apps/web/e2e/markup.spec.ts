@@ -145,6 +145,83 @@ test.describe('экран разметки', () => {
     await expect(dialog).toBeHidden();
   });
 
+  test('тип страницы ставится с экрана разметки и доходит до классификаций', async ({ page }) => {
+    await signIn(page, KC.engineer, MARKUP_URL);
+
+    const panel = page.getByTestId('page-type-panel');
+    await expect(panel).toBeVisible();
+    // Классификаций у ревизии ещё нет: панель честно говорит «Тип не задан», а
+    // не рисует пустую строку, за которой не отличить «нет» от «не загрузилось».
+    await expect(panel.getByText('Тип не задан')).toBeVisible();
+
+    // Вид ИД выбирается DOM-контролом над канвой — у действия есть путь мимо
+    // Konva (§17). Поиск сужает виртуализованный список до нужной опции.
+    const combo = panel.getByRole('combobox', { name: 'Вид ИД страницы 1' });
+    await combo.click();
+    await combo.fill('скрытых работ');
+    await page
+      .locator('.ant-select-dropdown:visible')
+      .getByTitle('Акт освидетельствования скрытых работ')
+      .click();
+
+    // Последствие в базе, а не надпись: строка классификации с source=manual.
+    // Метка — свойство ревизии ПОСТАВКИ (переживает пересборку), поэтому
+    // проверяется маршрут классификаций, а не что-либо разметочное.
+    await expect
+      .poll(async () => {
+        const response = await page.request.get(
+          `/api/v1/revisions/${IDS.revisionMarkup}/classifications`,
+        );
+        const body = (await response.json()) as {
+          items: { sourcePageId: string; source: string; label: string; docTypeCode: string | null }[];
+        };
+        const row = body.items.find((item) => item.sourcePageId === IDS.page0);
+        return row === undefined ? 'нет' : `${row.source}:${row.label}:${row.docTypeCode ?? ''}`;
+      })
+      .toBe('manual:B-DOC:aosr');
+
+    // Бейдж в ленте миниатюр: короткое имя вида и слово «вручную», не только цвет.
+    const strip = page.getByRole('navigation', { name: 'Страницы рабочего документа' });
+    await expect(strip.getByTestId('page-type-badge-0')).toContainText('АОСР');
+    await expect(strip.getByTestId('page-type-badge-0')).toContainText('вручную');
+
+    // «Продолжение» на странице 2: ярлык I-DOC без собственного типа.
+    await strip.getByRole('button', { name: /Стр\. 2/ }).click();
+    await panel.getByRole('button', { name: 'Продолжение' }).click();
+
+    await expect
+      .poll(async () => {
+        const response = await page.request.get(
+          `/api/v1/revisions/${IDS.revisionMarkup}/classifications`,
+        );
+        const body = (await response.json()) as {
+          items: { sourcePageId: string; source: string; label: string; docTypeCode: string | null }[];
+        };
+        const row = body.items.find((item) => item.sourcePageId === IDS.page1);
+        return row === undefined ? 'нет' : `${row.source}:${row.label}:${row.docTypeCode ?? ''}`;
+      })
+      .toBe('manual:I-DOC:');
+    await expect(strip.getByTestId('page-type-badge-1')).toContainText('продолжение');
+
+    // «Снять»: строка manual исчезает из классификаций, бейдж — из ленты.
+    await panel.getByRole('button', { name: 'Снять' }).click();
+    await expect
+      .poll(async () => {
+        const response = await page.request.get(
+          `/api/v1/revisions/${IDS.revisionMarkup}/classifications`,
+        );
+        const body = (await response.json()) as {
+          items: { sourcePageId: string; source: string }[];
+        };
+        const row = body.items.find(
+          (item) => item.sourcePageId === IDS.page1 && item.source === 'manual',
+        );
+        return row === undefined ? 'нет' : 'есть';
+      })
+      .toBe('нет');
+    await expect(strip.getByTestId('page-type-badge-1')).toHaveCount(0);
+  });
+
   test('заморозка пиннит blocks_hash, после неё появляется отправка на распознавание', async ({
     page,
   }) => {

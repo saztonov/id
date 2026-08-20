@@ -158,7 +158,7 @@ export function redactJson(json: string): Redacted {
  * `artifact_sha256` не соответствует. Поэтому архив не санируется, а
  * закрывается правом (см. маршрут выдачи содержимого).
  */
-export const REDACTABLE_ARTIFACT_KINDS = ['md', 'html', 'qa', 'blocks_json'] as const;
+export const REDACTABLE_ARTIFACT_KINDS = ['md', 'html', 'qa', 'blocks_json', 'canonical'] as const;
 
 export type RedactableArtifactKind = (typeof REDACTABLE_ARTIFACT_KINDS)[number];
 

@@ -795,6 +795,17 @@ export interface DetectedBlockInput {
   readonly y1: number;
   readonly sortOrder: number;
   readonly points: readonly { readonly x: number; readonly y: number }[];
+  /**
+   * Уверенность и версия модели локального детектора (ADR-0008).
+   *
+   * Опциональны и НЕ входят в геометрический хэш (`HashableBlock`): легаси-путь
+   * RD WEB (`toDetectedBlock` в `markup.ts`) их не знает и не обязан передавать,
+   * а хэш сверки §5.2 обязан совпадать независимо от того, откуда приехали
+   * координаты. `detectionScore` без `detectionModelVersion` (и наоборот) —
+   * ошибка вызывающего: если пишем один, обязаны знать и другой.
+   */
+  readonly detectionScore?: number | undefined;
+  readonly detectionModelVersion?: string | undefined;
 }
 
 export interface ImportDetectionInput {
@@ -953,15 +964,24 @@ interface InsertBlockInput {
 
 async function insertBlock(tx: JobExecutor, input: InsertBlockInput): Promise<string> {
   const b = input.block;
+  // Половинчатая пара — дефект вызывающего: score без версии модели нельзя
+  // приписать никакому прогону, версия без score — числовая уверенность
+  // потеряна молча. Обе колонки нужны или обе оставлены NULL.
+  if ((b.detectionScore === undefined) !== (b.detectionModelVersion === undefined)) {
+    throw internal({
+      logDetail: 'detectionScore и detectionModelVersion обязаны задаваться парой',
+    });
+  }
   const inserted = await tx.execute<{ id: string }>(sql`
     insert into ${layoutBlocks}
       (layout_revision_id, revision_id, bundle_id, source_page_id, working_page_index,
        object_id, block_type, shape_type, x0, y0, x1, y1, sort_order, source,
-       detector_provenance)
+       detector_provenance, detection_score, detection_model_version)
     values (${input.layoutRevisionId}::uuid, ${input.revisionId}::uuid, ${input.bundleId}::uuid,
             ${input.sourcePageId}::uuid, ${b.workingPageIndex}, ${input.objectId}::uuid,
             ${b.blockType}, ${b.shapeType}, ${b.x0}, ${b.y0}, ${b.x1}, ${b.y1},
-            ${b.sortOrder}, ${input.source}, ${input.provenance})
+            ${b.sortOrder}, ${input.source}, ${input.provenance},
+            ${b.detectionScore ?? null}, ${b.detectionModelVersion ?? null})
     returning id
   `);
   const row = inserted.rows[0];

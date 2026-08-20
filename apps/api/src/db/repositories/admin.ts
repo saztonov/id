@@ -515,6 +515,26 @@ export async function readSetting(
   return rows[0] ?? null;
 }
 
+/**
+ * Значение настройки БЕЗ требования глобальной области (ADR-0007/0008).
+ *
+ * `readSettings` намеренно заперт `requireGlobalScope`: он отдаёт экран
+ * администрирования, вместе с секретными ссылками и статусами интеграций.
+ * Ветвление конвейера — другой читатель: инженер с областью, ограниченной
+ * объектами, ставит распознавание и обязан узнать выбранного провайдера, не
+ * получая прав администратора. Безопасно ровно потому, что `SETTINGS_REGISTRY`
+ * закрыт для секретов по построению (`SECRET_SETTINGS`, 422 на запись) — здесь
+ * нет ничего, что требовало бы скрывать значение по области видимости.
+ */
+export async function readSettingValue(db: Database, key: string): Promise<JsonValue | undefined> {
+  const rows = await db
+    .select({ value: appSettings.value })
+    .from(appSettings)
+    .where(eq(appSettings.key, key))
+    .limit(1);
+  return rows[0] === undefined ? undefined : (rows[0].value as JsonValue);
+}
+
 export async function writeSetting(
   db: Database,
   scope: AuthScope,

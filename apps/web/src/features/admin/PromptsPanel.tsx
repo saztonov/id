@@ -54,6 +54,7 @@ import { ToneTag, type Tone } from '../../shared/tags.js';
 const STAGES: Record<string, string> = {
   page_classify: 'Классификация страниц',
   doc_split: 'Разбиение на документы',
+  recognize: 'Распознавание блока',
   extract: 'Извлечение реквизитов',
   check: 'Проверка правилом',
   summary: 'Сводка',

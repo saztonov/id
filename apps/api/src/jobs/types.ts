@@ -228,6 +228,20 @@ export const JOB_DEFINITIONS = {
     leaseMs: EXTERNAL_LEASE_MS,
     priority: DEFAULT_PRIORITY,
   },
+  /**
+   * Локальная детекция RF-DETR (ADR-0008): растеризация страницы на воркере и
+   * ONNX-инференс на CPU. Ставится вместо цепочки `rd.*` при
+   * `detection.provider='local'`. Очередь cpu: рендер и инференс держат ядро
+   * и сотни мегабайт на страницу.
+   */
+  'layout.detect_local': {
+    queue: 'cpu',
+    payload: layoutPayload,
+    stage: 'layout',
+    maxAttempts: 3,
+    leaseMs: 600_000,
+    priority: DEFAULT_PRIORITY,
+  },
   'layout.analyze_coverage': {
     queue: 'io',
     payload: layoutPayload,
@@ -285,6 +299,46 @@ export const JOB_DEFINITIONS = {
     stage: 'recognition',
     maxAttempts: 3,
     leaseMs: 900_000,
+    priority: DEFAULT_PRIORITY,
+  },
+
+  // Распознавание через OpenRouter VLM (ADR-0007). Ставится вместо цепочки
+  // rd.start/poll/fetch при settings_snapshot.provider='openrouter_vlm'.
+  // Прогресс и покрытие живут в recognition_run_pages/block_results, а не в
+  // payload'ах: повтор любой задачи опирается на состояние БД.
+  'vlm.start_recognition': {
+    queue: 'io',
+    payload: recognitionPayload,
+    stage: 'recognition',
+    maxAttempts: 3,
+    leaseMs: DEFAULT_LEASE_MS,
+    priority: DEFAULT_PRIORITY,
+  },
+  /**
+   * Одна страница = одна задача: кропы блоков страницы уходят в VLM
+   * последовательными вызовами, checkpoint — в block_results (ON CONFLICT).
+   * Параллелизм даёт сама очередь llm; внутренняя конкуренция сорвала бы
+   * потолок одновременности шлюза (3 на клиента).
+   */
+  'vlm.recognize_page': {
+    queue: 'llm',
+    payload: recognitionPayload.extend({ pageIndex: z.int().nonnegative() }),
+    stage: 'recognition',
+    maxAttempts: DEFAULT_MAX_ATTEMPTS,
+    leaseMs: 600_000,
+    priority: DEFAULT_PRIORITY,
+  },
+  /**
+   * Идемпотентный сборщик: ждёт терминальности всех строк
+   * recognition_run_pages (паттерн poll, как rd.poll_recognition), затем
+   * собирает RecognitionResult, валидирует и публикует одной транзакцией.
+   */
+  'vlm.finalize_run': {
+    queue: 'io',
+    payload: recognitionPayload,
+    stage: 'recognition',
+    maxAttempts: 60,
+    leaseMs: EXTERNAL_LEASE_MS,
     priority: DEFAULT_PRIORITY,
   },
 

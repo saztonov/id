@@ -74,6 +74,9 @@ const EXPECTED_TABLES: readonly string[] = [
   'layout_profiles',
   // §3.5 прогоны и неизменяемые артефакты
   'recognition_runs',
+  // Состояние страниц VLM-прогона (0019, ADR-0007): прогресс и покрытие
+  // финализация читает отсюда, а не из payload'ов очереди.
+  'recognition_run_pages',
   'artifact_versions',
   'page_text_versions',
   'block_results',

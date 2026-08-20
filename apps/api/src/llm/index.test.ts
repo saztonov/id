@@ -13,7 +13,13 @@ import { describe, expect, it } from 'vitest';
 import { loadEnv, type Env } from '../config/env.js';
 import { createLogger } from '../observability/logger.js';
 import { createMetrics } from '../observability/metrics.js';
-import { RDWEB_LLM_BLOCK_REASON, createLlmProvider, type LlmDeps } from './index.js';
+import {
+  RDWEB_LLM_BLOCK_REASON,
+  createLlmProvider,
+  createVlmProvider,
+  type LlmDeps,
+  type VlmDeps,
+} from './index.js';
 import {
   LlmBlockedProviderError,
   LlmDisabledError,
@@ -22,6 +28,9 @@ import {
 } from './port.js';
 import { ProxyLlmProvider } from './proxy.js';
 import { RecordedLlmProvider } from './recorded.js';
+import type { VlmRequest } from './vlm-port.js';
+import { ProxyVlmProvider } from './vlm-proxy.js';
+import { RecordedVlmProvider } from './vlm-recorded.js';
 
 /** Отказ вызова как значение: `.catch()` дал бы объединение с успешным ответом. */
 async function failureOf(call: Promise<unknown>): Promise<Error> {
@@ -191,5 +200,96 @@ describe('LLM_PROVIDER=proxy_llm', () => {
     expect(error.message).toContain('LLM_MODEL');
     // До шлюза дело не дошло: пустой `model` дал бы 400 без объяснения причины.
     expect(calls).toStrictEqual([]);
+  });
+});
+
+describe('createVlmProvider: то же ветвление LLM_PROVIDER, что у текстового пути', () => {
+  const VLM_REQUEST: VlmRequest = {
+    stage: 'recognize',
+    promptCode: 'recognition_block_text',
+    promptVersion: 1,
+    systemPrompt: 'Распознай блок.',
+    userPrompt: 'Блок 1.',
+    images: [{ png: Uint8Array.from([0x89, 0x50, 0x4e, 0x47]) }],
+    responseFormat: { name: 'block', strict: true, schema: { type: 'object' } },
+    schemaVersion: 'recognition_block_text.v1',
+    model: 'gw/vlm-a',
+    temperature: 0.1,
+    maxTokens: 12384,
+  };
+
+  function vlmDeps(overrides: Partial<VlmDeps> = {}): VlmDeps {
+    return {
+      metrics: createMetrics({ enabled: false, service: 'vlm-factory-test' }),
+      logger: createLogger({ service: 'vlm-factory-test', level: 'silent' }),
+      spend: { monthlySpend: () => Promise.resolve(0) },
+      ...overrides,
+    };
+  }
+
+  it('none — честный отказ «распознавание недоступно», а не пустой результат', async () => {
+    const provider = createVlmProvider(envOf({ LLM_PROVIDER: 'none' }), vlmDeps());
+
+    const error = await failureOf(provider.complete(VLM_REQUEST));
+    expect(error).toBeInstanceOf(LlmDisabledError);
+    expect(error.message).toContain('распознавание');
+  });
+
+  it('rdweb заблокирован тем же текстом причины, что и текстовый путь', async () => {
+    const provider = createVlmProvider(envOf({ LLM_PROVIDER: 'rdweb' }), vlmDeps());
+
+    const error = await failureOf(provider.complete(VLM_REQUEST));
+    expect(error).toBeInstanceOf(LlmBlockedProviderError);
+    expect(error.message).toBe(RDWEB_LLM_BLOCK_REASON);
+  });
+
+  it('recorded без записей отвечает отказом, с записями — записью', async () => {
+    const empty = createVlmProvider(envOf({ LLM_PROVIDER: 'recorded' }), vlmDeps());
+    expect(empty).toBeInstanceOf(RecordedVlmProvider);
+    await expect(empty.complete(VLM_REQUEST)).rejects.toBeInstanceOf(LlmRecordingMissingError);
+
+    const provider = createVlmProvider(
+      envOf({ LLM_PROVIDER: 'recorded' }),
+      vlmDeps({
+        recordings: new Map([
+          RecordedVlmProvider.recordingFor(VLM_REQUEST, {
+            text: '{"fragments":[]}',
+            finishReason: 'stop',
+          }),
+        ]),
+      }),
+    );
+    expect((await provider.complete(VLM_REQUEST)).text).toBe('{"fragments":[]}');
+  });
+
+  it('proxy_llm собирается и ходит по настроенному адресу', async () => {
+    const urls: string[] = [];
+    const provider = createVlmProvider(
+      envOf({
+        LLM_PROVIDER: 'proxy_llm',
+        PROXY_LLM_BASE_URL: 'https://llm-gw.internal/v1',
+        PROXY_LLM_TOKEN: 'unit-test-gateway-token',
+        LLM_MODEL: 'gw/vlm-a',
+      }),
+      vlmDeps({
+        fetchImpl: ((input: Parameters<typeof fetch>[0]) => {
+          urls.push(String(input));
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                choices: [{ message: { content: '{"fragments":[]}' }, finish_reason: 'stop' }],
+              }),
+              { status: 200, headers: { 'content-type': 'application/json' } },
+            ),
+          );
+        }) as typeof fetch,
+      }),
+    );
+
+    expect(provider).toBeInstanceOf(ProxyVlmProvider);
+    const response = await provider.complete(VLM_REQUEST);
+    expect(response.text).toBe('{"fragments":[]}');
+    expect(response.finishReason).toBe('stop');
+    expect(urls).toStrictEqual(['https://llm-gw.internal/v1/chat/completions']);
   });
 });

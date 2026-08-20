@@ -61,6 +61,7 @@ import { useSession } from '../../app/session.js';
 import { ErrorState, ExplainedLimitation, LoadingState } from '../../shared/ui.js';
 import { MATCH_STATE_LABELS, PAGE_ROLE_LABELS, labelOf } from '../../shared/labels.js';
 import { ToneTag } from '../../shared/tags.js';
+import { useManualLabel } from './useManualLabel.js';
 
 export function DocumentsTab({ revisionId }: { revisionId: string }): ReactNode {
   const { can } = useSession();
@@ -131,31 +132,9 @@ export function DocumentsTab({ revisionId }: { revisionId: string }): ReactNode 
     onError: (error) => message.error(describeError(error)),
   });
 
-  const refreshClassifications = async (): Promise<void> => {
-    await queryClient.invalidateQueries({ queryKey: revisionKeys.classifications(revisionId) });
-  };
-
-  const setManual = useMutation({
-    mutationFn: (input: { sourcePageId: string; label: string; docTypeCode: string | null }) =>
-      documents.setManualLabel(revisionId, input.sourcePageId, {
-        label: input.label,
-        docTypeCode: input.docTypeCode,
-      }),
-    onSuccess: async () => {
-      message.success('Метка страницы сохранена; пересборка — кнопкой «Собрать документы»');
-      await refreshClassifications();
-    },
-    onError: (error) => message.error(describeError(error)),
-  });
-
-  const clearManual = useMutation({
-    mutationFn: (sourcePageId: string) => documents.clearManualLabel(revisionId, sourcePageId),
-    onSuccess: async () => {
-      message.success('Ручная метка снята: страница классифицируется при следующей сборке');
-      await refreshClassifications();
-    },
-    onError: (error) => message.error(describeError(error)),
-  });
+  // Мутации ручной метки вынесены в общий хук: та же панель есть на экране
+  // разметки, и тексты с инвалидацией у них обязаны совпадать.
+  const manualLabel = useManualLabel(revisionId);
 
   if (list.isPending) return <LoadingState label="Загрузка документов…" />;
   if (list.isError) return <ErrorState error={list.error} />;
@@ -326,12 +305,10 @@ export function DocumentsTab({ revisionId }: { revisionId: string }): ReactNode 
             manual={{
               canEdit: can('document.edit'),
               typeOptions,
-              pending: setManual.isPending || clearManual.isPending,
-              onSetType: (sourcePageId, docTypeCode) =>
-                setManual.mutate({ sourcePageId, label: 'B-DOC', docTypeCode }),
-              onSetContinuation: (sourcePageId) =>
-                setManual.mutate({ sourcePageId, label: 'I-DOC', docTypeCode: null }),
-              onClear: (sourcePageId) => clearManual.mutate(sourcePageId),
+              pending: manualLabel.pending,
+              onSetType: manualLabel.setType,
+              onSetContinuation: manualLabel.setContinuation,
+              onClear: manualLabel.clear,
             }}
           />
         )}

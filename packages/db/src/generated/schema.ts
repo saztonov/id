@@ -639,58 +639,21 @@ export const layoutRevisions = pgTable("layout_revisions", {
 	check("layout_revisions_manual_edit_chk", sql`(first_manual_edit_at IS NULL) = (first_manual_edit_by IS NULL)`),
 ]);
 
-export const layoutBlocks = pgTable("layout_blocks", {
+export const artifactVersions = pgTable("artifact_versions", {
 	id: uuid().defaultRandom().primaryKey().notNull(),
-	layoutRevisionId: uuid("layout_revision_id").notNull(),
-	revisionId: uuid("revision_id").notNull(),
-	bundleId: uuid("bundle_id").notNull(),
-	sourcePageId: uuid("source_page_id").notNull(),
-	workingPageIndex: integer("working_page_index").notNull(),
-	objectId: uuid("object_id").notNull(),
-	blockType: text("block_type").notNull(),
-	shapeType: text("shape_type").notNull(),
-	x0: doublePrecision().notNull(),
-	y0: doublePrecision().notNull(),
-	x1: doublePrecision().notNull(),
-	y1: doublePrecision().notNull(),
-	sortOrder: integer("sort_order").notNull(),
-	source: text().notNull(),
-	detectorProvenance: text("detector_provenance").notNull(),
+	recognitionRunId: uuid("recognition_run_id").notNull(),
+	kind: text().notNull(),
+	s3Key: text("s3_key").notNull(),
+	artifactSha256: text("artifact_sha256").notNull(),
+	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
+	byteSize: bigint("byte_size", { mode: "number" }).notNull(),
 	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-	updatedAt: timestamp("updated_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
 }, (table) => [
-	index("ix_layout_blocks_object").using("btree", table.objectId.asc().nullsLast().op("uuid_ops")),
-	index("ix_layout_blocks_revision_page").using("btree", table.layoutRevisionId.asc().nullsLast().op("uuid_ops"), table.sourcePageId.asc().nullsLast().op("uuid_ops"), table.sortOrder.asc().nullsLast().op("uuid_ops")),
-	index("ix_layout_blocks_source_page").using("btree", table.sourcePageId.asc().nullsLast().op("uuid_ops")),
-	foreignKey({
-			columns: [table.layoutRevisionId],
-			foreignColumns: [layoutRevisions.id],
-			name: "layout_blocks_layout_revision_id_fkey"
-		}).onDelete("cascade"),
-	foreignKey({
-			columns: [table.sourcePageId],
-			foreignColumns: [sourcePages.id],
-			name: "layout_blocks_source_page_id_fkey"
-		}),
-	foreignKey({
-			columns: [table.layoutRevisionId, table.revisionId, table.bundleId, table.objectId],
-			foreignColumns: [layoutRevisions.bundleId, layoutRevisions.id, layoutRevisions.objectId, layoutRevisions.revisionId],
-			name: "layout_blocks_scope_fk"
-		}).onDelete("cascade"),
-	foreignKey({
-			columns: [table.revisionId, table.sourcePageId],
-			foreignColumns: [sourcePages.id, sourcePages.revisionId],
-			name: "layout_blocks_source_page_fk"
-		}),
-	unique("layout_blocks_revision_id_uq").on(table.id, table.revisionId),
-	unique("layout_blocks_layout_revision_uq").on(table.id, table.layoutRevisionId),
-	check("layout_blocks_working_page_index_chk", sql`working_page_index >= 0`),
-	check("layout_blocks_sort_order_chk", sql`sort_order >= 0`),
-	check("layout_blocks_block_type_chk", sql`block_type = ANY (ARRAY['text'::text, 'image'::text, 'stamp'::text])`),
-	check("layout_blocks_shape_type_chk", sql`shape_type = ANY (ARRAY['rectangle'::text, 'polygon'::text])`),
-	check("layout_blocks_source_chk", sql`source = ANY (ARRAY['auto'::text, 'user'::text])`),
-	check("layout_blocks_provenance_chk", sql`detector_provenance = ANY (ARRAY['rf_detr'::text, 'full_page'::text, 'user'::text, 'unavailable'::text])`),
-	check("layout_blocks_coords_chk", sql`(x0 >= (0)::double precision) AND (y0 >= (0)::double precision) AND (x1 <= (1)::double precision) AND (y1 <= (1)::double precision) AND (x0 <= x1) AND (y0 <= y1)`),
+	unique("artifact_versions_run_kind_uq").on(table.kind, table.recognitionRunId),
+	unique("artifact_versions_run_id_uq").on(table.id, table.recognitionRunId),
+	check("artifact_versions_sha256_chk", sql`artifact_sha256 ~ '^[0-9a-f]{64}$'::text`),
+	check("artifact_versions_byte_size_chk", sql`byte_size >= 0`),
+	check("artifact_versions_kind_chk", sql`kind = ANY (ARRAY['zip'::text, 'md'::text, 'html'::text, 'blocks_json'::text, 'qa'::text, 'canonical'::text])`),
 ]);
 
 export const rdRunDocuments = pgTable("rd_run_documents", {
@@ -714,7 +677,7 @@ export const recognitionRuns = pgTable("recognition_runs", {
 	id: uuid().defaultRandom().primaryKey().notNull(),
 	revisionId: uuid("revision_id").notNull(),
 	layoutRevisionId: uuid("layout_revision_id").notNull(),
-	rdRunDocumentId: uuid("rd_run_document_id").notNull(),
+	rdRunDocumentId: uuid("rd_run_document_id"),
 	rdJobId: text("rd_job_id"),
 	localLayoutHash: text("local_layout_hash").notNull(),
 	remoteLayoutHashBefore: text("remote_layout_hash_before"),
@@ -766,75 +729,61 @@ export const recognitionRuns = pgTable("recognition_runs", {
 	check("recognition_runs_finished_chk", sql`(status = 'running'::text) OR (finished_at IS NOT NULL)`),
 ]);
 
-export const artifactVersions = pgTable("artifact_versions", {
+export const layoutBlocks = pgTable("layout_blocks", {
 	id: uuid().defaultRandom().primaryKey().notNull(),
-	recognitionRunId: uuid("recognition_run_id").notNull(),
-	kind: text().notNull(),
-	s3Key: text("s3_key").notNull(),
-	artifactSha256: text("artifact_sha256").notNull(),
-	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
-	byteSize: bigint("byte_size", { mode: "number" }).notNull(),
-	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-}, (table) => [
-	foreignKey({
-			columns: [table.recognitionRunId],
-			foreignColumns: [recognitionRuns.id],
-			name: "artifact_versions_recognition_run_id_fkey"
-		}),
-	unique("artifact_versions_run_kind_uq").on(table.kind, table.recognitionRunId),
-	unique("artifact_versions_run_id_uq").on(table.id, table.recognitionRunId),
-	check("artifact_versions_kind_chk", sql`kind = ANY (ARRAY['zip'::text, 'md'::text, 'html'::text, 'blocks_json'::text, 'qa'::text])`),
-	check("artifact_versions_sha256_chk", sql`artifact_sha256 ~ '^[0-9a-f]{64}$'::text`),
-	check("artifact_versions_byte_size_chk", sql`byte_size >= 0`),
-]);
-
-export const pageTextVersions = pgTable("page_text_versions", {
-	id: uuid().defaultRandom().primaryKey().notNull(),
+	layoutRevisionId: uuid("layout_revision_id").notNull(),
 	revisionId: uuid("revision_id").notNull(),
+	bundleId: uuid("bundle_id").notNull(),
 	sourcePageId: uuid("source_page_id").notNull(),
-	recognitionRunId: uuid("recognition_run_id").notNull(),
-	artifactVersionId: uuid("artifact_version_id").notNull(),
-	textMd: text("text_md").notNull(),
-	textSha256: text("text_sha256").notNull(),
-	offsetConvention: text("offset_convention").default('utf16-code-unit').notNull(),
+	workingPageIndex: integer("working_page_index").notNull(),
+	objectId: uuid("object_id").notNull(),
+	blockType: text("block_type").notNull(),
+	shapeType: text("shape_type").notNull(),
+	x0: doublePrecision().notNull(),
+	y0: doublePrecision().notNull(),
+	x1: doublePrecision().notNull(),
+	y1: doublePrecision().notNull(),
+	sortOrder: integer("sort_order").notNull(),
+	source: text().notNull(),
+	detectorProvenance: text("detector_provenance").notNull(),
 	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	updatedAt: timestamp("updated_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	detectionScore: doublePrecision("detection_score"),
+	detectionModelVersion: text("detection_model_version"),
 }, (table) => [
-	index("ix_page_text_versions_artifact").using("btree", table.artifactVersionId.asc().nullsLast().op("uuid_ops")),
-	index("ix_page_text_versions_run").using("btree", table.recognitionRunId.asc().nullsLast().op("uuid_ops")),
+	index("ix_layout_blocks_object").using("btree", table.objectId.asc().nullsLast().op("uuid_ops")),
+	index("ix_layout_blocks_revision_page").using("btree", table.layoutRevisionId.asc().nullsLast().op("uuid_ops"), table.sourcePageId.asc().nullsLast().op("uuid_ops"), table.sortOrder.asc().nullsLast().op("uuid_ops")),
+	index("ix_layout_blocks_source_page").using("btree", table.sourcePageId.asc().nullsLast().op("uuid_ops")),
+	foreignKey({
+			columns: [table.layoutRevisionId],
+			foreignColumns: [layoutRevisions.id],
+			name: "layout_blocks_layout_revision_id_fkey"
+		}).onDelete("cascade"),
 	foreignKey({
 			columns: [table.sourcePageId],
 			foreignColumns: [sourcePages.id],
-			name: "page_text_versions_source_page_id_fkey"
+			name: "layout_blocks_source_page_id_fkey"
 		}),
 	foreignKey({
-			columns: [table.recognitionRunId],
-			foreignColumns: [recognitionRuns.id],
-			name: "page_text_versions_recognition_run_id_fkey"
-		}),
-	foreignKey({
-			columns: [table.artifactVersionId],
-			foreignColumns: [artifactVersions.id],
-			name: "page_text_versions_artifact_version_id_fkey"
-		}),
-	foreignKey({
-			columns: [table.recognitionRunId, table.artifactVersionId],
-			foreignColumns: [artifactVersions.id, artifactVersions.recognitionRunId],
-			name: "page_text_versions_artifact_fk"
-		}),
+			columns: [table.layoutRevisionId, table.revisionId, table.bundleId, table.objectId],
+			foreignColumns: [layoutRevisions.bundleId, layoutRevisions.id, layoutRevisions.objectId, layoutRevisions.revisionId],
+			name: "layout_blocks_scope_fk"
+		}).onDelete("cascade"),
 	foreignKey({
 			columns: [table.revisionId, table.sourcePageId],
 			foreignColumns: [sourcePages.id, sourcePages.revisionId],
-			name: "page_text_versions_page_fk"
+			name: "layout_blocks_source_page_fk"
 		}),
-	foreignKey({
-			columns: [table.revisionId, table.recognitionRunId],
-			foreignColumns: [recognitionRuns.id, recognitionRuns.revisionId],
-			name: "page_text_versions_run_fk"
-		}),
-	unique("page_text_versions_page_run_uq").on(table.recognitionRunId, table.sourcePageId),
-	unique("page_text_versions_revision_id_uq").on(table.id, table.revisionId),
-	check("page_text_versions_sha256_chk", sql`text_sha256 ~ '^[0-9a-f]{64}$'::text`),
-	check("page_text_versions_offset_convention_chk", sql`offset_convention = 'utf16-code-unit'::text`),
+	unique("layout_blocks_revision_id_uq").on(table.id, table.revisionId),
+	unique("layout_blocks_layout_revision_uq").on(table.id, table.layoutRevisionId),
+	check("layout_blocks_working_page_index_chk", sql`working_page_index >= 0`),
+	check("layout_blocks_sort_order_chk", sql`sort_order >= 0`),
+	check("layout_blocks_block_type_chk", sql`block_type = ANY (ARRAY['text'::text, 'image'::text, 'stamp'::text])`),
+	check("layout_blocks_shape_type_chk", sql`shape_type = ANY (ARRAY['rectangle'::text, 'polygon'::text])`),
+	check("layout_blocks_source_chk", sql`source = ANY (ARRAY['auto'::text, 'user'::text])`),
+	check("layout_blocks_provenance_chk", sql`detector_provenance = ANY (ARRAY['rf_detr'::text, 'full_page'::text, 'user'::text, 'unavailable'::text])`),
+	check("layout_blocks_coords_chk", sql`(x0 >= (0)::double precision) AND (y0 >= (0)::double precision) AND (x1 <= (1)::double precision) AND (y1 <= (1)::double precision) AND (x0 <= x1) AND (y0 <= y1)`),
+	check("layout_blocks_detection_score_chk", sql`(detection_score IS NULL) OR ((detection_score >= (0)::double precision) AND (detection_score <= (1)::double precision))`),
 ]);
 
 export const blockResults = pgTable("block_results", {
@@ -873,6 +822,7 @@ export const blockResults = pgTable("block_results", {
 			name: "block_results_run_fk"
 		}),
 	unique("block_results_block_id_uq").on(table.id, table.layoutBlockId),
+	unique("block_results_run_block_uq").on(table.layoutBlockId, table.recognitionRunId),
 	check("block_results_confidence_chk", sql`(confidence IS NULL) OR ((confidence >= (0)::double precision) AND (confidence <= (1)::double precision))`),
 ]);
 
@@ -920,11 +870,62 @@ export const aiRuns = pgTable("ai_runs", {
 			foreignColumns: [submissionRevisions.id],
 			name: "ai_runs_revision_id_fkey"
 		}),
-	check("ai_runs_stage_chk", sql`stage = ANY (ARRAY['page_classify'::text, 'doc_split'::text, 'extract'::text, 'check'::text, 'summary'::text])`),
 	check("ai_runs_provider_chk", sql`provider = ANY (ARRAY['proxy_llm'::text, 'rdweb'::text, 'recorded'::text])`),
 	check("ai_runs_input_hash_chk", sql`input_hash ~ '^[0-9a-f]{64}$'::text`),
 	check("ai_runs_output_hash_chk", sql`output_hash ~ '^[0-9a-f]{64}$'::text`),
 	check("ai_runs_tokens_chk", sql`((tokens_in IS NULL) OR (tokens_in >= 0)) AND ((tokens_out IS NULL) OR (tokens_out >= 0))`),
+	check("ai_runs_stage_chk", sql`stage = ANY (ARRAY['page_classify'::text, 'doc_split'::text, 'extract'::text, 'check'::text, 'summary'::text, 'recognize'::text])`),
+]);
+
+export const pageTextVersions = pgTable("page_text_versions", {
+	id: uuid().defaultRandom().primaryKey().notNull(),
+	revisionId: uuid("revision_id").notNull(),
+	sourcePageId: uuid("source_page_id").notNull(),
+	recognitionRunId: uuid("recognition_run_id").notNull(),
+	artifactVersionId: uuid("artifact_version_id").notNull(),
+	textMd: text("text_md").notNull(),
+	textSha256: text("text_sha256").notNull(),
+	offsetConvention: text("offset_convention").default('utf16-code-unit').notNull(),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	renderVersion: text("render_version").default('recognition.page_text.v1').notNull(),
+}, (table) => [
+	index("ix_page_text_versions_artifact").using("btree", table.artifactVersionId.asc().nullsLast().op("uuid_ops")),
+	index("ix_page_text_versions_run").using("btree", table.recognitionRunId.asc().nullsLast().op("uuid_ops")),
+	foreignKey({
+			columns: [table.sourcePageId],
+			foreignColumns: [sourcePages.id],
+			name: "page_text_versions_source_page_id_fkey"
+		}),
+	foreignKey({
+			columns: [table.recognitionRunId],
+			foreignColumns: [recognitionRuns.id],
+			name: "page_text_versions_recognition_run_id_fkey"
+		}),
+	foreignKey({
+			columns: [table.artifactVersionId],
+			foreignColumns: [artifactVersions.id],
+			name: "page_text_versions_artifact_version_id_fkey"
+		}),
+	foreignKey({
+			columns: [table.recognitionRunId, table.artifactVersionId],
+			foreignColumns: [artifactVersions.id, artifactVersions.recognitionRunId],
+			name: "page_text_versions_artifact_fk"
+		}),
+	foreignKey({
+			columns: [table.revisionId, table.sourcePageId],
+			foreignColumns: [sourcePages.id, sourcePages.revisionId],
+			name: "page_text_versions_page_fk"
+		}),
+	foreignKey({
+			columns: [table.revisionId, table.recognitionRunId],
+			foreignColumns: [recognitionRuns.id, recognitionRuns.revisionId],
+			name: "page_text_versions_run_fk"
+		}),
+	unique("page_text_versions_page_run_uq").on(table.recognitionRunId, table.sourcePageId),
+	unique("page_text_versions_revision_id_uq").on(table.id, table.revisionId),
+	check("page_text_versions_sha256_chk", sql`text_sha256 ~ '^[0-9a-f]{64}$'::text`),
+	check("page_text_versions_offset_convention_chk", sql`offset_convention = 'utf16-code-unit'::text`),
+	check("page_text_versions_render_version_chk", sql`render_version ~ '^[a-z0-9][a-z0-9._-]*$'::text`),
 ]);
 
 export const pageAssignments = pgTable("page_assignments", {
@@ -1346,9 +1347,9 @@ export const promptTemplates = pgTable("prompt_templates", {
 	unique("prompt_templates_code_version_uq").on(table.code, table.version),
 	check("prompt_templates_code_chk", sql`code ~ '^[a-z][a-z0-9_]*$'::text`),
 	check("prompt_templates_version_chk", sql`version > 0`),
-	check("prompt_templates_stage_chk", sql`stage = ANY (ARRAY['page_classify'::text, 'doc_split'::text, 'extract'::text, 'check'::text, 'summary'::text])`),
 	check("prompt_templates_state_chk", sql`state = ANY (ARRAY['draft'::text, 'test'::text, 'published'::text, 'archived'::text])`),
 	check("prompt_templates_published_chk", sql`(state <> 'published'::text) OR ((published_at IS NOT NULL) AND (published_by IS NOT NULL))`),
+	check("prompt_templates_stage_chk", sql`stage = ANY (ARRAY['page_classify'::text, 'doc_split'::text, 'extract'::text, 'check'::text, 'summary'::text, 'recognize'::text])`),
 ]);
 
 export const jobs = pgTable("jobs", {
@@ -1781,6 +1782,27 @@ export const rulesetRules = pgTable("ruleset_rules", {
 		}),
 	primaryKey({ columns: [table.ruleCode, table.rulesetVersionId], name: "ruleset_rules_pkey"}),
 	check("ruleset_rules_severity_chk", sql`severity = ANY (ARRAY['error'::text, 'warning'::text, 'info'::text])`),
+]);
+
+export const recognitionRunPages = pgTable("recognition_run_pages", {
+	recognitionRunId: uuid("recognition_run_id").notNull(),
+	workingPageIndex: integer("working_page_index").notNull(),
+	status: text().default('pending').notNull(),
+	blocksTotal: integer("blocks_total").default(0).notNull(),
+	blocksRecognized: integer("blocks_recognized").default(0).notNull(),
+	blocksInvalid: integer("blocks_invalid").default(0).notNull(),
+	blocksRefused: integer("blocks_refused").default(0).notNull(),
+	updatedAt: timestamp("updated_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+}, (table) => [
+	foreignKey({
+			columns: [table.recognitionRunId],
+			foreignColumns: [recognitionRuns.id],
+			name: "recognition_run_pages_recognition_run_id_fkey"
+		}),
+	primaryKey({ columns: [table.recognitionRunId, table.workingPageIndex], name: "recognition_run_pages_pkey"}),
+	check("recognition_run_pages_page_chk", sql`working_page_index >= 0`),
+	check("recognition_run_pages_status_chk", sql`status = ANY (ARRAY['pending'::text, 'done'::text, 'failed'::text])`),
+	check("recognition_run_pages_counts_chk", sql`(blocks_total >= 0) AND (blocks_recognized >= 0) AND (blocks_invalid >= 0) AND (blocks_refused >= 0)`),
 ]);
 
 export const pageClassifications = pgTable("page_classifications", {

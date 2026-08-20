@@ -50,6 +50,7 @@ import {
 import { enqueueJob } from '../../db/repositories/jobs.js';
 import { dedupeKeyFor } from '../../jobs/types.js';
 import { DETECT_BATCH_LIMIT } from '../../integrations/rdweb/legacy-adapter.js';
+import { readDetectionSettings } from '../../config/portal-settings.js';
 import {
   blockCreateSchema,
   blockMutationResponseSchema,
@@ -167,6 +168,42 @@ function registerStartRoute(app: AppInstance): void {
         revisionId,
         bundleId: bundle.id,
       });
+
+      // Ветвление детекции (ADR-0008): локальный RF-DETR не создаёт RD-документ
+      // и не ходит в RD WEB вовсе. Настройка читается на постановке; идущие
+      // задачи её смену не видят — у них цель уже в payload.
+      const detection = await readDetectionSettings(app.db);
+      if (detection.provider === 'local') {
+        if (app.env.PREVIEW_MODE === 'cached') {
+          // Кэш превью брал картинки у RD WEB; при локальной детекции его
+          // взять неоткуда — экран работает через pdf.js (ADR-0008).
+          request.log.warn(
+            { event: 'preview_cached_unavailable_local_detection' },
+            'PREVIEW_MODE=cached недоступен при локальной детекции: превью рендерит браузер',
+          );
+        }
+        const pages = (await listBundlePages(app.db, scope, bundle.id)).map(
+          (page) => page.workingPageIndex,
+        );
+        if (pages.length === 0) throw conflict('У рабочего документа нет карты страниц.');
+        const jobIds = await enqueueLocalDetectBatches(
+          app,
+          request,
+          scope,
+          { id: layout.id, revisionId },
+          pages,
+          false,
+        );
+        return withVersion(reply, layout.version).code(202).send({
+          layoutRevisionId: layout.id,
+          bundleId: bundle.id,
+          created,
+          // Схема ответа отдаёт одну задачу; у локальной ветки их страница к
+          // странице — наружу уходит первая, остальные видны в консоли задач.
+          jobId: jobIds[0] ?? '',
+          jobCreated: true,
+        });
+      }
 
       // Постановка первой задачи цепочки §12 (задача 4). Ключ идемпотентности —
       // по ревизии разметки: повторное нажатие кнопки не должно порождать
@@ -482,7 +519,11 @@ function registerPageRoutes(app: AppInstance): void {
             );
       if (pages.length === 0) throw conflict('У рабочего документа нет карты страниц.');
 
-      const jobIds = await enqueueDetectBatches(app, request, scope, layout, pages);
+      const detection = await readDetectionSettings(app.db);
+      const jobIds =
+        detection.provider === 'local'
+          ? await enqueueLocalDetectBatches(app, request, scope, layout, pages, true)
+          : await enqueueDetectBatches(app, request, scope, layout, pages);
       return reply.code(202).send({
         layoutRevisionId: layout.id,
         batches: jobIds.length,
@@ -532,6 +573,48 @@ async function enqueueDetectBatches(
   request.log.info(
     { event: 'job_enqueued', job_type: 'layout.detect_pages', batches: jobIds.length },
     'детекция поставлена пачками',
+  );
+  return jobIds;
+}
+
+/**
+ * Пачки ЛОКАЛЬНОЙ детекции (ADR-0008) — ветка `detection.provider='local'`.
+ *
+ * Одна страница = одна задача: рендер 300 DPI и ONNX-инференс держат ядро и
+ * сотни мегабайт, а checkpoint по уже размеченным страницам делает повтор
+ * упавшей задачи дешёвым ровно тогда, когда задача маленькая. Потолок пачки
+ * RD WEB здесь ни при чём — он был свойством их синхронного API.
+ */
+async function enqueueLocalDetectBatches(
+  app: AppInstance,
+  request: FastifyRequest,
+  scope: AuthScope,
+  layout: { readonly id: string; readonly revisionId: string },
+  pages: readonly number[],
+  overwriteExisting: boolean,
+): Promise<string[]> {
+  const jobIds: string[] = [];
+  for (const pageIndex of pages) {
+    const { jobId } = await enqueueJob(app.db, scope, {
+      type: 'layout.detect_local',
+      payload: tracePayload({
+        revisionId: layout.revisionId,
+        layoutRevisionId: layout.id,
+        pageIndices: [pageIndex],
+        ...(overwriteExisting ? { overwriteExisting: true } : {}),
+      }),
+      dedupeKey: dedupeKeyFor(
+        'layout.detect_local',
+        layout.id,
+        String(pageIndex),
+        ...(overwriteExisting ? ['overwrite'] : []),
+      ),
+    });
+    jobIds.push(jobId);
+  }
+  request.log.info(
+    { event: 'job_enqueued', job_type: 'layout.detect_local', batches: jobIds.length },
+    'локальная детекция поставлена постранично',
   );
   return jobIds;
 }

@@ -22,7 +22,8 @@
     "pii:scan": "node tools/scripts/pii-scan.mjs",
     "db:schema:generate": "pnpm --filter @id/db schema:generate",
     "seed:generate": "node tools/scripts/generate-seed-migration.mjs",
-    "rules:seed:generate": "node tools/scripts/generate-rules-seed-migration.mjs"
+    "rules:seed:generate": "node tools/scripts/generate-rules-seed-migration.mjs",
+    "prompts:seed:generate": "node tools/scripts/generate-recognition-prompts-seed-migration.mjs"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",

@@ -325,6 +325,7 @@ async function freshFrozenLayout(): Promise<string> {
 async function startRun(layoutRevisionId: string): Promise<string> {
   const { run } = await startRecognitionRun(db, SCOPE, {
     layoutRevisionId,
+    requireRdDocument: true,
     settingsSnapshot: { version: 1, provider: 'lmstudio', model: OCR_MODEL, documentMode: false },
   });
   await enqueueSystemJob(db, {
@@ -550,7 +551,11 @@ describe('цепочка распознавания доводит компле�
 
   it('повторный прогон по закрытому документу не заводится', async () => {
     await expect(
-      startRecognitionRun(db, SCOPE, { layoutRevisionId, settingsSnapshot: {} }),
+      startRecognitionRun(db, SCOPE, {
+        layoutRevisionId,
+        requireRdDocument: true,
+        settingsSnapshot: {},
+      }),
     ).rejects.toThrow();
     expect(await listRecognitionRuns(db, SCOPE, REVISION)).toHaveLength(1);
   });
@@ -763,6 +768,7 @@ describe('OCR не стартует при расхождении хэшей р�
     const layoutRevisionId = await freshFrozenLayout();
     const { run } = await startRecognitionRun(db, SCOPE, {
       layoutRevisionId,
+      requireRdDocument: true,
       settingsSnapshot: {},
     });
     const jobsBefore = fake.snapshot().jobs.length;
@@ -961,6 +967,7 @@ describe('исчерпание попыток задачи не оставляе
 
     const { run, created } = await startRecognitionRun(db, SCOPE, {
       layoutRevisionId,
+      requireRdDocument: true,
       settingsSnapshot: { version: 1, model: OCR_MODEL },
     });
     expect(created).toBe(true);

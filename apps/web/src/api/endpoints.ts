@@ -13,6 +13,7 @@
  */
 import { get, newIdempotencyKey, request, type ApiResponse } from './http.js';
 import type {
+  AppSetting,
   Artifact,
   ArchiveState,
   AuditEntry,
@@ -547,6 +548,18 @@ export const admin = {
     request<UserCard>('POST', `${V1}/admin/users/${userId}/deactivate`).then((r) => r.data),
 
   settings: () => get<SettingsView>(`${V1}/admin/settings`),
+
+  /**
+   * Запись одного настроечного ключа (`settingWriteBodySchema`).
+   *
+   * Сервер отвечает 422 на секретные ключи и на значение, не прошедшее схему
+   * ключа (pointer `/value`), 404 на незнакомый ключ и 409 на ключ, которым
+   * управляет собственный эндпоинт (`managedBy`).
+   */
+  setSetting: (key: string, value: unknown) =>
+    request<AppSetting>('PUT', `${V1}/admin/settings/${key}`, { body: { value } }).then(
+      (r) => r.data,
+    ),
 
   rules: () => get<{ items: RuleDefinition[] }>(`${V1}/admin/rules`).then((r) => r.items),
 

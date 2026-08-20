@@ -12,6 +12,7 @@
  *    наружу и не читает бюджет.
  * 4. **Отказы доезжают до вызывающего в своих классах** с верным `retriable`.
  */
+import { createHash } from 'node:crypto';
 import { Writable } from 'node:stream';
 
 import { describe, expect, it } from 'vitest';
@@ -27,7 +28,12 @@ import {
   type LlmRequest,
 } from './port.js';
 import { LruCache } from './prompt.js';
-import { ProxyLlmProvider, chatCompletionsUrl, type CachedCompletion } from './proxy.js';
+import {
+  ProxyLlmProvider,
+  chatCompletionsUrl,
+  idempotencyKey,
+  type CachedCompletion,
+} from './proxy.js';
 
 /** Часовой: строка, которой в журнале и в ошибках не должно быть нигде. */
 const TOKEN = 'chasovoy-llm-token-0001';
@@ -183,6 +189,51 @@ describe('наружу уходит только текст (§10)', () => {
     // в каком вызывающий вложил его в userPrompt. Второй кусок означал бы
     // двойную оплату одних и тех же токенов.
     expect(String(h.calls[0]!.init.body)).not.toContain('CHASOVOY-SOSEDNIY-KONTEKST');
+  });
+});
+
+describe('идемпотентный ключ (контракт шлюза)', () => {
+  const headerOf = (call: { init: RequestInit }): string =>
+    (call.init.headers as Record<string, string>)['X-Idempotency-Key'] ?? '';
+
+  it('равен sha256(inputHash:model) и едет в каждом запросе', async () => {
+    const h = harness(() => jsonResponse(okBody()));
+    const response = await h.provider.complete(REQUEST);
+
+    const expected = createHash('sha256')
+      .update(`${response.inputHash}:gw/model-a`, 'utf8')
+      .digest('hex');
+    expect(headerOf(h.calls[0]!)).toBe(expected);
+    expect(idempotencyKey(response.inputHash, 'gw/model-a')).toBe(expected);
+  });
+
+  it('стабилен между сетевыми попытками одного и того же вызова', async () => {
+    // Первая попытка падает 503 (ответ с ошибкой не кэшируется), движок задач
+    // повторяет вызов — шлюз обязан увидеть ТОТ ЖЕ ключ, иначе повтор
+    // исполнится и оплатится как новый вызов.
+    const h = harness((call) =>
+      call === 0 ? jsonResponse({ detail: 'upstream' }, 503) : jsonResponse(okBody()),
+    );
+
+    await expect(h.provider.complete(REQUEST)).rejects.toBeInstanceOf(LlmTransportError);
+    await h.provider.complete(REQUEST);
+
+    expect(h.calls).toHaveLength(2);
+    expect(headerOf(h.calls[0]!)).toMatch(/^[0-9a-f]{64}$/);
+    expect(headerOf(h.calls[1]!)).toBe(headerOf(h.calls[0]!));
+  });
+
+  it('различен для разных моделей и разных промтов', async () => {
+    const h = harness(() => jsonResponse(okBody()), {
+      allowedModels: ['gw/model-a', 'gw/model-b'],
+    });
+
+    await h.provider.complete(REQUEST);
+    await h.provider.complete({ ...REQUEST, model: 'gw/model-b' });
+    await h.provider.complete({ ...REQUEST, userPrompt: 'ПАСПОРТ КАЧЕСТВА №7' });
+
+    const keys = h.calls.map((call) => headerOf(call));
+    expect(new Set(keys).size).toBe(3);
   });
 });
 
@@ -351,6 +402,57 @@ describe('отказы', () => {
       // Повтор детерминированного промта даст тот же непригодный ответ и
       // потратит бюджет впустую.
       retriable: false,
+    });
+  });
+
+  it('finish_reason=length — это LlmProtocolError, а не тихий успех', async () => {
+    // Ответ оборван по max_tokens: JSON гарантированно неполон, вызов оплачен.
+    // Повтор оборвётся на том же токене — поэтому не retriable.
+    const h = harness(() =>
+      jsonResponse({
+        model: 'gw/model-a',
+        choices: [{ message: { content: '{"label":"B-DOC","doc_' }, finish_reason: 'length' }],
+        usage: { prompt_tokens: 120, completion_tokens: 4096, cost: 0.5 },
+      }),
+    );
+
+    const error = await failureOf(h.provider.complete(REQUEST));
+    expect(error).toBeInstanceOf(LlmProtocolError);
+    expect((error as LlmProtocolError).retriable).toBe(false);
+    expect(error.message).toContain('max_tokens');
+    expect(error.message).toContain('оборван');
+  });
+
+  it('пустой content — это LlmProtocolError с внятной причиной', async () => {
+    const h = harness(() =>
+      jsonResponse({ choices: [{ message: { content: '' }, finish_reason: 'stop' }] }),
+    );
+
+    const error = await failureOf(h.provider.complete(REQUEST));
+    expect(error).toBeInstanceOf(LlmProtocolError);
+    expect((error as LlmProtocolError).retriable).toBe(false);
+    expect(error.message).toContain('Пустой ответ');
+  });
+
+  it('502 upstream_response_too_large не ретраится', async () => {
+    // 502 без кода — преходящий сбой шлюза и повторяем; с кодом
+    // upstream_response_too_large — детерминированно большой ответ модели,
+    // повтор его лишь оплатит ещё раз.
+    const tooLarge = harness(() =>
+      jsonResponse(
+        { error: { message: 'response too large', code: 'upstream_response_too_large' } },
+        502,
+      ),
+    );
+    const error = await failureOf(tooLarge.provider.complete(REQUEST));
+    expect(error).toBeInstanceOf(LlmProtocolError);
+    expect((error as LlmProtocolError).retriable).toBe(false);
+    expect(error.message).toContain('upstream_response_too_large');
+
+    const plain = harness(() => jsonResponse({ error: { message: 'bad gateway' } }, 502));
+    await expect(plain.provider.complete(REQUEST)).rejects.toMatchObject({
+      name: 'LlmTransportError',
+      retriable: true,
     });
   });
 

@@ -40,6 +40,7 @@ import {
   pageTextVersions,
   processingBundlePages,
   rdRunDocuments,
+  recognitionRunPages,
   recognitionRuns,
   submissionRevisions,
 } from '@id/db';
@@ -64,8 +65,13 @@ export interface RecognitionRunView {
   readonly revisionId: string;
   readonly objectId: string;
   readonly layoutRevisionId: string;
-  readonly rdRunDocumentId: string;
-  readonly rdDocumentId: string;
+  /**
+   * `null` — прогон ветки VLM (ADR-0007): RD-документа у него нет по
+   * построению. Легаси-обработчики, которым RD-документ обязателен,
+   * проверяют это явно, а не полагаются на тип.
+   */
+  readonly rdRunDocumentId: string | null;
+  readonly rdDocumentId: string | null;
   readonly rdJobId: string | null;
   readonly localLayoutHash: string;
   readonly remoteLayoutHashBefore: string | null;
@@ -120,7 +126,10 @@ function runQuery(db: Database, scope: AuthScope, ...conditions: SQL[]) {
   return db
     .select(RUN_SELECTION)
     .from(recognitionRuns)
-    .innerJoin(rdRunDocuments, eq(recognitionRuns.rdRunDocumentId, rdRunDocuments.id))
+    // LEFT JOIN, а не INNER: у VLM-прогона rd_run_document_id NULL (0019), и
+    // внутреннее соединение молча выкинуло бы такие прогоны из всех выборок —
+    // они «исчезали» бы из истории и из finalize.
+    .leftJoin(rdRunDocuments, eq(recognitionRuns.rdRunDocumentId, rdRunDocuments.id))
     .innerJoin(submissionRevisions, eq(recognitionRuns.revisionId, submissionRevisions.id))
     .where(withScope(scope, REVISION_SCOPE, ...conditions));
 }
@@ -168,6 +177,13 @@ export async function findRunForLayout(
 export interface StartRunInput {
   readonly layoutRevisionId: string;
   readonly settingsSnapshot: Record<string, unknown>;
+  /**
+   * Нужен ли прогону RD-документ. Ветка RD WEB — да (без него OCR негде
+   * запускать), ветка VLM (ADR-0007) — нет. Флаг обязателен и без значения по
+   * умолчанию: решение принадлежит роуту, который выбрал ветку, и молчаливое
+   * «как раньше» скрыло бы выбор.
+   */
+  readonly requireRdDocument: boolean;
 }
 
 export interface StartRunResult {
@@ -227,18 +243,38 @@ export async function startRecognitionRun(
         'а RD-документ закрыт: для нового распознавания нужна новая ревизия разметки.',
     );
   }
-
-  const runDocument = await db
-    .select({ id: rdRunDocuments.id, closedAt: rdRunDocuments.closedAt })
-    .from(rdRunDocuments)
-    .where(eq(rdRunDocuments.layoutRevisionId, input.layoutRevisionId))
-    .limit(1);
-  const document = runDocument[0];
-  if (document === undefined) {
-    throw conflict('RD-документ прогона не создан: цепочка разметки не была выполнена.');
+  if (!input.requireRdDocument && existing !== null && existing.status === 'done') {
+    // Зеркало легаси-дисциплины: у RD WEB повторный прогон done-разметки
+    // запирает закрытый документ, у VLM запирать нечем — запрет явный.
+    // Результаты неизменяемы, повторное распознавание = новая ревизия разметки.
+    throw conflict(
+      'Прогон по этой ревизии разметки уже завершён успешно: ' +
+        'для повторного распознавания нужна новая ревизия разметки.',
+    );
   }
-  if (document.closedAt !== null) {
-    throw conflict('RD-документ прогона закрыт: требуется новая ревизия разметки.');
+
+  let rdRunDocumentId: string | null = null;
+  if (input.requireRdDocument) {
+    const runDocument = await db
+      .select({ id: rdRunDocuments.id, closedAt: rdRunDocuments.closedAt })
+      .from(rdRunDocuments)
+      .where(eq(rdRunDocuments.layoutRevisionId, input.layoutRevisionId))
+      .limit(1);
+    const document = runDocument[0];
+    if (document === undefined) {
+      // Сюда же приходит комбинация «детекция local + распознавание rdweb»
+      // (ADR-0007, матрица провайдеров): локальная разметка RD-документа не
+      // создаёт, и честный отказ обязан подсказать оба выхода.
+      throw conflict(
+        'RD-документ прогона не создан: цепочка разметки RD WEB не выполнялась. ' +
+          'Либо переразметьте с детекцией через RD WEB, либо переключите ' +
+          'распознавание на VLM в настройках портала.',
+      );
+    }
+    if (document.closedAt !== null) {
+      throw conflict('RD-документ прогона закрыт: требуется новая ревизия разметки.');
+    }
+    rdRunDocumentId = document.id;
   }
 
   const bundle = await db
@@ -257,7 +293,7 @@ export async function startRecognitionRun(
       .values({
         revisionId: found.revisionId,
         layoutRevisionId: found.id,
-        rdRunDocumentId: document.id,
+        rdRunDocumentId,
         localLayoutHash: found.blocksHash as string,
         workingPdfSha256,
         settingsSnapshot: input.settingsSnapshot,
@@ -819,6 +855,319 @@ async function loadPageMap(
     .innerJoin(submissionRevisions, eq(layoutRevisions.revisionId, submissionRevisions.id))
     .where(withScope(scope, REVISION_SCOPE, eq(layoutRevisions.id, layoutRevisionId)));
   return new Map(rows.map((row) => [row.workingPageIndex, row.sourcePageId]));
+}
+
+// =====================================================================
+// Ветка VLM (ADR-0007): состояние страниц прогона и append-only результаты
+// =====================================================================
+
+/**
+ * Здесь три инварианта плана, и все три держатся БД, а не дисциплиной кода:
+ *
+ * 1. Прогресс — таблица `recognition_run_pages`, а не payload'ы очереди:
+ *    финализация спрашивает «все ли страницы терминальны», и ответ обязан
+ *    переживать смерть воркера и повтор любой задачи.
+ * 2. Один результат на блок в прогоне — UNIQUE `(recognition_run_id,
+ *    layout_block_id)` (0019) + `ON CONFLICT DO NOTHING`: повторная аренда
+ *    задачи не создаёт дублей и не двигает ничего.
+ * 3. Публикация атомарна: во время прогона пишутся ТОЛЬКО `block_results` и
+ *    состояние страниц; `page_text_versions` и указатели
+ *    `current_block_result` появляются одной финальной транзакцией. Упавший
+ *    прогон не оставляет downstream ни байта.
+ */
+
+export type RunPageStatus = 'pending' | 'done' | 'failed';
+
+export interface RunPageState {
+  readonly workingPageIndex: number;
+  readonly status: RunPageStatus;
+  readonly blocksTotal: number;
+  readonly blocksRecognized: number;
+  readonly blocksInvalid: number;
+  readonly blocksRefused: number;
+}
+
+/**
+ * Сидирование страниц прогона при старте (`vlm.start_recognition`).
+ *
+ * `ON CONFLICT DO NOTHING`: повтор стартовой задачи после смерти воркера
+ * не сбрасывает счётчики страниц, уже отработанных другими задачами.
+ */
+export async function seedRunPages(
+  db: Database,
+  scope: AuthScope,
+  runId: string,
+  pages: readonly { readonly workingPageIndex: number; readonly blocksTotal: number }[],
+): Promise<void> {
+  const run = await findRecognitionRun(db, scope, runId);
+  if (run === null) throw notFound('Прогон распознавания не найден.');
+  if (pages.length === 0) return;
+  await db
+    .insert(recognitionRunPages)
+    .values(
+      pages.map((page) => ({
+        recognitionRunId: runId,
+        workingPageIndex: page.workingPageIndex,
+        blocksTotal: page.blocksTotal,
+      })),
+    )
+    .onConflictDoNothing();
+}
+
+/**
+ * Дополнение снимка настроек прогона фактами, известными только воркеру
+ * (версии опубликованных промптов, растеризатор, версия crop policy).
+ *
+ * Merge, а не перезапись: ядро снимка (провайдер, модель, dryRun) записал роут,
+ * и затирать его воркер не имеет права. Пишется только у running-прогона —
+ * снимок завершённого прогона неизменен как часть исхода.
+ */
+export async function mergeRunSettingsSnapshot(
+  db: Database,
+  scope: AuthScope,
+  runId: string,
+  patch: Record<string, unknown>,
+): Promise<void> {
+  await requireRunningRun(db, scope, runId);
+  await db
+    .update(recognitionRuns)
+    .set({
+      settingsSnapshot: sql`${recognitionRuns.settingsSnapshot} || ${JSON.stringify(patch)}::jsonb`,
+    })
+    .where(and(eq(recognitionRuns.id, runId), eq(recognitionRuns.status, 'running')));
+}
+
+/** Терминальная отметка страницы прогона — пишет `vlm.recognize_page` в конце обхода. */
+export async function markRunPage(
+  db: Database,
+  scope: AuthScope,
+  input: {
+    readonly runId: string;
+    readonly workingPageIndex: number;
+    readonly status: Exclude<RunPageStatus, 'pending'>;
+    readonly blocksRecognized: number;
+    readonly blocksInvalid: number;
+    readonly blocksRefused: number;
+  },
+): Promise<void> {
+  const run = await findRecognitionRun(db, scope, input.runId);
+  if (run === null) throw notFound('Прогон распознавания не найден.');
+  const updated = await db
+    .update(recognitionRunPages)
+    .set({
+      status: input.status,
+      blocksRecognized: input.blocksRecognized,
+      blocksInvalid: input.blocksInvalid,
+      blocksRefused: input.blocksRefused,
+      updatedAt: sql`now()`,
+    })
+    .where(
+      and(
+        eq(recognitionRunPages.recognitionRunId, input.runId),
+        eq(recognitionRunPages.workingPageIndex, input.workingPageIndex),
+      ),
+    )
+    .returning({ workingPageIndex: recognitionRunPages.workingPageIndex });
+  if (updated.length === 0) {
+    // Строки нет — стартовая задача её не сидировала. Это дефект постановщика,
+    // и молча создать строку здесь значило бы спрятать его.
+    throw notFound('Страница прогона не сидирована: vlm.start_recognition не выполнялась.');
+  }
+}
+
+export async function listRunPages(
+  db: Database,
+  scope: AuthScope,
+  runId: string,
+): Promise<readonly RunPageState[]> {
+  const run = await findRecognitionRun(db, scope, runId);
+  if (run === null) throw notFound('Прогон распознавания не найден.');
+  const rows = await db
+    .select({
+      workingPageIndex: recognitionRunPages.workingPageIndex,
+      status: recognitionRunPages.status,
+      blocksTotal: recognitionRunPages.blocksTotal,
+      blocksRecognized: recognitionRunPages.blocksRecognized,
+      blocksInvalid: recognitionRunPages.blocksInvalid,
+      blocksRefused: recognitionRunPages.blocksRefused,
+    })
+    .from(recognitionRunPages)
+    .where(eq(recognitionRunPages.recognitionRunId, runId))
+    .orderBy(asc(recognitionRunPages.workingPageIndex));
+  return rows.map((row) => ({ ...row, status: row.status as RunPageStatus }));
+}
+
+/**
+ * Идемпотентная запись результата одного блока — checkpoint `vlm.recognize_page`.
+ *
+ * Указатель `current_block_result` здесь НЕ двигается (инвариант 3): до
+ * финальной публикации частичный результат не виден downstream. `written:
+ * false` — строка уже есть (повторная аренда), и это штатный исход, а не сбой.
+ */
+export async function insertBlockResultIdempotent(
+  db: Database,
+  // Область не применяется: запись адресуется прогоном, чью область вызывающий
+  // уже проверил, загружая прогон. Параметр сохранён ради симметрии deps-порта.
+  _scope: AuthScope,
+  input: {
+    readonly recognitionRunId: string;
+    readonly layoutRevisionId: string;
+    readonly block: SaveBlockResultInput;
+  },
+): Promise<{ readonly written: boolean }> {
+  const rows = await db
+    .insert(blockResults)
+    .values({
+      layoutRevisionId: input.layoutRevisionId,
+      layoutBlockId: input.block.layoutBlockId,
+      recognitionRunId: input.recognitionRunId,
+      resultType: input.block.resultType,
+      contentHtml: input.block.contentHtml,
+      contentMd: input.block.contentMd,
+      contentJson: input.block.contentJson ?? null,
+      modelId: input.block.modelId,
+      confidence: input.block.confidence,
+    })
+    .onConflictDoNothing({
+      target: [blockResults.recognitionRunId, blockResults.layoutBlockId],
+    })
+    .returning({ id: blockResults.id });
+  return { written: rows.length > 0 };
+}
+
+/** Уже записанные блоки прогона — чем `vlm.recognize_page` отсекает оплаченное. */
+export async function listRunBlockIds(
+  db: Database,
+  // См. insertBlockResultIdempotent: область проверена загрузкой прогона.
+  _scope: AuthScope,
+  runId: string,
+): Promise<ReadonlySet<string>> {
+  const rows = await db
+    .select({ blockId: blockResults.layoutBlockId })
+    .from(blockResults)
+    .where(eq(blockResults.recognitionRunId, runId));
+  return new Set(rows.map((row) => row.blockId));
+}
+
+/** Конверты результатов прогона — вход финальной сборки RecognitionResult. */
+export async function listRunBlockEnvelopes(
+  db: Database,
+  scope: AuthScope,
+  runId: string,
+): Promise<
+  readonly {
+    readonly id: string;
+    readonly layoutBlockId: string;
+    readonly contentJson: unknown;
+    readonly modelId: string | null;
+  }[]
+> {
+  const run = await findRecognitionRun(db, scope, runId);
+  if (run === null) throw notFound('Прогон распознавания не найден.');
+  return db
+    .select({
+      id: blockResults.id,
+      layoutBlockId: blockResults.layoutBlockId,
+      contentJson: blockResults.contentJson,
+      modelId: blockResults.modelId,
+    })
+    .from(blockResults)
+    .where(eq(blockResults.recognitionRunId, runId))
+    .orderBy(asc(blockResults.layoutBlockId));
+}
+
+export interface PublishVlmResultsInput {
+  readonly recognitionRunId: string;
+  readonly artifactVersionId: string;
+  readonly pages: readonly {
+    readonly workingPageIndex: number;
+    readonly textMd: string;
+    readonly renderVersion: string;
+  }[];
+}
+
+/**
+ * Финальная публикация VLM-прогона — ОДНА транзакция (инвариант 3 плана):
+ * тексты страниц с версией рендера и перевод указателей «текущий результат»
+ * на все результаты прогона. Вызывается только после проверки полного
+ * покрытия; упавший прогон сюда не доходит.
+ *
+ * Повтор безопасен тем же механизмом, что `saveRecognitionResults`: страницы
+ * отсекаются по уже записанному множеству, указатели переводятся upsert'ом —
+ * второй раз в то же самое место.
+ */
+export async function publishVlmRunResults(
+  db: Database,
+  scope: AuthScope,
+  input: PublishVlmResultsInput,
+): Promise<{
+  readonly pagesWritten: number;
+  readonly pagesAlreadyPresent: number;
+  readonly pagesOutOfRange: number;
+  readonly pointersMoved: number;
+}> {
+  const run = await findRecognitionRun(db, scope, input.recognitionRunId);
+  if (run === null) throw notFound('Прогон распознавания не найден.');
+
+  const pageMap = await loadPageMap(db, scope, run.layoutRevisionId);
+  const existingPages = new Set(
+    (
+      await db
+        .select({ sourcePageId: pageTextVersions.sourcePageId })
+        .from(pageTextVersions)
+        .where(eq(pageTextVersions.recognitionRunId, input.recognitionRunId))
+    ).map((row) => row.sourcePageId),
+  );
+
+  const pagesOutOfRange = input.pages.filter(
+    (page) => pageMap.get(page.workingPageIndex) === undefined,
+  ).length;
+  if (pagesOutOfRange > 0) {
+    // Как в saveRecognitionResults: публикация со страницей вне рабочего
+    // документа не пишет ВООБЩЕ ничего — прогон будет остановлен целиком.
+    return { pagesWritten: 0, pagesAlreadyPresent: 0, pagesOutOfRange, pointersMoved: 0 };
+  }
+
+  const results = await db
+    .select({ id: blockResults.id, layoutBlockId: blockResults.layoutBlockId })
+    .from(blockResults)
+    .where(eq(blockResults.recognitionRunId, input.recognitionRunId));
+
+  return db.transaction(async (tx) => {
+    let pagesWritten = 0;
+    let pagesAlreadyPresent = 0;
+    for (const page of input.pages) {
+      const sourcePageId = pageMap.get(page.workingPageIndex);
+      if (sourcePageId === undefined || existingPages.has(sourcePageId)) {
+        pagesAlreadyPresent += 1;
+        continue;
+      }
+      await tx.insert(pageTextVersions).values({
+        revisionId: run.revisionId,
+        sourcePageId,
+        recognitionRunId: input.recognitionRunId,
+        artifactVersionId: input.artifactVersionId,
+        textMd: page.textMd,
+        textSha256: createHash('sha256').update(page.textMd, 'utf8').digest('hex'),
+        renderVersion: page.renderVersion,
+      });
+      pagesWritten += 1;
+    }
+
+    let pointersMoved = 0;
+    for (const result of results) {
+      await tx
+        .insert(currentBlockResult)
+        .values({ layoutBlockId: result.layoutBlockId, blockResultId: result.id })
+        .onConflictDoUpdate({
+          target: currentBlockResult.layoutBlockId,
+          set: { blockResultId: result.id, updatedAt: sql`now()` },
+        });
+      pointersMoved += 1;
+    }
+
+    return { pagesWritten, pagesAlreadyPresent, pagesOutOfRange: 0, pointersMoved };
+  });
 }
 
 /** Результаты блоков прогона — для чтения наружу и для проверок последствий. */

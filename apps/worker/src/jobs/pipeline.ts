@@ -25,8 +25,26 @@
  */
 import { createHash } from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
-import { stat } from 'node:fs/promises';
+import { mkdtemp, rm, stat } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { pipeline } from 'node:stream/promises';
+
+import {
+  assembleRecognitionResult,
+  insertBlockResultIdempotent,
+  listRunBlockEnvelopes,
+  listRunBlockIds,
+  listRunPages,
+  markRunPage,
+  mergeRunSettingsSnapshot,
+  publishVlmRunResults,
+  RECOGNITION_PROMPT_DEFAULTS,
+  recognizeBlock,
+  schemaHash,
+  seedRunPages,
+  type VlmPort,
+} from '@id/api';
 
 import {
   archiveKey,
@@ -62,6 +80,7 @@ import {
   loadProfileForLayout,
   previewPageKey,
   probePdf,
+  readDetectionSettings,
   recordArtifact,
   replaceRunDocument,
   saveFileVerdict,
@@ -96,6 +115,7 @@ import {
   type LlmPort,
   type LlmStage,
   type LayoutRevisionView,
+  type PageRasterizer,
   type PdfToolkit,
   type RdWebPort,
   type RecognitionSelection,
@@ -165,6 +185,20 @@ import {
   type PageBlocksSnapshot,
   type WaitPagesOptions,
 } from './markup.js';
+import { createLocalDetectionHandler, type LocalDetectionDeps } from './local-detection.js';
+import { createModelStore } from '../detection/model-store.js';
+import {
+  DEFAULT_INTER_OP_THREADS,
+  DEFAULT_INTRA_OP_THREADS,
+  OnnxRuntimeSession,
+} from '../detection/session.js';
+import {
+  createVlmFinalizeHandler,
+  createVlmRecognizePageHandler,
+  createVlmStartHandler,
+  type VlmRecognitionDeps,
+} from './vlm-recognition.js';
+import { cropBlockPng, downscalePng } from '../vlm/crop.js';
 
 /**
  * Актор фоновых задач.
@@ -181,8 +215,13 @@ const WORKER_ACTOR_ID = '00000000-0000-0000-0000-000000000000';
  *
  * Ею разрешается ТОЛЬКО ревизия из payload и ТОЛЬКО ради того, чтобы узнать её
  * подрядчика. Всё остальное идёт закреплённой областью — см. `pinScope()`.
+ *
+ * Экспортирована ради `main.ts`: расходомер бюджета VLM-провайдера
+ * (`createAiSpendReader`) строится при старте процесса, вместе с
+ * `toolkit`/`rasterizer`/`rdweb` — тем же местом, что и остальные
+ * startup-зависимости (ADR-0007), а не второй копией нулевого uuid.
  */
-const SYSTEM_SCOPE: AuthScope = { kind: 'admin', userId: WORKER_ACTOR_ID };
+export const SYSTEM_SCOPE: AuthScope = { kind: 'admin', userId: WORKER_ACTOR_ID };
 
 const PDF_CONTENT_TYPE = 'application/pdf';
 const ZIP_CONTENT_TYPE = 'application/zip';
@@ -211,6 +250,21 @@ export interface PipelineJobsOptions {
   readonly rdProjectId?: string | null | undefined;
   /** `PREVIEW_MODE=cached` (§7.1): только тогда ставится задача 9. */
   readonly previewCached?: boolean | undefined;
+  /**
+   * Растеризатор PDF→PNG для локальной детекции (ADR-0008), выбранный
+   * startup-проверкой `selectRasterizer()` в `main.ts` — тем же паттерном,
+   * что и `toolkit` (ADR-0003). `null` — на машине нет `pdftoppm`:
+   * `layout.detect_local` отказывает честно, остальной конвейер не страдает.
+   */
+  readonly rasterizer?: PageRasterizer | null | undefined;
+  /**
+   * Каталог кэша весов локальной модели детекции на диске воркера.
+   *
+   * По умолчанию подкаталог `workDirBase` (или системного tmpdir) — веса
+   * переживают job, но не обязаны переживать перезапуск процесса: при
+   * следующем старте `model-store.ts` перекачает и заново сверит sha256.
+   */
+  readonly detectionCacheDir?: string | undefined;
   /** Настройки поллинга рендера; в тестах ускоряются. */
   readonly waitPages?: WaitPagesOptions | undefined;
   /** Настройки поллинга распознавания; в тестах ускоряются. */
@@ -233,6 +287,16 @@ export interface PipelineJobsOptions {
   /** Журнал и метрики для провайдера модели; в тестах подменяются. */
   readonly llmLogger?: Parameters<typeof createLlmProvider>[1]['logger'] | undefined;
   readonly llmMetrics?: Parameters<typeof createLlmProvider>[1]['metrics'] | undefined;
+  /**
+   * Порт VLM-распознавания (ADR-0007). `null`/отсутствие — обе задачи
+   * `vlm.*`, которым он нужен, честно отказывают `VlmRecognitionConfigurationError`
+   * (тот же принцип, что у `rasterizer`/`rdweb`: опциональная ветка не роняет
+   * процесс). `createVlmProvider()` сама по себе НЕ бросает при
+   * `LLM_PROVIDER=none|rdweb` — она возвращает объект, честно отказывающий на
+   * первом вызове `.complete()`; `null` здесь — путь для тестов и для явного
+   * «не собирали вовсе».
+   */
+  readonly vlm?: VlmPort | null | undefined;
 }
 
 export class PipelineScopeError extends Error {
@@ -656,6 +720,97 @@ function markupDeps(options: PipelineJobsOptions): MarkupDeps {
 }
 
 // =====================================================================
+// Порт задачи `layout.detect_local` (детекция RF-DETR на CPU, ADR-0008)
+// =====================================================================
+
+/**
+ * Хранилище модели детекции — ОДНО на реестр задач, не на job.
+ *
+ * `ensureModel()` кэширует ONNX-сессию по версии в памяти процесса и
+ * защищает параллельную загрузку single-flight'ом (`model-store.ts`);
+ * пересоздание стора на каждую задачу обнулило бы оба — то есть каждая
+ * страница комплекта грузила бы веса заново, а очередь cpu с конкуренцией
+ * 1–2 не спасала бы от гонки при рестарте.
+ *
+ * Потоки ONNX Runtime берутся из `ORT_INTRA_OP_THREADS`/`ORT_INTER_OP_THREADS`
+ * (`options.env`), при отсутствии окружения — из дефолтов `session.ts` (2/1):
+ * тот же паттерн, что у `llm` в `segmentationDeps` — окружение опционально,
+ * функциональность деградирует к безопасным значениям, а не падает.
+ */
+function localDetectionDeps(options: PipelineJobsOptions): LocalDetectionDeps {
+  const { db, storage } = options;
+
+  const cacheDir =
+    options.detectionCacheDir ?? join(options.workDirBase ?? tmpdir(), 'detection-models');
+
+  const modelStore = createModelStore({
+    storage,
+    cacheDir,
+    createSession: (onnxPath, sessionOptions) => OnnxRuntimeSession.create(onnxPath, sessionOptions),
+    sessionOptions: {
+      intraOpNumThreads: options.env?.ORT_INTRA_OP_THREADS ?? DEFAULT_INTRA_OP_THREADS,
+      interOpNumThreads: options.env?.ORT_INTER_OP_THREADS ?? DEFAULT_INTER_OP_THREADS,
+    },
+  });
+
+  return {
+    rasterizer: options.rasterizer ?? null,
+    modelStore,
+    ...(options.workDirBase !== undefined ? { workDirBase: options.workDirBase } : {}),
+
+    loadTargetByLayout: async ({ revisionId, layoutRevisionId }) => {
+      const scope = await pinScope(db, revisionId);
+      if (scope === null) return null;
+      const layout = await findLayoutRevision(db, scope, layoutRevisionId);
+      if (layout === null || layout.revisionId !== revisionId) return null;
+      return buildMarkupTarget(options, scope, layout);
+    },
+
+    detectionSettings: async () => {
+      const settings = await readDetectionSettings(db);
+      return { modelVersion: settings.modelVersion };
+    },
+
+    pageGeometry: async ({ revisionId, bundleId }) => {
+      const scope = await pinScope(db, revisionId);
+      if (scope === null) return [];
+      return listBundlePages(db, scope, bundleId);
+    },
+
+    // Любой существующий блок (авто ИЛИ ручной) — сигнал «страницу уже
+    // размечали»: skip без overwriteExisting экономит рендер+инференс на
+    // странице, которую всё равно не тронет `importBlocks` (авто) или которую
+    // он безусловно защищает (ручной, `pagesWithManualBlocks`).
+    existingBlockPages: async ({ revisionId, layoutRevisionId }) => {
+      const scope = await pinScope(db, revisionId);
+      if (scope === null) return new Set();
+      const blocks = await listLayoutBlocks(db, scope, layoutRevisionId);
+      return new Set(blocks.map((block) => block.workingPageIndex));
+    },
+
+    fetchWorkingPdf: (key, destinationPath) => fetchOriginal(storage, key, destinationPath),
+
+    importBlocks: async (input) => {
+      const scope = await pinScope(db, input.revisionId);
+      if (scope === null) {
+        throw new PipelineScopeError('Ревизия исчезла до импорта локальной детекции.');
+      }
+      const result = await importDetectedBlocks(db, scope, {
+        layoutRevisionId: input.layoutRevisionId,
+        workingPageIndices: input.workingPageIndices,
+        blocks: input.blocks,
+        // Провенанс локального детектора — отдельное значение от легаси
+        // `rd_detr`... то есть в точности `rf_detr`, как и у RD WEB (§0.1):
+        // портал переиспользует ОДНУ и ту же модель детекции, менялся только
+        // способ инференса (локально vs через RD WEB), а не архитектура сети.
+        provenance: 'rf_detr',
+      });
+      return { imported: result.imported, skippedPages: result.skippedPages };
+    },
+  };
+}
+
+// =====================================================================
 // Порты задач 10–13 (распознавание)
 // =====================================================================
 
@@ -705,6 +860,12 @@ function recognitionDeps(options: PipelineJobsOptions): RecognitionDeps {
       // чужим прогоном, не находит его через область, а задача с прогоном
       // соседней ревизии того же подрядчика отсекается здесь.
       if (run === null || run.revisionId !== revisionId) return null;
+      // Легаси-задачи rd.* без RD-документа не работают по построению; прогон
+      // ветки VLM (rd_run_document_id NULL, ADR-0007) сюда попасть не должен —
+      // его ставит vlm.start_recognition, а не layout.reconcile. Если попал,
+      // честный null: задача откажет «прогон не найден», а не полезет в RD WEB
+      // с пустым идентификатором.
+      if (run.rdDocumentId === null) return null;
       return {
         runId: run.id,
         revisionId: run.revisionId,
@@ -818,6 +979,252 @@ function recognitionDeps(options: PipelineJobsOptions): RecognitionDeps {
       const scope = await scopeOf(layout.revisionId);
       const result = await closeRunDocument(db, scope, layoutRevisionId);
       return { changed: result.changed };
+    },
+  };
+}
+
+// =====================================================================
+// Порты задач `vlm.*` (распознавание через OpenRouter VLM, ADR-0007)
+// =====================================================================
+
+/**
+ * Связывание трёх задач `vlm.*` (`vlm-recognition.ts`) с базой, хранилищем,
+ * порядка правами и VLM-портом.
+ *
+ * Та же дисциплина, что у `recognitionDeps`: `revisionId`/`runId` из payload
+ * разрешаются закреплённой областью, а не системной, — payload с чужим
+ * прогоном не находит его вовсе. Отличие от `recognitionDeps` только в
+ * наборе полей: у VLM-прогона нет ни RD-документа, ни удалённых хэшей, зато
+ * есть таблица `recognition_run_pages`, растеризатор и порт `VlmPort`.
+ */
+function vlmRecognitionDeps(options: PipelineJobsOptions): VlmRecognitionDeps {
+  const { db, storage } = options;
+
+  const scopeOf = async (revisionId: string): Promise<AuthScope> => {
+    const scope = await pinScope(db, revisionId);
+    if (scope === null) {
+      throw new PipelineScopeError(`Ревизия ${revisionId} не найдена: прогон адресован в никуда.`);
+    }
+    return scope;
+  };
+
+  const scopeOfRun = async (runId: string): Promise<{ scope: AuthScope; revisionId: string }> => {
+    const run = await findRecognitionRun(db, SYSTEM_SCOPE, runId);
+    if (run === null) throw new PipelineScopeError(`Прогон ${runId} не найден.`);
+    return { scope: await scopeOf(run.revisionId), revisionId: run.revisionId };
+  };
+
+  /**
+   * Геометрия страниц bundle этого прогона.
+   *
+   * `layoutRevisionId` прогона резолвится в `bundleId` СИСТЕМНЫМ чтением
+   * ревизии разметки (тот же приём, что `closeRunDocument` в
+   * `recognitionDeps`) — сама ревизия разметки не денормализует подрядчика, а
+   * `listBundlePages` дальше идёт уже закреплённой областью прогона.
+   */
+  const loadGeometry = async (
+    scope: AuthScope,
+    layoutRevisionId: string,
+  ): ReturnType<VlmRecognitionDeps['loadPageGeometry']> => {
+    const layout = await findLayoutRevisionSystemwide(db, layoutRevisionId);
+    if (layout === null) return [];
+    return listBundlePages(db, scope, layout.bundleId);
+  };
+
+  return {
+    vlm: options.vlm ?? null,
+    rasterizer: options.rasterizer ?? null,
+    sha256: (bytes) => sha256Hex(bytes),
+
+    loadRun: async ({ revisionId, recognitionRunId }) => {
+      const scope = await pinScope(db, revisionId);
+      if (scope === null) return null;
+      const run = await findRecognitionRun(db, scope, recognitionRunId);
+      if (run === null || run.revisionId !== revisionId) return null;
+      return {
+        runId: run.id,
+        revisionId: run.revisionId,
+        layoutRevisionId: run.layoutRevisionId,
+        status: run.status,
+        localLayoutHash: run.localLayoutHash,
+        settingsSnapshot: run.settingsSnapshot,
+      };
+    },
+
+    loadFrozenBlocks: async (runId) => {
+      const { scope } = await scopeOfRun(runId);
+      const run = await findRecognitionRun(db, scope, runId);
+      if (run === null) return [];
+      const blocks = await listLayoutBlocks(db, scope, run.layoutRevisionId);
+      return blocks.map((block) => ({
+        id: block.id,
+        workingPageIndex: block.workingPageIndex,
+        blockType: block.blockType,
+        shapeType: block.shapeType,
+        coordsNorm: [block.x0, block.y0, block.x1, block.y1],
+        sortOrder: block.sortOrder,
+        polygon:
+          block.shapeType === 'polygon'
+            ? block.points.map((point): readonly [number, number] => [point.x, point.y])
+            : null,
+      }));
+    },
+
+    loadPageGeometry: async (runId) => {
+      const { scope } = await scopeOfRun(runId);
+      const run = await findRecognitionRun(db, scope, runId);
+      if (run === null) return [];
+      return loadGeometry(scope, run.layoutRevisionId);
+    },
+
+    seedRunPages: async (runId, pages) => {
+      const { scope } = await scopeOfRun(runId);
+      await seedRunPages(db, scope, runId, pages);
+    },
+
+    markRunPage: async (input) => {
+      const { scope } = await scopeOfRun(input.runId);
+      await markRunPage(db, scope, input);
+    },
+
+    listRunPages: async (runId) => {
+      const { scope } = await scopeOfRun(runId);
+      return listRunPages(db, scope, runId);
+    },
+
+    existingBlockIds: async (runId) => {
+      const { scope } = await scopeOfRun(runId);
+      return listRunBlockIds(db, scope, runId);
+    },
+
+    insertBlockResult: async (input) => {
+      const { scope } = await scopeOfRun(input.recognitionRunId);
+      return insertBlockResultIdempotent(db, scope, input);
+    },
+
+    listBlockEnvelopes: async (runId) => {
+      const { scope } = await scopeOfRun(runId);
+      return listRunBlockEnvelopes(db, scope, runId);
+    },
+
+    publishResults: async (input) => {
+      const { scope } = await scopeOfRun(input.recognitionRunId);
+      return publishVlmRunResults(db, scope, input);
+    },
+
+    mergeSnapshot: async (runId, patch) => {
+      const { scope } = await scopeOfRun(runId);
+      await mergeRunSettingsSnapshot(db, scope, runId, patch);
+    },
+
+    finishRun: async (input) => {
+      const { scope } = await scopeOfRun(input.runId);
+      return finishRecognitionRun(db, scope, input);
+    },
+
+    findArtifact: async (runId, kind) => {
+      const { scope } = await scopeOfRun(runId);
+      const artifact = await findArtifact(db, scope, runId, kind);
+      return artifact === null
+        ? null
+        : { kind: artifact.kind, artifactSha256: artifact.artifactSha256, byteSize: artifact.byteSize };
+    },
+
+    recordArtifact: async (input) => {
+      const { scope } = await scopeOfRun(input.runId);
+      const outcome = await recordArtifact(db, scope, {
+        recognitionRunId: input.runId,
+        kind: input.kind,
+        artifactSha256: input.artifactSha256,
+        byteSize: input.byteSize,
+      });
+      return { kind: outcome.kind, artifactSha256: outcome.artifact.artifactSha256 };
+    },
+
+    artifactId: async (runId, kind) => {
+      const { scope } = await scopeOfRun(runId);
+      const artifact = await findArtifact(db, scope, runId, kind);
+      if (artifact === null) {
+        throw new PipelineScopeError(`Артефакт ${kind} прогона ${runId} не записан.`);
+      }
+      return artifact.id;
+    },
+
+    readArtifactBytes: async (runId, kind) => {
+      const key = artifactKey(runId, kind);
+      const head = await storage.headObject(key);
+      if (head === null) return null;
+      return readStorageObject(storage, key, MAX_ARTIFACT_BYTES);
+    },
+
+    writeArtifactBytes: async ({ runId, kind, bytes, contentType }) => {
+      await storage.putObject({
+        key: artifactKey(runId, kind),
+        body: Buffer.from(bytes),
+        contentType,
+        contentLength: bytes.byteLength,
+      });
+    },
+
+    /**
+     * Опубликованный промпт по коду (не по стадии, в отличие от сегментации):
+     * `ux_prompt_templates_single_published` гарантирует не больше одной
+     * опубликованной версии на код, поэтому неоднозначности здесь нет.
+     */
+    publishedPromptByCode: async (code) => {
+      const page = await listPromptTemplates(db, SYSTEM_SCOPE, { code, state: 'published', limit: 1 });
+      const row = page.items[0];
+      if (row === undefined) return null;
+      return {
+        code: row.code,
+        version: row.version,
+        systemPrompt: row.systemPrompt,
+        userTemplate: row.userTemplate,
+        outputSchema: row.outputSchema,
+        modelOverride: row.modelOverride,
+      };
+    },
+
+    /** Параметры генерации и `responseFormat` по типу блока — чистые данные, без БД. */
+    generationProfile: (blockType) => {
+      const defaults = RECOGNITION_PROMPT_DEFAULTS[blockType];
+      return {
+        code: defaults.code,
+        temperature: defaults.temperature,
+        maxTokens: defaults.maxTokens,
+        topK: defaults.topK,
+        responseFormat: defaults.responseFormat,
+        schemaVersion: schemaHash(defaults.responseFormat.schema),
+      };
+    },
+
+    recognizeBlock: (input) => recognizeBlock(input),
+
+    /**
+     * Рабочий PDF прогона на диске — материализуется под каждый вызов задачи,
+     * а не кэшируется между блоками: `vlm.recognize_page` вызывается один раз
+     * на страницу, и файл нужен ровно на время её обработки.
+     */
+    workingPdfToFile: async (runId) => {
+      const { scope } = await scopeOfRun(runId);
+      const run = await findRecognitionRun(db, scope, runId);
+      if (run === null) throw new PipelineScopeError(`Прогон ${runId} не найден.`);
+      const dir = await mkdtemp(join(options.workDirBase ?? tmpdir(), 'id-vlm-pdf-'));
+      const path = join(dir, 'working.pdf');
+      await fetchOriginal(storage, blobKey(run.workingPdfSha256), path);
+      return {
+        path,
+        cleanup: () => rm(dir, { recursive: true, force: true }),
+      };
+    },
+
+    crop: (input) => cropBlockPng(input),
+    downscale: (png) => downscalePng(png),
+
+    assemble: (input) => assembleRecognitionResult(input),
+
+    recordAiRun: async (input) => {
+      await recordAiRun(db, await scopeOf(input.revisionId), input);
     },
   };
 }
@@ -1226,6 +1633,12 @@ export function registerPipelineJobs(
   registry.register('layout.analyze_coverage', createAnalyzeCoverageHandler(markup));
   registry.register('preview.cache_pages', createPreviewCacheHandler(markup));
 
+  // Локальная детекция RF-DETR (ADR-0008): альтернатива задаче 7 при
+  // `detection.provider='local'` — растеризация PDF на воркере и ONNX-инференс
+  // на CPU вместо похода в RD WEB. Регистрируется здесь и безусловно, как и
+  // остальные стадии: обработчик без регистрации выглядит зависшим конвейером.
+  registry.register('layout.detect_local', createLocalDetectionHandler(localDetectionDeps(options)));
+
   // Задачи 10–13 (§12): цикл сверки, запуск OCR, поллинг и однократный забор
   // экспорта. Регистрируются здесь и безусловно — по той же причине, что и
   // задачи разметки: обработчик без регистрации выглядит зависшим конвейером.
@@ -1237,6 +1650,16 @@ export function registerPipelineJobs(
     createPollRecognitionHandler(recognition, options.pollRecognition ?? {}),
   );
   registry.register('rd.fetch_export_once', createFetchExportHandler(recognition));
+
+  // Задачи `vlm.*` (ADR-0007): распознавание через OpenRouter VLM по кропам
+  // блоков — альтернатива задачам 10–13 при `recognition.provider=openrouter_vlm`.
+  // Регистрируются безусловно, тем же принципом: отсутствие VLM-порта или
+  // растеризатора — честный отказ КОНКРЕТНОГО прогона, а не отсутствующий
+  // обработчик.
+  const vlmRecognition = vlmRecognitionDeps(options);
+  registry.register('vlm.start_recognition', createVlmStartHandler(vlmRecognition));
+  registry.register('vlm.recognize_page', createVlmRecognizePageHandler(vlmRecognition));
+  registry.register('vlm.finalize_run', createVlmFinalizeHandler(vlmRecognition));
 
   // Задачи 14–19 (§12): классификация страниц, сборка документов, реквизиты,
   // реестр приложений, сверка и граф. Регистрируются здесь и безусловно — по

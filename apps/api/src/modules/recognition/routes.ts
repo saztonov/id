@@ -43,9 +43,14 @@
  */
 import type { FastifyRequest } from 'fastify';
 import type { AppInstance } from '../../app.js';
-import { badRequest, forbidden, internal, notFound } from '../../lib/problem.js';
+import { badRequest, conflict, forbidden, internal, notFound } from '../../lib/problem.js';
 import { currentAuth } from '../../middleware/require-auth.js';
 import { hasPermission, requirePermission } from '../../middleware/require-permission.js';
+import {
+  parseModelAllowlist,
+  readAiDryRunOnly,
+  readRecognitionSettings,
+} from '../../config/portal-settings.js';
 import { sha256Hex } from '../../pdf/probe.js';
 import { isRedactableArtifactKind, redactArtifactContent } from '../../recognition/redaction.js';
 import { tracePayload, updateContext } from '../../observability/context.js';
@@ -87,6 +92,7 @@ const ARTIFACT_CONTENT_TYPE: Readonly<Record<string, string>> = {
   html: 'text/html; charset=utf-8',
   blocks_json: 'application/json; charset=utf-8',
   qa: 'application/json; charset=utf-8',
+  canonical: 'application/json; charset=utf-8',
 };
 
 export function registerRecognitionRoutes(app: AppInstance): void {
@@ -157,31 +163,63 @@ function registerStartRoute(app: AppInstance): void {
       updateContext({ revisionId });
 
       /**
-       * Снимок настроек прогона — REDACTED по построению (§3.9, B).
-       *
-       * Здесь только провайдер, модель, профиль промта и режим документа: этого
-       * достаточно, чтобы прогон месячной давности объяснялся, и недостаточно,
-       * чтобы из снимка что-нибудь утекло. Пароль служебного аккаунта, адрес
-       * RD WEB и любые подписанные ссылки сюда не попадают — их здесь просто
-       * нет, а не «вырезаны фильтром».
+       * Ветвление провайдера (ADR-0007): настройка читается ЗДЕСЬ, на
+       * постановке, и фиксируется снимком — выполняющийся прогон смену
+       * настройки не видит. Снимок настроек — REDACTED по построению (§3.9, B):
+       * только провайдер, модель и режимы; ни секретов, ни адресов, ни
+       * подписанных ссылок — их здесь просто нет, а не «вырезаны фильтром».
        */
-      const selections = recognitionSelections(app.env);
-      const settingsSnapshot = {
-        version: 1,
-        documentMode: false,
-        blockTypes: selections.map((selection) => selection.blockType),
-        provider: selections[0]?.providerType ?? null,
-        model: selections[0]?.modelId ?? null,
-        promptProfiles: Object.fromEntries(
-          selections
-            .filter((selection) => selection.promptProfileId !== undefined)
-            .map((selection) => [selection.blockType, selection.promptProfileId]),
-        ),
-      };
+      const recognition = await readRecognitionSettings(app.db);
+      let settingsSnapshot: Record<string, unknown>;
+      let firstJobType: 'layout.reconcile' | 'vlm.start_recognition';
+      if (recognition.provider === 'openrouter_vlm') {
+        if (recognition.vlmModel === '') {
+          throw conflict(
+            'Модель распознавания не выбрана: задайте recognition.vlm_model ' +
+              'в настройках портала.',
+          );
+        }
+        const allowlist = parseModelAllowlist(app.env.LLM_MODEL_ALLOWLIST);
+        if (allowlist !== null && !allowlist.includes(recognition.vlmModel)) {
+          // Отказ до создания прогона: политика провайдера отвергла бы модель
+          // на первом же вызове, и прогон умер бы, не сделав ничего.
+          throw conflict(
+            `Модель «${recognition.vlmModel}» не входит в LLM_MODEL_ALLOWLIST: ` +
+              'согласуйте слаг с эксплуатацией.',
+          );
+        }
+        settingsSnapshot = {
+          version: 2,
+          provider: 'openrouter_vlm',
+          model: recognition.vlmModel,
+          // Промпты, растеризатор и crop policy дополняет vlm.start_recognition:
+          // они известны воркеру, а не роуту.
+          dryRun: await readAiDryRunOnly(app.db),
+        };
+        firstJobType = 'vlm.start_recognition';
+      } else {
+        const selections = recognitionSelections(app.env);
+        settingsSnapshot = {
+          version: 1,
+          documentMode: false,
+          blockTypes: selections.map((selection) => selection.blockType),
+          provider: selections[0]?.providerType ?? null,
+          model: selections[0]?.modelId ?? null,
+          promptProfiles: Object.fromEntries(
+            selections
+              .filter((selection) => selection.promptProfileId !== undefined)
+              .map((selection) => [selection.blockType, selection.promptProfileId]),
+          ),
+        };
+        firstJobType = 'layout.reconcile';
+      }
 
       const { run, created } = await startRecognitionRun(app.db, scope, {
         layoutRevisionId: request.body.frozenLayoutId,
         settingsSnapshot,
+        // Ветке RD WEB без RD-документа OCR запускать негде; у VLM-прогона
+        // его нет по построению (ADR-0007).
+        requireRdDocument: recognition.provider !== 'openrouter_vlm',
       });
       if (run.revisionId !== revisionId) {
         // Разметка чужой ревизии в теле запроса. Область её бы пропустила, если
@@ -190,15 +228,15 @@ function registerStartRoute(app: AppInstance): void {
       }
 
       const { jobId, created: jobCreated } = await enqueueJob(app.db, scope, {
-        type: 'layout.reconcile',
+        type: firstJobType,
         payload: tracePayload({ revisionId, recognitionRunId: run.id }),
-        dedupeKey: dedupeKeyFor('layout.reconcile', run.id, idempotencyKey),
+        dedupeKey: dedupeKeyFor(firstJobType, run.id, idempotencyKey),
       });
 
       request.log.info(
         {
           event: 'job_enqueued',
-          job_type: 'layout.reconcile',
+          job_type: firstJobType,
           job_id: jobId,
           created: jobCreated,
           recognition_run_id: run.id,

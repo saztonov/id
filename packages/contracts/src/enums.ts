@@ -113,12 +113,14 @@ export const blockSourceSchema = z.enum(['auto', 'user']);
 export type BlockSource = z.infer<typeof blockSourceSchema>;
 
 /**
- * Происхождение блока вместо уверенности детектора.
+ * Происхождение блока.
  *
- * Уверенность и модель не хранятся: `BlockOut` легаси-API их не отдаёт
- * (§0.1), и колонка была бы вечно NULL. `unavailable` — честная замена
- * выдуманному числу; `full_page` отмечает блок, которым пользователь заменил
- * всю страницу целиком (§5.3).
+ * `rf_detr` покрывает обоих поставщиков детекции — легаси-API RD WEB и
+ * локальный ONNX-инференс (модель одна и та же): их различает
+ * `layout_blocks.detection_score`/`detection_model_version`, которые знает
+ * только локальный путь (легаси-API уверенность не отдаёт, у него честный
+ * NULL). `unavailable` — честная замена выдуманному числу; `full_page`
+ * отмечает блок, которым пользователь заменил всю страницу целиком (§5.3).
  */
 export const detectorProvenanceSchema = z.enum(['rf_detr', 'full_page', 'user', 'unavailable']);
 export type DetectorProvenance = z.infer<typeof detectorProvenanceSchema>;
@@ -135,8 +137,29 @@ export type DetectorProvenance = z.infer<typeof detectorProvenanceSchema>;
 export const recognitionStatusSchema = z.enum(['running', 'done', 'integrity_error', 'failed']);
 export type RecognitionStatus = z.infer<typeof recognitionStatusSchema>;
 
-export const artifactKindSchema = z.enum(['zip', 'md', 'html', 'blocks_json', 'qa']);
+/**
+ * `canonical` — сериализованный RecognitionResult v2 (ADR-0006/0007):
+ * единственный источник правды VLM-прогона. Остальные виды производит
+ * legacy-путь RD WEB.
+ */
+export const artifactKindSchema = z.enum(['zip', 'md', 'html', 'blocks_json', 'qa', 'canonical']);
 export type ArtifactKind = z.infer<typeof artifactKindSchema>;
+
+/**
+ * Провайдер РАСПОЗНАВАНИЯ в настройках портала (`recognition.provider`).
+ *
+ * Это выбор ветки конвейера, а не провайдер канонического результата:
+ * `recognitionProviderSchema` из `@id/recognition` (`rdweb_md | openrouter_vlm |
+ * synthetic`) описывает источник данных в самом результате, и маппинг между
+ * ними явный (`rdweb` → `rdweb_md`). Одно перечисление на два смысла склеило
+ * бы настройку с форматом хранения.
+ */
+export const recognitionProviderSettingSchema = z.enum(['rdweb', 'openrouter_vlm']);
+export type RecognitionProviderSetting = z.infer<typeof recognitionProviderSettingSchema>;
+
+/** Провайдер ДЕТЕКЦИИ блоков (`detection.provider`): RD WEB или локальный RF-DETR. */
+export const detectionProviderSettingSchema = z.enum(['rdweb', 'local']);
+export type DetectionProviderSetting = z.infer<typeof detectionProviderSettingSchema>;
 
 // --- Документы и реквизиты (§3.6, §8) ---
 

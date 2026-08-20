@@ -25,8 +25,20 @@
  * лимите частоты, таймауте и сетевом сбое.
  */
 
-/** Стадии §10; совпадают с CHECK `ai_runs_stage_chk` миграции 0004. */
-export type LlmStage = 'page_classify' | 'doc_split' | 'extract' | 'check' | 'summary';
+/**
+ * Стадии §10; совпадают с CHECK `ai_runs_stage_chk` (миграция 0004,
+ * расширена 0019 значением `recognize` для VLM-распознавания по кропам
+ * блоков, ADR-0007). `recognize` использует не этот текстовый порт, а
+ * `VlmPort` (`vlm-port.ts`) — стадия здесь нужна только как значение поля
+ * `ai_runs.stage`, разделяемое обоими путями аудита.
+ */
+export type LlmStage =
+  | 'page_classify'
+  | 'doc_split'
+  | 'extract'
+  | 'check'
+  | 'summary'
+  | 'recognize';
 
 /** Провайдеры; совпадают с CHECK `ai_runs_provider_chk`. `rdweb` заблокирован (§0.3 п.6). */
 export type LlmProviderName = 'proxy_llm' | 'rdweb' | 'recorded';
@@ -214,6 +226,28 @@ export class LlmProtocolError extends LlmError {
   constructor(message: string, options: { readonly cause?: unknown } = {}) {
     super(message, { retriable: false, ...options });
     this.name = 'LlmProtocolError';
+  }
+}
+
+/**
+ * Тело запроса не пролезает в шлюз: сработал предохранитель до отправки
+ * либо шлюз ответил 413.
+ *
+ * Повтор ТОГО ЖЕ тела бессмысленен — оно упрётся в тот же потолок, поэтому
+ * `retriable: false`. Но и прогон это не останавливает: остальные блоки могут
+ * быть меньше. Класс отдельный, а не `LlmTransportError`, потому что по нему
+ * принимается решение, недоступное по коду статуса: вызывающий обязан один раз
+ * уменьшить кроп (downscale-retry, crop policy Ф4а) и повторить уже ДРУГОЕ
+ * тело — а сетевую ошибку так чинить нечем.
+ */
+export class LlmPayloadTooLargeError extends LlmError {
+  /** Размер сериализованного тела, байт: без него не подобрать downscale. */
+  readonly bytes: number;
+
+  constructor(bytes: number, message: string) {
+    super(message, { retriable: false, stopsBatch: false });
+    this.name = 'LlmPayloadTooLargeError';
+    this.bytes = bytes;
   }
 }
 

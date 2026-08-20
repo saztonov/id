@@ -44,10 +44,10 @@ import {
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { AttentionFlag, BlockType } from '@id/contracts';
 
-import { bundles, layout, recognition } from '../../api/endpoints.js';
-import { layoutKeys, revisionKeys } from '../../api/keys.js';
+import { bundles, catalog, documents, layout, recognition } from '../../api/endpoints.js';
+import { catalogKeys, layoutKeys, revisionKeys } from '../../api/keys.js';
 import { describeError } from '../../api/problem.js';
-import type { LayoutBlock } from '../../api/types.js';
+import type { LayoutBlock, PageClassification } from '../../api/types.js';
 import { files as filesApi } from '../../api/endpoints.js';
 import { useSession } from '../../app/session.js';
 import { useQueryParam } from '../../app/router.js';
@@ -55,7 +55,8 @@ import { ErrorState, LoadingState } from '../../shared/ui.js';
 import { LAYOUT_STATE_LABELS } from '../../shared/labels.js';
 import { BlockList } from './BlockList.js';
 import { PageCanvas } from './PageCanvas.js';
-import { ThumbnailStrip } from './ThumbnailStrip.js';
+import { PageTypePanel } from './PageTypePanel.js';
+import { ThumbnailStrip, type PageTypeBadge } from './ThumbnailStrip.js';
 import { VersionConflictModal } from './VersionConflictModal.js';
 import { applyFilter, coverageOf, readingRanks, sortedForReading, BLOCK_STYLES } from './blocks.js';
 import { framesAgree, fitInto } from './geometry.js';
@@ -117,6 +118,7 @@ export function MarkupScreen({ revisionId }: MarkupScreenProps): ReactNode {
       canEdit={can('markup.edit')}
       canFreeze={can('markup.freeze')}
       canRecognize={can('recognition.start')}
+      canLabelPages={can('document.edit')}
       onAfterRecognize={() => {
         void queryClient.invalidateQueries({
           queryKey: revisionKeys.recognitionRuns(revisionId),
@@ -135,12 +137,14 @@ interface WorkspaceProps {
   readonly canEdit: boolean;
   readonly canFreeze: boolean;
   readonly canRecognize: boolean;
+  /** Право `document.edit`: ручная метка типа страницы (§8.2), не связана с правкой блоков. */
+  readonly canLabelPages: boolean;
   readonly onAfterRecognize: () => void;
   readonly notify: ReturnType<typeof AntApp.useApp>['message'];
 }
 
 function LayoutWorkspace(props: WorkspaceProps): ReactNode {
-  const { revisionId, layoutId, canEdit, canFreeze, canRecognize, notify } = props;
+  const { revisionId, layoutId, canEdit, canFreeze, canRecognize, canLabelPages, notify } = props;
 
   const detail = useQuery({
     queryKey: layoutKeys.detail(layoutId),
@@ -155,6 +159,17 @@ function LayoutWorkspace(props: WorkspaceProps): ReactNode {
     queryKey: revisionKeys.bundlePages(bundleId ?? 'none'),
     queryFn: () => bundles.pages(bundleId ?? ''),
     enabled: bundleId !== null,
+  });
+  // Классификации и каталог видов ИД — для панели «Тип страницы» и бейджей в
+  // ленте. Ключи кэша те же, что на вкладке «Документы»: метка, поставленная
+  // здесь, видна там без второй загрузки, и наоборот.
+  const classifications = useQuery({
+    queryKey: revisionKeys.classifications(revisionId),
+    queryFn: () => documents.classifications(revisionId),
+  });
+  const docTypes = useQuery({
+    queryKey: catalogKeys.docTypes(false),
+    queryFn: () => catalog.docTypes(false),
   });
 
   const store = useMarkupStore();
@@ -244,6 +259,32 @@ function LayoutWorkspace(props: WorkspaceProps): ReactNode {
     );
   }
 
+  // Классификация привязана к странице ИСХОДНИКА (`sourcePageId`), а лента и
+  // канва живут в координатах рабочего документа — карта страниц уже несёт обе
+  // стороны соответствия, поэтому здесь только перекладка, без второго запроса.
+  const classByPage = new Map<string, PageClassification>(
+    (classifications.data ?? []).map((item) => [item.sourcePageId, item]),
+  );
+  const shortNameByCode = new Map<string, string>(
+    (docTypes.data ?? []).map((type) => [type.code, type.shortName]),
+  );
+  const typeByPage = new Map<number, PageTypeBadge>();
+  for (const pageEntry of pageList) {
+    const cls = classByPage.get(pageEntry.sourcePageId);
+    if (cls === undefined) continue;
+    typeByPage.set(pageEntry.workingPageIndex, {
+      text:
+        cls.label === 'I-DOC'
+          ? 'продолжение'
+          : cls.docTypeCode === null
+            ? // Ярлык без вида — законное состояние открытого мира: показывается
+              // код как есть, а не прочерк, за которым его не отличить от «пусто».
+              cls.label
+            : (shortNameByCode.get(cls.docTypeCode) ?? cls.docTypeCode),
+      manual: cls.source === 'manual',
+    });
+  }
+
   const pageBlocks = sortedForReading(
     blocks.filter((block) => block.workingPageIndex === (currentPage?.workingPageIndex ?? 0)),
   );
@@ -304,6 +345,7 @@ function LayoutWorkspace(props: WorkspaceProps): ReactNode {
               pages={pageList}
               flagsByPage={flagsByPage}
               blockCountByPage={blockCountByPage}
+              typeByPage={typeByPage}
               current={currentPage?.workingPageIndex ?? 0}
               onSelect={store.goToPage}
             />
@@ -319,30 +361,39 @@ function LayoutWorkspace(props: WorkspaceProps): ReactNode {
               description="Разметка ложится на страницы рабочего документа; без карты страниц показывать нечего."
             />
           ) : (
-            <CanvasArea
-              page={currentPage}
-              blocks={pageBlocks}
-              ranks={ranks}
-              selection={store.selection}
-              tool={store.tool}
-              draftType={store.draftType}
-              zoom={store.zoom}
-              editable={editable}
-              onSelect={(blockId, additive) =>
-                additive ? store.toggle(blockId) : store.select(blockId)
-              }
-              onClearSelection={store.clearSelection}
-              onCreate={(coords) => {
-                void editing.createBlock({
-                  workingPageIndex: currentPage.workingPageIndex,
-                  blockType: store.draftType,
-                  coords,
-                });
-              }}
-              onMove={(blockId, coords) => {
-                void editing.updateBlock(blockId, { coords });
-              }}
-            />
+            <>
+              <PageTypePanel
+                revisionId={revisionId}
+                page={currentPage}
+                classification={classByPage.get(currentPage.sourcePageId)}
+                docTypes={docTypes.data ?? []}
+                canEdit={canLabelPages}
+              />
+              <CanvasArea
+                page={currentPage}
+                blocks={pageBlocks}
+                ranks={ranks}
+                selection={store.selection}
+                tool={store.tool}
+                draftType={store.draftType}
+                zoom={store.zoom}
+                editable={editable}
+                onSelect={(blockId, additive) =>
+                  additive ? store.toggle(blockId) : store.select(blockId)
+                }
+                onClearSelection={store.clearSelection}
+                onCreate={(coords) => {
+                  void editing.createBlock({
+                    workingPageIndex: currentPage.workingPageIndex,
+                    blockType: store.draftType,
+                    coords,
+                  });
+                }}
+                onMove={(blockId, coords) => {
+                  void editing.updateBlock(blockId, { coords });
+                }}
+              />
+            </>
           )}
         </Col>
 
@@ -690,8 +741,11 @@ function FreezeAndRecognize(props: {
         flexWrap: 'wrap',
       }}
     >
+      {/* Текст нейтрален к провайдеру: сверка хэшей с RD WEB — деталь одной из
+          веток, а не свойство распознавания вообще (ADR-0007). */}
       <Typography.Text type="secondary">
-        Распознавание идёт по ЗАМОРОЖЕННОЙ разметке: сначала заморозка и сверка хэшей, затем OCR.
+        Распознавание идёт по замороженной разметке; провайдер и модель задаются в настройках
+        портала.
       </Typography.Text>
       {!props.frozen ? (
         <Popconfirm

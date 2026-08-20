@@ -22,11 +22,13 @@ import {
   codeSlugSchema,
   cursorPageSchema,
   DEFAULT_PAGE_LIMIT,
+  detectionProviderSettingSchema,
   docTypeCodeSchema,
   isoDateTimeSchema,
   jsonValueSchema,
   MAX_PAGE_LIMIT,
   promptStateSchema,
+  recognitionProviderSettingSchema,
   ruleCodeSchema,
   severitySchema,
   userRoleSchema,
@@ -140,6 +142,51 @@ export const SETTINGS_REGISTRY = {
     title: 'Интеграция с RD WEB включена',
     schema: z.boolean(),
     defaultValue: true,
+  },
+  /**
+   * Ветка распознавания (ADR-0007). Действует только на НОВЫЕ прогоны:
+   * выполняющийся прогон читает собственный settings_snapshot.
+   */
+  'recognition.provider': {
+    title: 'Провайдер распознавания',
+    schema: recognitionProviderSettingSchema,
+    defaultValue: 'rdweb',
+  },
+  /**
+   * Слаг модели OpenRouter для VLM-распознавания. Пусто — модель не выбрана,
+   * прогон с провайдером openrouter_vlm честно отказывает (409), как это
+   * делает recognitionSelections при ненастроенном OCR RD WEB.
+   */
+  'recognition.vlm_model': {
+    title: 'Модель OpenRouter для распознавания (слаг)',
+    schema: z
+      .string()
+      .max(200)
+      .regex(/^$|^[a-z0-9][a-z0-9_.-]*\/[a-z0-9][a-z0-9_.:-]*$/i, {
+        message: 'Слаг модели OpenRouter — «vendor/model», например qwen/qwen3-vl-235b',
+      }),
+    defaultValue: '',
+  },
+  /** Ветка детекции блоков (ADR-0008): RD WEB или локальный RF-DETR на CPU. */
+  'detection.provider': {
+    title: 'Провайдер детекции блоков',
+    schema: detectionProviderSettingSchema,
+    defaultValue: 'rdweb',
+  },
+  /**
+   * Версия локальной модели детекции — префикс ключа в хранилище
+   * (`models/detection/{version}/`). Пусто — модель не загружена, локальная
+   * детекция честно отказывает; ручная разметка работает всегда.
+   */
+  'detection.model_version': {
+    title: 'Версия локальной модели детекции (RF-DETR)',
+    schema: z
+      .string()
+      .max(64)
+      .regex(/^$|^[a-z0-9][a-z0-9._-]*$/, {
+        message: 'Версия модели — слаг из латиницы, цифр, точки, дефиса и подчёркивания',
+      }),
+    defaultValue: '',
   },
   'checks.autorun_after_documents': {
     title: 'Запускать проверки сразу после подтверждения документов',
@@ -303,6 +350,7 @@ export const promptStageSchema = z.enum([
   'extract',
   'check',
   'summary',
+  'recognize',
 ]);
 
 export const promptListQuerySchema = adminPageQuerySchema.extend({

@@ -116,7 +116,7 @@ export function isUploadKey(key: string): boolean {
 /** Неизменяемые артефакты прогона распознавания (§13). */
 const ARTIFACT_PREFIX = 'artifacts';
 
-export type ArtifactKind = 'zip' | 'md' | 'html' | 'blocks_json' | 'qa';
+export type ArtifactKind = 'zip' | 'md' | 'html' | 'blocks_json' | 'qa' | 'canonical';
 
 const ARTIFACT_EXTENSIONS: Readonly<Record<ArtifactKind, string>> = {
   zip: 'zip',
@@ -124,6 +124,8 @@ const ARTIFACT_EXTENSIONS: Readonly<Record<ArtifactKind, string>> = {
   html: 'html',
   blocks_json: 'json',
   qa: 'json',
+  // Сериализованный RecognitionResult v2 (ADR-0006/0007) — производит VLM-путь.
+  canonical: 'json',
 };
 
 /**
@@ -191,6 +193,44 @@ export function archiveKey(revisionId: string, revisionNo: number): string {
     throw new InvalidStorageKeyError('Номер ревизии обязан быть положительным целым');
   }
   return `${ARCHIVE_PREFIX}/${revisionId}/rev${revisionNo}-approved.zip`;
+}
+
+/** Модель локальной детекции RF-DETR (ADR-0008). */
+const DETECTION_MODEL_PREFIX = 'models/detection';
+
+/**
+ * Версия модели детекции: слаг, задаваемый настройкой `detection.model_version`.
+ *
+ * Формат жёстче общего KEY_PATTERN намеренно: версия приходит из настройки
+ * администратора, то есть снаружи, и становится сегментом пути.
+ */
+const DETECTION_MODEL_VERSION_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+
+function assertDetectionModelVersion(version: string): void {
+  if (!DETECTION_MODEL_VERSION_PATTERN.test(version) || version.includes('..')) {
+    throw new InvalidStorageKeyError(
+      'Версия модели детекции — слаг из латиницы, цифр, точки, дефиса и подчёркивания',
+    );
+  }
+}
+
+/**
+ * Ключ весов ONNX: `models/detection/{version}/model.onnx`.
+ *
+ * Адресуется версией, а не содержимым: пара «веса + манифест» обязана лежать
+ * под одним префиксом, а целостность доказывает sha256 из манифеста при
+ * загрузке в воркер, не адрес. Замена весов под той же версией запрещена
+ * процедурой (новая модель — новая версия), а не хранилищем.
+ */
+export function detectionModelKey(version: string): string {
+  assertDetectionModelVersion(version);
+  return `${DETECTION_MODEL_PREFIX}/${version}/model.onnx`;
+}
+
+/** Ключ манифеста экспорта: `models/detection/{version}/manifest.json`. */
+export function detectionManifestKey(version: string): string {
+  assertDetectionModelVersion(version);
+  return `${DETECTION_MODEL_PREFIX}/${version}/manifest.json`;
 }
 
 /** Кэш превью страниц (§13) — только при `PREVIEW_MODE=cached`. */

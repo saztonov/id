@@ -24,6 +24,7 @@ import { hostname } from 'node:os';
 import { z } from 'zod';
 import {
   closePool,
+  createAiSpendReader,
   createDatabase,
   createErrorReporter,
   createLogger,
@@ -34,6 +35,7 @@ import {
   createQpdfToolkit,
   createRdWeb,
   createStorage,
+  createVlmProvider,
   detectQpdf,
   EnvError,
   firstAllowedProject,
@@ -45,13 +47,14 @@ import {
   loadEnv,
   loadPdfLibModule,
   selectPdfToolkit,
+  selectRasterizer,
   type AppLogger,
   type Env,
   type Metrics,
   type PdfToolkit,
   type SqlExecutor,
 } from '@id/api';
-import { createWorkerRegistry } from './jobs/pipeline.js';
+import { createWorkerRegistry, SYSTEM_SCOPE } from './jobs/pipeline.js';
 
 /** Метка процесса в журнале и в метках метрик: строки API и воркера в общем потоке. */
 const SERVICE_NAME = 'worker';
@@ -154,6 +157,20 @@ async function main(): Promise<void> {
   // крупном комплекте, в фоновой задаче, без внятной ошибки пользователю.
   const toolkit = await choosePdfToolkit(env, logger);
 
+  // Растеризатор PDF→PNG для локальной детекции RF-DETR и (позже) кропов VLM
+  // (ADR-0008) — тот же паттерн startup-выбора, что и `toolkit` (ADR-0003), но
+  // без падения процесса: `detection.provider='rdweb'` (дефолт) обязан
+  // работать без poppler на машине, и это единственная причина не роднить его
+  // выбор с `choosePdfToolkit`. `null` — задачи локальной детекции честно
+  // отказывают `DetectionConfigurationError`, конвейер `rd.*` не страдает.
+  const rasterizer = await selectRasterizer({ binary: env.PDFTOPPM_PATH });
+  if (rasterizer === null) {
+    logger.warn(
+      { event: 'rasterizer_unavailable' },
+      'pdftoppm не найден: локальная детекция RF-DETR и локальные кропы VLM недоступны',
+    );
+  }
+
   const storage = createStorage(env, { metrics, logger });
 
   // Обработчики стадий регистрируются здесь. Написанный, но не
@@ -167,6 +184,18 @@ async function main(): Promise<void> {
   // `null` при ненастроенной интеграции — портал обязан подниматься и принимать
   // файлы даже без доступа к RD WEB.
   const rdweb = createRdWeb(env, { metrics, logger });
+
+  // VLM-порт распознавания (ADR-0007). Собирается всегда, тем же принципом,
+  // что и `rdweb`: `LLM_PROVIDER=none` (дефолт) не даёт пустого объекта, а
+  // даёт честно отказывающий провайдер — задачи `vlm.*` узнают об этом на
+  // первом вызове `.complete()`, с внятной причиной, а не на старте процесса.
+  // Бюджет (`ai_runs.cost`) общий с текстовыми стадиями — тот же расходомер,
+  // читающий системной областью (§11).
+  const vlm = createVlmProvider(env, {
+    metrics,
+    logger,
+    spend: createAiSpendReader(db, SYSTEM_SCOPE),
+  });
 
   // Сверка реестра правил с реализациями (§9.6). Воркер исполняет задачи 20–21,
   // то есть именно он даёт заключение по комплекту, — подниматься с неполным
@@ -192,6 +221,13 @@ async function main(): Promise<void> {
     // настроено», и задача 11 честно отказывает — она не имеет права
     // подставить чужой `model_id` за администратора.
     recognitionSelections: recognitionSelections(env),
+    rasterizer,
+    // `env` нужен `localDetectionDeps` ради `ORT_INTRA_OP_THREADS`/
+    // `ORT_INTER_OP_THREADS`; на остальные порты (например, LLM в
+    // `segmentationDeps`) не влияет — там дополнительно требуются
+    // `llmLogger`/`llmMetrics`, которых здесь нет.
+    env,
+    vlm,
   });
 
   const runner = new JobRunner({
@@ -282,6 +318,8 @@ async function main(): Promise<void> {
       storage_driver: storage.driver,
       // Факт настроенности, а не адрес и тем более не учётные данные (§11).
       rdweb_configured: rdweb !== null,
+      llm_provider: env.LLM_PROVIDER,
+      rasterizer: rasterizer?.kind ?? null,
       preview_mode: env.PREVIEW_MODE,
       metrics_port: worker.WORKER_METRICS_PORT ?? null,
     },

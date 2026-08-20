@@ -509,6 +509,7 @@ beforeAll(async () => {
   });
   const { run } = await startRecognitionRun(db, SCOPE, {
     layoutRevisionId: layout.id,
+    requireRdDocument: true,
     settingsSnapshot: { version: 1, provider: 'lmstudio', model: OCR_MODEL, documentMode: false },
   });
   await enqueueSystemJob(db, {

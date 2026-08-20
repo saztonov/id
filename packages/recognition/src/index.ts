@@ -19,6 +19,7 @@ export {
   type RecognitionResult,
 } from './schema.js';
 export { PAGE_TEXT_RENDER_VERSION, renderPageText } from './render.js';
+export { RENDER_FRAGMENTS_VERSION, renderFragmentsToMarkdown } from './render-fragments.js';
 export {
   RDWEB_MD_ADAPTER_VERSION,
   canonicalFromArchiveEntries,

@@ -337,7 +337,9 @@ describe('значения по умолчанию', () => {
       // на ровном месте, либо не значит ничего.
       LLM_BUDGET_MONTHLY: 0,
       LLM_RATE_LIMIT_PER_MIN: 60,
-      LLM_TIMEOUT_MS: 120_000,
+      // Больше дедлайна шлюза proxy_llm (190 с): клиент обязан дождаться его
+      // 504, а не отвалиться первым (ADR-0007).
+      LLM_TIMEOUT_MS: 240_000,
       LLM_CACHE_MAX_ENTRIES: 500,
       LLM_CACHE_TTL_MS: 3_600_000,
     });

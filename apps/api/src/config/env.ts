@@ -150,10 +150,31 @@ const envSchema = z.object({
   LLM_BUDGET_MONTHLY: z.coerce.number().nonnegative().default(0),
   /** Скользящее окно в процессе; `0` — без ограничения. */
   LLM_RATE_LIMIT_PER_MIN: z.coerce.number().int().nonnegative().default(60),
-  LLM_TIMEOUT_MS: z.coerce.number().int().positive().default(120_000),
+  /**
+   * Дедлайн шлюза proxy_llm — 190 с на весь запрос; клиентский таймаут обязан
+   * быть больше, иначе клиент отваливается раньше, чем шлюз отдаст свой 504,
+   * и различить «шлюз не успел» и «сеть порвалась» уже нельзя.
+   */
+  LLM_TIMEOUT_MS: z.coerce.number().int().positive().default(240_000),
   /** Потолок и срок жизни кэша ответов LLM в памяти процесса (§8.2). */
   LLM_CACHE_MAX_ENTRIES: z.coerce.number().int().positive().default(500),
   LLM_CACHE_TTL_MS: z.coerce.number().int().positive().default(3_600_000),
+
+  /**
+   * Путь к бинарю pdftoppm (poppler) для серверной растеризации PDF→PNG
+   * (ADR-0008). Пусто — бинарь ищется в PATH; не найден нигде — растеризация
+   * недоступна, и зависящие от неё задачи честно отказывают.
+   */
+  PDFTOPPM_PATH: z.string().min(1).optional(),
+
+  /**
+   * Потоки ONNX Runtime для локальной детекции (ADR-0008): intra — внутри
+   * одного оператора графа, inter — между операторами. Дефолты 2/1 подобраны
+   * под очередь cpu (§12, параллелизм 1–2): инференс не имеет права занять все
+   * ядра машины, на которой живут и API, и остальные очереди воркера.
+   */
+  ORT_INTRA_OP_THREADS: z.coerce.number().int().positive().default(2),
+  ORT_INTER_OP_THREADS: z.coerce.number().int().positive().default(1),
 
   AUDIT_HMAC_KEY: nonPlaceholder('AUDIT_HMAC_KEY').optional(),
 

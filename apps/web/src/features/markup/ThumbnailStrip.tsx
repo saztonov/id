@@ -19,16 +19,32 @@ import type { AttentionFlag } from '@id/contracts';
 import type { BundlePage } from '../../api/types.js';
 import { ATTENTION_FLAG_LABELS } from '../../shared/labels.js';
 
+/**
+ * Бейдж типа страницы на карточке.
+ *
+ * `manual` подписывается словом «вручную», а не цветом рамки: различение
+ * исключительно цветом недоступно, и §17 закрывает это прямо — тем же приёмом,
+ * что и флаги внимания ниже.
+ */
+export interface PageTypeBadge {
+  /** Короткое имя вида ИД (`shortName`) либо «продолжение» для I-DOC. */
+  readonly text: string;
+  /** Метка поставлена вручную, а не выведена конвейером. */
+  readonly manual: boolean;
+}
+
 export interface ThumbnailStripProps {
   readonly pages: readonly BundlePage[];
   readonly flagsByPage: ReadonlyMap<number, readonly AttentionFlag[]>;
   readonly blockCountByPage: ReadonlyMap<number, number>;
+  /** Тип страницы из классификаций; страницы без строки в карте нет. */
+  readonly typeByPage: ReadonlyMap<number, PageTypeBadge>;
   readonly current: number;
   readonly onSelect: (workingPageIndex: number) => void;
 }
 
 export function ThumbnailStrip(props: ThumbnailStripProps): ReactNode {
-  const { pages, flagsByPage, blockCountByPage, current } = props;
+  const { pages, flagsByPage, blockCountByPage, typeByPage, current } = props;
 
   return (
     <nav aria-label="Страницы рабочего документа">
@@ -45,6 +61,7 @@ export function ThumbnailStrip(props: ThumbnailStripProps): ReactNode {
         {pages.map((page) => {
           const flags = flagsByPage.get(page.workingPageIndex) ?? [];
           const blocks = blockCountByPage.get(page.workingPageIndex) ?? 0;
+          const pageType = typeByPage.get(page.workingPageIndex);
           const active = page.workingPageIndex === current;
           return (
             <li key={page.workingPageIndex}>
@@ -83,6 +100,42 @@ export function ThumbnailStrip(props: ThumbnailStripProps): ReactNode {
                 <div style={{ fontSize: 12, color: '#595959', overflowWrap: 'anywhere' }}>
                   {page.fileName}, лист {page.filePageIndex + 1}
                 </div>
+                {pageType !== undefined && (
+                  <div
+                    data-testid={`page-type-badge-${page.workingPageIndex}`}
+                    style={{ marginTop: 4, display: 'flex', flexWrap: 'wrap', gap: 4 }}
+                  >
+                    <span
+                      style={{
+                        fontSize: 11,
+                        padding: '1px 6px',
+                        borderRadius: 10,
+                        border: '1px solid #91caff',
+                        background: '#e6f4ff',
+                        color: '#0958d9',
+                      }}
+                    >
+                      {pageType.text}
+                    </span>
+                    {pageType.manual && (
+                      // Признак ручной метки — словом, как и флаги ниже: цветная
+                      // рамка без текста читалась бы не всеми и не читалась бы
+                      // скринридером вовсе.
+                      <span
+                        style={{
+                          fontSize: 11,
+                          padding: '1px 6px',
+                          borderRadius: 10,
+                          border: '1px solid #b7eb8f',
+                          background: '#f6ffed',
+                          color: '#135200',
+                        }}
+                      >
+                        вручную
+                      </span>
+                    )}
+                  </div>
+                )}
                 {flags.length > 0 && (
                   <ul
                     style={{
