@@ -1,0 +1,73 @@
+# Вклад портала ИД в общий ingress /opt/infra/nginx/conf.d/id.conf.
+# Рендер (на VPS, кавычки важны — иначе Windows/SSH ломают $ID_DOMAIN):
+#   ID_DOMAIN=id.su10.ru envsubst '$ID_DOMAIN' < deploy/nginx/id.conf.template \
+#     | sudo tee /opt/infra/nginx/conf.d/id.conf
+#   grep server_name /opt/infra/nginx/conf.d/id.conf   # не должно остаться ${…}
+#   docker exec infra-nginx nginx -t && docker exec infra-nginx nginx -s reload
+#
+# id-api / id-web — DNS-имена сервисов в сети edge.
+# Auth BFF на корне API: /auth/* и /me (не только /api/).
+
+server {
+    listen 80;
+    server_name ${ID_DOMAIN};
+    location /.well-known/acme-challenge/ { root /var/www/certbot; }
+    location / { return 301 https://$host$request_uri; }
+}
+
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name ${ID_DOMAIN};
+
+    ssl_certificate     /etc/letsencrypt/live/${ID_DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${ID_DOMAIN}/privkey.pem;
+
+    client_max_body_size 200m;         # согласовано с MAX_UPLOAD_BYTES (209715200)
+    proxy_read_timeout 240s;
+    proxy_send_timeout 240s;
+
+    add_header Strict-Transport-Security "max-age=63072000" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header X-Frame-Options "DENY" always;
+
+    # Динамический резолвинг имён контейнеров (Docker DNS) — переживает recreate.
+    resolver 127.0.0.11 valid=30s ipv6=off;
+    set $api id-api;
+    set $web id-web;
+
+    # X-Forwarded-For ПЕРЕЗАПИСЫВАЕТСЯ ($remote_addr): backend trustProxy + rate-limit по IP.
+    location /api/ {
+        proxy_pass http://$api:3000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Request-Id $request_id;
+    }
+
+    location /auth/ {
+        proxy_pass http://$api:3000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Request-Id $request_id;
+    }
+
+    location = /me {
+        proxy_pass http://$api:3000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Request-Id $request_id;
+    }
+
+    # /health/* наружу не проксируется — деплой проверяет изнутри контейнера.
+
+    location / {
+        proxy_pass http://$web:80;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}

@@ -16,3 +16,4 @@ export * from './generated/schema.js';
 
 export { createPool, closePool } from './pool.js';
 export type { PoolOptions } from './pool.js';
+export { pgConnectionOptions } from './pg-ssl.js';

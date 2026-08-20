@@ -6,7 +6,7 @@
  * соседей. Значение по умолчанию сознательно скромное.
  */
 import { Pool, type PoolConfig } from 'pg';
-import { readFileSync } from 'node:fs';
+import { pgConnectionOptions } from './pg-ssl.js';
 
 export interface PoolOptions {
   readonly connectionString: string;
@@ -23,15 +23,18 @@ export interface PoolOptions {
 const DEFAULT_MAX = 10;
 
 export function createPool(options: PoolOptions): Pool {
+  const { connectionString, ssl } = pgConnectionOptions(
+    options.connectionString,
+    options.caCertPath,
+  );
+
   const config: PoolConfig = {
-    connectionString: options.connectionString,
+    connectionString,
     max: options.max ?? DEFAULT_MAX,
     idleTimeoutMillis: options.idleTimeoutMillis ?? 30_000,
     connectionTimeoutMillis: options.connectionTimeoutMillis ?? 10_000,
     application_name: options.applicationName ?? 'id-portal',
-    ...(options.caCertPath
-      ? { ssl: { ca: readFileSync(options.caCertPath, 'utf8'), rejectUnauthorized: true } }
-      : {}),
+    ...(ssl !== undefined ? { ssl } : {}),
   };
 
   const pool = new Pool(config);

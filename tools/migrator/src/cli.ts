@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { Client } from 'pg';
 import { applyMigrations, loadMigrations, migrationStatus, type SqlExecutor } from './index.js';
+import { pgConnectionOptions } from './pg-ssl.js';
 
 const MIGRATIONS_DIR = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -53,10 +54,13 @@ async function main(): Promise<void> {
   const command = process.argv[2] ?? 'up';
   const migrations = loadMigrations(MIGRATIONS_DIR);
 
-  const caPath = process.env['PG_CA_CERT_PATH'];
+  const { connectionString, ssl } = pgConnectionOptions(
+    requireEnv('DATABASE_URL'),
+    process.env['PG_CA_CERT_PATH'],
+  );
   const client = new Client({
-    connectionString: requireEnv('DATABASE_URL'),
-    ...(caPath ? { ssl: { ca: (await import('node:fs')).readFileSync(caPath, 'utf8') } } : {}),
+    connectionString,
+    ...(ssl !== undefined ? { ssl } : {}),
   });
 
   await client.connect();

@@ -1,0 +1,94 @@
+# Портал ИД (id) — production-профиль для backend-vps-1 (single-VPS baseline).
+# Собирается и разворачивается через `deploy-id` (deploy/deploy-id.sh), portal-scoped —
+# не затрагивает соседние порталы, infra-nginx, Keycloak.
+#
+# БД — внешний Yandex Managed PostgreSQL, в compose не входит.
+# Nginx (infra-nginx) и Keycloak — отдельные инфраструктурные compose-проекты (/opt/infra/*).
+# Единственная точка входа — сеть `edge`. Портов наружу этот файл не публикует.
+#
+# Миграции — отдельный шаг (не из api/worker):
+#   docker compose -f deploy/docker-compose.prod.yml -p id run --rm migrate
+#
+# Auth: production требует AUTH_MODE=oidc + Keycloak. Без OIDC процесс api/worker
+# не стартует (dev-stub в production запрещён). См. deploy/README.md.
+
+services:
+  id-api:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: id-api:${ID_TAG:-latest}
+    command: ['node', 'apps/api/dist/server.js']
+    env_file: /etc/id/id.env
+    environment:
+      NODE_ENV: production
+    networks: [edge]
+    volumes:
+      - /etc/id/root.crt:/etc/id/root.crt:ro
+    restart: unless-stopped
+    mem_limit: 768m
+    memswap_limit: 1024m
+    pids_limit: 256
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:3000/health/ready || exit 1']
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+
+  id-worker:
+    image: id-api:${ID_TAG:-latest}
+    command: ['node', 'apps/worker/dist/main.js']
+    env_file: /etc/id/id.env
+    environment:
+      NODE_ENV: production
+    networks: [edge]
+    volumes:
+      - /etc/id/root.crt:/etc/id/root.crt:ro
+    restart: unless-stopped
+    mem_limit: 1536m
+    memswap_limit: 1792m
+    pids_limit: 128
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    stop_grace_period: 120s
+
+  id-web:
+    build:
+      context: ..
+      dockerfile: apps/web/Dockerfile
+    image: id-web:${ID_TAG:-latest}
+    restart: unless-stopped
+    networks: [edge]
+    mem_limit: 64m
+    memswap_limit: 128m
+    pids_limit: 128
+    cap_drop: [SYS_ADMIN, SYS_PTRACE, NET_RAW, MKNOD, AUDIT_WRITE]
+    security_opt: ['no-new-privileges:true']
+
+  # Разовый накат SQL-миграций. DATABASE_URL здесь ПЕРЕОПРЕДЕЛЁН из
+  # /etc/id/id-migrate.env (MIGRATE_DATABASE_URL) — deploy-id.sh подставляет значение.
+  # На этапе 1 допустима та же роль fin_id, что и в runtime.
+  migrate:
+    image: id-api:${ID_TAG:-latest}
+    command: ['node', 'tools/migrator/dist/cli.js']
+    profiles: ['tools']
+    env_file: /etc/id/id.env
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: ${MIGRATE_DATABASE_URL:-}
+    networks: [edge]
+    volumes:
+      - /etc/id/root.crt:/etc/id/root.crt:ro
+    restart: 'no'
+    mem_limit: 256m
+    memswap_limit: 384m
+    pids_limit: 128
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+
+networks:
+  edge:
+    external: true
