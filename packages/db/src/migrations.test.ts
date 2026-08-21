@@ -44,6 +44,11 @@ const EXPECTED_TABLES: readonly string[] = [
   'user_object_scopes',
   'auth_sessions',
   'audit_log',
+  // §3.1 локальная аутентификация (ADR-0009): существуют во всех режимах,
+  // наполняются только при AUTH_MODE=local.
+  'user_credentials',
+  'registration_requests',
+  'auth_throttle',
   // §3.2 справочники
   'counterparties',
   'construction_objects',

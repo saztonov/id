@@ -5,11 +5,34 @@
  * миграцию и выполните `pnpm db:schema:generate`. Ручная правка будет затёрта,
  * а тест на дрейф её заметит.
  */
-import { pgTable, index, foreignKey, unique, uuid, text, boolean, timestamp, check, integer, inet, bigint, jsonb, varchar, uniqueIndex, date, doublePrecision, numeric, primaryKey, pgView } from "drizzle-orm/pg-core"
+import { pgTable, index, foreignKey, check, uuid, text, integer, timestamp, inet, unique, boolean, bigint, jsonb, varchar, uniqueIndex, date, doublePrecision, numeric, primaryKey, pgView } from "drizzle-orm/pg-core"
 import { citext, bytea, int4range } from "../custom-types.js";
 import { sql } from "drizzle-orm"
 
 
+
+export const authSessions = pgTable("auth_sessions", {
+	id: uuid().defaultRandom().primaryKey().notNull(),
+	userId: uuid("user_id").notNull(),
+	kcSid: text("kc_sid"),
+	refreshEnvelope: bytea("refresh_envelope").notNull(),
+	keyVersion: integer("key_version").notNull(),
+	csrfHash: text("csrf_hash").notNull(),
+	idleExpiresAt: timestamp("idle_expires_at", { withTimezone: true, mode: 'string' }).notNull(),
+	absoluteExpiresAt: timestamp("absolute_expires_at", { withTimezone: true, mode: 'string' }).notNull(),
+	revokedAt: timestamp("revoked_at", { withTimezone: true, mode: 'string' }),
+	ip: inet(),
+	ua: text(),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	authMode: text("auth_mode").notNull(),
+}, (table) => [
+	index("ix_auth_sessions_expiry").using("btree", table.absoluteExpiresAt.asc().nullsLast().op("timestamptz_ops")).where(sql`(revoked_at IS NULL)`),
+	index("ix_auth_sessions_kc_sid").using("btree", table.kcSid.asc().nullsLast().op("text_ops")),
+	index("ix_auth_sessions_user").using("btree", table.userId.asc().nullsLast().op("uuid_ops")),
+	check("auth_sessions_expiry_chk", sql`idle_expires_at <= absolute_expires_at`),
+	check("auth_sessions_key_version_chk", sql`key_version > 0`),
+	check("auth_sessions_mode_chk", sql`auth_mode = ANY (ARRAY['oidc'::text, 'dev-stub'::text, 'local'::text])`),
+]);
 
 export const users = pgTable("users", {
 	id: uuid().defaultRandom().primaryKey().notNull(),
@@ -26,32 +49,6 @@ export const users = pgTable("users", {
 	index("ix_users_contractor").using("btree", table.contractorId.asc().nullsLast().op("uuid_ops")),
 	index("ix_users_email").using("btree", table.email.asc().nullsLast().op("citext_ops")),
 	unique("users_kc_sub_key").on(table.kcSub),
-]);
-
-export const authSessions = pgTable("auth_sessions", {
-	id: uuid().defaultRandom().primaryKey().notNull(),
-	userId: uuid("user_id").notNull(),
-	kcSid: text("kc_sid"),
-	refreshEnvelope: bytea("refresh_envelope").notNull(),
-	keyVersion: integer("key_version").notNull(),
-	csrfHash: text("csrf_hash").notNull(),
-	idleExpiresAt: timestamp("idle_expires_at", { withTimezone: true, mode: 'string' }).notNull(),
-	absoluteExpiresAt: timestamp("absolute_expires_at", { withTimezone: true, mode: 'string' }).notNull(),
-	revokedAt: timestamp("revoked_at", { withTimezone: true, mode: 'string' }),
-	ip: inet(),
-	ua: text(),
-	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-}, (table) => [
-	index("ix_auth_sessions_expiry").using("btree", table.absoluteExpiresAt.asc().nullsLast().op("timestamptz_ops")).where(sql`(revoked_at IS NULL)`),
-	index("ix_auth_sessions_kc_sid").using("btree", table.kcSid.asc().nullsLast().op("text_ops")),
-	index("ix_auth_sessions_user").using("btree", table.userId.asc().nullsLast().op("uuid_ops")),
-	foreignKey({
-			columns: [table.userId],
-			foreignColumns: [users.id],
-			name: "auth_sessions_user_id_fkey"
-		}).onDelete("cascade"),
-	check("auth_sessions_expiry_chk", sql`idle_expires_at <= absolute_expires_at`),
-	check("auth_sessions_key_version_chk", sql`key_version > 0`),
 ]);
 
 export const auditLog = pgTable("audit_log", {
@@ -1615,6 +1612,61 @@ export const legalHolds = pgTable("legal_holds", {
 	check("legal_holds_release_chk", sql`(released_by IS NULL) = (released_at IS NULL)`),
 ]);
 
+export const userCredentials = pgTable("user_credentials", {
+	userId: uuid("user_id").primaryKey().notNull(),
+	loginKey: citext("login_key").notNull(),
+	loginDisplay: text("login_display").notNull(),
+	passwordHash: text("password_hash").notNull(),
+	passwordAlgorithm: text("password_algorithm").notNull(),
+	passwordChangedAt: timestamp("password_changed_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	mustChangePassword: boolean("must_change_password").default(false).notNull(),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	updatedAt: timestamp("updated_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+}, (table) => [
+	foreignKey({
+			columns: [table.userId],
+			foreignColumns: [users.id],
+			name: "user_credentials_user_id_fkey"
+		}).onDelete("cascade"),
+	unique("user_credentials_login_key_key").on(table.loginKey),
+	check("user_credentials_algorithm_chk", sql`password_algorithm = 'scrypt'::text`),
+	check("user_credentials_hash_prefix_chk", sql`password_hash ~~ (password_algorithm || '$%'::text)`),
+	check("user_credentials_login_chk", sql`(length((login_key)::text) >= 3) AND (length((login_key)::text) <= 320)`),
+]);
+
+export const registrationRequests = pgTable("registration_requests", {
+	id: uuid().defaultRandom().primaryKey().notNull(),
+	loginKey: citext("login_key").notNull(),
+	loginDisplay: text("login_display").notNull(),
+	fullName: text("full_name").notNull(),
+	position: text(),
+	passwordHash: text("password_hash"),
+	passwordAlgorithm: text("password_algorithm"),
+	status: text().default('pending').notNull(),
+	decidedAt: timestamp("decided_at", { withTimezone: true, mode: 'string' }),
+	decidedBy: uuid("decided_by"),
+	createdUserId: uuid("created_user_id"),
+	ip: inet(),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+}, (table) => [
+	index("ix_registration_requests_created").using("btree", table.createdAt.desc().nullsFirst().op("timestamptz_ops")),
+	uniqueIndex("ux_registration_requests_pending").using("btree", table.loginKey.asc().nullsLast().op("citext_ops")).where(sql`(status = 'pending'::text)`),
+	foreignKey({
+			columns: [table.decidedBy],
+			foreignColumns: [users.id],
+			name: "registration_requests_decided_by_fkey"
+		}).onDelete("set null"),
+	foreignKey({
+			columns: [table.createdUserId],
+			foreignColumns: [users.id],
+			name: "registration_requests_created_user_id_fkey"
+		}).onDelete("set null"),
+	check("registration_requests_status_chk", sql`status = ANY (ARRAY['pending'::text, 'approved'::text, 'rejected'::text])`),
+	check("registration_requests_algorithm_chk", sql`(password_algorithm IS NULL) OR (password_algorithm = 'scrypt'::text)`),
+	check("registration_requests_hash_pair_chk", sql`(password_hash IS NULL) = (password_algorithm IS NULL)`),
+	check("registration_requests_decision_chk", sql`(status = 'pending'::text) = (decided_at IS NULL)`),
+]);
+
 export const userRoles = pgTable("user_roles", {
 	userId: uuid("user_id").notNull(),
 	role: text().notNull(),
@@ -1803,6 +1855,29 @@ export const recognitionRunPages = pgTable("recognition_run_pages", {
 	check("recognition_run_pages_page_chk", sql`working_page_index >= 0`),
 	check("recognition_run_pages_status_chk", sql`status = ANY (ARRAY['pending'::text, 'done'::text, 'failed'::text])`),
 	check("recognition_run_pages_counts_chk", sql`(blocks_total >= 0) AND (blocks_recognized >= 0) AND (blocks_invalid >= 0) AND (blocks_refused >= 0)`),
+]);
+
+export const authThrottle = pgTable("auth_throttle", {
+	scope: text().notNull(),
+	bucketKey: text("bucket_key").notNull(),
+	userId: uuid("user_id"),
+	failedAttempts: integer("failed_attempts").default(0).notNull(),
+	firstFailedAt: timestamp("first_failed_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	lastFailedAt: timestamp("last_failed_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true, mode: 'string' }),
+	lockedUntil: timestamp("locked_until", { withTimezone: true, mode: 'string' }),
+	windowExpiresAt: timestamp("window_expires_at", { withTimezone: true, mode: 'string' }).notNull(),
+}, (table) => [
+	index("ix_auth_throttle_expiry").using("btree", table.windowExpiresAt.asc().nullsLast().op("timestamptz_ops")),
+	index("ix_auth_throttle_user").using("btree", table.userId.asc().nullsLast().op("uuid_ops")),
+	foreignKey({
+			columns: [table.userId],
+			foreignColumns: [users.id],
+			name: "auth_throttle_user_id_fkey"
+		}).onDelete("cascade"),
+	primaryKey({ columns: [table.bucketKey, table.scope], name: "auth_throttle_pkey"}),
+	check("auth_throttle_scope_chk", sql`scope = ANY (ARRAY['login'::text, 'ip-login'::text, 'ip-register'::text])`),
+	check("auth_throttle_attempts_chk", sql`failed_attempts >= 0`),
 ]);
 
 export const pageClassifications = pgTable("page_classifications", {

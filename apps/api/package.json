@@ -15,7 +15,9 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint src --max-warnings 0",
-    "test": "vitest run --passWithNoTests"
+    "test": "vitest run --passWithNoTests",
+    "local-admin": "node dist/auth/local/cli.js",
+    "link-sso": "node dist/auth/local/link-sso.js"
   },
   "dependencies": {
     "@fastify/cookie": "11.1.2",

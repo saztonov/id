@@ -45,7 +45,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createPgliteDatabase, createTestPool } from '@id/db-harness';
 import { loadMigrations } from '@id/migrator';
 
-import { fixtureSql, sha256Of } from './fixture.mjs';
+import { fixtureSql, KC, LOCAL_LOGINS, LOCAL_PASSWORD, sha256Of } from './fixture.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const WEB_ROOT = resolve(HERE, '..', '..');
@@ -120,11 +120,33 @@ async function startApi() {
     pathToFileURL(join(REPO_ROOT, 'apps', 'api', 'dist', 'index.js')).href
   );
 
+  /**
+   * Режим стенда задаётся снаружи.
+   *
+   * `dev-stub` — прогон существующих сценариев (регрессия). `local` — прогон
+   * сценариев локального входа: вход формой, заявка, одобрение, блокировка.
+   * Один харнесс на оба режима намеренно: второй, отдельно поддерживаемый,
+   * разошёлся бы с первым в фикстуре, и различие сценариев объяснялось бы
+   * различием стендов, а не различием режимов.
+   */
+  const authMode = process.env['E2E_AUTH_MODE'] === 'local' ? 'local' : 'dev-stub';
+
   const env = loadEnv({
     NODE_ENV: 'test',
     PUBLIC_URL: `http://127.0.0.1:${String(FRONT_PORT)}`,
     DATABASE_URL: 'postgresql://pglite/id-portal-e2e',
-    AUTH_MODE: 'dev-stub',
+    AUTH_MODE: authMode,
+    ...(authMode === 'local'
+      ? {
+          AUTH_LOCAL_LOGIN_HMAC_KEY: 'login-hmac-key-of-playwright-run-0123456789',
+          // Стоимость снижена: прогон выполняет десятки проверок пароля, и
+          // боевые 240 мс на каждую превратили бы сценарий в ожидание.
+          AUTH_LOCAL_SCRYPT_COST_LOG2: '15',
+          AUTH_LOCAL_REGISTER_MAX_PER_IP_HOUR: '1000',
+          AUTH_LOCAL_PASSWORD_MAX_PER_HOUR: '1000',
+          AUTH_LOCAL_LOGIN_MAX_PER_IP: '1000',
+        }
+      : {}),
     CSRF_SECRET: 'csrf-secret-of-playwright-run-0123456789',
     STORAGE_DRIVER: 'local',
     LOCAL_STORAGE_DIR: storageDir,
@@ -136,9 +158,45 @@ async function startApi() {
     LOG_LEVEL: 'warn',
   });
 
+  if (authMode === 'local') await seedLocalCredentials(db, env);
+
   const app = await buildApp({ env, pool: createTestPool(db) });
   await app.listen({ port: API_PORT, host: '127.0.0.1' });
   return { app, db, storageDir };
+}
+
+/**
+ * Переводит фикстуру на локальный вход.
+ *
+ * Та же фикстура и те же люди, но `kc_sub` становится служебным `local:*`, а
+ * входить они начинают по адресу и паролю. Иначе пришлось бы держать вторую
+ * фикстуру, которая разошлась бы с первой, и различие сценариев объяснялось бы
+ * различием данных, а не различием режимов.
+ *
+ * Хэши считаются НАСТОЯЩЕЙ функцией портала: подставленный вручную хэш проверил
+ * бы разбор строки, но не то, что портал умеет её создавать.
+ */
+async function seedLocalCredentials(db, env) {
+  const { hashPassword } = await import(
+    pathToFileURL(join(REPO_ROOT, 'apps', 'api', 'dist', 'auth', 'local', 'passwords.js')).href
+  );
+
+  for (const [role, subject] of Object.entries(KC)) {
+    const login = LOCAL_LOGINS[role];
+    const hash = await hashPassword(env, LOCAL_PASSWORD);
+
+    await db.query(`update users set kc_sub = $2, email = $3 where kc_sub = $1`, [
+      subject,
+      `local:${subject}`,
+      login,
+    ]);
+    await db.query(
+      `insert into user_credentials
+         (user_id, login_key, login_display, password_hash, password_algorithm)
+       select id, $2, $3, $4, $5 from users where kc_sub = $1`,
+      [`local:${subject}`, login, login, hash.encoded, hash.algorithm],
+    );
+  }
 }
 
 function proxy(clientRequest, clientResponse) {

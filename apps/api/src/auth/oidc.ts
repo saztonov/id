@@ -691,9 +691,20 @@ function decodeStubCode(raw: string): StubAuthorizationCode {
 // Сборка
 // =====================================================================
 
-export function createAuthProvider(env: Env): AuthProvider {
+/**
+ * Провайдер идентичности либо его отсутствие.
+ *
+ * `null` при `AUTH_MODE=local` — не заглушка, а точное описание положения дел:
+ * внешнего провайдера в этом режиме нет. Фиктивная реализация, три метода
+ * которой обязаны бросать, была бы хуже: интерфейс обещает, что методы
+ * работают, и вызывающий не обязан гадать, у какого из провайдеров это обещание
+ * ложно. Обязанность проверить `null` видна в типе; обязанность не звать
+ * `startLogin()` у «локального провайдера» — не видна нигде.
+ */
+export function createAuthProvider(env: Env): AuthProvider | null {
   const clientId = env.OIDC_CLIENT_ID ?? DEFAULT_PORTAL_CLIENT_ID;
 
+  if (env.AUTH_MODE === 'local') return null;
   if (env.AUTH_MODE === 'dev-stub') return new DevStubAuthProvider(clientId);
 
   // Обязательность этих переменных при AUTH_MODE=oidc проверена в loadEnv();

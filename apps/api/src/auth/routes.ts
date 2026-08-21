@@ -22,6 +22,8 @@ import {
   type ScopeResolution,
 } from '../middleware/require-auth.js';
 import { hasPortalAccess, type DevStubIdentity } from './oidc.js';
+import { recordAuthEvent } from './local/audit.js';
+import { registerLocalAuthRoutes } from './local/routes.js';
 import { provisionUser } from './provisioning.js';
 import {
   CSRF_COOKIE,
@@ -74,7 +76,7 @@ const csrfResponseSchema = z.object({
 });
 
 const meResponseSchema = z.object({
-  authMode: z.enum(['oidc', 'dev-stub']),
+  authMode: z.enum(['oidc', 'dev-stub', 'local']),
   user: z.object({
     id: z.uuid(),
     email: z.string().nullable(),
@@ -95,14 +97,67 @@ const meResponseSchema = z.object({
   denial: z
     .enum(['unknown-user', 'inactive', 'no-business-role', 'contractor-without-organization'])
     .nullable(),
+  /**
+   * Требуется смена пароля до любой работы в портале.
+   *
+   * Всегда `false` вне `AUTH_MODE=local`: пароля там нет. Поле отдаётся, чтобы
+   * SPA увёл пользователя на форму смены сам, а не наткнулся на 403 в первом же
+   * запросе данных и показал его как ошибку.
+   */
+  mustChangePassword: z.boolean(),
   session: z.object({
     idleExpiresAt: z.string(),
     absoluteExpiresAt: z.string(),
   }),
 });
 
+/**
+ * Маршруты аутентификации в порядке, зависящем от режима.
+ *
+ * Redirect-поток и форма логина — взаимоисключающие способы подтвердить
+ * личность, поэтому маршруты одного из них в приложении просто отсутствуют, а
+ * не отвечают отказом. Отсутствующий маршрут нельзя вызвать по ошибке, забыв
+ * проверку режима; отвечающий отказом — можно.
+ */
 export function registerAuthRoutes(app: AppInstance): void {
-  const { env, pool, sessions, sessionCipher, authProvider } = app;
+  if (app.env.AUTH_MODE === 'local') {
+    registerLocalLoginEntry(app);
+    registerLocalAuthRoutes(app);
+  } else {
+    registerFederatedAuthRoutes(app);
+  }
+
+  registerSharedAuthRoutes(app);
+}
+
+/**
+ * Вход по адресу `/auth/login` в локальном режиме.
+ *
+ * Существует ради того, чтобы ссылка `sessionApi.loginUrl(returnTo)` во
+ * фронтенде, закладки пользователей и e2e-тесты работали во ВСЕХ режимах
+ * одинаково: здесь это перенаправление на страницу формы, а не на Keycloak.
+ * Cookie незавершённого входа не выставляется — обменивать нечего.
+ */
+function registerLocalLoginEntry(app: AppInstance): void {
+  const { env } = app;
+
+  app.get('/auth/login', { schema: { querystring: loginQuerySchema } }, (request, reply) => {
+    const target = new URL('/login', env.PUBLIC_URL);
+    target.searchParams.set('returnTo', safeReturnTo(request.query.returnTo));
+    return reply.redirect(target.href, 302);
+  });
+}
+
+/** Authorization Code Flow: Keycloak и заглушка разработки. */
+function registerFederatedAuthRoutes(app: AppInstance): void {
+  const { env, pool, sessions, sessionCipher } = app;
+  const authProvider = app.authProvider;
+  if (authProvider === null) {
+    // Недостижимо: сюда попадают только режимы oidc и dev-stub, где фабрика
+    // всегда возвращает провайдера. Проверка сужает тип и делает нарушение
+    // этого условия отказом сборки приложения, а не пятисоткой на первом входе.
+    throw new Error(`AUTH_MODE=${env.AUTH_MODE} требует провайдера идентичности`);
+  }
 
   app.get('/auth/login', { schema: { querystring: loginQuerySchema } }, async (request, reply) => {
     const returnTo = safeReturnTo(request.query.returnTo);
@@ -208,6 +263,17 @@ export function registerAuthRoutes(app: AppInstance): void {
       return reply.redirect(publicUrl(app, transaction.returnTo), 302);
     },
   );
+}
+
+/**
+ * Маршруты, общие для всех режимов.
+ *
+ * Выход, обновление CSRF-токена и `/me` требуют СЕССИЮ, но не бизнес-права:
+ * пользователь, которому роль ещё не назначена, обязан уметь выйти и обязан
+ * получить внятный ответ «прав нет», а не 403 без объяснения.
+ */
+function registerSharedAuthRoutes(app: AppInstance): void {
+  const { env, pool, sessions, authProvider } = app;
 
   app.post(
     '/auth/logout',
@@ -222,21 +288,35 @@ export function registerAuthRoutes(app: AppInstance): void {
       await sessions.revoke(session.id);
       clearSessionCookies(reply, env);
 
-      const result = await authProvider.endSession({
-        refreshToken,
-        postLogoutRedirectUri: env.PUBLIC_URL,
-      });
-      if (result.failure !== null) {
+      // В локальном режиме внешней сессии нет, и снимать нечего: провайдера не
+      // существует, а не «он вернул null».
+      const result =
+        authProvider === null
+          ? null
+          : await authProvider.endSession({
+              refreshToken,
+              postLogoutRedirectUri: env.PUBLIC_URL,
+            });
+      if (result !== null && result.failure !== null) {
         request.log.warn(
           { sessionId: session.id, failure: result.failure },
           'end-session провайдера не выполнен полностью',
         );
       }
 
+      await recordAuthEvent(pool, {
+        action: 'auth.logout',
+        actorUserId: session.userId,
+        actorEmailHmac: null,
+        ip: request.ip,
+        userAgent: request.headers['user-agent'] ?? null,
+        requestId: request.id,
+      });
+
       request.log.info({ userId: session.userId, sessionId: session.id }, 'выход выполнен');
       // Адрес возвращается, а не выполняется редиректом: front-channel logout
       // обязан пройти через браузер, иначе SSO-cookie Keycloak останется цела.
-      return reply.code(200).send({ endSessionUrl: result.endSessionUrl });
+      return reply.code(200).send({ endSessionUrl: result?.endSessionUrl ?? null });
     },
   );
 
@@ -276,13 +356,17 @@ export function registerAuthRoutes(app: AppInstance): void {
   app.get('/me', { schema: { response: { 200: meResponseSchema } } }, async (request, reply) => {
     const session = requireSession(request);
 
+    // Хук уже собрал и контекст, и принципала — второй запрос к БД здесь был бы
+    // лишним. Ветка с buildScope нужна тем, у кого прав нет: у них authContext
+    // не заполняется по построению.
     const resolution: ScopeResolution =
-      request.authContext !== null
+      request.authContext !== null && request.authPrincipal !== null
         ? {
             granted: true,
             user: request.authContext.user,
             roles: request.authContext.roles,
             scope: request.authContext.scope,
+            principal: request.authPrincipal,
           }
         : await buildScope(pool, session.userId);
 
@@ -296,7 +380,9 @@ export function registerAuthRoutes(app: AppInstance): void {
     // Ни выдачи, ни вращения CSRF-токена здесь нет намеренно: GET не меняет
     // состояние. Обновление токена — POST /auth/csrf.
     return reply.code(200).send({
-      authMode: authProvider.mode,
+      // Режим берётся из конфигурации, а не у провайдера: в локальном режиме
+      // провайдера нет вовсе, и спрашивать «какой у тебя режим» не у кого.
+      authMode: env.AUTH_MODE,
       user: {
         id: resolution.user.id,
         email: resolution.user.email,
@@ -316,6 +402,7 @@ export function registerAuthRoutes(app: AppInstance): void {
           }
         : null,
       denial: resolution.granted ? null : resolution.reason,
+      mustChangePassword: resolution.principal?.mustChangePassword ?? false,
       session: {
         idleExpiresAt: session.idleExpiresAt.toISOString(),
         absoluteExpiresAt: session.absoluteExpiresAt.toISOString(),

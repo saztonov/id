@@ -13,6 +13,8 @@
  */
 import { get, newIdempotencyKey, request, type ApiResponse } from './http.js';
 import type {
+  AuthConfig,
+  RegistrationRequest,
   AppSetting,
   Artifact,
   ArchiveState,
@@ -81,9 +83,40 @@ const V1 = '/api/v1';
 
 export const session = {
   me: () => get<Me>('/me'),
-  /** Выход: локальная сессия отзывается, `endSessionUrl` ведёт в Keycloak. */
+  /**
+   * Выход: локальная сессия отзывается, `endSessionUrl` ведёт к провайдеру.
+   *
+   * В режиме `local` провайдера нет и адрес приходит `null` — переходить некуда,
+   * достаточно вернуться на главную.
+   */
   logout: () => request<{ endSessionUrl: string | null }>('POST', '/auth/logout'),
   loginUrl: (returnTo: string) => `/auth/login?returnTo=${encodeURIComponent(returnTo)}`,
+};
+
+// =====================================================================
+// Локальный вход (AUTH_MODE=local)
+// =====================================================================
+
+/**
+ * Маршруты существуют только при `AUTH_MODE=local`; в остальных режимах их нет
+ * в приложении вовсе. Доступность регистрации сообщает `config()`, а не код
+ * ответа на попытку: «404 на POST» и «регистрация выключена» — не одно и то же
+ * для интерфейса.
+ */
+export const auth = {
+  config: () => get<AuthConfig>(`${V1}/auth/config`),
+  login: (email: string, password: string, returnTo?: string) =>
+    request<{ redirectTo: string }>('POST', `${V1}/auth/login`, {
+      body: { email, password, ...(returnTo === undefined ? {} : { returnTo }) },
+    }).then((response) => response.data),
+  register: (input: { email: string; fullName: string; position?: string; password: string }) =>
+    request<{ status: 'pending-activation' }>('POST', `${V1}/auth/register`, {
+      body: input,
+    }).then((response) => response.data),
+  changePassword: (currentPassword: string, newPassword: string) =>
+    request<{ changed: true }>('POST', `${V1}/auth/password`, {
+      body: { currentPassword, newPassword },
+    }).then((response) => response.data),
 };
 
 // =====================================================================
@@ -546,6 +579,64 @@ export const admin = {
 
   deactivate: (userId: string) =>
     request<UserCard>('POST', `${V1}/admin/users/${userId}/deactivate`).then((r) => r.data),
+
+  // --- локальные учётные записи (AUTH_MODE=local) ---
+
+  /**
+   * Создание пользователя с локальным паролем.
+   *
+   * Пароль не передаётся: его генерирует сервер и возвращает ОДИН раз. Дать
+   * администратору возможность задать пользователю известный себе пароль значит
+   * дать возможность действовать от его имени, и журнал этого не различит.
+   */
+  createUser: (input: {
+    email: string;
+    fullName: string;
+    position?: string;
+    contractorId?: string | null;
+    roles?: readonly UserRole[];
+    isActive?: boolean;
+  }) =>
+    request<UserCard & { temporaryPassword: string }>('POST', `${V1}/admin/users`, {
+      body: { ...input, ...(input.roles === undefined ? {} : { roles: [...input.roles] }) },
+    }).then((r) => r.data),
+
+  resetPassword: (userId: string) =>
+    request<{ temporaryPassword: string }>('POST', `${V1}/admin/users/${userId}/password`).then(
+      (r) => r.data,
+    ),
+
+  unlockUser: (userId: string) =>
+    request<UserCard>('POST', `${V1}/admin/users/${userId}/unlock`).then((r) => r.data),
+
+  registrationRequests: () =>
+    get<{ items: RegistrationRequest[] }>(`${V1}/admin/registration-requests`).then((r) => r.items),
+
+  approveRegistration: (
+    requestId: string,
+    input: {
+      roles: readonly UserRole[];
+      contractorId?: string | null;
+      objectIds?: readonly string[];
+      credential: 'temporary' | 'as-requested';
+    },
+  ) =>
+    request<UserCard & { temporaryPassword: string | null }>(
+      'POST',
+      `${V1}/admin/registration-requests/${requestId}/approve`,
+      {
+        body: {
+          ...input,
+          roles: [...input.roles],
+          ...(input.objectIds === undefined ? {} : { objectIds: [...input.objectIds] }),
+        },
+      },
+    ).then((r) => r.data),
+
+  rejectRegistration: (requestId: string, reason?: string) =>
+    request<{ rejected: true }>('POST', `${V1}/admin/registration-requests/${requestId}/reject`, {
+      body: reason === undefined ? {} : { reason },
+    }).then((r) => r.data),
 
   settings: () => get<SettingsView>(`${V1}/admin/settings`),
 

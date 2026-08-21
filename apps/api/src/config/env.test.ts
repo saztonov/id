@@ -437,3 +437,135 @@ describe('провайдер LLM', () => {
     ).toBe('gw/model-a');
   });
 });
+
+describe('AUTH_MODE=local', () => {
+  /** Минимально работоспособная локальная конфигурация. */
+  const local = {
+    AUTH_MODE: 'local',
+    AUTH_LOCAL_LOGIN_HMAC_KEY: 'l'.repeat(44),
+    AUDIT_HMAC_KEY: 'h'.repeat(44),
+  } as const;
+
+  it('допустим в production, в отличие от заглушки', () => {
+    // Ради этого режим и существует: развёртывание без Keycloak обязано
+    // подниматься в бою, а не только на машине разработчика.
+    expect(loadEnv(prodEnv({ ...local, OIDC_ISSUER: undefined })).AUTH_MODE).toBe('local');
+  });
+
+  it('не требует OIDC_*: провайдера идентичности в этом режиме нет', () => {
+    const env = loadEnv(
+      prodEnv({
+        ...local,
+        OIDC_ISSUER: undefined,
+        OIDC_CLIENT_ID: undefined,
+        OIDC_CLIENT_SECRET: undefined,
+      }),
+    );
+
+    expect(env.OIDC_ISSUER).toBeUndefined();
+  });
+
+  it('требует ключ HMAC троттлинга во всех окружениях, не только в production', () => {
+    // Ключ нужен не журналу, а подсчёту попыток: без него защиты от перебора
+    // нет вовсе, и это одинаково верно на стенде и в бою.
+    const problems = problemsOf(devEnv({ ...local, AUTH_LOCAL_LOGIN_HMAC_KEY: undefined }));
+
+    expect(problemAbout(problems, 'AUTH_LOCAL_LOGIN_HMAC_KEY')).toContain('троттлинг');
+  });
+
+  it('требует AUDIT_HMAC_KEY во всех окружениях', () => {
+    const problems = problemsOf(devEnv({ ...local, AUDIT_HMAC_KEY: undefined }));
+
+    expect(problemAbout(problems, 'AUDIT_HMAC_KEY')).toContain('AUTH_MODE=local');
+  });
+
+  it('отвергает короткий ключ HMAC', () => {
+    const problems = problemsOf(devEnv({ ...local, AUTH_LOCAL_LOGIN_HMAC_KEY: 'short' }));
+
+    expect(problemAbout(problems, 'AUTH_LOCAL_LOGIN_HMAC_KEY')).toContain('32');
+  });
+
+  it('отвергает ключ HMAC, оставленный заглушкой из .env.example', () => {
+    const problems = problemsOf(devEnv({ ...local, AUTH_LOCAL_LOGIN_HMAC_KEY: 'changeme' }));
+
+    expect(problemAbout(problems, 'AUTH_LOCAL_LOGIN_HMAC_KEY')).toBeDefined();
+  });
+
+  it('отвергает минимум длины пароля больше максимума', () => {
+    const problems = problemsOf(
+      devEnv({
+        ...local,
+        AUTH_LOCAL_PASSWORD_MIN_LENGTH: '200',
+        AUTH_LOCAL_PASSWORD_MAX_LENGTH: '128',
+      }),
+    );
+
+    expect(problemAbout(problems, 'AUTH_LOCAL_PASSWORD_MIN_LENGTH')).toContain('отвергала бы');
+  });
+
+  it('запрещает список разрешённых источников в production', () => {
+    // Список существует ради dev-прокси; в бою лишний origin — это разрешение
+    // слать форму входа с чужой страницы.
+    const problems = problemsOf(
+      prodEnv({ ...local, AUTH_LOCAL_ALLOWED_ORIGINS: 'https://evil.example' }),
+    );
+
+    expect(problemAbout(problems, 'AUTH_LOCAL_ALLOWED_ORIGINS')).toContain('production');
+    // Вне production он законен.
+    expect(
+      loadEnv(devEnv({ ...local, AUTH_LOCAL_ALLOWED_ORIGINS: 'http://localhost:5173' }))
+        .AUTH_LOCAL_ALLOWED_ORIGINS,
+    ).toBe('http://localhost:5173');
+  });
+
+  it('опирается на безусловное требование TRUST_PROXY в production', () => {
+    // Лимиты входа и регистрации считаются по адресу клиента. Отдельного
+    // правила для local нет намеренно: требование уже безусловно для
+    // production, и вторая его копия однажды разошлась бы с первой.
+    const problems = problemsOf(prodEnv({ ...local, TRUST_PROXY: '' }));
+
+    expect(problemAbout(problems, 'TRUST_PROXY')).toContain('production');
+  });
+
+  it('отвергает ключ локального входа в чужом режиме', () => {
+    // Переменная, которая ничего не делает, хуже отсутствующей: администратор
+    // считает защиту настроенной, а маршрутов, которые её читают, в приложении нет.
+    const problems = problemsOf(
+      devEnv({ AUTH_MODE: 'dev-stub', AUTH_LOCAL_LOGIN_HMAC_KEY: 'l'.repeat(44) }),
+    );
+
+    expect(problemAbout(problems, 'AUTH_LOCAL_LOGIN_HMAC_KEY')).toContain(
+      'только при AUTH_MODE=local',
+    );
+  });
+
+  it('разрешает только реализованный алгоритм хеширования', () => {
+    // argon2id в конфигурации без реализации завёл бы хэш, который нечем
+    // проверить: пользователь не смог бы войти без видимой причины.
+    const problems = problemsOf(devEnv({ ...local, AUTH_LOCAL_HASH: 'argon2id' }));
+
+    expect(problemAbout(problems, 'AUTH_LOCAL_HASH')).toBeDefined();
+  });
+
+  it('умолчания соответствуют профилю OWASP и стандарту', () => {
+    const env = loadEnv(devEnv(local));
+
+    expect(env.AUTH_LOCAL_SCRYPT_COST_LOG2).toBe(16);
+    expect(env.AUTH_LOCAL_SCRYPT_PARALLELISM).toBe(2);
+    expect(env.AUTH_LOCAL_PASSWORD_MIN_LENGTH).toBe(12);
+    expect(env.AUTH_LOCAL_LOCKOUT_MINUTES).toBe(30);
+    expect(env.AUTH_LOCAL_BACKOFF_MAX_SECONDS).toBe(30);
+    expect(env.AUTH_LOCAL_REGISTRATION_ENABLED).toBe(true);
+  });
+
+  it('регистрация выключается строкой false, а не любым значением', () => {
+    expect(
+      loadEnv(devEnv({ ...local, AUTH_LOCAL_REGISTRATION_ENABLED: 'false' }))
+        .AUTH_LOCAL_REGISTRATION_ENABLED,
+    ).toBe(false);
+    expect(
+      loadEnv(devEnv({ ...local, AUTH_LOCAL_REGISTRATION_ENABLED: '0' }))
+        .AUTH_LOCAL_REGISTRATION_ENABLED,
+    ).toBe(true);
+  });
+});

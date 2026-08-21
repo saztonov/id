@@ -10,6 +10,7 @@
     "lint": "eslint src e2e --max-warnings 0",
     "test": "vitest run --passWithNoTests",
     "test:e2e": "playwright test",
+    "test:e2e:local": "node ./e2e/run-local.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

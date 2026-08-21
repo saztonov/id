@@ -299,6 +299,8 @@ export interface SessionRecord {
   readonly id: string;
   readonly userId: string;
   readonly kcSid: string | null;
+  /** Режим, в котором сессия выдана. */
+  readonly authMode: Env['AUTH_MODE'];
   readonly keyVersion: number;
   readonly csrfHash: string;
   readonly idleExpiresAt: Date;
@@ -320,6 +322,7 @@ type SessionRow = {
   id: string;
   user_id: string;
   kc_sid: string | null;
+  auth_mode: Env['AUTH_MODE'];
   key_version: number;
   csrf_hash: string;
   idle_expires_at: Date;
@@ -329,7 +332,7 @@ type SessionRow = {
 
 type EnvelopeRow = { refresh_envelope: Buffer; key_version: number };
 
-const SESSION_COLUMNS = `id, user_id, kc_sid, key_version, csrf_hash,
+const SESSION_COLUMNS = `id, user_id, kc_sid, auth_mode, key_version, csrf_hash,
        idle_expires_at, absolute_expires_at, created_at`;
 
 /**
@@ -343,12 +346,14 @@ export class SessionStore {
   readonly #cipher: SessionCipher;
   readonly #idleMs: number;
   readonly #absoluteMs: number;
+  readonly #authMode: Env['AUTH_MODE'];
 
   constructor(pool: Pool, cipher: SessionCipher, env: Env) {
     this.#pool = pool;
     this.#cipher = cipher;
     this.#idleMs = env.SESSION_IDLE_MINUTES * 60_000;
     this.#absoluteMs = env.SESSION_ABSOLUTE_HOURS * 3_600_000;
+    this.#authMode = env.AUTH_MODE;
   }
 
   async create(input: CreateSessionInput): Promise<SessionRecord> {
@@ -366,14 +371,15 @@ export class SessionStore {
 
     const { rows } = await this.#pool.query<SessionRow>(
       `insert into auth_sessions
-         (id, user_id, kc_sid, refresh_envelope, key_version, csrf_hash,
+         (id, user_id, kc_sid, auth_mode, refresh_envelope, key_version, csrf_hash,
           idle_expires_at, absolute_expires_at, ip, ua)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9::inet, $10)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::inet, $11)
        returning ${SESSION_COLUMNS}`,
       [
         id,
         input.userId,
         input.kcSid,
+        this.#authMode,
         envelope,
         this.#cipher.keyVersion,
         hashCsrfToken(input.csrfToken),
@@ -396,13 +402,18 @@ export class SessionStore {
     if (!UUID_PATTERN.test(sessionId)) return null;
 
     const { rows } = await this.#pool.query<SessionRow>(
+      // Режим — часть условия действительности сессии, а не справочное поле.
+      // Сессия, выданная Keycloak, не должна работать после перевода портала на
+      // локальный вход: права те же, но способ подтверждения личности другой, и
+      // после смены режима прежнее подтверждение больше ничего не значит.
       `select ${SESSION_COLUMNS}
          from auth_sessions
         where id = $1
+          and auth_mode = $2
           and revoked_at is null
           and idle_expires_at > now()
           and absolute_expires_at > now()`,
-      [sessionId],
+      [sessionId, this.#authMode],
     );
 
     const row = rows[0];
@@ -505,6 +516,7 @@ function toSessionRecord(row: SessionRow): SessionRecord {
     id: row.id,
     userId: row.user_id,
     kcSid: row.kc_sid,
+    authMode: row.auth_mode,
     keyVersion: row.key_version,
     csrfHash: row.csrf_hash,
     idleExpiresAt: row.idle_expires_at,

@@ -271,6 +271,20 @@ export const userSummaryResponseSchema = z.object({
   contractorId: uuidSchema.nullable(),
   roles: z.array(userRoleSchema),
   createdAt: isoDateTimeSchema,
+  /**
+   * Состояние локальных учётных данных; `null` — пароля нет.
+   *
+   * Всегда `null` вне `AUTH_MODE=local`. Администратору важно отличать
+   * заведённого пользователя от того, кому нечем войти, а заблокированного
+   * перебором — от отключённого.
+   */
+  local: z
+    .object({
+      mustChangePassword: z.boolean(),
+      passwordChangedAt: isoDateTimeSchema,
+      lockedUntil: isoDateTimeSchema.nullable(),
+    })
+    .nullable(),
 });
 
 export const userPageResponseSchema = cursorPageSchema(userSummaryResponseSchema);

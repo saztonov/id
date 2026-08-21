@@ -52,10 +52,69 @@ const envSchema = z.object({
   PG_CA_CERT_PATH: z.string().optional(),
   PG_POOL_MAX: z.coerce.number().int().positive().default(10),
 
-  AUTH_MODE: z.enum(['oidc', 'dev-stub']).default('oidc'),
+  AUTH_MODE: z.enum(['oidc', 'dev-stub', 'local']).default('oidc'),
   OIDC_ISSUER: z.string().url().optional(),
   OIDC_CLIENT_ID: z.string().optional(),
   OIDC_CLIENT_SECRET: z.string().optional(),
+
+  // --- локальная аутентификация, AUTH_MODE=local (ADR-0009) ---
+
+  /**
+   * Ключ HMAC для ключей троттлинга входа. 32+ байта.
+   *
+   * Отдельный от AUDIT_HMAC_KEY намеренно: ротация ключа журнала не должна
+   * массово снимать блокировки входа — иначе смена ключа становится способом
+   * сбросить защиту от перебора.
+   */
+  AUTH_LOCAL_LOGIN_HMAC_KEY: nonPlaceholder('AUTH_LOCAL_LOGIN_HMAC_KEY').optional(),
+  AUTH_LOCAL_REGISTRATION_ENABLED: z
+    .string()
+    .default('true')
+    .transform((value) => value !== 'false'),
+  /**
+   * Границы длины пароля — единственный источник для всего кода: политика
+   * (`policy.ts`) и схемы тела запросов берут значения отсюда. Два независимых
+   * максимума разошлись бы, и пароль, принятый формой, отвергался бы политикой.
+   *
+   * Умолчание 12 — «рекомендуемая длина» корпоративного стандарта (минимум 8).
+   * Для развёртывания без MFA разумно поднять до 15 (SP 800-63B).
+   */
+  AUTH_LOCAL_PASSWORD_MIN_LENGTH: z.coerce.number().int().min(8).max(256).default(12),
+  AUTH_LOCAL_PASSWORD_MAX_LENGTH: z.coerce.number().int().min(64).max(256).default(128),
+  /**
+   * Только реализованное. Разрешать здесь алгоритм, которого нет в коде,
+   * значит завести хэш, который нечем проверить: пользователь не сможет войти,
+   * и причина не будет видна ни в одном журнале.
+   */
+  AUTH_LOCAL_HASH: z.enum(['scrypt']).default('scrypt'),
+  /** N = 2^значение. 16 при r=8, p=2 — профиль OWASP при ограниченной памяти. */
+  AUTH_LOCAL_SCRYPT_COST_LOG2: z.coerce.number().int().min(15).max(20).default(16),
+  AUTH_LOCAL_SCRYPT_PARALLELISM: z.coerce.number().int().min(1).max(8).default(2),
+  /**
+   * Сколько операций хеширования выполняется одновременно.
+   *
+   * Каждая занимает ~64 МБ и поток пула libuv (по умолчанию их 4). Без предела
+   * всплеск входов вытесняет из пула всё остальное — чтение файлов, DNS, zlib —
+   * и вход роняет производительность всего API. Переполнение очереди отвечает
+   * 429, а не копит ожидание.
+   */
+  AUTH_LOCAL_HASH_CONCURRENCY: z.coerce.number().int().positive().max(32).default(4),
+  /**
+   * Дополнительные источники, которым разрешено слать форму входа: полные
+   * origin через запятую.
+   *
+   * Существует ради dev-прокси Vite (браузер шлёт Origin :5173, а PUBLIC_URL
+   * указывает на :3000). В production запрещён: там SPA и API за одним адресом.
+   */
+  AUTH_LOCAL_ALLOWED_ORIGINS: z.string().optional(),
+  AUTH_LOCAL_LOGIN_MAX_PER_IP: z.coerce.number().int().positive().default(5),
+  AUTH_LOCAL_LOGIN_WINDOW_MINUTES: z.coerce.number().int().positive().default(15),
+  AUTH_LOCAL_LOGIN_MAX_PER_LOGIN_HOUR: z.coerce.number().int().positive().default(10),
+  AUTH_LOCAL_LOCKOUT_MINUTES: z.coerce.number().int().positive().default(30),
+  AUTH_LOCAL_BACKOFF_MAX_SECONDS: z.coerce.number().int().positive().default(30),
+  AUTH_LOCAL_REGISTER_MAX_PER_IP_HOUR: z.coerce.number().int().positive().default(3),
+  /** Смена пароля: сверх требований стандарта, но перебор текущего пароля тоже перебор. */
+  AUTH_LOCAL_PASSWORD_MAX_PER_HOUR: z.coerce.number().int().positive().default(5),
 
   /** Ключ шифрования refresh-токена в сессии. 32 байта в base64. */
   SESSION_ENC_KEY: z.string().optional(),
@@ -293,6 +352,54 @@ function crossChecks(env: Env): string[] {
     for (const key of ['OIDC_ISSUER', 'OIDC_CLIENT_ID', 'OIDC_CLIENT_SECRET'] as const) {
       if (!env[key]) errors.push(`${key} обязателен при AUTH_MODE=oidc`);
     }
+  }
+
+  if (env.AUTH_MODE === 'local') {
+    // Оба ключа обязательны во ВСЕХ окружениях, а не только в production.
+    // AUTH_LOCAL_LOGIN_HMAC_KEY — не украшение журнала: по нему ключуются строки
+    // auth_throttle. Без него пришлось бы либо класть логины в БД открытым
+    // текстом, либо отказаться от подсчёта попыток, то есть от защиты от
+    // перебора. AUDIT_HMAC_KEY по той же причине: события входа обязаны попадать
+    // в журнал, а адрес в журнале хранится только как HMAC.
+    if (!env.AUTH_LOCAL_LOGIN_HMAC_KEY) {
+      errors.push(
+        'AUTH_LOCAL_LOGIN_HMAC_KEY обязателен при AUTH_MODE=local: по нему ключуется ' +
+          'троттлинг входа',
+      );
+    } else if (Buffer.byteLength(env.AUTH_LOCAL_LOGIN_HMAC_KEY, 'utf8') < 32) {
+      errors.push('AUTH_LOCAL_LOGIN_HMAC_KEY: требуется не менее 32 байт');
+    }
+    if (!env.AUDIT_HMAC_KEY) {
+      errors.push(
+        'AUDIT_HMAC_KEY обязателен при AUTH_MODE=local: события входа пишутся в журнал, ' +
+          'а адрес в нём хранится только как HMAC',
+      );
+    }
+
+    if (env.AUTH_LOCAL_PASSWORD_MIN_LENGTH > env.AUTH_LOCAL_PASSWORD_MAX_LENGTH) {
+      errors.push(
+        'AUTH_LOCAL_PASSWORD_MIN_LENGTH больше AUTH_LOCAL_PASSWORD_MAX_LENGTH: ' +
+          'политика отвергала бы любой пароль',
+      );
+    }
+
+    if (isProd && env.AUTH_LOCAL_ALLOWED_ORIGINS !== undefined) {
+      // Список существует ради dev-прокси. В production SPA и API живут за одним
+      // PUBLIC_URL, поэтому лишний origin здесь — это разрешение слать форму
+      // входа с чужой страницы, то есть отключённая защита от login CSRF.
+      errors.push(
+        'AUTH_LOCAL_ALLOWED_ORIGINS запрещён в production: источник формы входа — PUBLIC_URL',
+      );
+    }
+
+    // Отдельной проверки TRUST_PROXY здесь нет: она уже безусловна для
+    // production выше. Лимиты входа и регистрации считаются по адресу клиента и
+    // потому опираются на неё же — дублировать правило значит однажды поправить
+    // одну копию из двух.
+  } else if (env.AUTH_LOCAL_LOGIN_HMAC_KEY !== undefined) {
+    // Настройка, которая ничего не делает, хуже отсутствующей: администратор
+    // считает защиту настроенной, а её нет.
+    errors.push('AUTH_LOCAL_LOGIN_HMAC_KEY имеет смысл только при AUTH_MODE=local');
   }
 
   if (isProd) {

@@ -26,6 +26,8 @@ import { type ReactNode } from 'react';
 import { Tabs } from 'antd';
 import { ScreenHeading } from '../../shared/ui.js';
 import { useNavigate, useQueryParam } from '../../app/router.js';
+import { useSession } from '../../app/session.js';
+import { RegistrationRequestsPanel } from './RegistrationRequestsPanel.js';
 import { UsersPanel } from './UsersPanel.js';
 import { CandidatesPanel } from './CandidatesPanel.js';
 import { DiagnosticsPanel } from './DiagnosticsPanel.js';
@@ -36,6 +38,7 @@ import { PromptsPanel } from './PromptsPanel.js';
 
 const TABS = [
   'users',
+  'registration',
   'candidates',
   'diagnostics',
   'audit',
@@ -47,6 +50,7 @@ type TabKey = (typeof TABS)[number];
 
 export function AdminScreen(): ReactNode {
   const navigate = useNavigate();
+  const { me } = useSession();
   const requested = useQueryParam('tab');
   const tab: TabKey = TABS.includes(requested as TabKey) ? (requested as TabKey) : 'users';
 
@@ -59,6 +63,17 @@ export function AdminScreen(): ReactNode {
         destroyOnHidden
         items={[
           { key: 'users', label: 'Пользователи и области', children: <UsersPanel /> },
+          // Вкладка существует только там, где портал распоряжается паролями:
+          // в федеративном режиме заявок на регистрацию не бывает.
+          ...(me.authMode === 'local'
+            ? [
+                {
+                  key: 'registration',
+                  label: 'Заявки на доступ',
+                  children: <RegistrationRequestsPanel />,
+                },
+              ]
+            : []),
           { key: 'candidates', label: 'Кандидаты в виды ИД', children: <CandidatesPanel /> },
           { key: 'diagnostics', label: 'Диагностика и задачи', children: <DiagnosticsPanel /> },
           { key: 'audit', label: 'Аудит', children: <AuditPanel /> },

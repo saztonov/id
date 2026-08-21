@@ -121,8 +121,13 @@ export function AppShell({ children }: { children: ReactNode }): ReactNode {
           <button
             type="button"
             onClick={() => {
-              void sessionApi.logout().then(() => {
-                window.location.assign('/');
+              void sessionApi.logout().then((response) => {
+                // Адрес front-channel logout выполняется переходом браузера:
+                // иначе SSO-cookie провайдера остаётся цела и следующий вход
+                // проходит без пароля — то есть выход не выполнен. Раньше
+                // ответ игнорировался и портал всегда уходил на «/».
+                // В локальном режиме провайдера нет, и адрес приходит null.
+                window.location.assign(response.data.endSessionUrl ?? '/');
               });
             }}
             style={{

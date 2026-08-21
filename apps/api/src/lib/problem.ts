@@ -182,6 +182,20 @@ export function preconditionFailed(detail?: string, options: HttpProblemOptions 
   return new HttpProblem(412, titleForStatus(412), withDetail(options, detail));
 }
 
+/**
+ * 415 — тип содержимого не тот.
+ *
+ * Отдельно от 400: для публичных маршрутов это не опечатка клиента, а признак
+ * запроса, отправленного HTML-формой с чужой страницы (такая форма не умеет
+ * `application/json` и потому не проходит preflight).
+ */
+export function unsupportedMediaType(
+  detail?: string,
+  options: HttpProblemOptions = {},
+): HttpProblem {
+  return new HttpProblem(415, titleForStatus(415), withDetail(options, detail));
+}
+
 /** 422 — тело разобрано, но не прошло проверку схемой или инвариантом. */
 export function unprocessable(
   errors: readonly ProblemError[],

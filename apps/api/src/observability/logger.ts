@@ -43,6 +43,10 @@ const SECRET_KEYS: readonly string[] = [
   'oldPassword',
   'newPassword',
   'passwordConfirm',
+  // Пароль, выданный администратором: возвращается в теле ответа один раз и
+  // не должен осесть в журнале, откуда его прочтёт кто угодно с доступом к логам.
+  'temporaryPassword',
+  'temporary_password',
   'authorization',
   'Authorization',
   'proxy-authorization',

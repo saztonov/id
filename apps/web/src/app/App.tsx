@@ -30,6 +30,9 @@ import { VolumeSubmissionsScreen } from '../features/ids/VolumeSubmissionsScreen
 import { RevisionScreen } from '../features/revision/RevisionScreen.js';
 import { CatalogScreen } from '../features/catalog/CatalogScreen.js';
 import { AdminScreen } from '../features/admin/AdminScreen.js';
+import { ChangePasswordPage } from '../features/auth/ChangePasswordPage.js';
+import { LoginPage } from '../features/auth/LoginPage.js';
+import { RegisterPage } from '../features/auth/RegisterPage.js';
 
 /**
  * Клиент кэша.
@@ -127,6 +130,26 @@ function Routes(): ReactNode {
   return match.route.render(match.params);
 }
 
+/**
+ * Внешняя развилка приложения.
+ *
+ * Страницы входа, заявки и смены пароля рисуются ДО проверки сессии: страница
+ * входа не может требовать входа. Внутри `Authenticated` их разместить нельзя —
+ * туда попадают только после успешного `/me`.
+ *
+ * Маршруты присутствуют во всех режимах: в федеративном `/auth/login` ведёт к
+ * провайдеру и до `/login` дело не доходит, а прямой заход покажет форму,
+ * которая честно ответит отказом — маршрутов локального входа в приложении нет.
+ */
+function Root(): ReactNode {
+  const { pathname } = useLocation();
+
+  if (pathname === '/login') return <LoginPage />;
+  if (pathname === '/register') return <RegisterPage />;
+
+  return <Authenticated />;
+}
+
 function Authenticated(): ReactNode {
   const me = useMeQuery();
 
@@ -145,8 +168,10 @@ function Authenticated(): ReactNode {
         <Result
           status="403"
           title="Требуется вход в портал"
-          subTitle="Вход выполняется через корпоративный Keycloak. Токены в браузер не передаются."
+          subTitle="Токены в браузер не передаются: портал работает на серверной сессии."
           extra={
+            // Ссылка одна на все режимы: в локальном `/auth/login` отвечает
+            // перенаправлением на форму портала, в федеративном — к провайдеру.
             <a href={sessionApi.loginUrl(returnTo)} data-testid="login-link">
               Войти
             </a>
@@ -156,6 +181,12 @@ function Authenticated(): ReactNode {
     }
     return <ErrorState error={me.error} title="Не удалось проверить сессию" />;
   }
+
+  // Пароль выдан администратором: до смены портал закрыт, и увести туда должен
+  // интерфейс — иначе пользователь получит 403 в первом же запросе данных и
+  // увидит его как непонятную ошибку. Проверка стоит ДО разбора прав: у свежей
+  // учётной записи ролей ещё нет.
+  if (me.data.mustChangePassword) return <ChangePasswordPage forced />;
 
   if (me.data.scope === null) {
     return (
@@ -196,7 +227,7 @@ export function App(): ReactNode {
         <AntApp>
           <QueryClientProvider client={queryClient}>
             <RouterProvider>
-              <Authenticated />
+              <Root />
             </RouterProvider>
           </QueryClientProvider>
         </AntApp>

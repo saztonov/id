@@ -33,7 +33,7 @@ import type {
 // =====================================================================
 
 export interface Me {
-  authMode: 'oidc' | 'dev-stub';
+  authMode: 'oidc' | 'dev-stub' | 'local';
   user: {
     id: string;
     email: string | null;
@@ -50,7 +50,31 @@ export interface Me {
   } | null;
   denial:
     'unknown-user' | 'inactive' | 'no-business-role' | 'contractor-without-organization' | null;
+  /**
+   * Требуется смена выданного пароля до любой работы в портале.
+   *
+   * Всегда `false` вне `AUTH_MODE=local`. Портал закрывает всё, кроме выхода и
+   * формы смены, поэтому интерфейс обязан увести туда сам — иначе пользователь
+   * получит 403 в первом же запросе данных и увидит его как ошибку.
+   */
+  mustChangePassword: boolean;
   session: { idleExpiresAt: string; absoluteExpiresAt: string };
+}
+
+/** Публичные признаки режима: доступны без входа. */
+export interface AuthConfig {
+  registrationEnabled: boolean;
+  passwordMinLength: number;
+}
+
+export interface RegistrationRequest {
+  id: string;
+  email: string;
+  fullName: string;
+  position: string | null;
+  createdAt: string;
+  /** Заявитель выбрал пароль сам. */
+  hasRequestedPassword: boolean;
 }
 
 // =====================================================================
@@ -584,6 +608,17 @@ export interface PortalUser {
   contractorId: string | null;
   roles: UserRole[];
   createdAt: string;
+  /**
+   * Состояние локальных учётных данных; `null` — пароля нет.
+   *
+   * Всегда `null` вне `AUTH_MODE=local`. Отличает заведённого пользователя от
+   * того, кому нечем войти, а заблокированного перебором — от отключённого.
+   */
+  local: {
+    mustChangePassword: boolean;
+    passwordChangedAt: string;
+    lockedUntil: string | null;
+  } | null;
 }
 
 export interface UserCard {

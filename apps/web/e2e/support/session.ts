@@ -21,6 +21,23 @@ export const KC = {
   mixed: 'kc-e2e-mixed',
 } as const;
 
+/**
+ * Адреса и пароль тех же людей в режиме `local`.
+ *
+ * Повторяют `e2e/harness/fixture.mjs` по той же причине, что и `KC` выше:
+ * харнесс — обычный `.mjs` без типов, и импорт из него делает всё, что пришло,
+ * `any`. Расхождение ловится первым же сценарием входа: пароль просто не подойдёт.
+ */
+export const LOCAL_LOGINS = {
+  contractor: 'contractor@e2e.example',
+  engineer: 'engineer@e2e.example',
+  manager: 'manager@e2e.example',
+  admin: 'admin@e2e.example',
+  mixed: 'mixed@e2e.example',
+} as const;
+
+export const LOCAL_PASSWORD = 'Mostovoy-Kran-77!';
+
 export const IDS = {
   object: '00000000-0000-4000-8000-000000000004',
   volume: '00000000-0000-4000-8000-000000000006',

@@ -48,11 +48,30 @@ export interface AuthContext {
 export type ScopeDenialReason =
   'unknown-user' | 'inactive' | 'no-business-role' | 'contractor-without-organization';
 
+/**
+ * Кто выполняет запрос, БЕЗ учёта бизнес-прав.
+ *
+ * Существует отдельно от `AuthContext` не ради удобства. `authContext`
+ * заполняется только при успешном разрешении области видимости, поэтому
+ * пользователь без назначенной роли не имеет его вовсе — а именно такой
+ * пользователь и обязан быть виден проверке «требуется смена пароля»: свежая
+ * учётная запись с временным паролем ролей ещё не имеет. Флаг, положенный в
+ * `AuthContext`, не сработал бы ровно там, где он нужен.
+ */
+export interface AuthPrincipal {
+  readonly user: PortalUser;
+  /** Пароль выдан администратором либо сброшен: до смены доступ ограничен. */
+  readonly mustChangePassword: boolean;
+  /** Есть ли у пользователя локальные учётные данные. */
+  readonly hasLocalCredentials: boolean;
+}
+
 export interface ScopeGranted {
   readonly granted: true;
   readonly user: PortalUser;
   readonly roles: readonly PortalRole[];
   readonly scope: AuthScope;
+  readonly principal: AuthPrincipal;
 }
 
 export interface ScopeDenied {
@@ -60,6 +79,8 @@ export interface ScopeDenied {
   readonly reason: ScopeDenialReason;
   readonly user: PortalUser | null;
   readonly roles: readonly PortalRole[];
+  /** `null` только при `unknown-user`: принципала без пользователя не бывает. */
+  readonly principal: AuthPrincipal | null;
 }
 
 export type ScopeResolution = ScopeGranted | ScopeDenied;
@@ -70,6 +91,13 @@ declare module 'fastify' {
     authSession: SessionRecord | null;
     /** Полный контекст доступа. `null` означает «прав нет», а не «нет сессии». */
     authContext: AuthContext | null;
+    /**
+     * Пользователь сессии независимо от бизнес-прав.
+     *
+     * Заполняется всегда, когда сессия ссылается на существующего пользователя,
+     * — в том числе при отказе в области видимости.
+     */
+    authPrincipal: AuthPrincipal | null;
     authDenial: ScopeDenialReason | null;
   }
 }
@@ -94,6 +122,7 @@ type PrincipalRow = {
   contractor_id: string | null;
   roles: string[];
   object_ids: string[];
+  must_change_password: boolean | null;
 };
 
 /**
@@ -105,14 +134,20 @@ type PrincipalRow = {
  */
 export async function buildScope(pool: Pool, userId: string): Promise<ScopeResolution> {
   const { rows } = await pool.query<PrincipalRow>(
+    // Соединение с user_credentials аддитивно и стоит близко к нулю: оно идёт
+    // по первичному ключу. Таблица существует во всех режимах, а строки в ней
+    // есть только при AUTH_MODE=local, поэтому в остальных режимах колонка
+    // всегда NULL и поведение не меняется.
     `select u.id, u.kc_sub, u.email, u.full_name, u.position, u.is_active, u.contractor_id,
             coalesce(array_agg(distinct r.role) filter (where r.role is not null),
                      '{}'::text[]) as roles,
             coalesce(array_agg(distinct s.object_id::text) filter (where s.object_id is not null),
-                     '{}'::text[]) as object_ids
+                     '{}'::text[]) as object_ids,
+            bool_or(c.must_change_password) as must_change_password
        from users u
        left join user_roles r on r.user_id = u.id
        left join user_object_scopes s on s.user_id = u.id
+       left join user_credentials c on c.user_id = u.id
       where u.id = $1
       group by u.id`,
     [userId],
@@ -120,7 +155,7 @@ export async function buildScope(pool: Pool, userId: string): Promise<ScopeResol
 
   const row = rows[0];
   if (row === undefined) {
-    return { granted: false, reason: 'unknown-user', user: null, roles: [] };
+    return { granted: false, reason: 'unknown-user', user: null, roles: [], principal: null };
   }
 
   const user: PortalUser = {
@@ -133,24 +168,32 @@ export async function buildScope(pool: Pool, userId: string): Promise<ScopeResol
     contractorId: row.contractor_id,
   };
 
+  const principal: AuthPrincipal = {
+    user,
+    // bool_or по левому соединению: NULL означает «локальных учётных данных
+    // нет», а не «менять не нужно», но для проверки доступа это одно и то же.
+    mustChangePassword: row.must_change_password === true,
+    hasLocalCredentials: row.must_change_password !== null,
+  };
+
   // Единственное место, где роль получает метку `PortalRole`: значение уже
   // прочитано из user_roles и проверено схемой домена.
   const roles: readonly PortalRole[] = row.roles
     .filter((role): role is UserRole => userRoleSchema.safeParse(role).success)
     .map((role) => role as PortalRole);
 
-  if (!user.isActive) return { granted: false, reason: 'inactive', user, roles };
+  if (!user.isActive) return { granted: false, reason: 'inactive', user, roles, principal };
 
   const primary = ROLE_PRIORITY.find((role) => roles.some((held) => held === role));
   if (primary === undefined) {
-    return { granted: false, reason: 'no-business-role', user, roles };
+    return { granted: false, reason: 'no-business-role', user, roles, principal };
   }
 
   switch (primary) {
     case 'admin':
-      return { granted: true, user, roles, scope: { kind: 'admin', userId: user.id } };
+      return { granted: true, user, roles, principal, scope: { kind: 'admin', userId: user.id } };
     case 'manager':
-      return { granted: true, user, roles, scope: { kind: 'manager', userId: user.id } };
+      return { granted: true, user, roles, principal, scope: { kind: 'manager', userId: user.id } };
     case 'engineer':
       // Пустой список объектов — законная ситуация: инженер без назначений
       // ничего не видит. scopeWhere() превращает её в FALSE, а не в TRUE.
@@ -158,18 +201,26 @@ export async function buildScope(pool: Pool, userId: string): Promise<ScopeResol
         granted: true,
         user,
         roles,
+        principal,
         scope: { kind: 'engineer', userId: user.id, objectIds: row.object_ids },
       };
     case 'contractor':
       if (user.contractorId === null) {
         // Ошибка администрирования, а не «видит всё»: подрядчик без организации
         // не имеет области видимости, и придумать её за него нельзя.
-        return { granted: false, reason: 'contractor-without-organization', user, roles };
+        return {
+          granted: false,
+          reason: 'contractor-without-organization',
+          user,
+          roles,
+          principal,
+        };
       }
       return {
         granted: true,
         user,
         roles,
+        principal,
         scope: { kind: 'contractor', userId: user.id, contractorId: user.contractorId },
       };
   }
@@ -209,6 +260,11 @@ export function sessionContextHook(deps: AuthMiddlewareDeps): onRequestAsyncHook
     request.authSession = await deps.sessions.touch(session);
 
     const resolution = await buildScope(deps.pool, session.userId);
+    // Принципал выставляется ДО ветки отказа: пользователь без назначенной роли
+    // всё равно обязан быть виден проверке «требуется смена пароля» — свежая
+    // учётная запись с временным паролем ролей ещё не имеет.
+    request.authPrincipal = resolution.principal;
+
     if (!resolution.granted) {
       request.authDenial = resolution.reason;
       return;

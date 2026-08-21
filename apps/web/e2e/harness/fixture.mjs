@@ -94,6 +94,23 @@ export const KC = {
 };
 
 /**
+ * Адреса тех же людей для прогона в режиме `local`.
+ *
+ * Отдельная таблица, а не производные от `KC`: в локальном режиме вход идёт по
+ * адресу почты, а `kc_sub` там служебный. Пароль один на всех — стенд одноразовый
+ * и живёт в памяти процесса.
+ */
+export const LOCAL_LOGINS = {
+  contractor: 'contractor@e2e.example',
+  engineer: 'engineer@e2e.example',
+  manager: 'manager@e2e.example',
+  admin: 'admin@e2e.example',
+  mixed: 'mixed@e2e.example',
+};
+
+export const LOCAL_PASSWORD = 'Mostovoy-Kran-77!';
+
+/**
  * Страницы фикстуры `rotated.pdf`: 0°, 90°, 180°, 270° и A3 landscape.
  *
  * Взято именно этот файл, потому что гейт §17 требует проверить пересчёт

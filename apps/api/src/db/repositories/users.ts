@@ -30,7 +30,7 @@
 import { asc, eq, inArray, sql } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
-import { userObjectScopes, userRoles, users } from '@id/db';
+import { authThrottle, userCredentials, userObjectScopes, userRoles, users } from '@id/db';
 import { userRoleSchema, type UserRole } from '@id/contracts';
 import { z } from 'zod';
 import type { AuthScope } from '../../auth/scope.js';
@@ -57,6 +57,20 @@ const ROLES_AGGREGATE = sql<
   string[]
 >`coalesce(array_agg(distinct ${userRoles.role}) filter (where ${userRoles.role} is not null), '{}'::text[])`;
 
+/**
+ * Состояние локальных учётных данных.
+ *
+ * `null` у пользователя без пароля — то есть всегда вне `AUTH_MODE=local` и у
+ * федеративных учётных записей. Признак нужен администратору: без него в списке
+ * не отличить того, кто может войти, от того, кто заведён, но входить нечем.
+ */
+export interface LocalAccountState {
+  readonly mustChangePassword: boolean;
+  readonly passwordChangedAt: string;
+  /** Время снятия блокировки после перебора; `null` — не заблокирован. */
+  readonly lockedUntil: string | null;
+}
+
 export interface UserSummary {
   readonly id: string;
   readonly email: string | null;
@@ -66,6 +80,7 @@ export interface UserSummary {
   readonly contractorId: string | null;
   readonly roles: readonly UserRole[];
   readonly createdAt: string;
+  readonly local: LocalAccountState | null;
 }
 
 export interface ListUsersParams {
@@ -87,6 +102,9 @@ type UserRowShape = {
   contractorId: string | null;
   createdAt: string;
   roles: string[];
+  localPasswordChangedAt: string | null;
+  localMustChangePassword: boolean | null;
+  localLockedUntil: string | null;
 };
 
 /**
@@ -111,6 +129,17 @@ const SELECTION = {
       'created_at_iso',
     ),
   roles: ROLES_AGGREGATE,
+  // Соединения аддитивные и идут по первичному ключу. Строки в этих таблицах
+  // появляются только при AUTH_MODE=local, поэтому в остальных режимах все три
+  // колонки всегда NULL и выдача не меняется.
+  localPasswordChangedAt: sql<
+    string | null
+  >`max(to_char(${userCredentials.passwordChangedAt} at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))`,
+  localMustChangePassword: sql<boolean | null>`bool_or(${userCredentials.mustChangePassword})`,
+  localLockedUntil: sql<
+    string | null
+  >`max(to_char(${authThrottle.lockedUntil} at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
+       filter (where ${authThrottle.lockedUntil} > now())`,
 };
 
 /**
@@ -134,6 +163,8 @@ export async function listUsers(
     .from(users)
     .leftJoin(userRoles, eq(userRoles.userId, users.id))
     .leftJoin(userObjectScopes, eq(userObjectScopes.userId, users.id))
+    .leftJoin(userCredentials, eq(userCredentials.userId, users.id))
+    .leftJoin(authThrottle, eq(authThrottle.userId, users.id))
     .where(withScope(scope, USERS_SCOPE_TARGET, ...conditions))
     .groupBy(users.id)
     .orderBy(asc(users.createdAt), asc(users.id))
@@ -161,6 +192,8 @@ export async function findUserById(
     .from(users)
     .leftJoin(userRoles, eq(userRoles.userId, users.id))
     .leftJoin(userObjectScopes, eq(userObjectScopes.userId, users.id))
+    .leftJoin(userCredentials, eq(userCredentials.userId, users.id))
+    .leftJoin(authThrottle, eq(authThrottle.userId, users.id))
     .where(withScope(scope, USERS_SCOPE_TARGET, eq(users.id, userId)))
     .groupBy(users.id)
     .limit(1);
@@ -220,6 +253,16 @@ function toUserSummary(row: UserRowShape): UserSummary {
     // контракта API, и проверка схемой домена здесь дешевле, чем расследование
     // «откуда в ответе роль, которой нет в перечислении».
     roles: row.roles.filter((role): role is UserRole => userRoleSchema.safeParse(role).success),
+    // Строка user_credentials есть — значит есть и локальный пароль. Отметка
+    // времени служит здесь признаком наличия строки: она объявлена NOT NULL.
+    local:
+      row.localPasswordChangedAt === null
+        ? null
+        : {
+            mustChangePassword: row.localMustChangePassword === true,
+            passwordChangedAt: row.localPasswordChangedAt,
+            lockedUntil: row.localLockedUntil,
+          },
   };
 }
 

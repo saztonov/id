@@ -60,6 +60,10 @@ import {
   SessionStore,
   type SessionCipher,
 } from './auth/session.js';
+import { mustChangePasswordGuard } from './auth/local/must-change-guard.js';
+import { PUBLIC_LOCAL_AUTH_ROUTES } from './auth/local/routes.js';
+import { warmupDummyHash } from './auth/local/passwords.js';
+import { assertLocalAdminExists } from './auth/local/startup.js';
 import { csrfGuardHook, sessionContextHook } from './middleware/require-auth.js';
 import { instrumentPool } from './observability/db-timing.js';
 import {
@@ -151,7 +155,8 @@ declare module 'fastify' {
     db: NodePgDatabase;
     sessions: SessionStore;
     sessionCipher: SessionCipher;
-    authProvider: AuthProvider;
+    /** `null` при AUTH_MODE=local: внешнего провайдера идентичности нет. */
+    authProvider: AuthProvider | null;
     metrics: Metrics;
     /** Регистрация ошибок в `error_events` (§11): нужна и `server.ts`. */
     errorReporter: ErrorReporter;
@@ -170,7 +175,7 @@ export interface BuildAppOptions {
   readonly env?: Env;
   /** Готовый пул (тесты, pglite). Переданный извне пул не закрывается при shutdown. */
   readonly pool?: Pool;
-  readonly authProvider?: AuthProvider;
+  readonly authProvider?: AuthProvider | null;
   /**
    * Готовый логгер. Нужен проверкам, которые читают сам поток журнала: подмена
    * приёмника — единственный способ доказать, что значение не ушло в stdout.
@@ -272,7 +277,9 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppInstan
 
   const sessionCipher = await createSessionCipher(env);
   const sessions = new SessionStore(pool, sessionCipher, env);
-  const authProvider = options.authProvider ?? createAuthProvider(env);
+  // `??` не годится: null здесь — законное значение, а не «не задано».
+  const authProvider =
+    options.authProvider !== undefined ? options.authProvider : createAuthProvider(env);
 
   app.decorate('env', env);
   app.decorate('pool', pool);
@@ -300,8 +307,26 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppInstan
     },
   });
 
+  /**
+   * Подготовка локального режима.
+   *
+   * Холостой хэш считается ЗДЕСЬ, а не при первом неизвестном логине: ленивая
+   * подготовка сделала бы первый такой вход вдвое дороже последующих, то есть
+   * вернула бы измеримую разницу между «нет такого пользователя» и «неверный
+   * пароль» — ровно то, что вся холостая проверка и убирает.
+   */
+  if (env.AUTH_MODE === 'local') {
+    await warmupDummyHash(env);
+    await assertLocalAdminExists(pool, env, {
+      warn: (details, message) => {
+        logger.warn(details, message);
+      },
+    });
+  }
+
   app.decorateRequest('authSession', null);
   app.decorateRequest('authContext', null);
+  app.decorateRequest('authPrincipal', null);
   app.decorateRequest('authDenial', null);
 
   /**
@@ -403,6 +428,17 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppInstan
   const middlewareDeps = { pool, sessions, env };
   app.addHook('onRequest', sessionContextHook(middlewareDeps));
 
+  /**
+   * Ограничение доступа до смены выданного администратором пароля.
+   *
+   * Сразу после чтения сессии и ДО проверки CSRF: отказ «смените пароль» точнее
+   * отказа «проверка CSRF не пройдена», а до самой смены пользователю и так
+   * доступны только маршруты из белого списка хука.
+   */
+  if (env.AUTH_MODE === 'local') {
+    app.addHook('onRequest', mustChangePasswordGuard());
+  }
+
   // `user_id` в строке запроса и в записи `error_events`. Раньше этого места
   // пользователь неизвестен — сессия ещё не прочитана; позже проверки CSRF —
   // отказ 403 остался бы без имени пользователя, а это первое, что спрашивают.
@@ -433,6 +469,22 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppInstan
   const localUploadExempt = storage.localUploads !== undefined;
   app.addHook('onRequest', function guardCsrf(request, reply) {
     if (localUploadExempt && request.routeOptions.url === LOCAL_UPLOAD_PATH) {
+      return Promise.resolve();
+    }
+    /**
+     * Публичные маршруты локального входа защищены иначе — и обязаны быть.
+     *
+     * Общая проверка CSRF срабатывает при наличии сессии. У формы входа сессии
+     * быть не должно, но она может БЫТЬ — если чужая страница заранее подсунула
+     * жертве свой идентификатор сессии. Тогда общая проверка отвергала бы
+     * законный вход, и жертва не смогла бы войти вовсе, пока не почистит cookie:
+     * подкладывание cookie превращалось бы в отказ в обслуживании.
+     *
+     * Взамен эти маршруты закрыты `sameOriginGuard` и `jsonOnlyGuard`, которые
+     * работают и без сессии, а сам вход отзывает предъявленную сессию и выдаёт
+     * новую (защита от фиксации сессии).
+     */
+    if (env.AUTH_MODE === 'local' && PUBLIC_LOCAL_AUTH_ROUTES.has(request.routeOptions.url ?? '')) {
       return Promise.resolve();
     }
     // `call` сохраняет `this` хука: Fastify объявляет его экземпляром сервера.

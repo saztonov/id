@@ -62,6 +62,7 @@ import {
 import { conflict, internal, notFound, unprocessable } from '../../lib/problem.js';
 import { findSectionMarkers } from '../../segmentation/prompts.js';
 import { currentAuth } from '../../middleware/require-auth.js';
+import { registerLocalAdminRoutes } from '../../auth/local/admin-routes.js';
 import { requirePermission } from '../../middleware/require-permission.js';
 import {
   editableStates,
@@ -119,6 +120,11 @@ export function registerAdminRoutes(app: AppInstance): void {
 
 function registerUserRoutes(app: AppInstance): void {
   const manage = requirePermission('users.manage');
+
+  // Создание учётных записей, сброс паролей и заявки на регистрацию существуют
+  // только там, где портал распоряжается паролями. В федеративном режиме
+  // пользователи заводятся входом через провайдера, и этих маршрутов нет.
+  if (app.env.AUTH_MODE === 'local') registerLocalAdminRoutes(app);
 
   app.get(
     `${PREFIX}/users`,
@@ -336,6 +342,12 @@ function registerUserRoutes(app: AppInstance): void {
       const changed = await setUserActive(app.db, auth.scope, userId, false);
       if (!changed) throw notFound('Пользователь не найден.');
 
+      // Сессия НЕ отзывается намеренно. Отключение действует немедленно и без
+      // этого: `buildScope` возвращает отказ `inactive` уже на следующем
+      // запросе, и пользователь получает 403 с внятной причиной вместо
+      // молчаливого разлогинивания. Заодно ошибочное отключение отменяется
+      // включением обратно, не заставляя человека входить заново.
+
       await audit(app, request, {
         action: 'user.deactivated',
         entityType: 'user',
@@ -365,6 +377,7 @@ function toUserResponse(user: UserSummary) {
     contractorId: user.contractorId,
     roles: [...user.roles],
     createdAt: toIsoTimestamp(user.createdAt),
+    local: user.local,
   };
 }
 

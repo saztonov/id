@@ -18,7 +18,17 @@ const BASE_URL = `http://127.0.0.1:${String(PORT)}`;
 
 export default defineConfig({
   testDir: './e2e',
-  testMatch: /.*\.spec\.ts$/,
+  /**
+   * Сценарии разведены по режимам стенда.
+   *
+   * `local-auth.spec.ts` требует `AUTH_MODE=local`, где нет ни redirect-потока,
+   * ни dev-заглушки; остальные сценарии, наоборот, входят через заглушку.
+   * Собрать их в один прогон нельзя: режим у стенда один, и он задаётся при
+   * запуске. Поэтому прогон выбирается переменной `E2E_AUTH_MODE`, а сценарии
+   * фильтруются по ней же — иначе половина набора падала бы «не тем» отказом.
+   */
+  testMatch: process.env['E2E_AUTH_MODE'] === 'local' ? /local-auth\.spec\.ts$/ : /.*\.spec\.ts$/,
+  testIgnore: process.env['E2E_AUTH_MODE'] === 'local' ? [] : ['**/local-auth.spec.ts'],
   // Артефакты прогона (трассы, снимки, `.last-run.json`) кладутся ВНЕ дерева
   // исходников. Значение по умолчанию — `test-results/` в корне пакета — попадало
   // в `prettier --check` и роняло `format:check` двенадцатью файлами, которые
