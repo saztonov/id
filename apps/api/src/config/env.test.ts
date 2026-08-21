@@ -552,7 +552,7 @@ describe('AUTH_MODE=local', () => {
 
     expect(env.AUTH_LOCAL_SCRYPT_COST_LOG2).toBe(16);
     expect(env.AUTH_LOCAL_SCRYPT_PARALLELISM).toBe(2);
-    expect(env.AUTH_LOCAL_PASSWORD_MIN_LENGTH).toBe(12);
+    expect(env.AUTH_LOCAL_PASSWORD_MIN_LENGTH).toBe(8);
     expect(env.AUTH_LOCAL_LOCKOUT_MINUTES).toBe(30);
     expect(env.AUTH_LOCAL_BACKOFF_MAX_SECONDS).toBe(30);
     expect(env.AUTH_LOCAL_REGISTRATION_ENABLED).toBe(true);

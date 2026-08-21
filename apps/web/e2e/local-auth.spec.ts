@@ -146,17 +146,17 @@ test.describe('заявка на регистрацию', () => {
     await expect(page.getByText(email)).toBeVisible();
   });
 
-  test('слабый пароль отвергается с объяснением', async ({ page }) => {
+  test('слишком короткий пароль отвергается с объяснением', async ({ page }) => {
     await page.goto('/register');
     await page.getByTestId('register-email').fill('slabyy@e2e.example');
     await page.getByTestId('register-fullname').fill('Слабый Пароль');
-    await page.getByTestId('register-password').fill('password123456');
-    await page.getByLabel('Пароль ещё раз').fill('password123456');
+    await page.getByTestId('register-password').fill('1234567');
+    await page.getByLabel('Пароль ещё раз').fill('1234567');
     await page.getByTestId('register-submit').click();
 
     // Отказ по паролю ничего не сообщает об учётных записях портала, поэтому
     // его можно и нужно объяснять честно.
-    await expect(page.getByText(/распространённых/u)).toBeVisible();
+    await expect(page.getByText(/короче/u)).toBeVisible();
   });
 });
 

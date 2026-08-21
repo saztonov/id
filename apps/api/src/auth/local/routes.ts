@@ -46,7 +46,7 @@ import {
   replacePassword,
 } from './credentials.js';
 import { jsonOnlyGuard, sameOriginGuard } from './origin-guard.js';
-import { checkPasswordPolicy, type PasswordContext } from './policy.js';
+import { checkPasswordPolicy } from './policy.js';
 import {
   HashLimiter,
   hashPassword,
@@ -317,14 +317,10 @@ export function registerLocalAuthRoutes(app: AppInstance): void {
         const { email, fullName, position, password } = request.body;
         const login = canonicalizeLogin(email);
 
-        // Политика проверяется всегда и первой: отказ по слабому паролю ничего
-        // не сообщает о существовании учётной записи, поэтому его можно и нужно
-        // возвращать честно.
-        const violations = checkPasswordPolicy(
-          password,
-          { login, email, fullName, organizationName: null },
-          env,
-        );
+        // Политика проверяется всегда и первой: отказ по слишком короткому
+        // паролю ничего не сообщает о существовании учётной записи, поэтому его
+        // можно и нужно возвращать честно.
+        const violations = checkPasswordPolicy(password, env);
         if (violations.length > 0) throw policyProblem(violations);
 
         // Хэш считается ДО проверки занятости адреса и независимо от неё: иначе
@@ -429,13 +425,7 @@ export function registerLocalAuthRoutes(app: AppInstance): void {
       }
       if (!currentOk) throw unauthorized('Текущий пароль неверен.');
 
-      const context: PasswordContext = {
-        login: credential.loginKey,
-        email: credential.email,
-        fullName: credential.fullName,
-        organizationName: credential.organizationName,
-      };
-      const violations = [...checkPasswordPolicy(request.body.newPassword, context, env)];
+      const violations = [...checkPasswordPolicy(request.body.newPassword, env)];
       if (await verifyPassword(request.body.newPassword, credential.passwordHash)) {
         violations.push({ code: 'unchanged', message: 'Новый пароль совпадает с текущим.' });
       }

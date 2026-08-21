@@ -235,7 +235,7 @@ describe('состав маршрутов', () => {
     const response = await app.inject({ method: 'GET', url: '/api/v1/auth/config' });
 
     expect(response.statusCode).toBe(200);
-    expect(response.json()).toEqual({ registrationEnabled: true, passwordMinLength: 12 });
+    expect(response.json()).toEqual({ registrationEnabled: true, passwordMinLength: 8 });
   });
 });
 
@@ -510,13 +510,13 @@ describe('смена пароля', () => {
     expect(response.statusCode).toBe(401);
   });
 
-  it('отвергает слабый пароль со списком причин', async () => {
+  it('отвергает слишком короткий пароль со списком причин', async () => {
     const auth = await signIn(LOGIN_ACTIVE);
     const response = await app.inject({
       method: 'POST',
       url: '/api/v1/auth/password',
       headers: authHeaders(auth),
-      payload: { currentPassword: PASSWORD, newPassword: 'password123456' },
+      payload: { currentPassword: PASSWORD, newPassword: '1234567' },
     });
 
     expect(response.statusCode).toBe(422);
@@ -629,12 +629,12 @@ describe('регистрация', () => {
     expect(await db.query('select id from registration_requests')).toHaveLength(0);
   });
 
-  it('отвергает слабый пароль честно', async () => {
+  it('отвергает слишком короткий пароль честно', async () => {
     // Об учётной записи это ничего не сообщает, поэтому молчать незачем.
     const response = await register({
       email: NEW_LOGIN,
       fullName: 'Новиков Новик',
-      password: 'qwerty123456',
+      password: 'qwerty1',
     });
 
     expect(response.statusCode).toBe(422);

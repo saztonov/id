@@ -30,7 +30,6 @@ export interface CredentialWithUser extends CredentialRecord {
   readonly fullName: string;
   readonly email: string | null;
   readonly contractorId: string | null;
-  readonly organizationName: string | null;
 }
 
 export interface CredentialsDb {
@@ -51,7 +50,6 @@ type CredentialRow = {
   full_name: string;
   email: string | null;
   contractor_id: string | null;
-  organization_name: string | null;
 };
 
 function toRecord(row: CredentialRow): CredentialWithUser {
@@ -69,18 +67,15 @@ function toRecord(row: CredentialRow): CredentialWithUser {
     fullName: row.full_name,
     email: row.email,
     contractorId: row.contractor_id,
-    organizationName: row.organization_name,
   };
 }
 
 const SELECTION = `c.user_id, c.login_key, c.login_display, c.password_hash,
        c.must_change_password, c.password_changed_at,
-       u.is_active, u.full_name, u.email, u.contractor_id,
-       o.name as organization_name`;
+       u.is_active, u.full_name, u.email, u.contractor_id`;
 
 const FROM = `from user_credentials c
-       join users u on u.id = c.user_id
-       left join counterparties o on o.id = u.contractor_id`;
+       join users u on u.id = c.user_id`;
 
 /**
  * Поиск по логину.
@@ -89,9 +84,6 @@ const FROM = `from user_credentials c
  * канонизация нашла бы строку через `citext` (он и так регистронезависим), но
  * ключ троттлинга посчитался бы от другой формы — и блокировка обходилась бы
  * сменой регистра. Единая точка входа делает такую ошибку невозможной.
- *
- * Название организации подтягивается сразу: оно нужно политике пароля, а второй
- * запрос за ним выполнялся бы на каждой смене пароля.
  */
 export async function findCredentialByLogin(
   db: CredentialsDb,
