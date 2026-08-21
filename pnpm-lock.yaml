@@ -471,9 +471,6 @@ importers:
 
   tools/migrator:
     dependencies:
-      '@id/db':
-        specifier: workspace:*
-        version: link:../../packages/db
       pg:
         specifier: 8.23.0
         version: 8.23.0
