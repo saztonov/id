@@ -114,6 +114,17 @@ test.describe('вход паролем', () => {
   });
 });
 
+test.describe('встроенный администратор', () => {
+  test('входит выданным паролем и попадает прямо на форму смены', async ({ page }) => {
+    // Ради этого учётная запись и заведена: свежее развёртывание открывается в
+    // браузере и пускает внутрь. Пароль лежит в репозитории, поэтому портал
+    // сразу требует его сменить — до смены работать нечем.
+    await signInWithPassword(page, 'admin', 'qwedcxz1@');
+
+    await expect(page.getByTestId('must-change-password')).toBeVisible();
+  });
+});
+
 test.describe('заявка на регистрацию', () => {
   test('подаётся и попадает в очередь администратора', async ({ page }) => {
     const email = `zayavka-${String(Date.now())}@e2e.example`;

@@ -123,16 +123,16 @@ export function LoginPage(): ReactNode {
         <Form<FormValues> layout="vertical" onFinish={submit} requiredMark={false}>
           <Form.Item
             name="email"
-            label="Адрес электронной почты"
-            rules={[{ required: true, message: 'Укажите адрес' }]}
+            label="Логин или адрес почты"
+            rules={[{ required: true, message: 'Укажите логин' }]}
           >
-            <Input
-              type="email"
-              autoComplete="username"
-              autoFocus
-              size="large"
-              data-testid="login-email"
-            />
+            {/* Поле НЕ объявлено `type="email"` намеренно: браузер проверяет
+                такие поля сам и отказывается отправлять форму со значением без
+                собаки — а логином может быть не адрес (встроенный `admin`).
+                Сервер формат тоже не проверяет: вход принимает любую строку от
+                трёх символов. Проверять адрес обязана регистрация, и там это
+                поле объявлено адресом. */}
+            <Input autoComplete="username" autoFocus size="large" data-testid="login-email" />
           </Form.Item>
 
           <Form.Item
