@@ -119,7 +119,7 @@ test.describe('встроенный администратор', () => {
     // Ради этого учётная запись и заведена: свежее развёртывание открывается в
     // браузере и пускает внутрь. Пароль лежит в репозитории, поэтому портал
     // сразу требует его сменить — до смены работать нечем.
-    await signInWithPassword(page, 'admin', 'qwedcxz1@');
+    await signInWithPassword(page, 'admin@test.com', 'qwedcxz1@');
 
     await expect(page.getByTestId('must-change-password')).toBeVisible();
   });

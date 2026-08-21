@@ -40,8 +40,13 @@ const MIGRATIONS_DIR = join(
   'migrations',
 );
 
-/** Учётные данные встроенного администратора: те же, что в seed-миграции. */
-const LOGIN = 'admin';
+/**
+ * Учётные данные встроенного администратора: те же, что в seed-миграциях.
+ *
+ * Логин — адрес почты, как у всех остальных: до подключения Keycloak им служит
+ * введённый адрес, и исключений из этого правила нет.
+ */
+const LOGIN = 'admin@test.com';
 const PASSWORD = 'qwedcxz1@';
 
 const SAME_ORIGIN = { 'sec-fetch-site': 'same-origin', 'content-type': 'application/json' };
@@ -129,7 +134,8 @@ describe('seed', () => {
          from user_credentials c
          join users u on u.id = c.user_id
          join user_roles r on r.user_id = u.id
-        where c.login_key = 'admin'`,
+        where c.login_key = $1`,
+      [LOGIN],
     );
 
     expect(rows).toHaveLength(1);
@@ -140,8 +146,9 @@ describe('seed', () => {
       // Ограничение последствий: пароль из git обязан быть сменён при первом входе.
       must_change_password: true,
     });
-    // `admin` адресом почты не является и притворяться им не должен.
-    expect(rows[0]?.email).toBeNull();
+    // Логин и адрес — одно и то же значение: правило «логином служит введённый
+    // адрес» не имеет исключений.
+    expect(rows[0]?.email).toBe(LOGIN);
   });
 
   it('не пишет в журнал', async () => {
@@ -162,7 +169,9 @@ describe('seed', () => {
     await db.exec(seed?.sql ?? '');
     await db.exec(seed?.sql ?? '');
 
-    const rows = await db.query(`select user_id from user_credentials where login_key = 'admin'`);
+    const rows = await db.query('select user_id from user_credentials where login_key = $1', [
+      LOGIN,
+    ]);
     expect(rows).toHaveLength(1);
   });
 
@@ -191,8 +200,10 @@ describe('первый вход', () => {
     expect(me.json()).toMatchObject({ authMode: 'local', mustChangePassword: true });
   }, 30_000);
 
-  it('находит учётную запись независимо от регистра логина', async () => {
-    const response = await login('  ADMIN  ', PASSWORD);
+  it('находит учётную запись независимо от регистра и обрамляющих пробелов', async () => {
+    // Адрес часто вставляют из буфера вместе с пробелами; отказ на видимо
+    // верном значении объяснял бы не то.
+    const response = await login('  ADMIN@Test.COM  ', PASSWORD);
 
     expect(response.statusCode).toBe(200);
   }, 30_000);
@@ -213,6 +224,14 @@ describe('первый вход', () => {
 
     expect(response.statusCode).toBe(401);
   }, 30_000);
+
+  it('логин не в форме адреса отвергается схемой', async () => {
+    // Учётной записи с таким логином завести нельзя ни одним из трёх путей,
+    // поэтому отказ по формату ничего не сообщает о содержимом базы.
+    const response = await login('admin', PASSWORD);
+
+    expect(response.statusCode).toBe(422);
+  });
 });
 
 // =====================================================================

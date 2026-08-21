@@ -126,7 +126,16 @@ export function registerLocalAuthRoutes(app: AppInstance): void {
     {
       schema: {
         body: z.object({
-          email: z.string().trim().min(3).max(320),
+          // До подключения Keycloak логином служит введённый адрес: так
+          // заводятся учётные записи всеми тремя путями (регистрация, создание
+          // администратором, CLI). Проверка формата здесь не выдаёт
+          // существования учётной записи — она про синтаксис ввода, а не про
+          // содержимое базы, — и потому не нарушает единообразия отказов.
+          //
+          // Обрамляющие пробелы снимаются ДО проверки: адрес часто вставляют из
+          // буфера вместе с ними, и отказ «это не адрес» на видимо верном
+          // значении объясняет не то.
+          email: z.string().trim().pipe(z.email().max(320)),
           password: passwordBody,
           returnTo: z.string().max(512).optional(),
         }),
@@ -292,7 +301,7 @@ export function registerLocalAuthRoutes(app: AppInstance): void {
       {
         schema: {
           body: z.object({
-            email: z.email().max(320),
+            email: z.string().trim().pipe(z.email().max(320)),
             fullName: z.string().trim().min(2).max(256),
             position: z.string().trim().max(256).optional(),
             password: passwordBody,

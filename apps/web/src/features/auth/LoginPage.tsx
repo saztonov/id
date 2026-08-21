@@ -123,16 +123,24 @@ export function LoginPage(): ReactNode {
         <Form<FormValues> layout="vertical" onFinish={submit} requiredMark={false}>
           <Form.Item
             name="email"
-            label="Логин или адрес почты"
-            rules={[{ required: true, message: 'Укажите логин' }]}
+            label="Адрес электронной почты"
+            rules={[
+              { required: true, message: 'Укажите адрес' },
+              { type: 'email', message: 'Адрес указан неверно' },
+            ]}
           >
-            {/* Поле НЕ объявлено `type="email"` намеренно: браузер проверяет
-                такие поля сам и отказывается отправлять форму со значением без
-                собаки — а логином может быть не адрес (встроенный `admin`).
-                Сервер формат тоже не проверяет: вход принимает любую строку от
-                трёх символов. Проверять адрес обязана регистрация, и там это
-                поле объявлено адресом. */}
-            <Input autoComplete="username" autoFocus size="large" data-testid="login-email" />
+            {/* `type="email"` включает и браузерную проверку формата. Она здесь
+                уместна: до подключения Keycloak логином служит именно адрес, и
+                учётной записи с логином-не-адресом завести нельзя ни одним из
+                трёх путей. Отказ по формату виден до отправки и ничего не
+                сообщает о существовании учётной записи. */}
+            <Input
+              type="email"
+              autoComplete="username"
+              autoFocus
+              size="large"
+              data-testid="login-email"
+            />
           </Form.Item>
 
           <Form.Item

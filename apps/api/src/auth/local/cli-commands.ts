@@ -11,8 +11,11 @@
  * Первого администратора заводит seed-миграция (встроенный `admin`, ADR-0009),
  * поэтому `create` нужен не для первого входа, а для второго администратора и
  * для восстановления, если встроенную учётную запись удалили. `reset` и
- * `unlock` работают и со встроенной: `local-admin reset --email admin` выдаёт
- * новый пароль, когда прежний забыт.
+ * `unlock` работают и со встроенной: `local-admin reset --email admin@test.com`
+ * выдаёт новый пароль, когда прежний забыт.
+ *
+ * `--email` обязан быть адресом: до подключения Keycloak логином служит именно
+ * он, и учётная запись с логином-не-адресом была бы недоступна из браузера.
  *
  * Создавать администратора побочным эффектом старта API по-прежнему нельзя:
  * при нескольких репликах это гонка, а пароль в переменной окружения живёт
@@ -23,6 +26,7 @@
  * журнале процессов.
  */
 import type { Pool } from 'pg';
+import { z } from 'zod';
 
 import type { Env } from '../../config/env.js';
 import { canonicalizeLogin, loginThrottleKey } from './canonical.js';
@@ -58,8 +62,14 @@ export function parseArguments(argv: readonly string[]): Options {
     values.set(flag.slice(2), value);
   }
 
-  const email = values.get('email');
-  if (email === undefined) throw new UsageError('Обязателен --email');
+  const email = values.get('email')?.trim();
+  if (email === undefined || email === '') throw new UsageError('Обязателен --email');
+  if (!z.email().safeParse(email).success) {
+    // До подключения Keycloak логином служит адрес, и другого пути его задать
+    // нет: через эту команду завели бы учётную запись, в которую нельзя войти
+    // из браузера — форма входа не отправит значение без собаки.
+    throw new UsageError(`--email: «${email}» не похож на адрес почты`);
+  }
   if (values.has('password')) {
     // Пароль в аргументах осел бы в истории оболочки и в списке процессов, где
     // его прочитает любой пользователь машины.
