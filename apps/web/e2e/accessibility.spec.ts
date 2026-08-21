@@ -66,6 +66,24 @@ test('администрирование проходит axe', async ({ page })
   await analyze(page);
 });
 
+test('журнал ошибок проходит axe', async ({ page }) => {
+  await signIn(page, KC.admin, '/admin?tab=journal');
+  const panel = page.getByRole('tabpanel', { name: 'Журнал и качество' });
+  await expect(panel).toContainText('Примеров сохранено', { timeout: 30_000 });
+  await analyze(page);
+
+  // Остальные разделы той же вкладки: у каждого своя разметка и свои таблицы.
+  const sections = page.getByRole('radiogroup', { name: 'Раздел журнала' });
+
+  await sections.getByText('Аномалии и скорость', { exact: true }).click();
+  await expect(panel).toContainText('Это счётчики за сутки');
+  await analyze(page);
+
+  await sections.getByText('Качество конвейера', { exact: true }).click();
+  await expect(panel).toContainText('Здесь дефекты качества');
+  await analyze(page);
+});
+
 test('справочник профилей разделов проходит проверку axe', async ({ page }) => {
   await signIn(page, KC.admin, '/catalog?tab=section-profiles');
   await expect(page.getByTestId('section-profile-card').first()).toBeVisible();

@@ -184,3 +184,104 @@ export const JOB_STATUS_LABELS: Record<string, string> = {
  * либо потерял бы числа, либо расходился бы с сервером при каждой правке
  * формулировки — и то и другое хуже, чем показать фразу как есть.
  */
+
+// =====================================================================
+// Журнал ошибок (§11)
+// =====================================================================
+
+/**
+ * Оси классификации проблемы.
+ *
+ * Их четыре, и на экране они стоят рядом именно потому, что отвечают на разные
+ * вопросы: `domain` — что сломалось, `execution` — где выполнялось,
+ * `source` — какой процесс сообщил, `pipelineStage` — на каком шаге обработки
+ * поставки. Свести их в одну колонку значило бы вернуть то самое единственное
+ * поле `kind`, ради ухода от которого они и разделены.
+ */
+export const ERROR_SOURCE_LABELS: Record<string, string> = {
+  api: 'API',
+  worker: 'Воркер',
+  web: 'Браузер',
+  unknown: 'Неизвестно',
+};
+
+export const ERROR_EXECUTION_LABELS: Record<string, string> = {
+  http: 'Запрос',
+  job: 'Задача очереди',
+  process: 'Процесс',
+  client: 'Клиент',
+  unknown: 'Неизвестно',
+};
+
+export const ERROR_DOMAIN_LABELS: Record<string, string> = {
+  db: 'База данных',
+  llm: 'Модель',
+  recognition: 'Распознавание',
+  storage: 'Хранилище',
+  auth: 'Доступ',
+  integration: 'Интеграция',
+  application: 'Приложение',
+  unknown: 'Не определён',
+};
+
+export const ERROR_SEVERITY_LABELS: Record<string, string> = {
+  warn: 'Предупреждение',
+  error: 'Ошибка',
+  fatal: 'Критично',
+};
+
+export const ERROR_STATUS_LABELS: Record<string, string> = {
+  new: 'Новая',
+  ack: 'В работе',
+  resolved: 'Закрыта',
+};
+
+export const ERROR_ACTION_LABELS: Record<string, string> = {
+  acknowledge: 'взята в работу',
+  comment: 'комментарий',
+  resolve: 'закрыта',
+  reopen: 'открыта снова',
+  assign: 'назначена',
+};
+
+export const ERROR_RESOLUTION_TYPE_LABELS: Record<string, string> = {
+  fixed: 'Исправлено',
+  wontfix: 'Не будем чинить',
+  duplicate: 'Дубликат',
+  external: 'Причина вне портала',
+  not_reproducible: 'Не воспроизводится',
+};
+
+/**
+ * Причины дефектов качества конвейера (§11, ADR-0010).
+ *
+ * Рядом с подписью на экране показывается и сам код: подпись объясняет смысл
+ * человеку, код — то, по чему фильтруют и что уходит в выгрузку.
+ */
+export const FEEDBACK_REASON_LABELS: Record<string, string> = {
+  'vlm.invalid_json': 'Ответ модели не разобран как JSON',
+  'vlm.schema_mismatch': 'Ответ модели не по схеме',
+  'vlm.refusal': 'Модель не дала результата',
+  'vlm.empty_result': 'Пустой результат распознавания',
+  'extract.field_missing': 'Реквизит не извлечён',
+  'classify.low_confidence': 'Классификация неуверенная',
+  'detect.no_blocks': 'Обводок не найдено',
+  'detect.low_score': 'Обводки с низкой уверенностью',
+  'match.ambiguous': 'Сопоставление неоднозначно',
+  'doc_split.unassigned_pages': 'Страницы не отнесены к документам',
+  'manual.field_corrected': 'Инженер исправил реквизит',
+  'manual.block_redrawn': 'Инженер перерисовал обводку',
+  'manual.type_changed': 'Инженер сменил вид ИД',
+};
+
+export const FEEDBACK_STAGE_LABELS: Record<string, string> = {
+  uploaded: 'Приём файлов',
+  layout: 'Разметка',
+  detect: 'Детекция',
+  recognition: 'Распознавание',
+  analysis: 'Анализ',
+  match: 'Сопоставление',
+  checks: 'Проверки',
+  ready: 'Готово',
+  failed: 'Отказ',
+};

@@ -62,6 +62,22 @@ export interface HttpMetricsSink {
   }): void;
 }
 
+/**
+ * Приёмник медленных запросов (реализуется `anomalies.ts`).
+ *
+ * Объявлен здесь по той же причине, что `HttpMetricsSink`: модуль журнала
+ * запросов не должен зависеть от модуля, знающего схему БД.
+ */
+export interface SlowRequestSink {
+  recordSlow(sample: {
+    readonly kind: 'http';
+    readonly target: string;
+    readonly durationMs: number;
+    readonly thresholdMs: number;
+    readonly requestId?: string | undefined;
+  }): void;
+}
+
 export interface RequestLogFields {
   readonly route?: string | undefined;
   readonly userId?: string | undefined;
@@ -113,6 +129,13 @@ export interface RequestLogOptions {
   /** Пути без логирования и без метрик: `/metrics`, проверки живости. */
   readonly ignorePaths?: readonly string[];
   readonly metrics?: HttpMetricsSink;
+  /**
+   * Куда складывать превышения `slowRequestMs`.
+   *
+   * Необязателен: без него медленный запрос по-прежнему становится строкой
+   * `warn` и точкой гистограммы, просто не копится в почасовой счётчик.
+   */
+  readonly slowSink?: SlowRequestSink | undefined;
   /**
    * Принимать `x-request-id` от клиента (§15, `TRUST_REQUEST_ID`).
    *
@@ -279,18 +302,32 @@ export function createRequestLogHandler(options: RequestLogOptions): RequestLogH
       // Клиент должен уметь назвать идентификатор в обращении в поддержку.
       if (!res.headersSent) res.setHeader(REQUEST_ID_HEADER, requestId);
 
-      if (metrics && !isIgnored(req)) {
+      if ((metrics || options.slowSink) && !isIgnored(req)) {
         const startedAt = Date.now();
         let observed = false;
         res.once('close', () => {
           if (observed) return;
           observed = true;
-          metrics.observeHttpRequest({
+          const durationMs = Date.now() - startedAt;
+          const route = routeOf(req);
+          metrics?.observeHttpRequest({
             method: req.method ?? 'UNKNOWN',
-            route: routeOf(req),
+            route,
             statusCode: res.statusCode,
-            durationMs: Date.now() - startedAt,
+            durationMs,
           });
+          if (durationMs >= slowRequestMs) {
+            // Цель — шаблон маршрута, а не путь: конкретный путь сделал бы
+            // число строк счётчика неограниченным, а на вопрос «что тормозит»
+            // отвечает именно шаблон.
+            options.slowSink?.recordSlow({
+              kind: 'http',
+              target: `${req.method ?? 'UNKNOWN'} ${route}`,
+              durationMs,
+              thresholdMs: slowRequestMs,
+              requestId: requestIdOf(req),
+            });
+          }
         });
       }
 

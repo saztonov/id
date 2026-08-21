@@ -102,6 +102,14 @@ export interface Metrics {
   observeJobRun(sample: JobRunSample): void;
   observeExternalCall(sample: ExternalCallSample): void;
   observeLlmUsage(sample: LlmUsageSample): void;
+  /**
+   * События журнала, не доехавшие до БД.
+   *
+   * Счётчик обязателен, а не желателен: журнал ошибок объявлен best-effort, и
+   * без видимой величины потерь «ошибок нет» неотличимо от «журнал не
+   * справился». Второе — сообщение о том, что экрану сейчас верить нельзя.
+   */
+  observeJournalDropped(count: number): void;
   setQueueDepth(samples: readonly QueueDepthSample[]): void;
   setDeadJobs(samples: readonly DeadJobsSample[]): void;
   /** Снимок очереди на момент сбора: без него значения отстают на интервал. */
@@ -168,6 +176,7 @@ class PromMetrics implements Metrics {
   private readonly deadJobs: Gauge<'job_type'>;
   private readonly llmCost: Counter<'model' | 'stage'>;
   private readonly llmTokens: Counter<'model' | 'stage' | 'kind'>;
+  private readonly journalDropped: Counter<string>;
   private queueSnapshotProvider: (() => Promise<QueueSnapshot>) | undefined;
 
   constructor(options: MetricsOptions) {
@@ -238,6 +247,12 @@ class PromMetrics implements Metrics {
       registers,
     });
 
+    this.journalDropped = new Counter({
+      name: 'observability_dropped_total',
+      help: 'События журнала ошибок, потерянные из-за переполнения или сбоя записи',
+      registers,
+    });
+
     const url = options.path ?? DEFAULT_PATH;
     this.route = {
       method: 'GET',
@@ -287,6 +302,10 @@ class PromMetrics implements Metrics {
       },
       sample.durationMs / 1000,
     );
+  }
+
+  observeJournalDropped(count: number): void {
+    if (count > 0) this.journalDropped.inc(count);
   }
 
   observeLlmUsage(sample: LlmUsageSample): void {
@@ -375,6 +394,7 @@ class DisabledMetrics implements Metrics {
   observeJobRun(): void {}
   observeExternalCall(): void {}
   observeLlmUsage(): void {}
+  observeJournalDropped(): void {}
   setQueueDepth(): void {}
   setDeadJobs(): void {}
   setQueueSnapshotProvider(): void {}

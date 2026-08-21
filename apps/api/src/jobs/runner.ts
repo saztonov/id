@@ -40,7 +40,9 @@
 import type { Logger } from 'pino';
 import { childLogger, newRequestId, runWithContext } from '../observability/context.js';
 import {
+  classifyErrorDomain,
   errorClassOf,
+  errorDigest,
   normalizeErrorMessage,
   type ErrorReporter,
 } from '../observability/errors.js';
@@ -57,6 +59,7 @@ import {
   type ClaimedJob,
 } from '../db/repositories/jobs.js';
 import type { Database } from '../db/repositories/users.js';
+import { pruneJournal } from '../db/repositories/error-journal.js';
 import { emitRevisionEvent, type JobContext, type JobRegistry } from './registry.js';
 import {
   backoffDelayMs,
@@ -78,6 +81,11 @@ const MAX_HEARTBEAT_MS = 20_000;
 const DEFAULT_POLL_INTERVAL_MS = 1_000;
 const DEFAULT_REAPER_INTERVAL_MS = 30_000;
 const DEFAULT_OUTBOX_INTERVAL_MS = 2_000;
+/**
+ * Раз в час: очистка удаляет хвост суточной давности и старше, и чаще ей
+ * нечего делать. Реже — хвост растёт заметными скачками.
+ */
+const DEFAULT_PRUNE_INTERVAL_MS = 3_600_000;
 /** Сколько ждать текущие задачи при остановке: Docker шлёт SIGKILL через 10 с. */
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 8_000;
 
@@ -195,6 +203,23 @@ export interface JobRunnerOptions {
   readonly pollIntervalMs?: number | undefined;
   readonly reaperIntervalMs?: number | undefined;
   readonly outboxIntervalMs?: number | undefined;
+  /**
+   * Очистка журнала ошибок по срокам хранения (§11).
+   *
+   * Не задано — цикл не запускается вовсе. Это не «выключено по умолчанию из
+   * осторожности»: в тестах и в процессах без журнала цикл, который раз в час
+   * ходит в БД удалять чужие строки, — чистый вред, а отсутствующий цикл
+   * невозможно спутать с работающим.
+   */
+  readonly journalRetention?:
+    | {
+        readonly sampleRetentionDays: number;
+        readonly statsRetentionDays: number;
+        readonly slowRetentionDays: number;
+        readonly samplesPerIssue: number;
+      }
+    | undefined;
+  readonly pruneIntervalMs?: number | undefined;
   readonly backoff?: BackoffPolicy | undefined;
   readonly shutdownTimeoutMs?: number | undefined;
 }
@@ -228,6 +253,7 @@ export class JobRunner {
   readonly #pollIntervalMs: number;
   #reaperTimer: NodeJS.Timeout | null = null;
   #outboxTimer: NodeJS.Timeout | null = null;
+  #pruneTimer: NodeJS.Timeout | null = null;
   #started = false;
   #stopping = false;
 
@@ -279,6 +305,7 @@ export class JobRunner {
     for (const queue of JOB_QUEUES) this.#schedule(queue, 0);
     this.#scheduleReaper();
     this.#scheduleOutbox();
+    if (this.#options.journalRetention !== undefined) this.#schedulePrune();
   }
 
   /**
@@ -298,8 +325,10 @@ export class JobRunner {
     }
     if (this.#reaperTimer !== null) clearTimeout(this.#reaperTimer);
     if (this.#outboxTimer !== null) clearTimeout(this.#outboxTimer);
+    if (this.#pruneTimer !== null) clearTimeout(this.#pruneTimer);
     this.#reaperTimer = null;
     this.#outboxTimer = null;
+    this.#pruneTimer = null;
 
     const timeoutMs = this.#options.shutdownTimeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS;
     const pending = this.#running.map((entry) => entry.promise);
@@ -472,6 +501,55 @@ export class JobRunner {
         'reaper не отработал',
       );
       void this.#options.errorReporter.report(error, { extra: { source: 'reaper' } });
+    }
+  }
+
+  /**
+   * Очистка журнала по срокам хранения.
+   *
+   * Цикл живёт в каждом процессе с исполнителем задач, но одновременно работает
+   * только один: `pruneJournal` берёт advisory-блокировку и не получивший её
+   * уходит без работы. Выделять очистку в отдельный процесс или в задачу
+   * очереди не за чем — она обслуживает саму наблюдаемость и не должна зависеть
+   * от того, жива ли очередь.
+   */
+  #schedulePrune(): void {
+    if (this.#stopping) return;
+    const interval = this.#options.pruneIntervalMs ?? DEFAULT_PRUNE_INTERVAL_MS;
+    this.#pruneTimer = setTimeout(() => {
+      void this.#pruneOnce().finally(() => {
+        this.#schedulePrune();
+      });
+    }, interval);
+    this.#pruneTimer.unref();
+  }
+
+  async #pruneOnce(): Promise<void> {
+    const retention = this.#options.journalRetention;
+    if (retention === undefined) return;
+
+    try {
+      const result = await pruneJournal(this.#options.db, retention);
+      if (!result.locked) return;
+      this.#options.logger.info(
+        {
+          event: 'journal_pruned',
+          samples_deleted: result.samplesDeleted,
+          stats_deleted: result.statsDeleted,
+        },
+        'журнал ошибок очищен по сроку хранения',
+      );
+    } catch (error) {
+      // Очистка — обслуживание: её сбой не должен ни ронять исполнителя, ни
+      // прекращать цикл. Но и молчать нельзя, иначе таблица растёт незаметно.
+      this.#options.logger.error(
+        { event: 'journal_prune_failed', ...errorDigest(error) },
+        'не удалось очистить журнал ошибок',
+      );
+      void this.#options.errorReporter.report(error, {
+        execution: 'process',
+        extra: { source: 'journal_prune' },
+      });
     }
   }
 
@@ -737,12 +815,27 @@ export class JobRunner {
       durationMs,
     });
 
-    // В `error_events` уходит исходная ошибка со стеком: там дедупликация по
-    // отпечатку, и по ней видно, сколько раз это уже случалось (§11).
+    // В журнал уходит исходная ошибка со стеком: там дедупликация по отпечатку,
+    // и по ней видно, сколько раз это уже случалось (§11).
+    //
+    // Стадия берётся из `JOB_DEFINITIONS`, а не из префикса имени задачи.
+    // Разбор имени ошибся бы молча на `layout.reconcile` (стадия распознавания,
+    // а не разметки) и устаревал бы при каждом новом типе — то есть ровно так,
+    // как это уже случилось с классификацией отказов (см. `classifyFailure`).
+    const definition = isJobType(job.type) ? jobDefinition(job.type) : undefined;
     void this.#options.errorReporter.report(failure.error, {
       jobType: job.type,
       jobId: job.jobId,
       attempt: job.attempt,
+      execution: 'job',
+      ...(definition?.stage !== undefined && definition.stage !== null
+        ? { pipelineStage: definition.stage }
+        : {}),
+      // Очередь `llm` — это факт о задаче, а не догадка о причине: домен
+      // назначается только когда по самой ошибке его определить не удалось.
+      ...(definition?.queue === 'llm' && classifyErrorDomain(failure.error) === 'unknown'
+        ? { domain: 'llm' as const }
+        : {}),
       ...(job.revisionId !== null ? { revisionId: job.revisionId } : {}),
     });
 

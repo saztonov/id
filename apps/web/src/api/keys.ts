@@ -70,4 +70,13 @@ export const adminKeys = {
   queues: () => ['admin', 'queues'] as const,
   audit: (filter: string) => ['admin', 'audit', filter] as const,
   ruleCatalog: () => ['admin', 'rule-catalog'] as const,
+  errors: (filter: string) => ['admin', 'errors', filter] as const,
+  errorIssue: (issueId: string) => ['admin', 'errors', 'one', issueId] as const,
+  errorSeries: (issueId: string) => ['admin', 'errors', 'series', issueId] as const,
+  errorSummary: () => ['admin', 'errors', 'summary'] as const,
+  errorSamples: (filter: string) => ['admin', 'errors', 'samples', filter] as const,
+  feedbackSummary: (filter: string) => ['admin', 'feedback', 'summary', filter] as const,
+  feedbackEvents: (filter: string) => ['admin', 'feedback', 'events', filter] as const,
+  httpAnomalies: () => ['admin', 'http-anomalies'] as const,
+  slowOperations: (kind: string) => ['admin', 'slow-operations', kind] as const,
 };

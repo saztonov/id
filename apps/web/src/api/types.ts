@@ -794,6 +794,213 @@ export interface AuditEntry {
   requestId: string | null;
 }
 
+/**
+ * Журнал ошибок (§11).
+ *
+ * `events` — число СОБЫТИЙ за выбранный период, из почасовых бакетов.
+ * `signatures` — сколько разных отпечатков отнесено к этой проблеме. Числа
+ * примеров в строке нет намеренно: примеры прорежены политикой, и рядом с
+ * частотой такое число читалось бы как её уточнение.
+ */
+export interface ErrorIssue {
+  id: string;
+  title: string;
+  status: 'new' | 'ack' | 'resolved';
+  priority: string;
+  isSynthetic: boolean;
+  source: string;
+  execution: string;
+  domain: string;
+  pipelineStage: string | null;
+  severity: string;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  firstRelease: string | null;
+  lastRelease: string | null;
+  assigneeUserId: string | null;
+  resolvedAt: string | null;
+  resolution: string | null;
+  events: number;
+  signatures: number;
+}
+
+export interface ErrorSignature {
+  fingerprint: string;
+  algoVersion: number;
+  errorClass: string;
+  messageTemplate: string;
+  topFrame: string | null;
+  source: string;
+  firstSeenAt: string;
+  lastSeenAt: string;
+}
+
+/** Диагностический пример. Их число НЕ равно числу событий — см. `ErrorIssue`. */
+export interface ErrorSample {
+  id: number;
+  at: string;
+  fingerprint: string;
+  source: string;
+  execution: string;
+  domain: string;
+  pipelineStage: string | null;
+  severity: string;
+  release: string | null;
+  requestId: string | null;
+  clientEventId: string | null;
+  userId: string | null;
+  route: string | null;
+  statusCode: number | null;
+  errorCode: string | null;
+  objectId: string | null;
+  revisionId: string | null;
+  jobId: string | null;
+  jobType: string | null;
+  attempt: number | null;
+  repeatCount: number;
+  context: unknown;
+}
+
+export interface ErrorIssueAction {
+  id: number;
+  at: string;
+  actorUserId: string | null;
+  action: string;
+  payload: unknown;
+}
+
+export interface ErrorIssueDetail {
+  issue: ErrorIssue;
+  signatures: ErrorSignature[];
+  samples: ErrorSample[];
+  actions: ErrorIssueAction[];
+}
+
+export interface ErrorSeriesPoint {
+  bucketAt: string;
+  release: string;
+  events: number;
+}
+
+/** Три величины названы по отдельности: подменять их друг другом нельзя. */
+export interface ErrorJournalSummary {
+  from: string;
+  to: string;
+  issues: number;
+  newIssues: number;
+  events: number;
+  samples: number;
+  byDomain: { domain: string; events: number }[];
+  bySource: { source: string; events: number }[];
+}
+
+export type ErrorIssueActionInput =
+  | { action: 'acknowledge'; comment?: string }
+  | { action: 'comment'; comment: string }
+  | {
+      action: 'resolve';
+      rootCause: string;
+      resolution: string;
+      resolutionType: 'fixed' | 'wontfix' | 'duplicate' | 'external' | 'not_reproducible';
+      fixedInRelease?: string;
+    }
+  | { action: 'reopen'; comment: string }
+  | { action: 'assign'; assigneeUserId: string | null };
+
+/** Маршрут приёма ошибок браузера (§11). */
+export const CLIENT_ERROR_PATH = '/api/v1/client-errors';
+
+/**
+ * Обстоятельство, при котором ошибка возникла в браузере.
+ *
+ * Это НЕ классификация журнала — её ставит сервер. Здесь только то, чего сервер
+ * знать не может: упало при отрисовке, в необработанном промисе или в
+ * обработчике события. По нему видно, почему у отчёта может не быть стека.
+ */
+export type ClientErrorKind = 'render' | 'unhandled_rejection' | 'window_error' | 'manual';
+
+export interface ClientErrorReport {
+  name: string;
+  message: string;
+  kind: ClientErrorKind;
+  clientEventId: string;
+  repeatCount: number;
+  stack?: string;
+  componentStack?: string;
+  buildId?: string;
+  url?: string;
+}
+
+/**
+ * Срез обратной связи конвейера (§11, ADR-0010).
+ *
+ * `rate` равен `null`, когда знаменатель неизвестен — у стадий без вызова
+ * модели. Это НЕ то же самое, что ноль: ноль читается как «дефектов нет».
+ */
+export interface PipelineFeedbackRow {
+  reasonCode: string;
+  pipelineStage: string | null;
+  promptCode: string | null;
+  promptVersion: number | null;
+  model: string | null;
+  docTypeCode: string | null;
+  defects: number;
+  calls: number | null;
+  rate: number | null;
+  medianScore: number | null;
+}
+
+export interface PipelineFeedbackSummary {
+  from: string;
+  to: string;
+  rows: PipelineFeedbackRow[];
+}
+
+export interface PipelineFeedbackEvent {
+  id: number;
+  at: string;
+  feedbackType: string;
+  reasonCode: string;
+  severity: string;
+  revisionId: string | null;
+  recognitionRunId: string | null;
+  sourcePageId: string | null;
+  workingPageIndex: number | null;
+  layoutBlockId: string | null;
+  fieldCode: string | null;
+  docTypeCode: string | null;
+  pipelineStage: string | null;
+  provider: string | null;
+  model: string | null;
+  promptCode: string | null;
+  promptVersion: number | null;
+  detectorModelVersion: string | null;
+  appRelease: string | null;
+  score: number | null;
+  observed: unknown;
+  expected: unknown;
+  requestId: string | null;
+}
+
+/** Всплеск значимых отказов: счётчик по маршруту, а не запись на отказ. */
+export interface HttpAnomalyRow {
+  route: string;
+  statusCode: number;
+  problemSlug: string;
+  count: number;
+}
+
+/** Медленная операция за период. `avgMs` считается из суммы, а не хранится. */
+export interface SlowOperationRow {
+  kind: string;
+  target: string;
+  count: number;
+  maxMs: number;
+  avgMs: number;
+  thresholdMs: number;
+  sampleRequestId: string | null;
+}
+
 export interface Page<T> {
   items: T[];
   nextCursor: string | null;

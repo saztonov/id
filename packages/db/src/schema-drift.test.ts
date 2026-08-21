@@ -64,7 +64,7 @@ describe('схема Drizzle сгенерирована из миграций', 
       'page_assignments',
       'findings',
       'jobs',
-      'error_events',
+      'error_issues',
     ];
 
     for (const table of expected) {

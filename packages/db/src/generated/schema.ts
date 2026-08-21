@@ -1349,6 +1349,32 @@ export const promptTemplates = pgTable("prompt_templates", {
 	check("prompt_templates_stage_chk", sql`stage = ANY (ARRAY['page_classify'::text, 'doc_split'::text, 'extract'::text, 'check'::text, 'summary'::text, 'recognize'::text])`),
 ]);
 
+export const errorEventsLegacy = pgTable("error_events_legacy", {
+	fingerprint: text().primaryKey().notNull(),
+	errorClass: text("error_class").notNull(),
+	messageTemplate: text("message_template").notNull(),
+	topFrame: text("top_frame"),
+	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
+	count: bigint({ mode: "number" }).default(1).notNull(),
+	firstSeenAt: timestamp("first_seen_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	lastSeenAt: timestamp("last_seen_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	sampleRequestId: text("sample_request_id"),
+	sampleContext: jsonb("sample_context"),
+	status: text().default('new').notNull(),
+	ackedBy: uuid("acked_by"),
+	resolvedAt: timestamp("resolved_at", { withTimezone: true, mode: 'string' }),
+}, (table) => [
+	index("ix_error_events_legacy_acked_by").using("btree", table.ackedBy.asc().nullsLast().op("uuid_ops")),
+	index("ix_error_events_legacy_status").using("btree", table.status.asc().nullsLast().op("text_ops"), table.lastSeenAt.desc().nullsFirst().op("text_ops")),
+	foreignKey({
+			columns: [table.ackedBy],
+			foreignColumns: [users.id],
+			name: "error_events_acked_by_fkey"
+		}),
+	check("error_events_count_chk", sql`count > 0`),
+	check("error_events_status_chk", sql`status = ANY (ARRAY['new'::text, 'ack'::text, 'resolved'::text])`),
+]);
+
 export const jobs = pgTable("jobs", {
 	id: uuid().defaultRandom().primaryKey().notNull(),
 	type: text().notNull(),
@@ -1409,32 +1435,6 @@ export const jobRuns = pgTable("job_runs", {
 	check("job_runs_outcome_chk", sql`(outcome IS NULL) OR (outcome = ANY (ARRAY['succeeded'::text, 'failed'::text, 'cancelled'::text, 'lease_expired'::text]))`),
 	check("job_runs_duration_chk", sql`(duration_ms IS NULL) OR (duration_ms >= 0)`),
 	check("job_runs_finished_chk", sql`(outcome IS NOT NULL) OR (finished_at IS NULL)`),
-]);
-
-export const errorEvents = pgTable("error_events", {
-	fingerprint: text().primaryKey().notNull(),
-	errorClass: text("error_class").notNull(),
-	messageTemplate: text("message_template").notNull(),
-	topFrame: text("top_frame"),
-	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
-	count: bigint({ mode: "number" }).default(1).notNull(),
-	firstSeenAt: timestamp("first_seen_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-	lastSeenAt: timestamp("last_seen_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-	sampleRequestId: text("sample_request_id"),
-	sampleContext: jsonb("sample_context"),
-	status: text().default('new').notNull(),
-	ackedBy: uuid("acked_by"),
-	resolvedAt: timestamp("resolved_at", { withTimezone: true, mode: 'string' }),
-}, (table) => [
-	index("ix_error_events_acked_by").using("btree", table.ackedBy.asc().nullsLast().op("uuid_ops")),
-	index("ix_error_events_status").using("btree", table.status.asc().nullsLast().op("text_ops"), table.lastSeenAt.desc().nullsFirst().op("text_ops")),
-	foreignKey({
-			columns: [table.ackedBy],
-			foreignColumns: [users.id],
-			name: "error_events_acked_by_fkey"
-		}),
-	check("error_events_count_chk", sql`count > 0`),
-	check("error_events_status_chk", sql`status = ANY (ARRAY['new'::text, 'ack'::text, 'resolved'::text])`),
 ]);
 
 export const outbox = pgTable("outbox", {
@@ -1634,6 +1634,65 @@ export const userCredentials = pgTable("user_credentials", {
 	check("user_credentials_login_chk", sql`(length((login_key)::text) >= 3) AND (length((login_key)::text) <= 320)`),
 ]);
 
+export const errorIssues = pgTable("error_issues", {
+	id: uuid().defaultRandom().primaryKey().notNull(),
+	title: text().notNull(),
+	status: text().default('new').notNull(),
+	priority: text().default('normal').notNull(),
+	assigneeUserId: uuid("assignee_user_id"),
+	isSynthetic: boolean("is_synthetic").default(false).notNull(),
+	source: text().default('unknown').notNull(),
+	execution: text().default('unknown').notNull(),
+	domain: text().default('unknown').notNull(),
+	pipelineStage: text("pipeline_stage"),
+	severity: text().default('error').notNull(),
+	firstSeenAt: timestamp("first_seen_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	lastSeenAt: timestamp("last_seen_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	firstRelease: text("first_release"),
+	lastRelease: text("last_release"),
+	ackedAt: timestamp("acked_at", { withTimezone: true, mode: 'string' }),
+	ackedBy: uuid("acked_by"),
+	resolvedAt: timestamp("resolved_at", { withTimezone: true, mode: 'string' }),
+	resolvedBy: uuid("resolved_by"),
+	rootCause: text("root_cause"),
+	resolution: text(),
+	resolutionType: text("resolution_type"),
+	fixedInRelease: text("fixed_in_release"),
+}, (table) => [
+	index("ix_error_issues_acked_by").using("btree", table.ackedBy.asc().nullsLast().op("uuid_ops")),
+	index("ix_error_issues_assignee").using("btree", table.assigneeUserId.asc().nullsLast().op("uuid_ops")),
+	index("ix_error_issues_domain").using("btree", table.domain.asc().nullsLast().op("text_ops"), table.lastSeenAt.desc().nullsFirst().op("text_ops")),
+	index("ix_error_issues_last_seen").using("btree", table.lastSeenAt.desc().nullsFirst().op("timestamptz_ops")),
+	index("ix_error_issues_resolved_by").using("btree", table.resolvedBy.asc().nullsLast().op("uuid_ops")),
+	index("ix_error_issues_source").using("btree", table.source.asc().nullsLast().op("timestamptz_ops"), table.lastSeenAt.desc().nullsFirst().op("text_ops")),
+	index("ix_error_issues_status").using("btree", table.status.asc().nullsLast().op("timestamptz_ops"), table.lastSeenAt.desc().nullsFirst().op("text_ops")),
+	foreignKey({
+			columns: [table.assigneeUserId],
+			foreignColumns: [users.id],
+			name: "error_issues_assignee_user_id_fkey"
+		}),
+	foreignKey({
+			columns: [table.ackedBy],
+			foreignColumns: [users.id],
+			name: "error_issues_acked_by_fkey"
+		}),
+	foreignKey({
+			columns: [table.resolvedBy],
+			foreignColumns: [users.id],
+			name: "error_issues_resolved_by_fkey"
+		}),
+	check("error_issues_status_chk", sql`status = ANY (ARRAY['new'::text, 'ack'::text, 'resolved'::text])`),
+	check("error_issues_priority_chk", sql`priority = ANY (ARRAY['low'::text, 'normal'::text, 'high'::text])`),
+	check("error_issues_source_chk", sql`source = ANY (ARRAY['api'::text, 'worker'::text, 'web'::text, 'unknown'::text])`),
+	check("error_issues_execution_chk", sql`execution = ANY (ARRAY['http'::text, 'job'::text, 'process'::text, 'client'::text, 'unknown'::text])`),
+	check("error_issues_domain_chk", sql`domain = ANY (ARRAY['db'::text, 'llm'::text, 'recognition'::text, 'storage'::text, 'auth'::text, 'integration'::text, 'application'::text, 'unknown'::text])`),
+	check("error_issues_pipeline_stage_chk", sql`(pipeline_stage IS NULL) OR (pipeline_stage = ANY (ARRAY['uploaded'::text, 'layout'::text, 'recognition'::text, 'analysis'::text, 'checks'::text, 'ready'::text, 'failed'::text]))`),
+	check("error_issues_severity_chk", sql`severity = ANY (ARRAY['warn'::text, 'error'::text, 'fatal'::text])`),
+	check("error_issues_resolution_type_chk", sql`(resolution_type IS NULL) OR (resolution_type = ANY (ARRAY['fixed'::text, 'wontfix'::text, 'duplicate'::text, 'external'::text, 'not_reproducible'::text]))`),
+	check("error_issues_resolved_chk", sql`(status <> 'resolved'::text) OR ((resolved_at IS NOT NULL) AND (resolved_by IS NOT NULL))`),
+	check("error_issues_seen_order_chk", sql`last_seen_at >= first_seen_at`),
+]);
+
 export const registrationRequests = pgTable("registration_requests", {
 	id: uuid().defaultRandom().primaryKey().notNull(),
 	loginKey: citext("login_key").notNull(),
@@ -1665,6 +1724,143 @@ export const registrationRequests = pgTable("registration_requests", {
 	check("registration_requests_algorithm_chk", sql`(password_algorithm IS NULL) OR (password_algorithm = 'scrypt'::text)`),
 	check("registration_requests_hash_pair_chk", sql`(password_hash IS NULL) = (password_algorithm IS NULL)`),
 	check("registration_requests_decision_chk", sql`(status = 'pending'::text) = (decided_at IS NULL)`),
+]);
+
+export const errorSignatures = pgTable("error_signatures", {
+	fingerprint: text().primaryKey().notNull(),
+	algoVersion: integer("algo_version").notNull(),
+	issueId: uuid("issue_id").notNull(),
+	errorClass: text("error_class").notNull(),
+	messageTemplate: text("message_template").notNull(),
+	topFrame: text("top_frame"),
+	source: text().default('unknown').notNull(),
+	firstSeenAt: timestamp("first_seen_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	lastSeenAt: timestamp("last_seen_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+}, (table) => [
+	index("ix_error_signatures_issue").using("btree", table.issueId.asc().nullsLast().op("uuid_ops")),
+	index("ix_error_signatures_last_seen").using("btree", table.lastSeenAt.desc().nullsFirst().op("timestamptz_ops")),
+	foreignKey({
+			columns: [table.issueId],
+			foreignColumns: [errorIssues.id],
+			name: "error_signatures_issue_id_fkey"
+		}).onDelete("cascade"),
+	check("error_signatures_algo_chk", sql`algo_version > 0`),
+	check("error_signatures_source_chk", sql`source = ANY (ARRAY['api'::text, 'worker'::text, 'web'::text, 'unknown'::text])`),
+]);
+
+export const processingFeedback = pgTable("processing_feedback", {
+	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
+	id: bigint({ mode: "number" }).primaryKey().generatedAlwaysAsIdentity({ name: "processing_feedback_id_seq", startWith: 1, increment: 1, minValue: 1, maxValue: 9223372036854775807, cache: 1 }),
+	at: timestamp({ withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	feedbackType: text("feedback_type").notNull(),
+	reasonCode: text("reason_code").notNull(),
+	severity: text().default('warn').notNull(),
+	revisionId: uuid("revision_id"),
+	recognitionRunId: uuid("recognition_run_id"),
+	sourcePageId: uuid("source_page_id"),
+	workingPageIndex: integer("working_page_index"),
+	layoutBlockId: uuid("layout_block_id"),
+	fieldCode: text("field_code"),
+	findingId: uuid("finding_id"),
+	jobRunId: uuid("job_run_id"),
+	aiRunId: uuid("ai_run_id"),
+	docTypeCode: text("doc_type_code"),
+	pipelineStage: text("pipeline_stage"),
+	provider: text(),
+	model: text(),
+	promptCode: text("prompt_code"),
+	promptVersion: integer("prompt_version"),
+	detectorModelVersion: text("detector_model_version"),
+	rulesetVersion: text("ruleset_version"),
+	appRelease: text("app_release"),
+	score: doublePrecision(),
+	observed: jsonb(),
+	expected: jsonb(),
+	requestId: text("request_id"),
+}, (table) => [
+	index("ix_processing_feedback_at").using("btree", table.at.desc().nullsFirst().op("timestamptz_ops")),
+	index("ix_processing_feedback_block").using("btree", table.layoutBlockId.asc().nullsLast().op("uuid_ops")).where(sql`(layout_block_id IS NOT NULL)`),
+	index("ix_processing_feedback_doc_type").using("btree", table.docTypeCode.asc().nullsLast().op("text_ops"), table.at.desc().nullsFirst().op("timestamptz_ops")),
+	index("ix_processing_feedback_prompt").using("btree", table.promptCode.asc().nullsLast().op("int4_ops"), table.promptVersion.asc().nullsLast().op("int4_ops"), table.at.desc().nullsFirst().op("timestamptz_ops")),
+	index("ix_processing_feedback_reason").using("btree", table.reasonCode.asc().nullsLast().op("timestamptz_ops"), table.at.desc().nullsFirst().op("text_ops")),
+	index("ix_processing_feedback_revision").using("btree", table.revisionId.asc().nullsLast().op("timestamptz_ops"), table.at.desc().nullsFirst().op("timestamptz_ops")),
+	index("ix_processing_feedback_stage").using("btree", table.pipelineStage.asc().nullsLast().op("text_ops"), table.at.desc().nullsFirst().op("timestamptz_ops")),
+	check("processing_feedback_type_chk", sql`feedback_type = ANY (ARRAY['system_failure'::text, 'recognition_failure'::text, 'wrong_extraction'::text, 'check_error'::text, 'manual_correction'::text])`),
+	check("processing_feedback_reason_chk", sql`reason_code = ANY (ARRAY['vlm.invalid_json'::text, 'vlm.schema_mismatch'::text, 'vlm.refusal'::text, 'vlm.empty_result'::text, 'extract.field_missing'::text, 'classify.low_confidence'::text, 'detect.no_blocks'::text, 'detect.low_score'::text, 'match.ambiguous'::text, 'doc_split.unassigned_pages'::text, 'manual.field_corrected'::text, 'manual.block_redrawn'::text, 'manual.type_changed'::text])`),
+	check("processing_feedback_severity_chk", sql`severity = ANY (ARRAY['info'::text, 'warn'::text, 'error'::text])`),
+	check("processing_feedback_stage_chk", sql`(pipeline_stage IS NULL) OR (pipeline_stage = ANY (ARRAY['uploaded'::text, 'layout'::text, 'recognition'::text, 'analysis'::text, 'checks'::text, 'ready'::text, 'failed'::text, 'detect'::text, 'match'::text]))`),
+	check("processing_feedback_score_chk", sql`(score IS NULL) OR ((score >= (0)::double precision) AND (score <= (1)::double precision))`),
+	check("processing_feedback_page_chk", sql`(working_page_index IS NULL) OR (working_page_index >= 0)`),
+	check("processing_feedback_prompt_version_chk", sql`(prompt_version IS NULL) OR (prompt_version > 0)`),
+]);
+
+export const errorSamples = pgTable("error_samples", {
+	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
+	id: bigint({ mode: "number" }).primaryKey().generatedAlwaysAsIdentity({ name: "error_samples_id_seq", startWith: 1, increment: 1, minValue: 1, maxValue: 9223372036854775807, cache: 1 }),
+	issueId: uuid("issue_id").notNull(),
+	fingerprint: text().notNull(),
+	at: timestamp({ withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	source: text().default('unknown').notNull(),
+	execution: text().default('unknown').notNull(),
+	domain: text().default('unknown').notNull(),
+	pipelineStage: text("pipeline_stage"),
+	severity: text().default('error').notNull(),
+	release: text(),
+	requestId: text("request_id"),
+	clientEventId: text("client_event_id"),
+	userId: uuid("user_id"),
+	route: text(),
+	statusCode: integer("status_code"),
+	errorCode: text("error_code"),
+	objectId: uuid("object_id"),
+	revisionId: uuid("revision_id"),
+	jobId: uuid("job_id"),
+	jobType: text("job_type"),
+	attempt: integer(),
+	repeatCount: integer("repeat_count").default(1).notNull(),
+	context: jsonb(),
+}, (table) => [
+	index("ix_error_samples_at").using("btree", table.at.desc().nullsFirst().op("timestamptz_ops")),
+	index("ix_error_samples_client_event").using("btree", table.clientEventId.asc().nullsLast().op("text_ops")).where(sql`(client_event_id IS NOT NULL)`),
+	index("ix_error_samples_fingerprint").using("btree", table.fingerprint.asc().nullsLast().op("timestamptz_ops"), table.at.desc().nullsFirst().op("text_ops")),
+	index("ix_error_samples_issue").using("btree", table.issueId.asc().nullsLast().op("timestamptz_ops"), table.at.desc().nullsFirst().op("timestamptz_ops")),
+	index("ix_error_samples_request").using("btree", table.requestId.asc().nullsLast().op("text_ops")).where(sql`(request_id IS NOT NULL)`),
+	index("ix_error_samples_user").using("btree", table.userId.asc().nullsLast().op("uuid_ops"), table.at.desc().nullsFirst().op("timestamptz_ops")),
+	foreignKey({
+			columns: [table.issueId],
+			foreignColumns: [errorIssues.id],
+			name: "error_samples_issue_id_fkey"
+		}).onDelete("cascade"),
+	check("error_samples_source_chk", sql`source = ANY (ARRAY['api'::text, 'worker'::text, 'web'::text, 'unknown'::text])`),
+	check("error_samples_execution_chk", sql`execution = ANY (ARRAY['http'::text, 'job'::text, 'process'::text, 'client'::text, 'unknown'::text])`),
+	check("error_samples_domain_chk", sql`domain = ANY (ARRAY['db'::text, 'llm'::text, 'recognition'::text, 'storage'::text, 'auth'::text, 'integration'::text, 'application'::text, 'unknown'::text])`),
+	check("error_samples_severity_chk", sql`severity = ANY (ARRAY['warn'::text, 'error'::text, 'fatal'::text])`),
+	check("error_samples_repeat_chk", sql`repeat_count > 0`),
+	check("error_samples_attempt_chk", sql`(attempt IS NULL) OR (attempt > 0)`),
+]);
+
+export const errorIssueActions = pgTable("error_issue_actions", {
+	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
+	id: bigint({ mode: "number" }).primaryKey().generatedAlwaysAsIdentity({ name: "error_issue_actions_id_seq", startWith: 1, increment: 1, minValue: 1, maxValue: 9223372036854775807, cache: 1 }),
+	issueId: uuid("issue_id").notNull(),
+	at: timestamp({ withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	actorUserId: uuid("actor_user_id"),
+	action: text().notNull(),
+	payload: jsonb().default({}).notNull(),
+}, (table) => [
+	index("ix_error_issue_actions_actor").using("btree", table.actorUserId.asc().nullsLast().op("uuid_ops")),
+	index("ix_error_issue_actions_issue").using("btree", table.issueId.asc().nullsLast().op("timestamptz_ops"), table.at.desc().nullsFirst().op("timestamptz_ops")),
+	foreignKey({
+			columns: [table.issueId],
+			foreignColumns: [errorIssues.id],
+			name: "error_issue_actions_issue_id_fkey"
+		}).onDelete("cascade"),
+	foreignKey({
+			columns: [table.actorUserId],
+			foreignColumns: [users.id],
+			name: "error_issue_actions_actor_user_id_fkey"
+		}),
+	check("error_issue_actions_action_chk", sql`action = ANY (ARRAY['acknowledge'::text, 'comment'::text, 'resolve'::text, 'reopen'::text, 'assign'::text])`),
 ]);
 
 export const userRoles = pgTable("user_roles", {
@@ -1813,6 +2009,21 @@ export const revisionEvents = pgTable("revision_events", {
 	check("revision_events_seq_chk", sql`seq > 0`),
 ]);
 
+export const httpAnomalyStatsHourly = pgTable("http_anomaly_stats_hourly", {
+	bucketAt: timestamp("bucket_at", { withTimezone: true, mode: 'string' }).notNull(),
+	route: text().notNull(),
+	statusCode: integer("status_code").notNull(),
+	problemSlug: text("problem_slug").default('unknown').notNull(),
+	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
+	count: bigint({ mode: "number" }).default(0).notNull(),
+}, (table) => [
+	index("ix_http_anomaly_bucket").using("btree", table.bucketAt.desc().nullsFirst().op("timestamptz_ops")),
+	index("ix_http_anomaly_route").using("btree", table.route.asc().nullsLast().op("text_ops"), table.bucketAt.desc().nullsFirst().op("text_ops")),
+	primaryKey({ columns: [table.bucketAt, table.problemSlug, table.route, table.statusCode], name: "http_anomaly_stats_hourly_pkey"}),
+	check("http_anomaly_status_chk", sql`(status_code >= 400) AND (status_code <= 499)`),
+	check("http_anomaly_count_chk", sql`count >= 0`),
+]);
+
 export const rulesetRules = pgTable("ruleset_rules", {
 	rulesetVersionId: uuid("ruleset_version_id").notNull(),
 	ruleCode: text("rule_code").notNull(),
@@ -1857,6 +2068,27 @@ export const recognitionRunPages = pgTable("recognition_run_pages", {
 	check("recognition_run_pages_counts_chk", sql`(blocks_total >= 0) AND (blocks_recognized >= 0) AND (blocks_invalid >= 0) AND (blocks_refused >= 0)`),
 ]);
 
+export const slowOperations = pgTable("slow_operations", {
+	kind: text().notNull(),
+	target: text().notNull(),
+	bucketAt: timestamp("bucket_at", { withTimezone: true, mode: 'string' }).notNull(),
+	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
+	count: bigint({ mode: "number" }).default(0).notNull(),
+	maxMs: integer("max_ms").default(0).notNull(),
+	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
+	sumMs: bigint("sum_ms", { mode: "number" }).default(0).notNull(),
+	thresholdMs: integer("threshold_ms").notNull(),
+	sampleRequestId: text("sample_request_id"),
+}, (table) => [
+	index("ix_slow_operations_bucket").using("btree", table.bucketAt.desc().nullsFirst().op("timestamptz_ops")),
+	index("ix_slow_operations_kind").using("btree", table.kind.asc().nullsLast().op("text_ops"), table.bucketAt.desc().nullsFirst().op("timestamptz_ops")),
+	primaryKey({ columns: [table.bucketAt, table.kind, table.target], name: "slow_operations_pkey"}),
+	check("slow_operations_kind_chk", sql`kind = ANY (ARRAY['http'::text, 'sql'::text, 'external'::text])`),
+	check("slow_operations_count_chk", sql`count >= 0`),
+	check("slow_operations_max_chk", sql`max_ms >= 0`),
+	check("slow_operations_sum_chk", sql`sum_ms >= 0`),
+]);
+
 export const authThrottle = pgTable("auth_throttle", {
 	scope: text().notNull(),
 	bucketKey: text("bucket_key").notNull(),
@@ -1878,6 +2110,29 @@ export const authThrottle = pgTable("auth_throttle", {
 	primaryKey({ columns: [table.bucketKey, table.scope], name: "auth_throttle_pkey"}),
 	check("auth_throttle_scope_chk", sql`scope = ANY (ARRAY['login'::text, 'ip-login'::text, 'ip-register'::text])`),
 	check("auth_throttle_attempts_chk", sql`failed_attempts >= 0`),
+]);
+
+export const errorStatsHourly = pgTable("error_stats_hourly", {
+	issueId: uuid("issue_id").notNull(),
+	bucketAt: timestamp("bucket_at", { withTimezone: true, mode: 'string' }).notNull(),
+	release: text().default('unknown').notNull(),
+	source: text().default('unknown').notNull(),
+	execution: text().default('unknown').notNull(),
+	domain: text().default('unknown').notNull(),
+	pipelineStage: text("pipeline_stage").default('none').notNull(),
+	severity: text().default('error').notNull(),
+	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
+	count: bigint({ mode: "number" }).default(0).notNull(),
+}, (table) => [
+	index("ix_error_stats_hourly_bucket").using("btree", table.bucketAt.desc().nullsFirst().op("timestamptz_ops")),
+	index("ix_error_stats_hourly_issue").using("btree", table.issueId.asc().nullsLast().op("timestamptz_ops"), table.bucketAt.desc().nullsFirst().op("timestamptz_ops")),
+	foreignKey({
+			columns: [table.issueId],
+			foreignColumns: [errorIssues.id],
+			name: "error_stats_hourly_issue_id_fkey"
+		}).onDelete("cascade"),
+	primaryKey({ columns: [table.bucketAt, table.domain, table.execution, table.issueId, table.pipelineStage, table.release, table.severity, table.source], name: "error_stats_hourly_pkey"}),
+	check("error_stats_hourly_count_chk", sql`count >= 0`),
 ]);
 
 export const pageClassifications = pgTable("page_classifications", {

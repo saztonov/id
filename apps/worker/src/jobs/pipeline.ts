@@ -43,6 +43,8 @@ import {
   recognizeBlock,
   schemaHash,
   seedRunPages,
+  NoopProcessingFeedbackSink,
+  type ProcessingFeedbackSink,
   type VlmPort,
 } from '@id/api';
 
@@ -236,6 +238,15 @@ export interface PipelineLimits {
 export interface PipelineJobsOptions {
   readonly db: Database;
   readonly storage: StorageProvider;
+  /**
+   * Приёмник дефектов качества конвейера (§11, ADR-0010).
+   *
+   * Не задан — записи не ведутся: в тестах и на локальном запуске без БД это
+   * честнее, чем молча писать в никуда. В боевом воркере задаётся всегда:
+   * ряд начинается тогда, когда включён сбор, и задним числом не
+   * восстанавливается.
+   */
+  readonly feedback?: ProcessingFeedbackSink | undefined;
   /** Выбран startup-проверкой (`selectPdfToolkit`), а не этим модулем. */
   readonly toolkit: PdfToolkit;
   readonly limits: PipelineLimits;
@@ -746,7 +757,8 @@ function localDetectionDeps(options: PipelineJobsOptions): LocalDetectionDeps {
   const modelStore = createModelStore({
     storage,
     cacheDir,
-    createSession: (onnxPath, sessionOptions) => OnnxRuntimeSession.create(onnxPath, sessionOptions),
+    createSession: (onnxPath, sessionOptions) =>
+      OnnxRuntimeSession.create(onnxPath, sessionOptions),
     sessionOptions: {
       intraOpNumThreads: options.env?.ORT_INTRA_OP_THREADS ?? DEFAULT_INTRA_OP_THREADS,
       interOpNumThreads: options.env?.ORT_INTER_OP_THREADS ?? DEFAULT_INTER_OP_THREADS,
@@ -1127,7 +1139,11 @@ function vlmRecognitionDeps(options: PipelineJobsOptions): VlmRecognitionDeps {
       const artifact = await findArtifact(db, scope, runId, kind);
       return artifact === null
         ? null
-        : { kind: artifact.kind, artifactSha256: artifact.artifactSha256, byteSize: artifact.byteSize };
+        : {
+            kind: artifact.kind,
+            artifactSha256: artifact.artifactSha256,
+            byteSize: artifact.byteSize,
+          };
     },
 
     recordArtifact: async (input) => {
@@ -1172,7 +1188,11 @@ function vlmRecognitionDeps(options: PipelineJobsOptions): VlmRecognitionDeps {
      * опубликованной версии на код, поэтому неоднозначности здесь нет.
      */
     publishedPromptByCode: async (code) => {
-      const page = await listPromptTemplates(db, SYSTEM_SCOPE, { code, state: 'published', limit: 1 });
+      const page = await listPromptTemplates(db, SYSTEM_SCOPE, {
+        code,
+        state: 'published',
+        limit: 1,
+      });
       const row = page.items[0];
       if (row === undefined) return null;
       return {
@@ -1226,6 +1246,11 @@ function vlmRecognitionDeps(options: PipelineJobsOptions): VlmRecognitionDeps {
     recordAiRun: async (input) => {
       await recordAiRun(db, await scopeOf(input.revisionId), input);
     },
+
+    // Дефекты качества: непригодный ответ модели и отказ. По умолчанию
+    // приёмник пустой — запуск без БД не обязан вести набор данных, и
+    // отсутствующий приёмник честнее записи в никуда.
+    feedback: options.feedback ?? new NoopProcessingFeedbackSink(),
   };
 }
 
@@ -1637,7 +1662,10 @@ export function registerPipelineJobs(
   // `detection.provider='local'` — растеризация PDF на воркере и ONNX-инференс
   // на CPU вместо похода в RD WEB. Регистрируется здесь и безусловно, как и
   // остальные стадии: обработчик без регистрации выглядит зависшим конвейером.
-  registry.register('layout.detect_local', createLocalDetectionHandler(localDetectionDeps(options)));
+  registry.register(
+    'layout.detect_local',
+    createLocalDetectionHandler(localDetectionDeps(options)),
+  );
 
   // Задачи 10–13 (§12): цикл сверки, запуск OCR, поллинг и однократный забор
   // экспорта. Регистрируются здесь и безусловно — по той же причине, что и

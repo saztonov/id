@@ -5,7 +5,12 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 
-import { computeBlocksHash, type HashableBlock, type JobContext } from '@id/api';
+import {
+  computeBlocksHash,
+  NoopProcessingFeedbackSink,
+  type HashableBlock,
+  type JobContext,
+} from '@id/api';
 import { textBlockSchema, type RecognitionBlock, type RecognitionResult } from '@id/recognition';
 
 import {
@@ -67,9 +72,7 @@ function makeSink(): Sink {
   return { enqueued: [], emitted: [], logs: [] };
 }
 
-function makeContext<
-  K extends 'vlm.start_recognition' | 'vlm.recognize_page' | 'vlm.finalize_run',
->(
+function makeContext<K extends 'vlm.start_recognition' | 'vlm.recognize_page' | 'vlm.finalize_run'>(
   type: K,
   payload: Record<string, unknown>,
   sink: Sink,
@@ -138,7 +141,12 @@ function runTarget(overrides: Partial<VlmRunTarget> = {}): VlmRunTarget {
     layoutRevisionId: LAYOUT,
     status: 'running',
     localLayoutHash: MATCHING_HASH,
-    settingsSnapshot: { version: 2, provider: 'openrouter_vlm', model: 'vendor/model-1', dryRun: false },
+    settingsSnapshot: {
+      version: 2,
+      provider: 'openrouter_vlm',
+      model: 'vendor/model-1',
+      dryRun: false,
+    },
     ...overrides,
   };
 }
@@ -248,11 +256,9 @@ function idempotentFinishRun(): {
 }
 
 function deps(overrides: Partial<VlmRecognitionDeps> = {}): VlmRecognitionDeps {
-  const unexpected =
-    (name: string) =>
-    (): never => {
-      throw new Error(`порт ${name} вызван неожиданно`);
-    };
+  const unexpected = (name: string) => (): never => {
+    throw new Error(`порт ${name} вызван неожиданно`);
+  };
 
   const base: VlmRecognitionDeps = {
     loadRun: async () => runTarget(),
@@ -286,6 +292,9 @@ function deps(overrides: Partial<VlmRecognitionDeps> = {}): VlmRecognitionDeps {
     downscale: async (png: Uint8Array) => png,
     assemble: unexpected('assemble') as VlmRecognitionDeps['assemble'],
     recordAiRun: async () => {},
+    // Пустой приёмник: предмет этих тестов — конвейер, а не запись обратной
+    // связи. Её содержание проверяется отдельно, на настоящей БД.
+    feedback: new NoopProcessingFeedbackSink(),
     sha256: (bytes: Uint8Array) => `h${bytes.byteLength}`.padEnd(64, '0'),
   };
 
@@ -305,7 +314,11 @@ describe('createVlmStartHandler', () => {
     });
     const sink = makeSink();
     const handler = createVlmStartHandler(d);
-    const ctx = makeContext('vlm.start_recognition', { revisionId: REVISION, recognitionRunId: RUN }, sink);
+    const ctx = makeContext(
+      'vlm.start_recognition',
+      { revisionId: REVISION, recognitionRunId: RUN },
+      sink,
+    );
 
     await expect(handler(ctx)).rejects.toThrow(VlmRecognitionIntegrityError);
     expect(finishCalls).toHaveLength(1);
@@ -316,12 +329,17 @@ describe('createVlmStartHandler', () => {
   it('отсутствие опубликованного промпта — конфигурационный отказ', async () => {
     const { fn: finishRun, calls: finishCalls } = idempotentFinishRun();
     const d = deps({
-      publishedPromptByCode: async (code: string) => (code === 'recognition_block_image' ? null : publishedPrompt(code)),
+      publishedPromptByCode: async (code: string) =>
+        code === 'recognition_block_image' ? null : publishedPrompt(code),
       finishRun,
     });
     const sink = makeSink();
     const handler = createVlmStartHandler(d);
-    const ctx = makeContext('vlm.start_recognition', { revisionId: REVISION, recognitionRunId: RUN }, sink);
+    const ctx = makeContext(
+      'vlm.start_recognition',
+      { revisionId: REVISION, recognitionRunId: RUN },
+      sink,
+    );
 
     await expect(handler(ctx)).rejects.toThrow(VlmRecognitionConfigurationError);
     expect(finishCalls).toHaveLength(1);
@@ -341,7 +359,11 @@ describe('createVlmStartHandler', () => {
     });
     const sink = makeSink();
     const handler = createVlmStartHandler(d);
-    const ctx = makeContext('vlm.start_recognition', { revisionId: REVISION, recognitionRunId: RUN }, sink);
+    const ctx = makeContext(
+      'vlm.start_recognition',
+      { revisionId: REVISION, recognitionRunId: RUN },
+      sink,
+    );
 
     await expect(handler(ctx)).rejects.toThrow(VlmRecognitionStateError);
     expect(finishCalls[0]?.['status']).toBe('failed');
@@ -368,7 +390,11 @@ describe('createVlmStartHandler', () => {
     });
     const sink = makeSink();
     const handler = createVlmStartHandler(d);
-    const ctx = makeContext('vlm.start_recognition', { revisionId: REVISION, recognitionRunId: RUN }, sink);
+    const ctx = makeContext(
+      'vlm.start_recognition',
+      { revisionId: REVISION, recognitionRunId: RUN },
+      sink,
+    );
 
     await handler(ctx);
 
@@ -402,7 +428,11 @@ describe('createVlmStartHandler', () => {
     });
     const sink = makeSink();
     const handler = createVlmStartHandler(d);
-    const ctx = makeContext('vlm.start_recognition', { revisionId: REVISION, recognitionRunId: RUN }, sink);
+    const ctx = makeContext(
+      'vlm.start_recognition',
+      { revisionId: REVISION, recognitionRunId: RUN },
+      sink,
+    );
 
     await expect(handler(ctx)).rejects.toThrow(VlmRecognitionConfigurationError);
   });
@@ -411,7 +441,11 @@ describe('createVlmStartHandler', () => {
     const d = deps({ vlm: null });
     const sink = makeSink();
     const handler = createVlmStartHandler(d);
-    const ctx = makeContext('vlm.start_recognition', { revisionId: REVISION, recognitionRunId: RUN }, sink);
+    const ctx = makeContext(
+      'vlm.start_recognition',
+      { revisionId: REVISION, recognitionRunId: RUN },
+      sink,
+    );
 
     await expect(handler(ctx)).rejects.toThrow(VlmRecognitionConfigurationError);
   });
@@ -443,7 +477,14 @@ describe('createVlmRecognizePageHandler', () => {
     await handler(ctx);
 
     expect(marked).toEqual([
-      { runId: RUN, workingPageIndex: 0, status: 'done', blocksRecognized: 1, blocksInvalid: 0, blocksRefused: 0 },
+      {
+        runId: RUN,
+        workingPageIndex: 0,
+        status: 'done',
+        blocksRecognized: 1,
+        blocksInvalid: 0,
+        blocksRefused: 0,
+      },
     ]);
   });
 
@@ -487,14 +528,23 @@ describe('createVlmRecognizePageHandler', () => {
 
     expect(inserted).toHaveLength(0);
     expect(marked).toEqual([
-      { runId: RUN, workingPageIndex: 0, status: 'failed', blocksRecognized: 0, blocksInvalid: 1, blocksRefused: 0 },
+      {
+        runId: RUN,
+        workingPageIndex: 0,
+        status: 'failed',
+        blocksRecognized: 0,
+        blocksInvalid: 1,
+        blocksRefused: 0,
+      },
     ]);
     // Вызов состоялся (есть response) — ai_runs всё равно пишется.
     expect(recorded).toHaveLength(1);
   });
 
   it('degenerate text пишет пустой канонический блок с пометкой degenerate', async () => {
-    const inserted: { block: { contentJson: unknown; resultType: string; contentMd: string | null } }[] = [];
+    const inserted: {
+      block: { contentJson: unknown; resultType: string; contentMd: string | null };
+    }[] = [];
     const marked: Record<string, unknown>[] = [];
     const d = deps({
       workingPdfToFile: async () => ({ path: '/tmp/work.pdf', cleanup: async () => {} }),
@@ -536,7 +586,14 @@ describe('createVlmRecognizePageHandler', () => {
     expect(envelope.provenance.degenerate).toBe(true);
     expect(envelope.provenance.cropSha256).toBeNull();
     expect(marked).toEqual([
-      { runId: RUN, workingPageIndex: 0, status: 'done', blocksRecognized: 1, blocksInvalid: 0, blocksRefused: 0 },
+      {
+        runId: RUN,
+        workingPageIndex: 0,
+        status: 'done',
+        blocksRecognized: 1,
+        blocksInvalid: 0,
+        blocksRefused: 0,
+      },
     ]);
   });
 
@@ -566,7 +623,14 @@ describe('createVlmRecognizePageHandler', () => {
     await handler(ctx);
 
     expect(marked).toEqual([
-      { runId: RUN, workingPageIndex: 0, status: 'failed', blocksRecognized: 0, blocksInvalid: 1, blocksRefused: 0 },
+      {
+        runId: RUN,
+        workingPageIndex: 0,
+        status: 'failed',
+        blocksRecognized: 0,
+        blocksInvalid: 1,
+        blocksRefused: 0,
+      },
     ]);
   });
 
@@ -581,7 +645,8 @@ describe('createVlmRecognizePageHandler', () => {
         renderPage: async () => ({ widthPx: 595, heightPx: 842 }),
       },
       crop: async () => ({ png: new Uint8Array([9, 9, 9]), widthPx: 50, heightPx: 50 }),
-      recognizeBlock: async (input: VlmRecognizeBlockInput) => okOutcome(frozenBlock({ id: input.block.layoutBlockId })),
+      recognizeBlock: async (input: VlmRecognizeBlockInput) =>
+        okOutcome(frozenBlock({ id: input.block.layoutBlockId })),
       insertBlockResult: async (input) => {
         inserted.push(input);
         return { written: true };
@@ -603,7 +668,14 @@ describe('createVlmRecognizePageHandler', () => {
     expect(inserted).toHaveLength(1);
     expect((inserted[0] as { block: { resultType: string } }).block.resultType).toBe('text_json');
     expect(marked).toEqual([
-      { runId: RUN, workingPageIndex: 0, status: 'done', blocksRecognized: 1, blocksInvalid: 0, blocksRefused: 0 },
+      {
+        runId: RUN,
+        workingPageIndex: 0,
+        status: 'done',
+        blocksRecognized: 1,
+        blocksInvalid: 0,
+        blocksRefused: 0,
+      },
     ]);
   });
 
@@ -612,7 +684,12 @@ describe('createVlmRecognizePageHandler', () => {
     class FakeBudgetError extends Error {
       readonly retriable = false;
       readonly stopsBatch = true;
-      readonly attempt = { provider: 'proxy_llm', model: 'vendor/model-1', inputHash: 'c'.repeat(64), latencyMs: 12 };
+      readonly attempt = {
+        provider: 'proxy_llm',
+        model: 'vendor/model-1',
+        inputHash: 'c'.repeat(64),
+        latencyMs: 12,
+      };
       constructor() {
         super('месячный бюджет исчерпан');
         this.name = 'LlmBudgetError';
@@ -660,7 +737,12 @@ describe('createVlmRecognizePageHandler', () => {
     const finishCalls: Record<string, unknown>[] = [];
     class FakeRateLimitError extends Error {
       readonly retriable = true;
-      readonly attempt = { provider: 'proxy_llm', model: 'vendor/model-1', inputHash: 'd'.repeat(64), latencyMs: 8 };
+      readonly attempt = {
+        provider: 'proxy_llm',
+        model: 'vendor/model-1',
+        inputHash: 'd'.repeat(64),
+        latencyMs: 8,
+      };
       constructor() {
         super('превышен лимит частоты');
         this.name = 'LlmRateLimitError';
@@ -722,7 +804,14 @@ describe('createVlmRecognizePageHandler', () => {
     await handler(ctx);
 
     expect(marked).toEqual([
-      { runId: RUN, workingPageIndex: 0, status: 'failed', blocksRecognized: 0, blocksInvalid: 0, blocksRefused: 0 },
+      {
+        runId: RUN,
+        workingPageIndex: 0,
+        status: 'failed',
+        blocksRecognized: 0,
+        blocksInvalid: 0,
+        blocksRefused: 0,
+      },
     ]);
   });
 });
@@ -770,7 +859,12 @@ describe('createVlmFinalizeHandler', () => {
   function fakeAssembled(): RecognitionResult {
     return {
       schemaVersion: 'recognition.result.v2',
-      source: { provider: 'openrouter_vlm', adapterVersion: 'test.v1', modelId: 'vendor/model-1', generatedAt: null },
+      source: {
+        provider: 'openrouter_vlm',
+        adapterVersion: 'test.v1',
+        modelId: 'vendor/model-1',
+        generatedAt: null,
+      },
       pages: [
         {
           workingPageIndex: 0,
@@ -788,7 +882,10 @@ describe('createVlmFinalizeHandler', () => {
   it('есть незавершённые страницы — retriable, прогон не закрывается', async () => {
     const finishCalls: unknown[] = [];
     const d = deps({
-      listRunPages: async () => [donePage(), { ...donePage({ workingPageIndex: 1 }), status: 'pending' }],
+      listRunPages: async () => [
+        donePage(),
+        { ...donePage({ workingPageIndex: 1 }), status: 'pending' },
+      ],
       finishRun: async (input) => {
         finishCalls.push(input);
         return { changed: true };
@@ -796,10 +893,15 @@ describe('createVlmFinalizeHandler', () => {
     });
     const sink = makeSink();
     const handler = createVlmFinalizeHandler(d);
-    const ctx = makeContext('vlm.finalize_run', { revisionId: REVISION, recognitionRunId: RUN }, sink, {
-      attempt: 1,
-      maxAttempts: 60,
-    });
+    const ctx = makeContext(
+      'vlm.finalize_run',
+      { revisionId: REVISION, recognitionRunId: RUN },
+      sink,
+      {
+        attempt: 1,
+        maxAttempts: 60,
+      },
+    );
 
     await expect(handler(ctx)).rejects.toThrow(VlmRecognitionPendingError);
     expect(finishCalls).toHaveLength(0);
@@ -814,7 +916,11 @@ describe('createVlmFinalizeHandler', () => {
     });
     const sink = makeSink();
     const handler = createVlmFinalizeHandler(d);
-    const ctx = makeContext('vlm.finalize_run', { revisionId: REVISION, recognitionRunId: RUN }, sink);
+    const ctx = makeContext(
+      'vlm.finalize_run',
+      { revisionId: REVISION, recognitionRunId: RUN },
+      sink,
+    );
 
     await expect(handler(ctx)).rejects.toThrow(VlmRecognitionCoverageError);
     expect(finishCalls).toHaveLength(1);
@@ -833,7 +939,11 @@ describe('createVlmFinalizeHandler', () => {
     });
     const sink = makeSink();
     const handler = createVlmFinalizeHandler(d);
-    const ctx = makeContext('vlm.finalize_run', { revisionId: REVISION, recognitionRunId: RUN }, sink);
+    const ctx = makeContext(
+      'vlm.finalize_run',
+      { revisionId: REVISION, recognitionRunId: RUN },
+      sink,
+    );
 
     await expect(handler(ctx)).rejects.toThrow(VlmRecognitionCoverageError);
     expect(finishCalls[0]?.['status']).toBe('failed');
@@ -867,7 +977,11 @@ describe('createVlmFinalizeHandler', () => {
     });
     const sink = makeSink();
     const handler = createVlmFinalizeHandler(d);
-    const ctx = makeContext('vlm.finalize_run', { revisionId: REVISION, recognitionRunId: RUN }, sink);
+    const ctx = makeContext(
+      'vlm.finalize_run',
+      { revisionId: REVISION, recognitionRunId: RUN },
+      sink,
+    );
 
     await handler(ctx);
 
@@ -887,7 +1001,14 @@ describe('createVlmFinalizeHandler', () => {
     const finishCalls: Record<string, unknown>[] = [];
     const d = deps({
       loadRun: async () =>
-        runTarget({ settingsSnapshot: { version: 2, provider: 'openrouter_vlm', model: 'vendor/model-1', dryRun: true } }),
+        runTarget({
+          settingsSnapshot: {
+            version: 2,
+            provider: 'openrouter_vlm',
+            model: 'vendor/model-1',
+            dryRun: true,
+          },
+        }),
       listRunPages: async () => [donePage()],
       listBlockEnvelopes: async () => [envelope(frozenBlock())],
       assemble: () => fakeAssembled(),
@@ -905,7 +1026,11 @@ describe('createVlmFinalizeHandler', () => {
     });
     const sink = makeSink();
     const handler = createVlmFinalizeHandler(d);
-    const ctx = makeContext('vlm.finalize_run', { revisionId: REVISION, recognitionRunId: RUN }, sink);
+    const ctx = makeContext(
+      'vlm.finalize_run',
+      { revisionId: REVISION, recognitionRunId: RUN },
+      sink,
+    );
 
     await handler(ctx);
 
@@ -926,7 +1051,11 @@ describe('createVlmFinalizeHandler', () => {
     });
     const sink = makeSink();
     const handler = createVlmFinalizeHandler(d);
-    const ctx = makeContext('vlm.finalize_run', { revisionId: REVISION, recognitionRunId: RUN }, sink);
+    const ctx = makeContext(
+      'vlm.finalize_run',
+      { revisionId: REVISION, recognitionRunId: RUN },
+      sink,
+    );
 
     await expect(handler(ctx)).rejects.toThrow(VlmRecognitionStateError);
     // Повторный вызов не трогает ни публикацию, ни (напрямую) finishRun —

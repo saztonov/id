@@ -226,3 +226,107 @@ test('невалидный слаг модели ловится у поля и �
   // Ошибка поля снята: сохранённое значение прошло и клиентское зеркало, и сервер.
   await expect(page.getByTestId('setting-error-recognition.vlm_model')).toHaveCount(0);
 });
+
+// =====================================================================
+// Журнал ошибок (§11)
+// =====================================================================
+
+/** Проблема из фикстуры: открытая, 42 события и один пример. */
+const JOURNAL_ISSUE_TITLE = 'Error: пул соединений исчерпан';
+
+test('журнал показывает проблему и различает события и примеры', async ({ page }) => {
+  await signIn(page, KC.admin, '/admin?tab=journal');
+
+  const panel = page.getByRole('tabpanel', { name: 'Журнал и качество' });
+
+  // Три величины подписаны по отдельности. Именно это проверяется первым:
+  // одна общая цифра «ошибок за сутки» была бы правдоподобной и неверной.
+  // Запас по времени — на холодный старт стенда: первый запрос к API поднимает
+  // соединение и прогревает пул, и 10 секунд по умолчанию на него не хватает.
+  await expect(panel).toContainText('Событий', { timeout: 30_000 });
+  await expect(panel).toContainText('Примеров сохранено');
+
+  await expect(page.getByRole('cell', { name: JOURNAL_ISSUE_TITLE })).toBeVisible();
+  // 42 события против одного примера: числа в фикстуре расходятся намеренно.
+  await expect(page.getByRole('cell', { name: '42', exact: true })).toBeVisible();
+});
+
+test('взятие в работу меняет статус проблемы в базе', async ({ page }) => {
+  await signIn(page, KC.admin, '/admin?tab=journal');
+
+  await page
+    .getByRole('row', { name: new RegExp(JOURNAL_ISSUE_TITLE) })
+    .getByRole('button')
+    .click();
+  await page.getByRole('button', { name: 'Взять в работу' }).click();
+
+  // Проверяется последствие в БД, а не текст на экране: экран мог бы показать
+  // успех и при неудачной записи.
+  await expect
+    .poll(async () => {
+      const response = await page.request.get('/api/v1/admin/errors?status=ack');
+      const body = (await response.json()) as { items: { title: string }[] };
+      return body.items.map((item) => item.title);
+    })
+    .toContain(JOURNAL_ISSUE_TITLE);
+});
+
+test('закрытая проблема показывает, чем её чинили в прошлый раз', async ({ page }) => {
+  await signIn(page, KC.admin, '/admin?tab=journal');
+
+  // `Segmented` в antd — группа radio, но сам input скрыт стилями: кликать
+  // нужно по видимой подписи внутри группы, иначе Playwright бесконечно ждёт
+  // видимости элемента, которым управляют через label.
+  await page
+    .getByRole('radiogroup', { name: 'Фильтр по статусу' })
+    .getByText('Закрытые', { exact: true })
+    .click();
+  const row = page.getByRole('row', { name: /LlmTimeoutError/ });
+  await expect(row).toBeVisible();
+  await row.getByRole('button').click();
+
+  await expect(page.getByText('Чем чинили в прошлый раз')).toBeVisible();
+  await expect(page.getByText('поднят PROXY_LLM_TIMEOUT_MS')).toBeVisible();
+});
+
+test('отчёт браузера об ошибке доезжает до журнала без сессии', async ({ page }) => {
+  // Запрос уходит ИЗ страницы, а не из тестового контекста: только так
+  // проверяется, что маршрут проходит `sameOriginGuard` с настоящими
+  // заголовками браузера и не требует CSRF-токена.
+  await page.goto('/login');
+
+  const eventId = '00000000-0000-4000-8000-00000000beef';
+  const status = await page.evaluate(async (id) => {
+    const response = await fetch('/api/v1/client-errors', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        name: 'ChunkLoadError',
+        message: 'Loading chunk failed',
+        kind: 'render',
+        clientEventId: id,
+        repeatCount: 1,
+      }),
+    });
+    return response.status;
+  }, eventId);
+
+  expect(status, 'отчёт с экрана входа отвергнут: именно его поломка самая опасная').toBe(204);
+
+  await signIn(page, KC.admin, '/admin?tab=journal');
+
+  // Проверяется последствие в БД: запись обязана появиться с источником `web`.
+  await expect
+    .poll(
+      async () => {
+        const response = await page.request.get('/api/v1/admin/errors?source=web');
+        const body = (await response.json()) as { items: { title: string }[] };
+        return body.items.map((item) => item.title);
+      },
+      // Писатель сбрасывает накопитель раз в две секунды: запись появляется не
+      // мгновенно, и ожидание здесь — часть проверки, а не борьба с флаки.
+      { timeout: 20_000 },
+    )
+    .toContain('ChunkLoadError: Loading chunk failed');
+});

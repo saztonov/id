@@ -67,12 +67,13 @@ import { assertLocalAdminExists } from './auth/local/startup.js';
 import { csrfGuardHook, sessionContextHook } from './middleware/require-auth.js';
 import { instrumentPool } from './observability/db-timing.js';
 import {
-  createErrorReporter,
   errorDigest,
   normalizeErrorMessage,
   type ErrorReporter,
   type SqlExecutor,
 } from './observability/errors.js';
+import { createErrorReporting, type ErrorJournalWriter } from './observability/journal-writer.js';
+import { AnomalyWriter, WATCHED_CLIENT_STATUSES } from './observability/anomalies.js';
 import { createLogger, type AppLogger } from './observability/logger.js';
 import { createMetrics, type Metrics } from './observability/metrics.js';
 import {
@@ -93,6 +94,9 @@ import {
 } from './lib/problem.js';
 import { registerAdminRoutes } from './modules/admin/routes.js';
 import { registerJobsConsoleRoutes } from './modules/admin/jobs-console.js';
+import { registerErrorJournalRoutes } from './modules/admin/error-journal.js';
+import { registerPipelineFeedbackRoutes } from './modules/admin/pipeline-feedback.js';
+import { CLIENT_ERRORS_PATH, registerClientErrorRoutes } from './modules/client-errors/routes.js';
 import { registerAuditRoutes } from './modules/audit/routes.js';
 import { registerHealthRoutes } from './routes/health.js';
 import { registerCatalogRoutes } from './modules/catalog/routes.js';
@@ -161,6 +165,13 @@ declare module 'fastify' {
     /** Регистрация ошибок в `error_events` (§11): нужна и `server.ts`. */
     errorReporter: ErrorReporter;
     /**
+     * Накопитель журнала. Открыт наружу, потому что без явного сброса при
+     * остановке последние события остались бы в памяти умирающего процесса.
+     */
+    errorJournal: ErrorJournalWriter;
+    /** Накопитель счётчиков 4xx и медленных операций (поток B). */
+    anomalies: AnomalyWriter;
+    /**
      * Хранилище файлов (§7, §13).
      *
      * Один экземпляр на приложение: он несёт конфигурацию драйвера и обёртку
@@ -220,7 +231,26 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppInstan
   // до выполнения и длительности не знает. Пул инструментируется до `drizzle()`
   // и до первого запроса — обёртка накладывается на месте и на клиентов
   // транзакций тоже.
-  instrumentPool(pool, { logger, slowQueryMs: env.SLOW_QUERY_MS, metrics });
+  /**
+   * Счётчики значимых отказов и медленных операций (поток B, ADR-0010).
+   *
+   * Создаётся до инструментирования пула, потому что тот сразу начинает в него
+   * писать. Собственные запросы накопителя помечены и не измеряются — иначе
+   * запись статистики порождала бы статистику о себе.
+   */
+  const anomalies = new AnomalyWriter({
+    sql: pool as unknown as SqlExecutor,
+    logger,
+    metrics,
+  });
+  anomalies.start();
+
+  instrumentPool(pool, {
+    logger,
+    slowQueryMs: env.SLOW_QUERY_MS,
+    metrics,
+    slowSink: anomalies,
+  });
 
   // Хранилище создаётся здесь и здесь же оборачивается измерением: провайдер,
   // собранный на месте вызова, остался бы без метрик и без порога
@@ -228,14 +258,20 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppInstan
   // именно оно (§11).
   const storage = createStorage(env, { metrics, logger });
 
-  const errorReporter = createErrorReporter({
+  const { reporter: errorReporter, writer: errorJournal } = createErrorReporting({
     kind: env.ERROR_REPORTER,
     // `pg.Pool` подходит под `SqlExecutor` по форме, но у перегруженного
     // `query` в типах `pg` это не выводится.
     sql: pool as unknown as SqlExecutor,
     logger,
+    source: 'api',
     sentryDsn: env.SENTRY_DSN,
     environment: env.NODE_ENV,
+    release: env.APP_RELEASE,
+    flushIntervalMs: env.ERROR_JOURNAL_FLUSH_MS,
+    sampleIntervalMs: env.ERROR_JOURNAL_SAMPLE_INTERVAL_MS,
+    newSignatureLimitPerHour: env.ERROR_JOURNAL_NEW_SIGNATURE_LIMIT,
+    metrics,
   });
 
   const app = fastify({
@@ -289,6 +325,8 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppInstan
   app.decorate('authProvider', authProvider);
   app.decorate('metrics', metrics);
   app.decorate('errorReporter', errorReporter);
+  app.decorate('errorJournal', errorJournal);
+  app.decorate('anomalies', anomalies);
   app.decorate('storage', storage);
 
   /**
@@ -487,6 +525,17 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppInstan
     if (env.AUTH_MODE === 'local' && PUBLIC_LOCAL_AUTH_ROUTES.has(request.routeOptions.url ?? '')) {
       return Promise.resolve();
     }
+
+    /**
+     * Приём ошибок браузера — по тому же основанию и с той же защитой.
+     *
+     * Отчёт обязан уходить и тогда, когда сессии нет: поломка экрана входа —
+     * самый опасный случай, потому что сообщить о ней изнутри портала уже
+     * нельзя. Взамен маршрут закрыт `sameOriginGuard`, `jsonOnlyGuard` и двумя
+     * лимитами; худшее, что даёт подделанный запрос, — запись в журнал, а не
+     * действие от имени пользователя.
+     */
+    if (request.routeOptions.url === CLIENT_ERRORS_PATH) return Promise.resolve();
     // `call` сохраняет `this` хука: Fastify объявляет его экземпляром сервера.
     return csrfGuard.call(this, request, reply);
   });
@@ -542,6 +591,23 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppInstan
       void app.errorReporter.report(error, { extra: { status_code: problem.status } });
     } else {
       request.log.warn(logFields, logMessage);
+      /**
+       * Значимые отказы — счётчиком, а не строкой журнала.
+       *
+       * 401/403/409/412/429 это работающая защита, а не поломка портала:
+       * заводить на каждый такой ответ запись значило бы дать перебору паролей
+       * и сканеру путей писать в базу с той же частотой, с какой они стучатся.
+       * Интерес представляет всплеск — «этот маршрут за час ответил 403 четыре
+       * тысячи раз», — и на него отвечает почасовой счётчик. Остальные 4xx не
+       * копятся вовсе: опечатка клиента не отвечает ни на один вопрос.
+       */
+      if (WATCHED_CLIENT_STATUSES.has(problem.status)) {
+        app.anomalies.recordAnomaly({
+          route: `${request.method} ${request.routeOptions.url ?? UNKNOWN_ROUTE}`,
+          statusCode: problem.status,
+          problemSlug: problem.type.split(':').at(-1) ?? 'unknown',
+        });
+      }
     }
 
     if (problem.headers !== undefined) {
@@ -583,6 +649,16 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppInstan
   // зарегистрированы здесь — модуль, написанный и не подключённый, выглядит
   // работающим и проходит собственные тесты (урок S3).
   registerJobsConsoleRoutes(app);
+  // Журнал ошибок (§11): до S14 таблица наблюдаемости писалась и не имела ни
+  // одного читателя. Регистрация здесь и безусловно — модуль без неё проходит
+  // собственные тесты и недостижим (урок S3).
+  registerErrorJournalRoutes(app);
+  // Обратная связь конвейера: дефекты качества, по которым дорабатывают промты
+  // и модель обводок. Исключений они не бросают и в журнал ошибок не попадают.
+  registerPipelineFeedbackRoutes(app);
+  // Приём ошибок браузера. Без него исключение при отрисовке гасит интерфейс
+  // и не оставляет следа ни в одном журнале.
+  registerClientErrorRoutes(app);
   registerRevisionEventRoutes(app);
   registerCatalogRoutes(app);
   // Профили правил объекта — тот же префикс `/catalog`, но свой модуль: у них своя
@@ -619,6 +695,10 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppInstan
   registerWorkflowRoutes(app);
 
   app.addHook('onClose', async () => {
+    // Журнал дописывается до закрытия пула: после него писать некуда, и
+    // события последних секунд работы исчезли бы бесследно.
+    await errorJournal.stop();
+    await anomalies.stop();
     // Пул, полученный извне, принадлежит вызывающему: закрыть его здесь значит
     // сломать остальные тесты того же файла.
     if (ownsPool) await closePool(pool);

@@ -26,7 +26,8 @@ import {
   closePool,
   createAiSpendReader,
   createDatabase,
-  createErrorReporter,
+  createErrorReporting,
+  DbProcessingFeedbackSink,
   createLogger,
   assertRuleRegistryConsistent,
   createMetrics,
@@ -141,14 +142,23 @@ async function main(): Promise<void> {
 
   const db = createDatabase(pool);
 
-  const errorReporter = createErrorReporter({
+  const { reporter: errorReporter, writer: errorJournal } = createErrorReporting({
     kind: env.ERROR_REPORTER,
     // `pg.Pool` подходит под `SqlExecutor` по форме, но у перегруженного
     // `query` в типах `pg` это не выводится.
     sql: pool as unknown as SqlExecutor,
     logger,
+    // Источник задаётся здесь один раз, а не в каждом вызове `report()`:
+    // забыть его в одном месте из тридцати — это строка журнала, которая
+    // приписывает падение воркера API и уводит разбор не туда.
+    source: 'worker',
     sentryDsn: env.SENTRY_DSN,
     environment: env.NODE_ENV,
+    release: env.APP_RELEASE,
+    flushIntervalMs: env.ERROR_JOURNAL_FLUSH_MS,
+    sampleIntervalMs: env.ERROR_JOURNAL_SAMPLE_INTERVAL_MS,
+    newSignatureLimitPerHour: env.ERROR_JOURNAL_NEW_SIGNATURE_LIMIT,
+    metrics,
   });
 
   // Выбор реализации работы с PDF — startup check (ADR-0003), а не решение
@@ -209,9 +219,23 @@ async function main(): Promise<void> {
     },
   });
 
+  /**
+   * Приёмник дефектов качества конвейера (§11, ADR-0010).
+   *
+   * Собирается здесь, потому что ряд начинается тогда, когда включён сбор:
+   * задним числом «доля невалидных ответов у промта версии 3» не
+   * восстанавливается ниоткуда, и выключателя у записи поэтому нет.
+   */
+  const feedback = new DbProcessingFeedbackSink({
+    sql: pool as unknown as SqlExecutor,
+    logger,
+    release: env.APP_RELEASE,
+  });
+
   const registry = createWorkerRegistry({
     db,
     storage,
+    feedback,
     toolkit,
     limits: { maxBytes: env.MAX_UPLOAD_BYTES, maxPages: env.MAX_PAGES_PER_FILE },
     rdweb,
@@ -249,6 +273,15 @@ async function main(): Promise<void> {
         : {}),
     },
     shutdownTimeoutMs: SHUTDOWN_TIMEOUT_MS,
+    // Очистка журнала живёт здесь, а не в API: у воркера уже есть часовой цикл
+    // обслуживания, и одновременно работает всё равно только один процесс —
+    // очистка берёт advisory-блокировку.
+    journalRetention: {
+      sampleRetentionDays: env.ERROR_SAMPLE_RETENTION_DAYS,
+      statsRetentionDays: env.ERROR_STATS_RETENTION_DAYS,
+      slowRetentionDays: env.SLOW_OPERATION_RETENTION_DAYS,
+      samplesPerIssue: env.ERROR_SAMPLES_PER_ISSUE,
+    },
   });
 
   const metricsServer = startMetricsServer(worker.WORKER_METRICS_PORT, metrics, logger);
@@ -256,6 +289,9 @@ async function main(): Promise<void> {
   installProcessErrorHandlers({
     reporter: errorReporter,
     logger,
+    // Без сброса запись о падении осталась бы в памяти процесса, который
+    // прямо сейчас гасят: терялись бы ровно самые тяжёлые отказы.
+    flush: () => errorJournal.flush(),
     // Процесс гасится через graceful shutdown: `process.exit()` из слоя
     // наблюдаемости оборвал бы выполняющуюся задачу на середине записи
     // результата.
@@ -277,6 +313,8 @@ async function main(): Promise<void> {
     void (async () => {
       try {
         await runner.stop();
+        // Журнал дописывается ДО закрытия пула: после него писать некуда.
+        await errorJournal.stop();
         metricsServer?.close();
         await closePool(pool);
         clearTimeout(forceExit);

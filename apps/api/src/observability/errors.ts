@@ -17,8 +17,43 @@
  */
 import { hash } from 'node:crypto';
 import type { Logger } from 'pino';
+import type { ProcessingStage } from '@id/contracts';
 import { currentContext } from './context.js';
 import { redactDeep } from './logger.js';
+
+/**
+ * Версия алгоритма отпечатка.
+ *
+ * Повышается при ЛЮБОЙ правке `normalizeErrorMessage` или разбора кадров
+ * стека. Без неё расхождение счётчиков после такой правки выглядит как две
+ * разные ошибки, и объяснить его через полгода нечем: старые отпечатки
+ * остались в таблице, новые пошли рядом, а причина не записана нигде.
+ */
+export const FINGERPRINT_ALGO_VERSION = 1;
+
+/**
+ * Оси классификации.
+ *
+ * Их четыре, а не одна, потому что одно поле заставило бы выбирать. Ошибка
+ * драйвера PostgreSQL внутри задачи распознавания одновременно относится к
+ * домену `db`, к способу исполнения `job` и к стадии `recognition`, и именно
+ * пересечение трёх отвечает на вопрос «где чинить». Поле `kind` вынудило бы
+ * назвать одно и молча потерять два.
+ */
+export type ErrorSource = 'api' | 'worker' | 'web' | 'unknown';
+export type ErrorExecution = 'http' | 'job' | 'process' | 'client' | 'unknown';
+export type ErrorDomain =
+  'db' | 'llm' | 'recognition' | 'storage' | 'auth' | 'integration' | 'application' | 'unknown';
+export type ErrorSeverity = 'warn' | 'error' | 'fatal';
+
+export interface ErrorAxes {
+  readonly source: ErrorSource;
+  readonly execution: ErrorExecution;
+  readonly domain: ErrorDomain;
+  /** Стадия конвейера (§12); `null` — событие вне конвейера. */
+  readonly pipelineStage: ProcessingStage | null;
+  readonly severity: ErrorSeverity;
+}
 
 export interface ErrorEventContext {
   readonly requestId?: string | undefined;
@@ -29,8 +64,63 @@ export interface ErrorEventContext {
   readonly jobType?: string | undefined;
   readonly jobId?: string | undefined;
   readonly attempt?: number | undefined;
+  /** Оси; незаданные выводятся структурно из самой ошибки. */
+  readonly source?: ErrorSource | undefined;
+  readonly execution?: ErrorExecution | undefined;
+  readonly domain?: ErrorDomain | undefined;
+  readonly pipelineStage?: ProcessingStage | null | undefined;
+  readonly severity?: ErrorSeverity | undefined;
+  readonly statusCode?: number | undefined;
+  /** Идентификатор события браузера: у ошибки отрисовки `requestId` нет. */
+  readonly clientEventId?: string | undefined;
+  /** Сколько раз клиент наблюдал ошибку до отправки отчёта. */
+  readonly repeatCount?: number | undefined;
   /** Дополнительные поля образца. Уходят в БД как есть — ПДн тут запрещены. */
   readonly extra?: Record<string, unknown> | undefined;
+}
+
+/**
+ * Домен по ФОРМЕ объекта ошибки, а не по списку имён классов.
+ *
+ * Тот же принцип, что в `classifyFailure` (`jobs/runner.ts`): перечень классов
+ * — это способ, которым дефект случается второй раз. Новый класс ошибки
+ * драйвера или нового клиента интеграции попал бы в `unknown` и молча выпал бы
+ * из среза, а никто бы этого не заметил: на экране просто стало бы меньше строк.
+ *
+ * Возвращённое значение — предположение, и вызывающая сторона вправе его
+ * переопределить: `runner` знает стадию конвейера, хранилище знает, что оно
+ * хранилище, а из объекта ошибки этого не видно.
+ */
+export function classifyErrorDomain(error: unknown): ErrorDomain {
+  if (typeof error !== 'object' || error === null) return 'unknown';
+  const candidate = error as Record<string, unknown>;
+
+  // PostgreSQL: SQLSTATE — ровно пять символов из цифр и заглавных букв. Одного
+  // кода мало: `code` есть и у системных ошибок Node (`ECONNREFUSED`), поэтому
+  // требуется ещё хотя бы одно поле, которое кладёт именно драйвер.
+  const code = candidate.code;
+  if (
+    typeof code === 'string' &&
+    /^[0-9A-Z]{5}$/u.test(code) &&
+    ('severity' in candidate ||
+      'routine' in candidate ||
+      'schema' in candidate ||
+      'table' in candidate ||
+      'constraint' in candidate)
+  ) {
+    return 'db';
+  }
+
+  // Порт LLM: пара «повторять ли вызов» и «прерывает ли пачку» есть только у
+  // `LlmError` и его наследников (`llm/port.ts`).
+  if (typeof candidate.retriable === 'boolean' && typeof candidate.stopsBatch === 'boolean') {
+    return 'llm';
+  }
+
+  // Клиент внешней интеграции: названная операция и статус ответа (`RdWebError`).
+  if (typeof candidate.operation === 'string' && 'status' in candidate) return 'integration';
+
+  return 'unknown';
 }
 
 export interface ErrorReporter {
@@ -299,31 +389,11 @@ export interface SqlExecutor {
   query(text: string, values?: readonly unknown[]): Promise<{ rows: readonly unknown[] }>;
 }
 
-/**
- * Повторное появление после `resolved` снова открывает запись: иначе однажды
- * закрытая ошибка исчезла бы с экрана диагностики навсегда. Статус `ack`
- * сохраняется — он означает «взято в работу», и сбрасывать его каждым
- * повторением значило бы заново поднимать шум.
- */
-const UPSERT_ERROR_EVENT = `
-  INSERT INTO error_events (
-    fingerprint, error_class, message_template, top_frame, sample_request_id, sample_context
-  )
-  VALUES ($1, $2, $3, $4, $5, $6::jsonb)
-  ON CONFLICT (fingerprint) DO UPDATE
-     SET count = error_events.count + 1,
-         last_seen_at = now(),
-         status = CASE WHEN error_events.status = 'resolved' THEN 'new' ELSE error_events.status END,
-         resolved_at = CASE WHEN error_events.status = 'resolved' THEN NULL
-                            ELSE error_events.resolved_at END,
-         sample_request_id = COALESCE($5, error_events.sample_request_id),
-         sample_context = COALESCE($6::jsonb, error_events.sample_context)
-`;
-
 function mergeWithContext(context: ErrorEventContext | undefined): ErrorEventContext {
   const ambient = currentContext();
   if (!ambient) return context ?? {};
   return {
+    ...context,
     requestId: context?.requestId ?? ambient.requestId,
     userId: context?.userId ?? ambient.userId,
     route: context?.route ?? ambient.route,
@@ -332,74 +402,99 @@ function mergeWithContext(context: ErrorEventContext | undefined): ErrorEventCon
     jobType: context?.jobType ?? ambient.jobType,
     jobId: context?.jobId ?? ambient.jobId,
     attempt: context?.attempt ?? ambient.attempt,
-    extra: context?.extra,
   };
 }
 
-function sampleContext(
+/**
+ * Контекст, пригодный для записи в БД.
+ *
+ * Проходит ту же очистку, что журнал. Без неё колонка `context` становится
+ * вторым каналом утечки, более долговечным: строка в таблице живёт дольше, чем
+ * ротируемый файл журнала.
+ */
+export function sampleContext(
   fingerprint: ErrorFingerprint,
   context: ErrorEventContext,
 ): Record<string, unknown> {
   const sample: Record<string, unknown> = {};
-  if (context.userId !== undefined) sample.user_id = context.userId;
-  if (context.route !== undefined) sample.route = context.route;
-  if (context.objectId !== undefined) sample.object_id = context.objectId;
-  if (context.revisionId !== undefined) sample.revision_id = context.revisionId;
-  if (context.jobType !== undefined) sample.job_type = context.jobType;
-  if (context.jobId !== undefined) sample.job_id = context.jobId;
-  if (context.attempt !== undefined) sample.attempt = context.attempt;
   if (fingerprint.topFrameRaw !== undefined) sample.own_frame = fingerprint.topFrameRaw;
-  // Контекст проходит ту же очистку, что журнал. Без неё error_events.sample_context
-  // становится вторым каналом утечки, более долговечным: строка в таблице без срока
-  // хранения, тогда как журнал ротируется.
   if (context.extra !== undefined) sample.extra = redactDeep(context.extra);
   return sample;
 }
 
-export interface DbErrorReporterOptions {
-  readonly sql: SqlExecutor;
-  readonly logger: Logger;
+/**
+ * Событие, готовое к накоплению: чистые данные без объекта ошибки.
+ *
+ * Объект ошибки дальше этой функции не идёт намеренно. Накопитель держит
+ * события до сброса, и ссылка на `Error` удерживала бы в памяти весь замкнутый
+ * на него граф — при шторме это утечка ровно в тот момент, когда процессу
+ * тяжелее всего.
+ */
+export interface JournalEvent {
+  readonly fingerprint: ErrorFingerprint;
+  readonly axes: ErrorAxes;
+  readonly errorCode: string | undefined;
+  readonly context: ErrorEventContext;
+  readonly sampleContext: Record<string, unknown>;
 }
 
-export class DbErrorReporter implements ErrorReporter {
-  private readonly sql: SqlExecutor;
-  private readonly logger: Logger;
+export interface PrepareEventOptions {
+  readonly defaultSource: ErrorSource;
+}
 
-  constructor(options: DbErrorReporterOptions) {
-    this.sql = options.sql;
-    this.logger = options.logger;
+export function prepareJournalEvent(
+  error: unknown,
+  context: ErrorEventContext | undefined,
+  options: PrepareEventOptions,
+): JournalEvent {
+  const fingerprint = fingerprintError(error);
+  const merged = mergeWithContext(context);
+  const code = stringField(error, 'code');
+
+  const axes: ErrorAxes = {
+    source: merged.source ?? options.defaultSource,
+    execution: merged.execution ?? (merged.jobType !== undefined ? 'job' : 'unknown'),
+    domain: merged.domain ?? classifyErrorDomain(error),
+    pipelineStage: merged.pipelineStage ?? null,
+    severity: merged.severity ?? 'error',
+  };
+
+  return {
+    fingerprint,
+    axes,
+    errorCode: code,
+    context: merged,
+    sampleContext: sampleContext(fingerprint, merged),
+  };
+}
+
+/**
+ * Приёмник подготовленных событий. Реализуется `journal-writer.ts`.
+ *
+ * Объявлен здесь, а не импортирован оттуда, чтобы модуль отпечатков не зависел
+ * от модуля записи: тот тянет за собой знание о схеме БД, а этот нужен и там,
+ * где БД нет.
+ */
+export interface JournalEventSink {
+  accept(event: JournalEvent): void;
+}
+
+/** Репортер поверх накопителя: сам SQL выполняет `journal-writer.ts`. */
+export class JournalErrorReporter implements ErrorReporter {
+  readonly #sink: JournalEventSink;
+  readonly #defaultSource: ErrorSource;
+
+  constructor(sink: JournalEventSink, defaultSource: ErrorSource) {
+    this.#sink = sink;
+    this.#defaultSource = defaultSource;
   }
 
-  async report(error: unknown, context?: ErrorEventContext): Promise<void> {
-    const fingerprint = fingerprintError(error);
-    const merged = mergeWithContext(context);
-
-    try {
-      await this.sql.query(UPSERT_ERROR_EVENT, [
-        fingerprint.fingerprint,
-        fingerprint.errorClass,
-        fingerprint.messageTemplate,
-        fingerprint.topFrame ?? null,
-        merged.requestId ?? null,
-        JSON.stringify(sampleContext(fingerprint, merged)),
-      ]);
-      this.logger.debug(
-        { event: 'error_reported', fingerprint: fingerprint.fingerprint },
-        'ошибка зарегистрирована',
-      );
-    } catch (writeError) {
-      // Репортер не имеет права бросать: его вызывают из catch-блоков и из
-      // обработчика необработанных отказов. Собственный сбой только пишется в
-      // лог — попытка зарегистрировать его в той же БД зациклила бы отказ.
-      this.logger.error(
-        {
-          event: 'error_report_failed',
-          fingerprint: fingerprint.fingerprint,
-          error_class: errorClassOf(writeError),
-        },
-        'не удалось записать ошибку в error_events',
-      );
-    }
+  report(error: unknown, context?: ErrorEventContext): Promise<void> {
+    // Синхронная постановка в накопитель вместо запроса к БД: `report()`
+    // вызывают из catch-блоков на горячем пути, и ждать там сети нельзя.
+    // Сигнатура остаётся промисной — её ждут вызывающие и тесты.
+    this.#sink.accept(prepareJournalEvent(error, context, { defaultSource: this.#defaultSource }));
+    return Promise.resolve();
   }
 }
 
@@ -481,38 +576,6 @@ export class NoopErrorReporter implements ErrorReporter {
   }
 }
 
-export interface CreateErrorReporterOptions {
-  readonly kind: 'db' | 'sentry';
-  readonly sql: SqlExecutor;
-  readonly logger: Logger;
-  readonly sentryDsn?: string | undefined;
-  readonly environment?: string | undefined;
-  readonly release?: string | undefined;
-}
-
-export function createErrorReporter(options: CreateErrorReporterOptions): ErrorReporter {
-  const db = new DbErrorReporter({ sql: options.sql, logger: options.logger });
-  if (options.kind !== 'sentry') return db;
-
-  if (options.sentryDsn === undefined || options.sentryDsn.length === 0) {
-    // Проверка окружения это уже отвергает; здесь остаётся защита от того,
-    // чтобы отсутствие DSN не превратилось в потерю регистрации ошибок.
-    options.logger.warn(
-      { event: 'sentry_dsn_missing' },
-      'ERROR_REPORTER=sentry без SENTRY_DSN: используется запись в БД',
-    );
-    return db;
-  }
-
-  return new SentryErrorReporter({
-    dsn: options.sentryDsn,
-    logger: options.logger,
-    delegate: db,
-    ...(options.environment === undefined ? {} : { environment: options.environment }),
-    ...(options.release === undefined ? {} : { release: options.release }),
-  });
-}
-
 /**
  * Минимум логгера для обработчиков процесса.
  *
@@ -528,6 +591,15 @@ export interface ErrorLogSink {
 export interface ProcessErrorHandlerOptions {
   readonly reporter: ErrorReporter;
   readonly logger: ErrorLogSink;
+  /**
+   * Досрочный сброс накопителя журнала.
+   *
+   * Обязателен по смыслу, хотя объявлен необязательным ради вызовов из тестов:
+   * репортер только КЛАДЁТ событие в накопитель, и без сброса запись о
+   * падении, которое гасит процесс, не доедет до БД никогда — то есть
+   * потеряется ровно у самых тяжёлых отказов, ради которых журнал и заводили.
+   */
+  readonly flush?: (() => Promise<void>) | undefined;
   /**
    * Гасить процесс после `uncaughtException`. По умолчанию да: после
    * необработанного исключения состояние процесса не определено, и продолжать
@@ -548,12 +620,16 @@ export function installProcessErrorHandlers(options: ProcessErrorHandlerOptions)
   const { reporter, logger } = options;
   const exitOnUncaught = options.exitOnUncaught ?? true;
 
+  const flush = options.flush ?? ((): Promise<void> => Promise.resolve());
+
   const onRejection = (reason: unknown): void => {
     logger.error(
       { event: 'unhandled_rejection', error_class: errorClassOf(reason) },
       'необработанный отказ промиса',
     );
-    void reporter.report(reason, { extra: { source: 'unhandledRejection' } });
+    void reporter
+      .report(reason, { execution: 'process', extra: { source: 'unhandledRejection' } })
+      .then(flush);
   };
 
   const onException = (error: unknown): void => {
@@ -564,9 +640,16 @@ export function installProcessErrorHandlers(options: ProcessErrorHandlerOptions)
     // Записать успеваем не всегда, поэтому выход отложен до завершения записи,
     // а не сразу: иначе строки в error_events не будет ровно у самых тяжёлых
     // падений.
-    void reporter.report(error, { extra: { source: 'uncaughtException' } }).finally(() => {
-      if (exitOnUncaught) process.exit(options.exitCode ?? 1);
-    });
+    void reporter
+      .report(error, {
+        execution: 'process',
+        severity: 'fatal',
+        extra: { source: 'uncaughtException' },
+      })
+      .then(flush)
+      .finally(() => {
+        if (exitOnUncaught) process.exit(options.exitCode ?? 1);
+      });
   };
 
   process.on('unhandledRejection', onRejection);

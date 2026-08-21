@@ -300,3 +300,51 @@ export const MATERIAL_CATEGORIES = [
 
 export const materialCategoryCodeSchema = z.enum(MATERIAL_CATEGORIES);
 export type MaterialCategoryCode = z.infer<typeof materialCategoryCodeSchema>;
+
+// --- Обратная связь конвейера (§11, ADR-0010) ---
+
+/**
+ * Крупная категория сигнала о качестве обработки.
+ *
+ * `manual_correction` — правка человека. Самый ценный вид: инженер, исправляя
+ * распознанное, проставляет правильный ответ там, где модель ошиблась, и это
+ * единственный сигнал, который знает не только «плохо», но и «как надо».
+ */
+export const processingFeedbackTypeSchema = z.enum([
+  'system_failure',
+  'recognition_failure',
+  'wrong_extraction',
+  'check_error',
+  'manual_correction',
+]);
+export type ProcessingFeedbackType = z.infer<typeof processingFeedbackTypeSchema>;
+
+/**
+ * Причина из закрытого перечня — ключ, по которому строится годовой ряд.
+ *
+ * Закрытый, а не свободный текст, сознательно: формулировку сообщения меняют
+ * при первой же правке кода, и ряд «доля дефектов у промта X версии N»
+ * разорвался бы ровно тогда, когда его впервые захотят посмотреть.
+ */
+export const processingFeedbackReasonSchema = z.enum([
+  /** Ответ модели не разобран как JSON. */
+  'vlm.invalid_json',
+  /** JSON разобран, но не соответствует схеме блока. */
+  'vlm.schema_mismatch',
+  /** Модель не дала результата: отказ, обрыв по лимиту, пустой ответ. */
+  'vlm.refusal',
+  /** Ответ формально верен и пуст: распознавать было нечего или не вышло. */
+  'vlm.empty_result',
+  /** Реквизит не извлечён. В записи только код поля, не значение. */
+  'extract.field_missing',
+  'classify.low_confidence',
+  'detect.no_blocks',
+  'detect.low_score',
+  'match.ambiguous',
+  'doc_split.unassigned_pages',
+  /** Правки человека: он назвал правильный ответ. */
+  'manual.field_corrected',
+  'manual.block_redrawn',
+  'manual.type_changed',
+]);
+export type ProcessingFeedbackReason = z.infer<typeof processingFeedbackReasonSchema>;

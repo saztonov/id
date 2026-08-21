@@ -28,13 +28,27 @@ export type { AppLogger, LogLevel } from './observability/logger.js';
 export { createMetrics, measureExternalCall } from './observability/metrics.js';
 export type { Metrics } from './observability/metrics.js';
 export {
-  createErrorReporter,
   errorDigest,
   installProcessErrorHandlers,
   NoopErrorReporter,
   normalizeErrorMessage,
 } from './observability/errors.js';
-export type { ErrorReporter, SqlExecutor } from './observability/errors.js';
+export type {
+  ErrorAxes,
+  ErrorDomain,
+  ErrorEventContext,
+  ErrorReporter,
+  ErrorSource,
+  SqlExecutor,
+} from './observability/errors.js';
+export { createErrorReporting, ErrorJournalWriter } from './observability/journal-writer.js';
+export type { ErrorReporting } from './observability/journal-writer.js';
+export { DbProcessingFeedbackSink, NoopProcessingFeedbackSink } from './observability/quality.js';
+export type {
+  FeedbackStage,
+  ProcessingFeedbackEvent,
+  ProcessingFeedbackSink,
+} from './observability/quality.js';
 export { instrumentPool } from './observability/db-timing.js';
 export {
   childLogger,
@@ -242,11 +256,11 @@ export {
 export type { RecognitionProviderSettings } from './config/portal-settings.js';
 
 /** VLM-распознавание по кропам блоков (ADR-0007, план v3). */
-export {
-  RECOGNITION_PROMPT_DEFAULTS,
-  substitutePlaceholders,
+export { RECOGNITION_PROMPT_DEFAULTS, substitutePlaceholders } from './recognition/vlm/prompts.js';
+export type {
+  PromptSubstitutionContext,
+  RecognitionPromptDefault,
 } from './recognition/vlm/prompts.js';
-export type { PromptSubstitutionContext, RecognitionPromptDefault } from './recognition/vlm/prompts.js';
 export { schemaHash } from './recognition/vlm/schemas.js';
 export { recognizeBlock } from './recognition/vlm/recognize-block.js';
 export type {

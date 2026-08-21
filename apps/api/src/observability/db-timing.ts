@@ -27,6 +27,22 @@ export interface DbMetricsSink {
   }): void;
 }
 
+/**
+ * Приёмник медленных операций (реализуется `anomalies.ts`).
+ *
+ * Объявлен здесь, а не импортирован, по той же причине, что `DbMetricsSink`:
+ * модуль таймингов не должен тянуть за собой знание о схеме БД, иначе он
+ * перестанет годиться процессу без неё.
+ */
+export interface SlowQuerySink {
+  recordSlow(sample: {
+    readonly kind: 'sql';
+    readonly target: string;
+    readonly durationMs: number;
+    readonly thresholdMs: number;
+  }): void;
+}
+
 export interface DbTimingOptions {
   readonly logger: Logger;
   readonly slowQueryMs: number;
@@ -34,6 +50,13 @@ export interface DbTimingOptions {
   readonly maxSqlLength?: number;
   /** Быстрые запросы писать на debug. По умолчанию да — уровень их отфильтрует. */
   readonly logFastQueries?: boolean;
+  /**
+   * Куда складывать превышения порога.
+   *
+   * Необязателен: без него медленный запрос по-прежнему попадает в лог и в
+   * гистограмму, просто не копится в почасовой счётчик.
+   */
+  readonly slowSink?: SlowQuerySink | undefined;
 }
 
 interface Resolved {
@@ -42,7 +65,17 @@ interface Resolved {
   readonly metrics: DbMetricsSink | undefined;
   readonly maxSqlLength: number;
   readonly logFastQueries: boolean;
+  readonly slowSink: SlowQuerySink | undefined;
 }
+
+/**
+ * Метка запросов самой наблюдаемости.
+ *
+ * Их тайминги не снимаются: сброс счётчиков идёт в ту же базу, и медленная
+ * запись статистики порождала бы запись о медленной записи статистики. В
+ * спокойное время это незаметно, в инциденте — удваивает поток.
+ */
+const OBSERVABILITY_MARKER = '/* observability */';
 
 const DEFAULT_MAX_SQL_LENGTH = 400;
 
@@ -156,6 +189,9 @@ function report(
   failed: boolean,
   error: unknown,
 ): void {
+  // Запросы самой наблюдаемости не измеряются: см. OBSERVABILITY_MARKER.
+  if (sql.includes(OBSERVABILITY_MARKER)) return;
+
   const durationMs = Math.round(performance.now() - startedAt);
   const operation = sqlOperation(sql);
 
@@ -181,6 +217,12 @@ function report(
   }
 
   if (durationMs >= options.slowQueryMs) {
+    options.slowSink?.recordSlow({
+      kind: 'sql',
+      target: normalizeSql(sql, options.maxSqlLength),
+      durationMs,
+      thresholdMs: options.slowQueryMs,
+    });
     options.logger.warn(
       {
         event: 'db_query_slow',
@@ -264,6 +306,7 @@ export function instrumentPool<T extends object>(pool: T, options: DbTimingOptio
     metrics: options.metrics,
     maxSqlLength: options.maxSqlLength ?? DEFAULT_MAX_SQL_LENGTH,
     logFastQueries: options.logFastQueries ?? true,
+    slowSink: options.slowSink,
   };
 
   instrumentQueryable(pool, resolved);

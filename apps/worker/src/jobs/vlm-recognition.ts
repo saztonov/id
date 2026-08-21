@@ -77,6 +77,7 @@ import {
   type JobHandler,
   type LlmProviderName,
   type PageRasterizer,
+  type ProcessingFeedbackSink,
   type VlmJsonSchemaFormat,
   type VlmPort,
   type VlmResponse,
@@ -479,6 +480,16 @@ export interface VlmRecognitionDeps {
   /** Как wired: `recordAiRun(db, scope, input)` — 1:1. Вызывается и на успех, и на отказ. */
   recordAiRun(input: VlmRecordAiRunInput): Promise<void>;
 
+  /**
+   * Приёмник дефектов качества (§11, ADR-0010).
+   *
+   * `ai_runs` фиксирует, что вызов БЫЛ и сколько стоил; `recognition_run_pages`
+   * — сколько блоков вышло непригодными. Ни то, ни другое не отвечает, ПОЧЕМУ
+   * и КАКОЙ версией промта: именно этого не хватало, чтобы дорабатывать промты
+   * по данным, а не по памяти.
+   */
+  readonly feedback: ProcessingFeedbackSink;
+
   /** Как wired: `sha256Hex`. */
   sha256(bytes: Uint8Array): string;
 }
@@ -647,10 +658,7 @@ function toHashableBlock(block: VlmFrozenBlock): HashableBlock {
     x1,
     y1,
     sortOrder: block.sortOrder,
-    points:
-      block.shapeType === 'polygon'
-        ? (block.polygon ?? []).map(([x, y]) => ({ x, y }))
-        : [],
+    points: block.shapeType === 'polygon' ? (block.polygon ?? []).map(([x, y]) => ({ x, y })) : [],
   };
 }
 
@@ -704,9 +712,12 @@ function parseBlockEnvelope(contentJson: unknown): RecognitionBlock | null {
  * `ai_runs` не пишется (её CHECK'и требуют хэшей, см. `ai-runs.ts`), это же
  * поведение, что у сегментации (`segmentation.ts`, `if (trace === null) return`).
  */
-function llmAttemptOf(
-  error: unknown,
-): { readonly provider: LlmProviderName; readonly model: string; readonly inputHash: string; readonly latencyMs: number } | null {
+function llmAttemptOf(error: unknown): {
+  readonly provider: LlmProviderName;
+  readonly model: string;
+  readonly inputHash: string;
+  readonly latencyMs: number;
+} | null {
   if (typeof error !== 'object' || error === null) return null;
   const attempt = (error as { attempt?: unknown }).attempt;
   if (typeof attempt !== 'object' || attempt === null) return null;
@@ -734,7 +745,11 @@ function llmAttemptOf(
  * копий лжёт, а `error.name` контрактно стабилен.
  */
 function isPayloadTooLarge(error: unknown): boolean {
-  return typeof error === 'object' && error !== null && (error as { name?: unknown }).name === 'LlmPayloadTooLargeError';
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    (error as { name?: unknown }).name === 'LlmPayloadTooLargeError'
+  );
 }
 
 function requireVlm(deps: VlmRecognitionDeps): VlmPort {
@@ -759,7 +774,9 @@ function requireRasterizer(deps: VlmRecognitionDeps): PageRasterizer {
 // vlm.start_recognition
 // =====================================================================
 
-export function createVlmStartHandler(deps: VlmRecognitionDeps): JobHandler<'vlm.start_recognition'> {
+export function createVlmStartHandler(
+  deps: VlmRecognitionDeps,
+): JobHandler<'vlm.start_recognition'> {
   return withVlmRunTermination(deps, async (ctx: JobContext<'vlm.start_recognition'>) => {
     const run = await loadRunningVlmRun(deps, ctx.payload);
 
@@ -854,7 +871,11 @@ export function createVlmStartHandler(deps: VlmRecognitionDeps): JobHandler<'vlm
     for (const page of pages) {
       await ctx.enqueue({
         type: 'vlm.recognize_page',
-        payload: { revisionId: run.revisionId, recognitionRunId: run.runId, pageIndex: page.workingPageIndex },
+        payload: {
+          revisionId: run.revisionId,
+          recognitionRunId: run.runId,
+          pageIndex: page.workingPageIndex,
+        },
         dedupeKey: `vlm.recognize_page:${run.runId}:${page.workingPageIndex}`,
       });
     }
@@ -874,6 +895,46 @@ export function createVlmStartHandler(deps: VlmRecognitionDeps): JobHandler<'vlm
 // =====================================================================
 // vlm.recognize_page
 // =====================================================================
+
+/**
+ * Запись дефекта качества по блоку.
+ *
+ * Собрана в одном месте, чтобы обе ветки отказа заполняли провенанс одинаково:
+ * разойдись они в наборе полей — и срез «доля дефектов у промта X версии N»
+ * посчитался бы по разным знаменателям, а расхождение было бы незаметно.
+ *
+ * `await` намеренный, хотя приёмник не бросает: без него запись гонялась бы с
+ * завершением задачи, и последние блоки страницы терялись бы при остановке
+ * воркера — то есть чаще всего именно те, на которых он и упал.
+ */
+async function recordBlockFeedback(
+  deps: VlmRecognitionDeps,
+  ctx: JobContext<'vlm.recognize_page'>,
+  run: VlmRunTarget,
+  block: VlmFrozenBlock,
+  prompt: { readonly code: string; readonly version: number },
+  model: string,
+  input: {
+    readonly reasonCode: 'vlm.invalid_json' | 'vlm.schema_mismatch' | 'vlm.refusal';
+    readonly observed: Record<string, unknown>;
+  },
+): Promise<void> {
+  await deps.feedback.record({
+    feedbackType: 'recognition_failure',
+    reasonCode: input.reasonCode,
+    severity: 'warn',
+    revisionId: run.revisionId,
+    recognitionRunId: run.runId,
+    layoutBlockId: block.id,
+    workingPageIndex: ctx.payload.pageIndex,
+    pipelineStage: 'recognition',
+    provider: 'proxy_llm',
+    model,
+    promptCode: prompt.code,
+    promptVersion: prompt.version,
+    observed: input.observed,
+  });
+}
 
 async function recordSuccessAiRun(
   deps: VlmRecognitionDeps,
@@ -1066,7 +1127,11 @@ export function createVlmRecognizePageHandler(
               const envelope = {
                 envelope: RECOGNITION_BLOCK_RESULT_ENVELOPE,
                 block: emptyBlock,
-                page: { workingPageIndex: pageIndex, widthPx: rendered.widthPx, heightPx: rendered.heightPx },
+                page: {
+                  workingPageIndex: pageIndex,
+                  widthPx: rendered.widthPx,
+                  heightPx: rendered.heightPx,
+                },
                 provenance: {
                   promptCode: null,
                   promptVersion: null,
@@ -1094,13 +1159,21 @@ export function createVlmRecognizePageHandler(
               });
               if (written) recognizedThisAttempt += 1;
               ctx.logger.warn(
-                { event: 'degenerate_crop', layout_block_id: block.id, block_type: block.blockType },
+                {
+                  event: 'degenerate_crop',
+                  layout_block_id: block.id,
+                  block_type: block.blockType,
+                },
                 'кроп блока вырожден: записан пустой текстовый результат',
               );
             } else {
               invalidCount += 1;
               ctx.logger.warn(
-                { event: 'degenerate_crop', layout_block_id: block.id, block_type: block.blockType },
+                {
+                  event: 'degenerate_crop',
+                  layout_block_id: block.id,
+                  block_type: block.blockType,
+                },
                 'кроп блока вырожден: результат invalid (degenerate_crop)',
               );
             }
@@ -1146,7 +1219,16 @@ export function createVlmRecognizePageHandler(
               downscale: deps.downscale,
             });
           } catch (error) {
-            await recordFailureAiRun(deps, ctx, run, block, prompt, cropSha256, requestedModel, error);
+            await recordFailureAiRun(
+              deps,
+              ctx,
+              run,
+              block,
+              prompt,
+              cropSha256,
+              requestedModel,
+              error,
+            );
             if (isPayloadTooLarge(error)) {
               // Тело не пролезает в шлюз даже после downscale-повтора внутри
               // recognizeBlock: по контракту LlmPayloadTooLargeError это НЕ
@@ -1174,7 +1256,11 @@ export function createVlmRecognizePageHandler(
               const envelope = {
                 envelope: RECOGNITION_BLOCK_RESULT_ENVELOPE,
                 block: outcome.block,
-                page: { workingPageIndex: pageIndex, widthPx: rendered.widthPx, heightPx: rendered.heightPx },
+                page: {
+                  workingPageIndex: pageIndex,
+                  widthPx: rendered.widthPx,
+                  heightPx: rendered.heightPx,
+                },
                 provenance: {
                   promptCode: prompt.code,
                   promptVersion: prompt.version,
@@ -1203,18 +1289,48 @@ export function createVlmRecognizePageHandler(
                 },
               });
               if (written) recognizedThisAttempt += 1;
-              await recordSuccessAiRun(deps, ctx, run, block, prompt, cropSha256, outcome.response, 'ok');
+              await recordSuccessAiRun(
+                deps,
+                ctx,
+                run,
+                block,
+                prompt,
+                cropSha256,
+                outcome.response,
+                'ok',
+              );
               break;
             }
             case 'invalid_response': {
               invalidCount += 1;
               ctx.logger.warn(
-                { event: 'block_invalid_response', layout_block_id: block.id, reason: outcome.reason },
+                {
+                  event: 'block_invalid_response',
+                  layout_block_id: block.id,
+                  reason: outcome.reason,
+                },
                 'ответ модели непригоден: блок invalid',
               );
+              // Причина различается по её же коду: «не разобрался как JSON» и
+              // «разобрался, но не по схеме» правятся разными местами промта, и
+              // сводить их в одну строку значит потерять именно то различие,
+              // ради которого запись ведётся.
+              await recordBlockFeedback(deps, ctx, run, block, prompt, requestedModel, {
+                reasonCode: outcome.reason.includes('schema')
+                  ? 'vlm.schema_mismatch'
+                  : 'vlm.invalid_json',
+                observed: { reason_code: outcome.reason, block_type: block.blockType },
+              });
               if (outcome.response !== undefined) {
                 await recordSuccessAiRun(
-                  deps, ctx, run, block, prompt, cropSha256, outcome.response, 'invalid_response',
+                  deps,
+                  ctx,
+                  run,
+                  block,
+                  prompt,
+                  cropSha256,
+                  outcome.response,
+                  'invalid_response',
                 );
               }
               break;
@@ -1225,9 +1341,24 @@ export function createVlmRecognizePageHandler(
                 { event: 'block_model_refusal', layout_block_id: block.id, reason: outcome.reason },
                 'модель не дала результата: блок refused',
               );
+              await recordBlockFeedback(deps, ctx, run, block, prompt, requestedModel, {
+                reasonCode: 'vlm.refusal',
+                observed: {
+                  reason_code: outcome.reason,
+                  block_type: block.blockType,
+                  finish_reason: outcome.response?.finishReason ?? null,
+                },
+              });
               if (outcome.response !== undefined) {
                 await recordSuccessAiRun(
-                  deps, ctx, run, block, prompt, cropSha256, outcome.response, 'model_refusal',
+                  deps,
+                  ctx,
+                  run,
+                  block,
+                  prompt,
+                  cropSha256,
+                  outcome.response,
+                  'model_refusal',
                 );
               }
               break;
@@ -1413,7 +1544,10 @@ export function createVlmFinalizeHandler(deps: VlmRecognitionDeps): JobHandler<'
       await deps.finishRun({
         runId: run.runId,
         status: 'integrity_error',
-        reason: `сборка результата провалила двустороннюю сверку: ${message}`.slice(0, MAX_REASON_LENGTH),
+        reason: `сборка результата провалила двустороннюю сверку: ${message}`.slice(
+          0,
+          MAX_REASON_LENGTH,
+        ),
       });
       throw new VlmRecognitionIntegrityError(`assemble: ${message}`);
     }
@@ -1429,10 +1563,19 @@ export function createVlmFinalizeHandler(deps: VlmRecognitionDeps): JobHandler<'
       await deps.finishRun({
         runId: run.runId,
         status: 'done',
-        counts: { ...counts, blocksExpected: frozen.length, blocksCovered: envelopes.length, dryRun: true },
+        counts: {
+          ...counts,
+          blocksExpected: frozen.length,
+          blocksCovered: envelopes.length,
+          dryRun: true,
+        },
       });
       ctx.logger.info(
-        { event: 'vlm_recognition_dry_run_done', recognition_run_id: run.runId, artifact_sha256: sha256 },
+        {
+          event: 'vlm_recognition_dry_run_done',
+          recognition_run_id: run.runId,
+          artifact_sha256: sha256,
+        },
         'прогон VLM завершён в dry-run: canonical записан, публикация пропущена',
       );
       return;

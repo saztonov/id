@@ -89,6 +89,9 @@ async function main(): Promise<void> {
   installProcessErrorHandlers({
     reporter: app.errorReporter,
     logger: app.log,
+    // Репортер только кладёт событие в накопитель. Без сброса запись о
+    // падении, которое гасит процесс, не доехала бы до БД никогда.
+    flush: () => app.errorJournal.flush(),
     exitOnUncaught: false,
   });
 

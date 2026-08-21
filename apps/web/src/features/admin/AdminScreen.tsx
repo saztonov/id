@@ -21,6 +21,22 @@
  * До S11 это право было объявлено в матрице и не имело ни одного экрана: журнал
  * исполнения фиксировал его как долг четыре этапа подряд. Здесь оно получает
  * потребителя — консоль задач, глубина очереди и попытки с последними ошибками.
+ *
+ * ## Журнал и качество — одна вкладка с двумя разделами
+ *
+ * Разделов два, а вкладка одна, и это не экономия места: у `Tabs` antd при
+ * переполнении появляется кнопка свёртки, а она нарушает `aria-required-children`
+ * — внутри `tablist` оказывается элемент, вкладкой не являющийся. Найдено
+ * прогоном axe, а не рассуждением. Разделы при этом честно разные и переключаются
+ * явно, а не прячутся один в другом.
+ *
+ * ## Журнал — отдельная вкладка, а не карточка в диагностике
+ *
+ * У них разный горизонт и разный вопрос. Диагностика отвечает «что происходит
+ * прямо сейчас»: очередь, выполняющиеся задачи, последние попытки. Журнал
+ * отвечает «что ломалось и чем это чинили» — с историей, статусами и разбором,
+ * который живёт годами. Общая вкладка заставила бы один экран обслуживать
+ * дежурство и разбор накопленного, а это разные режимы работы.
  */
 import { type ReactNode } from 'react';
 import { Tabs } from 'antd';
@@ -31,6 +47,7 @@ import { RegistrationRequestsPanel } from './RegistrationRequestsPanel.js';
 import { UsersPanel } from './UsersPanel.js';
 import { CandidatesPanel } from './CandidatesPanel.js';
 import { DiagnosticsPanel } from './DiagnosticsPanel.js';
+import { ErrorJournalPanel } from './ErrorJournalPanel.js';
 import { AuditPanel } from './AuditPanel.js';
 import { SettingsPanel } from './SettingsPanel.js';
 import { RulesPanel } from './RulesPanel.js';
@@ -41,6 +58,7 @@ const TABS = [
   'registration',
   'candidates',
   'diagnostics',
+  'journal',
   'audit',
   'settings',
   'rules',
@@ -76,6 +94,7 @@ export function AdminScreen(): ReactNode {
             : []),
           { key: 'candidates', label: 'Кандидаты в виды ИД', children: <CandidatesPanel /> },
           { key: 'diagnostics', label: 'Диагностика и задачи', children: <DiagnosticsPanel /> },
+          { key: 'journal', label: 'Журнал и качество', children: <ErrorJournalPanel /> },
           { key: 'audit', label: 'Аудит', children: <AuditPanel /> },
           { key: 'settings', label: 'Настройки и интеграции', children: <SettingsPanel /> },
           { key: 'rules', label: 'Правила и ruleset', children: <RulesPanel /> },

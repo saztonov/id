@@ -16,13 +16,13 @@
 import { StrictMode, type ReactNode } from 'react';
 import { App as AntApp, ConfigProvider, Result, Spin, Typography } from 'antd';
 import ruRU from 'antd/locale/ru_RU';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { MutationCache, QueryCache, QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
 import { AppShell } from './AppShell.js';
 import { resolveRoute, RouterProvider, useLocation, type RouteDefinition } from './router.js';
 import { SessionProvider, useMeQuery } from './session.js';
 import { session as sessionApi } from '../api/endpoints.js';
-import { isUnauthenticated } from '../api/problem.js';
+import { isApiError, isUnauthenticated } from '../api/problem.js';
 import { ErrorState } from '../shared/ui.js';
 import { IdsScreen } from '../features/ids/IdsScreen.js';
 import { ObjectVolumesScreen } from '../features/ids/ObjectVolumesScreen.js';
@@ -33,6 +33,8 @@ import { AdminScreen } from '../features/admin/AdminScreen.js';
 import { ChangePasswordPage } from '../features/auth/ChangePasswordPage.js';
 import { LoginPage } from '../features/auth/LoginPage.js';
 import { RegisterPage } from '../features/auth/RegisterPage.js';
+import { ErrorBoundary } from './ErrorBoundary.js';
+import { reportClientError } from './errorReporting.js';
 
 /**
  * Клиент кэша.
@@ -50,6 +52,25 @@ const queryClient = new QueryClient({
     },
     mutations: { retry: 0 },
   },
+  /**
+   * В журнал уходят только НЕ серверные отказы.
+   *
+   * `ApiError` означает, что сервер ответил: пятисотые он уже записал сам, а
+   * четырёхсотые — это отказ по праву или проверке, то есть штатная работа.
+   * Докладывать о них с клиента значит удваивать одну ошибку в журнале и
+   * заполнять его отказами доступа, которые ошибками не являются. Остаётся то,
+   * чего сервер увидеть не может: исключение в коде запроса и обрыв сети.
+   */
+  queryCache: new QueryCache({
+    onError: (error) => {
+      if (!isApiError(error)) reportClientError(error, { kind: 'manual' });
+    },
+  }),
+  mutationCache: new MutationCache({
+    onError: (error) => {
+      if (!isApiError(error)) reportClientError(error, { kind: 'manual' });
+    },
+  }),
 });
 
 /**
@@ -94,6 +115,15 @@ const THEME_TOKENS = {
  */
 const THEME_COMPONENTS = {
   Table: { colorTextDisabled: 'rgba(0, 0, 0, 0.62)' },
+  /**
+   * Подсказка `Select` поднята по той же причине и найдена тем же способом —
+   * прогоном axe (вкладка «Журнал ошибок», два фильтра). У `Select` подсказка
+   * это НЕ нативный `placeholder`, а обычный текстовый узел: браузер его не
+   * выделяет, axe проверяет как текст, и умолчание antd `rgba(0,0,0,.25)` даёт
+   * 1.83:1. Глобально токен не трогается — у `Input` подсказка нативная, и её
+   * оформление остаётся на усмотрение браузера.
+   */
+  Select: { colorTextPlaceholder: 'rgba(0, 0, 0, 0.62)' },
 } as const;
 
 const ROUTES: readonly RouteDefinition[] = [
@@ -225,11 +255,17 @@ export function App(): ReactNode {
     <StrictMode>
       <ConfigProvider locale={ruRU} theme={{ token: THEME_TOKENS, components: THEME_COMPONENTS }}>
         <AntApp>
-          <QueryClientProvider client={queryClient}>
-            <RouterProvider>
-              <Root />
-            </RouterProvider>
-          </QueryClientProvider>
+          {/*
+            Граница отрисовки охватывает и вход: исключение на экране логина
+            гасило бы портал до того, как пользователь может о нём сообщить.
+          */}
+          <ErrorBoundary>
+            <QueryClientProvider client={queryClient}>
+              <RouterProvider>
+                <Root />
+              </RouterProvider>
+            </QueryClientProvider>
+          </ErrorBoundary>
         </AntApp>
       </ConfigProvider>
     </StrictMode>

@@ -19,6 +19,16 @@ import type {
   Artifact,
   ArchiveState,
   AuditEntry,
+  ErrorIssue,
+  ErrorIssueActionInput,
+  ErrorIssueDetail,
+  ErrorJournalSummary,
+  ErrorSample,
+  ErrorSeriesPoint,
+  PipelineFeedbackEvent,
+  PipelineFeedbackSummary,
+  HttpAnomalyRow,
+  SlowOperationRow,
   BlockMutationResult,
   BlockResult,
   Bundle,
@@ -760,6 +770,111 @@ export const admin = {
         limit: 100,
       },
     }),
+
+  // --- журнал ошибок (§11) ---
+
+  /**
+   * Список проблем.
+   *
+   * `sort=frequency` возвращает топ и `nextCursor: null` — у сортировки по
+   * частоте курсора нет по построению (частота меняется во время листания).
+   * Это не «страница кончилась», и подписывать кнопку «показать ещё» по
+   * `nextCursor === null` в этом режиме нельзя.
+   */
+  errorIssues: (query?: {
+    status?: string;
+    source?: string;
+    domain?: string;
+    severity?: string;
+    search?: string;
+    sort?: 'last_seen' | 'frequency';
+    cursor?: string;
+  }) =>
+    get<Page<ErrorIssue>>(`${V1}/admin/errors`, {
+      query: {
+        ...(query?.status === undefined ? {} : { status: query.status }),
+        ...(query?.source === undefined ? {} : { source: query.source }),
+        ...(query?.domain === undefined ? {} : { domain: query.domain }),
+        ...(query?.severity === undefined ? {} : { severity: query.severity }),
+        ...(query?.search === undefined ? {} : { search: query.search }),
+        ...(query?.sort === undefined ? {} : { sort: query.sort }),
+        ...(query?.cursor === undefined ? {} : { cursor: query.cursor }),
+        limit: 50,
+      },
+    }),
+
+  errorSummary: () => get<ErrorJournalSummary>(`${V1}/admin/errors/summary`),
+
+  errorIssue: (issueId: string) => get<ErrorIssueDetail>(`${V1}/admin/errors/${issueId}`),
+
+  errorSeries: (issueId: string) =>
+    get<{ points: ErrorSeriesPoint[] }>(`${V1}/admin/errors/${issueId}/series`),
+
+  errorSamples: (query?: {
+    requestId?: string;
+    domain?: string;
+    source?: string;
+    cursor?: string;
+  }) =>
+    get<Page<ErrorSample>>(`${V1}/admin/errors/samples`, {
+      query: {
+        ...(query?.requestId === undefined ? {} : { requestId: query.requestId }),
+        ...(query?.domain === undefined ? {} : { domain: query.domain }),
+        ...(query?.source === undefined ? {} : { source: query.source }),
+        ...(query?.cursor === undefined ? {} : { cursor: query.cursor }),
+        limit: 50,
+      },
+    }),
+
+  // --- аномалии и производительность (§11, поток B) ---
+
+  httpAnomalies: () =>
+    get<{ from: string; to: string; items: HttpAnomalyRow[] }>(`${V1}/admin/http-anomalies`),
+
+  slowOperations: (kind?: string) =>
+    get<{ from: string; to: string; items: SlowOperationRow[] }>(`${V1}/admin/slow-operations`, {
+      query: { ...(kind === undefined ? {} : { kind }) },
+    }),
+
+  // --- обратная связь конвейера (§11) ---
+
+  feedbackSummary: (query?: { reasonCode?: string; pipelineStage?: string; promptCode?: string }) =>
+    get<PipelineFeedbackSummary>(`${V1}/admin/pipeline-feedback/summary`, {
+      query: {
+        ...(query?.reasonCode === undefined ? {} : { reasonCode: query.reasonCode }),
+        ...(query?.pipelineStage === undefined ? {} : { pipelineStage: query.pipelineStage }),
+        ...(query?.promptCode === undefined ? {} : { promptCode: query.promptCode }),
+      },
+    }),
+
+  feedbackEvents: (query?: { reasonCode?: string; promptCode?: string; cursor?: string }) =>
+    get<Page<PipelineFeedbackEvent>>(`${V1}/admin/pipeline-feedback/events`, {
+      query: {
+        ...(query?.reasonCode === undefined ? {} : { reasonCode: query.reasonCode }),
+        ...(query?.promptCode === undefined ? {} : { promptCode: query.promptCode }),
+        ...(query?.cursor === undefined ? {} : { cursor: query.cursor }),
+        limit: 50,
+      },
+    }),
+
+  /**
+   * Адрес выгрузки.
+   *
+   * Обычная ссылка, а не `fetch`: файл сохраняет браузер, и тянуть пятьдесят
+   * тысяч строк в память вкладки ради того же результата незачем.
+   */
+  feedbackExportUrl: (query?: { reasonCode?: string; promptCode?: string }) => {
+    const search = new URLSearchParams();
+    if (query?.reasonCode !== undefined) search.set('reasonCode', query.reasonCode);
+    if (query?.promptCode !== undefined) search.set('promptCode', query.promptCode);
+    const suffix = search.toString();
+    return `${V1}/admin/pipeline-feedback/export${suffix === '' ? '' : `?${suffix}`}`;
+  },
+
+  errorAction: (issueId: string, input: ErrorIssueActionInput) =>
+    request<{ status: string }>('POST', `${V1}/admin/errors/${issueId}/actions`, {
+      body: input,
+    }).then((r) => r.data),
 };
 
 export type { LayoutBlock };

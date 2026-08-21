@@ -7,6 +7,11 @@
  */
 import { createRoot } from 'react-dom/client';
 import { App } from './app/App.js';
+import { installClientErrorReporting } from './app/errorReporting.js';
+
+// Перехватчики ставятся ДО монтирования: исключение в первом же рендере
+// должно попасть в журнал, а не потеряться из-за порядка вызовов.
+installClientErrorReporting();
 
 const container = document.getElementById('root');
 if (container === null) throw new Error('Не найден корневой элемент #root');

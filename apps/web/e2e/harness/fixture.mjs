@@ -85,6 +85,12 @@ export const IDS = {
   findingWithBlock: id(86),
 };
 
+/** Проблемы журнала ошибок (§11): экрану нужны данные, а вызвать 500 из теста нечем. */
+export const JOURNAL = {
+  issueOpen: id(910),
+  issueResolved: id(911),
+};
+
 export const KC = {
   contractor: 'kc-e2e-contractor',
   engineer: 'kc-e2e-engineer',
@@ -372,6 +378,37 @@ export function fixtureSql(pdfSha) {
                '${IDS.orgContractor}', 'AOSR.HDR.022', 'warning', 'open', 'deterministic', false,
                'document', '${IDS.documentReview}', '${IDS.pageReview}',
                'ОГРН не проходит проверку контрольной суммы', 'Сверьте значение с выпиской ЕГРЮЛ')`,
+
+    // Журнал ошибок. Данные ставятся прямым SQL, потому что вызвать настоящую
+    // 500 из браузерного теста нечем: любой сценарий, который её порождает, —
+    // это дефект портала, и держать такой специально ради фикстуры нельзя.
+    // Числа выбраны расходящимися намеренно: 42 события против одного примера,
+    // чтобы подмена одной величины другой была видна на экране.
+    `INSERT INTO error_issues (id, title, status, source, execution, domain, severity,
+                               first_seen_at, last_seen_at, last_release)
+       VALUES ('${JOURNAL.issueOpen}', 'Error: пул соединений исчерпан', 'new', 'api', 'http',
+               'db', 'error', now() - interval '4 hours', now() - interval '2 minutes', '2026.08.1')`,
+    `INSERT INTO error_issues (id, title, status, source, execution, domain, severity,
+                               first_seen_at, last_seen_at, resolved_at, resolved_by,
+                               root_cause, resolution, resolution_type)
+       VALUES ('${JOURNAL.issueResolved}', 'LlmTimeoutError: модель не ответила', 'resolved',
+               'worker', 'job', 'llm', 'error', now() - interval '9 days',
+               now() - interval '8 days', now() - interval '7 days', '${IDS.userAdmin}',
+               'таймаут шлюза был меньше времени ответа модели', 'поднят PROXY_LLM_TIMEOUT_MS',
+               'fixed')`,
+    `INSERT INTO error_signatures (fingerprint, algo_version, issue_id, error_class,
+                                   message_template, top_frame, source)
+       VALUES ('e2e0000000000001', 1, '${JOURNAL.issueOpen}', 'Error', 'пул соединений исчерпан',
+               'claimJobs (apps/api/src/db/repositories/jobs.ts)', 'api')`,
+    `INSERT INTO error_stats_hourly (issue_id, bucket_at, release, source, execution, domain,
+                                     pipeline_stage, severity, count)
+       VALUES ('${JOURNAL.issueOpen}', date_trunc('hour', now()), '2026.08.1', 'api', 'http',
+               'db', 'none', 'error', 42)`,
+    `INSERT INTO error_samples (issue_id, fingerprint, at, source, execution, domain, severity,
+                                release, request_id, route, status_code, error_code)
+       VALUES ('${JOURNAL.issueOpen}', 'e2e0000000000001', now() - interval '2 minutes', 'api',
+               'http', 'db', 'error', '2026.08.1', 'req-e2e-000000000001',
+               '/api/v1/submissions', 500, '53300')`,
 
     // Проведение ревизии по статусам — последним шагом, когда содержимое уже
     // на месте. Ровно тот порядок, которым чинилась фикстура на S2.
