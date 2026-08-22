@@ -8,8 +8,8 @@
  * пустой список у него — это правильный ответ, а не отказ.
  */
 import { useState, type ReactNode } from 'react';
-import { Input, Space, Table, Tabs, Tag } from 'antd';
-import { useQuery } from '@tanstack/react-query';
+import { App as AntApp, Button, Input, Popconfirm, Space, Table, Tabs, Tag } from 'antd';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { catalog } from '../../api/endpoints.js';
 import { catalogKeys } from '../../api/keys.js';
 import type {
@@ -23,7 +23,11 @@ import type {
 import { EmptyState, ErrorState, LoadingState, ScreenHeading } from '../../shared/ui.js';
 import { Link, useNavigate, useQueryParam } from '../../app/router.js';
 import { SectionProfilesPanel } from './SectionProfilesPanel.js';
+import { ImportPanel } from './ImportPanel.js';
+import { CounterpartyDialog, ObjectDialog } from './CatalogForms.js';
 import { ToneTag } from '../../shared/tags.js';
+import { describeError } from '../../api/problem.js';
+import { useSession } from '../../app/session.js';
 
 const TABS = [
   'objects',
@@ -32,6 +36,7 @@ const TABS = [
   'section-profiles',
   'rd-documents',
   'doc-types',
+  'imports',
 ] as const;
 type TabKey = (typeof TABS)[number];
 
@@ -58,31 +63,122 @@ export function CatalogScreen(): ReactNode {
           },
           { key: 'rd-documents', label: 'Реестр РД', children: <RdDocumentsTable /> },
           { key: 'doc-types', label: 'Виды ИД', children: <DocTypesTable /> },
+          { key: 'imports', label: 'Импорт', children: <ImportPanel /> },
         ]}
       />
     </>
   );
 }
 
+/**
+ * Действия над строкой справочника: правка, отключение, удаление.
+ *
+ * Отключение и удаление — РАЗНЫЕ действия, и это не дублирование. Отключение
+ * выводит карточку из работы, сохраняя всё, что на неё ссылается: акты,
+ * подписанные этой организацией, обязаны остаться объяснимыми. Удаление
+ * возможно только пока ссылок нет вовсе — оно для карточки, заведённой по
+ * ошибке или задублированной импортом. Сервер отвечает 409 с перечислением
+ * помех, и текст показывается дословно: «нельзя» без причины отправило бы
+ * администратора искать ссылку по всей схеме.
+ */
+function RowActions({
+  isActive,
+  onEdit,
+  onToggleActive,
+  onDelete,
+  busy,
+}: {
+  isActive: boolean;
+  onEdit: () => void;
+  onToggleActive: () => void;
+  onDelete: () => void;
+  busy: boolean;
+}): ReactNode {
+  return (
+    <Space size={4} wrap>
+      <Button size="small" onClick={onEdit}>
+        Изменить
+      </Button>
+      <Button size="small" loading={busy} onClick={onToggleActive}>
+        {isActive ? 'Отключить' : 'Включить'}
+      </Button>
+      <Popconfirm
+        title="Удалить карточку?"
+        description="Удаление возможно, только если на неё ничего не ссылается."
+        okText="Удалить"
+        cancelText="Отмена"
+        onConfirm={onDelete}
+      >
+        <Button size="small" danger loading={busy}>
+          Удалить
+        </Button>
+      </Popconfirm>
+    </Space>
+  );
+}
+
 function ObjectsTable(): ReactNode {
+  const { can } = useSession();
+  const { message } = AntApp.useApp();
+  const queryClient = useQueryClient();
   const [search, setSearch] = useState('');
+  const [editing, setEditing] = useState<ConstructionObject | null>(null);
+  const [dialogOpen, setDialogOpen] = useState(false);
+
   const query = useQuery({
     queryKey: catalogKeys.objects(search),
     queryFn: () => catalog.objects(search === '' ? {} : { search }),
   });
+
+  const invalidate = async (): Promise<void> => {
+    await queryClient.invalidateQueries({ queryKey: ['catalog'] });
+  };
+
+  const toggle = useMutation({
+    mutationFn: (row: ConstructionObject) =>
+      catalog.updateObject(row.id, { isActive: !row.isActive }),
+    onSuccess: invalidate,
+    onError: (error) => message.error(describeError(error)),
+  });
+
+  const remove = useMutation({
+    mutationFn: (row: ConstructionObject) => catalog.deleteObject(row.id),
+    onSuccess: async () => {
+      message.success('Объект удалён');
+      await invalidate();
+    },
+    // Текст 409 приходит с сервера и перечисляет, что именно мешает удалению.
+    onError: (error) => message.error(describeError(error)),
+  });
+
+  const manage = can('settings.manage');
 
   if (query.isPending) return <LoadingState />;
   if (query.isError) return <ErrorState error={query.error} />;
 
   return (
     <>
-      <Input.Search
-        allowClear
-        placeholder="Поиск по коду и наименованию"
-        onSearch={setSearch}
-        style={{ maxWidth: 360, marginBottom: 12 }}
-        aria-label="Поиск объекта"
-      />
+      <Space wrap style={{ marginBottom: 12 }}>
+        <Input.Search
+          allowClear
+          placeholder="Поиск по коду и наименованию"
+          onSearch={setSearch}
+          style={{ width: 360 }}
+          aria-label="Поиск объекта"
+        />
+        {manage && (
+          <Button
+            type="primary"
+            data-testid="new-object"
+            onClick={() => {
+              setEditing(null);
+              setDialogOpen(true);
+            }}
+          >
+            Новый объект
+          </Button>
+        )}
+      </Space>
       <Table<ConstructionObject>
         rowKey="id"
         size="small"
@@ -104,31 +200,109 @@ function ObjectsTable(): ReactNode {
             key: 'isActive',
             render: (value: boolean) => (value ? 'да' : 'нет'),
           },
+          ...(manage
+            ? [
+                {
+                  title: 'Действия',
+                  key: 'actions',
+                  render: (_value: unknown, row: ConstructionObject) => (
+                    <RowActions
+                      isActive={row.isActive}
+                      busy={toggle.isPending || remove.isPending}
+                      onEdit={() => {
+                        setEditing(row);
+                        setDialogOpen(true);
+                      }}
+                      onToggleActive={() => toggle.mutate(row)}
+                      onDelete={() => remove.mutate(row)}
+                    />
+                  ),
+                },
+              ]
+            : []),
         ]}
+      />
+      <ObjectDialog
+        open={dialogOpen}
+        editing={editing}
+        onClose={() => {
+          setDialogOpen(false);
+          setEditing(null);
+        }}
       />
     </>
   );
 }
 
 function CounterpartiesTable(): ReactNode {
+  const { can } = useSession();
+  const { message } = AntApp.useApp();
+  const queryClient = useQueryClient();
   const [search, setSearch] = useState('');
+  const [editing, setEditing] = useState<Counterparty | null>(null);
+  const [dialogOpen, setDialogOpen] = useState(false);
+
   const query = useQuery({
     queryKey: catalogKeys.counterparties(search, ''),
     queryFn: () => catalog.counterparties(search === '' ? {} : { search }),
   });
+
+  // Вид показывается наименованием, а не кодом: `laboratory` в таблице ничего
+  // не сообщает человеку, который заводит испытательную лабораторию.
+  const kinds = useQuery({
+    queryKey: catalogKeys.counterpartyKinds(),
+    queryFn: () => catalog.counterpartyKinds(),
+  });
+  const kindLabel = new Map((kinds.data ?? []).map((kind) => [kind.code, kind.name]));
+
+  const invalidate = async (): Promise<void> => {
+    await queryClient.invalidateQueries({ queryKey: ['catalog'] });
+  };
+
+  const toggle = useMutation({
+    mutationFn: (row: Counterparty) =>
+      catalog.updateCounterparty(row.id, { isActive: !row.isActive }),
+    onSuccess: invalidate,
+    onError: (error) => message.error(describeError(error)),
+  });
+
+  const remove = useMutation({
+    mutationFn: (row: Counterparty) => catalog.deleteCounterparty(row.id),
+    onSuccess: async () => {
+      message.success('Контрагент удалён');
+      await invalidate();
+    },
+    onError: (error) => message.error(describeError(error)),
+  });
+
+  const manage = can('settings.manage');
 
   if (query.isPending) return <LoadingState />;
   if (query.isError) return <ErrorState error={query.error} />;
 
   return (
     <>
-      <Input.Search
-        allowClear
-        placeholder="Поиск по наименованию"
-        onSearch={setSearch}
-        style={{ maxWidth: 360, marginBottom: 12 }}
-        aria-label="Поиск контрагента"
-      />
+      <Space wrap style={{ marginBottom: 12 }}>
+        <Input.Search
+          allowClear
+          placeholder="Поиск по наименованию"
+          onSearch={setSearch}
+          style={{ width: 360 }}
+          aria-label="Поиск контрагента"
+        />
+        {manage && (
+          <Button
+            type="primary"
+            data-testid="new-counterparty"
+            onClick={() => {
+              setEditing(null);
+              setDialogOpen(true);
+            }}
+          >
+            Новый контрагент
+          </Button>
+        )}
+      </Space>
       <Table<Counterparty>
         rowKey="id"
         size="small"
@@ -137,7 +311,12 @@ function CounterpartiesTable(): ReactNode {
         locale={{ emptyText: 'Контрагентов в вашей области видимости нет' }}
         columns={[
           { title: 'Наименование', dataIndex: 'name', key: 'name' },
-          { title: 'Вид', dataIndex: 'kind', key: 'kind' },
+          {
+            title: 'Вид',
+            dataIndex: 'kind',
+            key: 'kind',
+            render: (kind: string) => kindLabel.get(kind) ?? kind,
+          },
           { title: 'ИНН', dataIndex: 'inn', key: 'inn', render: (v) => v ?? '—' },
           { title: 'ОГРН', dataIndex: 'ogrn', key: 'ogrn', render: (v) => v ?? '—' },
           {
@@ -146,7 +325,35 @@ function CounterpartiesTable(): ReactNode {
             key: 'isActive',
             render: (value: boolean) => (value ? 'да' : 'нет'),
           },
+          ...(manage
+            ? [
+                {
+                  title: 'Действия',
+                  key: 'actions',
+                  render: (_value: unknown, row: Counterparty) => (
+                    <RowActions
+                      isActive={row.isActive}
+                      busy={toggle.isPending || remove.isPending}
+                      onEdit={() => {
+                        setEditing(row);
+                        setDialogOpen(true);
+                      }}
+                      onToggleActive={() => toggle.mutate(row)}
+                      onDelete={() => remove.mutate(row)}
+                    />
+                  ),
+                },
+              ]
+            : []),
         ]}
+      />
+      <CounterpartyDialog
+        open={dialogOpen}
+        editing={editing}
+        onClose={() => {
+          setDialogOpen(false);
+          setEditing(null);
+        }}
       />
     </>
   );

@@ -541,8 +541,13 @@ export interface ProcessingStatus {
  * ровно тот дефект, из-за которого на S2 схема Drizzle сделана производной.
  */
 export type {
+  CatalogImportProblem,
+  CatalogImportStatus,
+  CatalogImportTarget,
+  CatalogImportVerdict,
   ConstructionObject,
   Counterparty,
+  CounterpartyKindEntry,
   ObjectSection,
   SectionProfile,
 } from '@id/contracts';
@@ -550,6 +555,35 @@ export type {
 export interface SectionKind {
   code: string;
   name: string;
+}
+
+/** Карточка массового ввода справочника (§3.2, миграция 0027). */
+export interface CatalogImport {
+  id: string;
+  target: 'counterparties' | 'construction_objects';
+  status: 'uploading' | 'parsing' | 'ready' | 'applied' | 'failed' | 'expired';
+  fileName: string;
+  sizeBytes: number | null;
+  rowCount: number;
+  errorCount: number;
+  duplicateCount: number;
+  createdCount: number;
+  failureReason: string | null;
+  createdBy: string;
+  createdAt: string;
+  parsedAt: string | null;
+  appliedAt: string | null;
+  expiresAt: string;
+}
+
+/** Строка предпросмотра: то, что человек утверждает перед созданием карточек. */
+export interface CatalogImportRow {
+  id: string;
+  rowNo: number;
+  raw: Record<string, string>;
+  verdict: 'create' | 'duplicate' | 'error';
+  problems: { column: string | null; code: string; message: string }[];
+  createdEntityId: string | null;
 }
 
 export interface DocType {

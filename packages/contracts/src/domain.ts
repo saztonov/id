@@ -23,7 +23,6 @@ import {
   autonomyLevelSchema,
   blockSourceSchema,
   blockTypeSchema,
-  counterpartyKindSchema,
   detectorProvenanceSchema,
   documentRelationSchema,
   extractedBySchema,
@@ -77,6 +76,21 @@ export const codeSlugSchema = z
  */
 export const sectionKindCodeSchema = codeSlugSchema;
 export const docTypeCodeSchema = codeSlugSchema;
+
+/**
+ * Вид контрагента — тоже код справочника (`counterparty_kinds`, миграция 0027).
+ *
+ * До 0027 это было перечисление из четырёх значений, и оно оказалось закрытым
+ * там, где множество открыто: в одном реестре ИД участвуют заводы-изготовители,
+ * испытательные лаборатории, органы по сертификации, метрологические службы,
+ * учебные центры, проектировщики и геодезисты. Заведение вида не должно быть
+ * релизом портала — то же правило, что для видов разделов и видов ИД (§0.5).
+ */
+export const counterpartyKindCodeSchema = codeSlugSchema;
+
+/** Прежнее имя схемы: вид контрагента упоминается им во всех модулях. */
+export const counterpartyKindSchema = counterpartyKindCodeSchema;
+export type CounterpartyKind = z.infer<typeof counterpartyKindSchema>;
 
 /** Код правила проверки: `AOSR.P4`, `DATE.372`, `SIG.STAMP.370`, `REG`. */
 export const ruleCodeSchema = z
@@ -168,6 +182,16 @@ export const constructionObjectSchema = z.object({
   generalContractorId: uuidSchema.nullable(),
   /** Шаблон номера акта: проверяется правилом `AOSR.ACT`. */
   actNumberPattern: z.string().max(255).nullable(),
+  /**
+   * Кадастровый номер и идентификатор объекта капитального строительства.
+   *
+   * Оба печатаются в шапке реестра ИД и в шапке АОСР, поэтому живут в карточке:
+   * иначе один и тот же объект в разных документах называется по-разному.
+   * Формы у них нет (участков бывает несколько, идентификатор разрешения
+   * произволен), поэтому проверяется только длина — см. миграцию 0027.
+   */
+  cadastralNumber: z.string().max(255).nullable(),
+  permitIdentifier: z.string().max(255).nullable(),
 });
 export type ConstructionObject = z.infer<typeof constructionObjectSchema>;
 
@@ -182,6 +206,15 @@ export const counterpartySchema = z.object({
   isActive: z.boolean(),
 });
 export type Counterparty = z.infer<typeof counterpartySchema>;
+
+/** Строка справочника видов контрагентов. */
+export const counterpartyKindEntrySchema = z.object({
+  code: counterpartyKindCodeSchema,
+  name: z.string().min(1).max(255),
+  sortOrder: sortOrderSchema,
+  isActive: z.boolean(),
+});
+export type CounterpartyKindEntry = z.infer<typeof counterpartyKindEntrySchema>;
 
 export const objectSectionSchema = z.object({
   id: uuidSchema,

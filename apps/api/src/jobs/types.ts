@@ -444,6 +444,32 @@ export const JOB_DEFINITIONS = {
     leaseMs: 900_000,
     priority: 10,
   },
+
+  // 26–27. Массовый ввод справочников (0027). К ревизии отношения не имеют,
+  // поэтому `stage` у них пуст: сводка конвейера (§3.8) считается над задачами
+  // ревизии, и импорт справочника в ней выглядел бы стадией чужой поставки.
+  'catalog.import.parse': {
+    // Очередь `cpu`, а не `io`: задача держит книгу в памяти и разбирает XML —
+    // это счёт, а не ожидание. В `io` она конкурировала бы за слоты с
+    // короткими сводными задачами конвейера.
+    queue: 'cpu',
+    payload: basePayload.extend({ importId: uuid }),
+    stage: null,
+    // Повтор не поможет: файл не изменится между попытками, а разбор
+    // детерминирован. Единственная причина второй попытки — падение воркера
+    // до записи результата.
+    maxAttempts: 2,
+    leaseMs: DEFAULT_LEASE_MS,
+    priority: DEFAULT_PRIORITY,
+  },
+  'catalog.import.expire': {
+    queue: 'io',
+    payload: maintenancePayload,
+    stage: null,
+    maxAttempts: 3,
+    leaseMs: DEFAULT_LEASE_MS,
+    priority: 10,
+  },
 } as const satisfies Record<string, JobDefinition>;
 
 export type JobType = keyof typeof JOB_DEFINITIONS;

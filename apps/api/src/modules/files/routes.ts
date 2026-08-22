@@ -102,7 +102,10 @@ export function registerFileRoutes(app: AppInstance): void {
   // Ключ подписи талонов один на процесс. Вне продакшна `CSRF_SECRET`
   // необязателен, и тогда талоны не переживают перезапуск — для незавершённой
   // загрузки это корректно, повторный `init` дешевле хранимого состояния.
-  const ticketKey = deriveTicketKey(app.env.CSRF_SECRET ?? randomBytes(32).toString('hex'));
+  const ticketKey = deriveTicketKey(
+    app.env.CSRF_SECRET ?? randomBytes(32).toString('hex'),
+    'revision-file',
+  );
 
   registerListRoute(app);
   registerUploadRoutes(app, ticketKey);
@@ -170,7 +173,7 @@ function registerUploadRoutes(app: AppInstance, ticketKey: Buffer): void {
 
       const ticket = signUploadTicket(ticketKey, {
         uploadId,
-        revisionId: revision.id,
+        targetId: revision.id,
         userId: user.id,
         fileName: request.body.fileName,
         key,
@@ -207,11 +210,11 @@ function registerUploadRoutes(app: AppInstance, ticketKey: Buffer): void {
       }
       // Талон привязан к ревизии и к пользователю: иначе перехваченный талон
       // работал бы в чужой сессии, а выданный на одну ревизию — в другой.
-      if (ticket.revisionId !== request.params.revisionId || ticket.userId !== user.id) {
+      if (ticket.targetId !== request.params.revisionId || ticket.userId !== user.id) {
         throw forbidden('Загрузка относится к другой ревизии или к другому пользователю.');
       }
 
-      const revision = await requireEditableRevision(app.db, scope, ticket.revisionId);
+      const revision = await requireEditableRevision(app.db, scope, ticket.targetId);
       updateContext({ revisionId: revision.id, objectId: revision.objectId });
 
       const maxBytes = app.env.MAX_UPLOAD_BYTES;

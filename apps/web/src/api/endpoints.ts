@@ -37,6 +37,9 @@ import type {
   ConstructionObject,
   Counterparty,
   DetectResult,
+  CatalogImport,
+  CatalogImportRow,
+  CounterpartyKindEntry,
   DocType,
   DocTypeCandidate,
   DocumentDetail,
@@ -451,6 +454,35 @@ export const revisionEvents = {
 // Справочники (§14)
 // =====================================================================
 
+/**
+ * Тело заведения объекта.
+ *
+ * `code` есть только здесь: в правку он не входит — печатается в номерах актов
+ * и участвует в именовании выгрузок, поэтому смена задним числом рассогласовала
+ * бы уже выданные документы с карточкой (см. репозиторий справочников).
+ */
+export interface ObjectInput {
+  code: string;
+  name: string;
+  fullName: string;
+  address?: string | null;
+  cadastralNumber?: string | null;
+  permitIdentifier?: string | null;
+  actNumberPattern?: string | null;
+  developerId?: string | null;
+  techCustomerId?: string | null;
+  generalContractorId?: string | null;
+}
+
+export interface CounterpartyInput {
+  name: string;
+  kind: string;
+  inn?: string | null;
+  kpp?: string | null;
+  ogrn?: string | null;
+  legalAddress?: string | null;
+}
+
 export const catalog = {
   objects: (query?: { search?: string; limit?: number }) =>
     get<Page<ConstructionObject>>(`${V1}/catalog/objects`, {
@@ -458,6 +490,23 @@ export const catalog = {
     }),
 
   object: (objectId: string) => get<ConstructionObject>(`${V1}/catalog/objects/${objectId}`),
+
+  createObject: (body: ObjectInput) =>
+    request<ConstructionObject>('POST', `${V1}/catalog/objects`, { body }).then((r) => r.data),
+
+  updateObject: (objectId: string, body: Partial<ObjectInput> & { isActive?: boolean }) =>
+    request<ConstructionObject>('PATCH', `${V1}/catalog/objects/${objectId}`, { body }).then(
+      (r) => r.data,
+    ),
+
+  /**
+   * Удаление карточки.
+   *
+   * Ответ пуст (204), поэтому `.data` не читается: попытка разобрать пустое
+   * тело как JSON дала бы отказ там, где сервер ответил успехом.
+   */
+  deleteObject: (objectId: string) =>
+    request<null>('DELETE', `${V1}/catalog/objects/${objectId}`).then(() => undefined),
 
   counterparties: (query?: { search?: string; kind?: string }) =>
     get<Page<Counterparty>>(`${V1}/catalog/counterparties`, {
@@ -467,6 +516,22 @@ export const catalog = {
         limit: 100,
       },
     }),
+
+  createCounterparty: (body: CounterpartyInput) =>
+    request<Counterparty>('POST', `${V1}/catalog/counterparties`, { body }).then((r) => r.data),
+
+  updateCounterparty: (
+    counterpartyId: string,
+    body: Partial<CounterpartyInput> & { isActive?: boolean },
+  ) =>
+    request<Counterparty>('PATCH', `${V1}/catalog/counterparties/${counterpartyId}`, {
+      body,
+    }).then((r) => r.data),
+
+  deleteCounterparty: (counterpartyId: string) =>
+    request<null>('DELETE', `${V1}/catalog/counterparties/${counterpartyId}`).then(() => undefined),
+
+  counterpartyKinds: () => get<CounterpartyKindEntry[]>(`${V1}/catalog/counterparty-kinds`),
 
   /** Список разделов приходит массивом, а не конвертом — так объявлена схема. */
   sections: (objectId: string) =>
@@ -559,6 +624,49 @@ export const catalog = {
       'POST',
       `${V1}/catalog/doc-type-candidates/${candidateId}/doc-type`,
       { body },
+    ).then((r) => r.data),
+};
+
+// =====================================================================
+// Массовый ввод справочников (§3.2)
+// =====================================================================
+
+export const catalogImports = {
+  templateUrl: (target: string) => `${V1}/catalog/imports/template?target=${target}`,
+
+  list: (target?: string) =>
+    get<{ items: CatalogImport[] }>(`${V1}/catalog/imports`, {
+      query: target === undefined ? {} : { target },
+    }),
+
+  one: (importId: string) => get<CatalogImport>(`${V1}/catalog/imports/${importId}`),
+
+  rows: (importId: string, verdict?: string) =>
+    get<{ items: CatalogImportRow[]; nextRowNo: number | null }>(
+      `${V1}/catalog/imports/${importId}/rows`,
+      { query: { ...(verdict === undefined ? {} : { verdict }), limit: 200 } },
+    ),
+
+  init: (body: { target: string; fileName: string; sizeBytes: number }) =>
+    request<{
+      importId: string;
+      uploadId: string;
+      uploadUrl: string;
+      method: 'PUT';
+      headers: Record<string, string>;
+      expiresAt: string;
+      maxBytes: number;
+    }>('POST', `${V1}/catalog/imports/init`, { body }).then((r) => r.data),
+
+  complete: (importId: string, uploadId: string) =>
+    request<CatalogImport>('POST', `${V1}/catalog/imports/${importId}/complete`, {
+      body: { uploadId },
+    }).then((r) => r.data),
+
+  apply: (importId: string) =>
+    request<{ created: number; skipped: number }>(
+      'POST',
+      `${V1}/catalog/imports/${importId}/apply`,
     ).then((r) => r.data),
 };
 

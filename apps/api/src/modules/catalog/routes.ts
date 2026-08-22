@@ -53,12 +53,15 @@ import {
   clearDocTypeOverride,
   createConstructionObject,
   createCounterparty,
+  createCounterpartyKind,
   createDocType,
   createDocTypeFromCandidate,
   createObjectSection,
   createRdDocument,
   createSectionKind,
   createSectionProfile,
+  deleteConstructionObject,
+  deleteCounterparty,
   findConstructionObject,
   findCounterparty,
   findDocType,
@@ -66,6 +69,7 @@ import {
   findEffectiveSectionProfile,
   listConstructionObjects,
   listCounterparties,
+  listCounterpartyKinds,
   listDocTypeCandidates,
   listDocTypes,
   listObjectSections,
@@ -87,10 +91,12 @@ import {
   candidateStatusBodySchema,
   constructionObjectPageSchema,
   counterpartyIdParamSchema,
+  counterpartyKindListSchema,
   counterpartyListQuerySchema,
   counterpartyPageSchema,
   createConstructionObjectBodySchema,
   createCounterpartyBodySchema,
+  createCounterpartyKindBodySchema,
   createDocTypeBodySchema,
   createObjectSectionBodySchema,
   createRdDocumentBodySchema,
@@ -127,6 +133,7 @@ import {
 } from './schemas.js';
 import {
   constructionObjectSchema,
+  counterpartyKindEntrySchema,
   counterpartySchema,
   objectSectionSchema,
   sectionProfileSchema,
@@ -189,6 +196,7 @@ const manageDocTypes = requirePermission('doc_types.manage');
 export function registerCatalogRoutes(app: AppInstance): void {
   registerObjectRoutes(app);
   registerCounterpartyRoutes(app);
+  registerCounterpartyKindRoutes(app);
   registerSectionRoutes(app);
   registerSectionProfileRoutes(app);
   registerRdDocumentRoutes(app);
@@ -275,6 +283,34 @@ function registerObjectRoutes(app: AppInstance): void {
       return reply.code(200).send(updated);
     },
   );
+
+  /**
+   * Удаление объекта — только пока на него ничего не ссылается.
+   *
+   * Основной способ вывести объект из работы — отключение (`PATCH isActive`), и
+   * оно остаётся: удаление отвечает 409, как только у объекта появились разделы,
+   * шифры РД или поставки. Ответ перечисляет, что именно мешает, — иначе
+   * администратор получает «нельзя» без причины и идёт искать её в схеме.
+   *
+   * Через `app.route`, а не `app.delete`: см. разбор у наложений видов ИД ниже.
+   */
+  app.route({
+    method: 'DELETE',
+    url: `${PREFIX}/objects/:objectId`,
+    preHandler: manageCatalog,
+    schema: { params: objectIdParamSchema },
+    handler: async (request, reply) => {
+      const { scope } = currentAuth(request);
+      const removed = await deleteConstructionObject(
+        app.db,
+        scope,
+        request.params.objectId,
+        auditActor(app, request),
+      );
+      if (removed === null) throw notFound('Объект строительства не найден.');
+      return reply.code(204).send();
+    },
+  });
 }
 
 // =====================================================================
@@ -351,6 +387,69 @@ function registerCounterpartyRoutes(app: AppInstance): void {
       );
       if (updated === null) throw notFound('Контрагент не найден.');
       return reply.code(200).send(updated);
+    },
+  );
+
+  /** Удаление контрагента — только при нуле ссылок; разбор у объектов выше. */
+  app.route({
+    method: 'DELETE',
+    url: `${PREFIX}/counterparties/:counterpartyId`,
+    preHandler: manageCatalog,
+    schema: { params: counterpartyIdParamSchema },
+    handler: async (request, reply) => {
+      const { scope } = currentAuth(request);
+      const removed = await deleteCounterparty(
+        app.db,
+        scope,
+        request.params.counterpartyId,
+        auditActor(app, request),
+      );
+      if (removed === null) throw notFound('Контрагент не найден.');
+      return reply.code(204).send();
+    },
+  });
+}
+
+// =====================================================================
+// Виды контрагентов
+// =====================================================================
+
+/**
+ * Справочник видов контрагентов (миграция 0027).
+ *
+ * Чтение — всем аутентифицированным: это конфигурация, подписи в форме, а не
+ * сведения об участниках стройки. Запись — `settings.manage`, как у остальных
+ * справочников.
+ */
+function registerCounterpartyKindRoutes(app: AppInstance): void {
+  app.get(
+    `${PREFIX}/counterparty-kinds`,
+    { preHandler: authenticated, schema: { response: { 200: counterpartyKindListSchema } } },
+    async (request, reply) => {
+      const { scope } = currentAuth(request);
+      const kinds = await listCounterpartyKinds(app.db, scope);
+      return reply.code(200).send([...kinds]);
+    },
+  );
+
+  app.post(
+    `${PREFIX}/counterparty-kinds`,
+    {
+      preHandler: manageCatalog,
+      schema: {
+        body: createCounterpartyKindBodySchema,
+        response: { 201: counterpartyKindEntrySchema },
+      },
+    },
+    async (request, reply) => {
+      const { scope } = currentAuth(request);
+      const created = await createCounterpartyKind(
+        app.db,
+        scope,
+        request.body,
+        auditActor(app, request),
+      );
+      return reply.code(201).send(created);
     },
   );
 }

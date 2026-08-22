@@ -104,43 +104,45 @@ export function IdsScreen(): ReactNode {
         />
       )}
 
-      <Card
-        size="small"
-        title="Открыть ревизию поставки по идентификатору"
-        style={{ marginTop: 24 }}
-      >
-        <Typography.Paragraph type="secondary" style={{ marginTop: 0 }}>
-          Рабочее место ревизии адресуется её идентификатором. Ссылка того же вида приходит в
-          уведомлениях и в консоли задач.
-        </Typography.Paragraph>
-        <Form
-          layout="inline"
-          onFinish={(values: { revisionId?: string }) => {
-            const id = (values.revisionId ?? '').trim();
-            if (UUID_PATTERN.test(id)) navigate(`/ids/revisions/${id}`);
-          }}
+      {objects.isSuccess && objects.data.items.length === 0 && (
+        <Card
+          size="small"
+          title="Открыть ревизию поставки по идентификатору"
+          style={{ marginTop: 24 }}
         >
-          <Form.Item
-            name="revisionId"
-            label="Идентификатор ревизии"
-            rules={[
-              {
-                pattern: UUID_PATTERN,
-                message: 'Идентификатор ревизии — UUID',
-              },
-            ]}
+          <Typography.Paragraph type="secondary" style={{ marginTop: 0 }}>
+            Рабочее место ревизии адресуется её идентификатором. Ссылка того же вида приходит в
+            уведомлениях и в консоли задач.
+          </Typography.Paragraph>
+          <Form
+            layout="inline"
+            onFinish={(values: { revisionId?: string }) => {
+              const id = (values.revisionId ?? '').trim();
+              if (UUID_PATTERN.test(id)) navigate(`/ids/revisions/${id}`);
+            }}
           >
-            <Input style={{ width: 340 }} placeholder="00000000-0000-4000-8000-000000000000" />
-          </Form.Item>
-          <Form.Item>
-            <Space>
-              <Button type="primary" htmlType="submit">
-                Открыть
-              </Button>
-            </Space>
-          </Form.Item>
-        </Form>
-      </Card>
+            <Form.Item
+              name="revisionId"
+              label="Идентификатор ревизии"
+              rules={[
+                {
+                  pattern: UUID_PATTERN,
+                  message: 'Идентификатор ревизии — UUID',
+                },
+              ]}
+            >
+              <Input style={{ width: 340 }} placeholder="00000000-0000-4000-8000-000000000000" />
+            </Form.Item>
+            <Form.Item>
+              <Space>
+                <Button type="primary" htmlType="submit">
+                  Открыть
+                </Button>
+              </Space>
+            </Form.Item>
+          </Form>
+        </Card>
+      )}
     </>
   );
 }

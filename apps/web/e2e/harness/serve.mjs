@@ -21,6 +21,16 @@
  * проверял бы не ту модель безопасности. Поэтому фронтовый сервер сам
  * проксирует `/api`, `/auth`, `/me`, `/health` и `/metrics` в приложение.
  *
+ * ## Воркера в стенде нет — кроме одной задачи
+ *
+ * Конвейер ИД в сквозных сценариях проходится подготовленной фикстурой: поднять
+ * настоящий воркер значило бы тащить в прогон qpdf, poppler и модель детекции.
+ * Но у массового ввода справочников (§3.2) вся суть в том, что файл разбирает
+ * ВОРКЕР, а не API, и без исполнителя сценарий импорта проверял бы только форму
+ * загрузки. Поэтому стенд запускает крошечный насос ровно одного типа задач,
+ * настоящим обработчиком из `apps/worker/dist`: подмены нет, есть отсутствующий
+ * в стенде процесс.
+ *
  * ## Импорт `buildApp` относительным путём
  *
  * `@id/api` объявляет в `exports` только корень, а `buildApp` живёт в `app.ts` и
@@ -35,7 +45,7 @@
  * знает про Node только для `*.ts`; править его ради одного файла воркспейса
  * значило бы менять правила всем одиннадцати пакетам.
  */
-/* global process, console, URL */
+/* global process, console, URL, setInterval, clearInterval, AbortController */
 import { createServer, request as httpRequest } from 'node:http';
 import { existsSync, mkdtempSync, readFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -162,7 +172,68 @@ async function startApi() {
 
   const app = await buildApp({ env, pool: createTestPool(db) });
   await app.listen({ port: API_PORT, host: '127.0.0.1' });
-  return { app, db, storageDir };
+
+  const pump = await startCatalogImportPump(app, db);
+  return { app, db, storageDir, pump };
+}
+
+/**
+ * Исполнитель задач `catalog.import.parse`.
+ *
+ * Берёт очередь напрямую, без `JobRunner`: аренда, повторы и метрики здесь
+ * лишние — нужна ровно одна вещь, чтобы загруженный файл был разобран тем же
+ * кодом, что и в бою. Обработчик импортируется из собранного воркера.
+ */
+async function startCatalogImportPump(app, db) {
+  const handlerModule = join(REPO_ROOT, 'apps', 'worker', 'dist', 'jobs', 'catalog-import.js');
+  if (!existsSync(handlerModule)) {
+    fail(
+      `не найден собранный воркер: ${handlerModule}
+` +
+        'Сценарий импорта справочника исполняет настоящую задачу разбора, поэтому нужен `pnpm -r build`.',
+    );
+  }
+
+  const { createCatalogImportParseHandler } = await import(pathToFileURL(handlerModule).href);
+  const handler = createCatalogImportParseHandler({ db: app.db, storage: app.storage });
+  const silent = { info() {}, warn() {}, error() {}, debug() {}, child: () => silent };
+
+  const timer = setInterval(() => {
+    void (async () => {
+      const claimed = await db.query(
+        `UPDATE jobs SET status = 'running', locked_by = 'e2e', locked_until = now() + interval '1 minute'
+          WHERE id IN (SELECT id FROM jobs WHERE type = 'catalog.import.parse' AND status = 'queued'
+                        ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED)
+          RETURNING id, payload`,
+      );
+      // `db.query` стенда отдаёт массив строк, а не конверт драйвера.
+      const job = claimed[0];
+      if (job === undefined) return;
+
+      const payload = typeof job.payload === 'string' ? JSON.parse(job.payload) : job.payload;
+      try {
+        await handler({
+          jobId: job.id,
+          type: 'catalog.import.parse',
+          attempt: 1,
+          maxAttempts: 2,
+          revisionId: null,
+          payload,
+          db: app.db,
+          logger: silent,
+          signal: new AbortController().signal,
+          enqueue: async () => ({ jobId: 'e2e', created: true }),
+          emit: async () => {},
+        });
+        await db.query(`UPDATE jobs SET status = 'done' WHERE id = '${job.id}'`);
+      } catch (error) {
+        console.error('[стенд] разбор импорта справочника упал:', error);
+        await db.query(`UPDATE jobs SET status = 'failed' WHERE id = '${job.id}'`);
+      }
+    })();
+  }, 200);
+  timer.unref();
+  return timer;
 }
 
 /**
@@ -267,6 +338,7 @@ async function main() {
   });
 
   const shutdown = async () => {
+    clearInterval(started.pump);
     front.close();
     await started.app.close();
     await started.db.close();

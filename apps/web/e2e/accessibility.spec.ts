@@ -42,6 +42,24 @@ test('раздел ИД проходит проверку axe', async ({ page })
   await analyze(page);
 });
 
+test('свёрнутое боковое меню остаётся доступным', async ({ page }) => {
+  await signIn(page, KC.admin, '/catalog');
+  await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
+
+  // Иконка без доступного имени для скринридера нема, поэтому в свёрнутом виде
+  // название раздела остаётся в разметке визуально скрытым.
+  await page.getByTestId('nav-toggle').click();
+  await expect(page.getByRole('link', { name: 'Справочники' })).toBeVisible();
+  await analyze(page);
+});
+
+test('формы справочника проходят axe', async ({ page }) => {
+  await signIn(page, KC.admin, '/catalog?tab=counterparties');
+  await page.getByTestId('new-counterparty').click();
+  await expect(page.getByTestId('counterparty-name')).toBeVisible();
+  await analyze(page);
+});
+
 test('экран разметки проходит проверку axe', async ({ page }) => {
   await signIn(page, KC.engineer, `/ids/revisions/${IDS.revisionMarkup}?tab=markup`);
   await expect(page.getByRole('application')).toBeVisible();

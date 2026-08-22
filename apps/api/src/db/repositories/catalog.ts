@@ -107,15 +107,17 @@ import {
   sql,
   type SQL,
 } from 'drizzle-orm';
-import { alias, QueryBuilder, type PgColumn } from 'drizzle-orm/pg-core';
+import { alias, QueryBuilder, type PgColumn, type PgTable } from 'drizzle-orm/pg-core';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { z } from 'zod';
 import {
   constructionObjects,
   counterparties,
+  counterpartyKinds,
   docTypeCandidates,
   docTypeOverrides,
   docTypes,
+  objectRuleProfiles,
   objectSections,
   rdDocuments,
   ruleDefinitions,
@@ -123,6 +125,8 @@ import {
   sectionProfiles,
   submissionRevisions,
   submissions,
+  userObjectScopes,
+  users,
   volumes,
 } from '@id/db';
 import type {
@@ -130,6 +134,7 @@ import type {
   ConstructionObject,
   Counterparty,
   CounterpartyKind,
+  CounterpartyKindEntry,
   JsonValue,
   ObjectSection,
   SectionProfile,
@@ -578,6 +583,21 @@ const CONSTRAINT_PROBLEMS: Readonly<Record<string, ConstraintProblem>> = {
     message: 'ИНН — 10 цифр у организации или 12 у физического лица.',
   },
   counterparties_kpp_chk: { status: 422, pointer: '/kpp', message: 'КПП — 9 цифр.' },
+  counterparties_kind_fkey: {
+    status: 422,
+    pointer: '/kind',
+    message: 'Вид контрагента не найден в справочнике.',
+  },
+  counterparty_kinds_pkey: {
+    status: 409,
+    pointer: '/code',
+    message: 'Вид контрагента с таким кодом уже существует.',
+  },
+  counterparty_kinds_code_chk: {
+    status: 422,
+    pointer: '/code',
+    message: 'Код вида — латиница в нижнем регистре, цифры и подчёркивание.',
+  },
   counterparties_ogrn_chk: {
     status: 422,
     pointer: '/ogrn',
@@ -721,6 +741,104 @@ function changedFields(patch: object): Record<string, unknown> {
   return Object.fromEntries(Object.entries(patch).filter(([, value]) => value !== undefined));
 }
 
+/**
+ * Удаление строки справочника: только пока на неё никто не ссылается.
+ *
+ * ## Почему удаление вообще есть, если основной способ — отключение
+ *
+ * Отключение (`is_active = false`) сохраняет строку и всё, что на неё ссылается;
+ * это правильный способ вывести организацию или объект из работы. Но у него
+ * есть предел: заведённая по ошибке или задублированная импортом карточка, на
+ * которую ещё ничего не ссылается, должна исчезать, а не оставаться навсегда
+ * отключённым мусором в списке выбора.
+ *
+ * ## Почему ссылки считаются, а не ловится нарушение ключа
+ *
+ * Нарушение внешнего ключа даёт SQLSTATE 23503 и имя ограничения — то есть
+ * «нельзя» без ответа на вопрос «из-за чего». Администратор, получивший
+ * `works_contractor_id_fkey`, вынужден искать причину в чужой схеме. Поэтому
+ * ссылки пересчитываются заранее и отказ называет их по-человечески; сам DELETE
+ * при этом остаётся под защитой ключа — между подсчётом и удалением строку
+ * может занять параллельный запрос, и 23503 в этом случае переводится в тот же
+ * 409, а не в 500.
+ */
+interface ReferenceCheck {
+  /** Как называется то, что ссылается, в родительном падеже множественного. */
+  readonly label: string;
+  readonly countRefs: (executor: Executor, id: string) => Promise<number>;
+}
+
+async function countWhere(executor: Executor, table: PgTable, where: SQL): Promise<number> {
+  const rows = await executor
+    .select({ total: sql<number>`count(*)::int` })
+    .from(table)
+    .where(where);
+  return rows[0]?.total ?? 0;
+}
+
+function refs(label: string, table: PgTable, column: PgColumn): ReferenceCheck {
+  return { label, countRefs: (executor, id) => countWhere(executor, table, eq(column, id)) };
+}
+
+/**
+ * Кто ссылается на контрагента.
+ *
+ * Список рукописный по той же причине, что и карта ограничений: он часть
+ * контракта миграций. Забытая таблица не открывает удаление — её ключ всё равно
+ * не пустит, — но лишает отказ внятности, поэтому список пополняется вместе со
+ * схемой.
+ */
+const COUNTERPARTY_REFERENCES: readonly ReferenceCheck[] = [
+  refs('пользователи портала', users, users.contractorId),
+  refs('объекты (застройщик)', constructionObjects, constructionObjects.developerId),
+  refs('объекты (технический заказчик)', constructionObjects, constructionObjects.techCustomerId),
+  refs(
+    'объекты (генеральный подрядчик)',
+    constructionObjects,
+    constructionObjects.generalContractorId,
+  ),
+  refs('шифры рабочей документации', rdDocuments, rdDocuments.designerId),
+  refs('поставки', submissions, submissions.contractorId),
+];
+
+/** Кто ссылается на объект строительства. */
+const CONSTRUCTION_OBJECT_REFERENCES: readonly ReferenceCheck[] = [
+  refs('разделы работ', objectSections, objectSections.objectId),
+  refs('шифры рабочей документации', rdDocuments, rdDocuments.objectId),
+  refs('тома', volumes, volumes.objectId),
+  refs('поставки', submissions, submissions.objectId),
+  refs('профили правил объекта', objectRuleProfiles, objectRuleProfiles.objectId),
+  refs('назначенные области видимости', userObjectScopes, userObjectScopes.objectId),
+];
+
+/** Перечень мешающих ссылок или `null`, если ссылок нет. */
+async function blockingReferences(
+  executor: Executor,
+  checks: readonly ReferenceCheck[],
+  id: string,
+): Promise<string[]> {
+  const found: string[] = [];
+  for (const check of checks) {
+    const total = await check.countRefs(executor, id);
+    if (total > 0) found.push(`${check.label}: ${String(total)}`);
+  }
+  return found;
+}
+
+/** SQLSTATE нарушения внешнего ключа: строку заняли между подсчётом и удалением. */
+const FOREIGN_KEY_VIOLATION = '23503';
+
+function referencedConflict(what: string, found: readonly string[]): never {
+  const detail =
+    found.length === 0
+      ? 'На неё ссылаются данные портала.'
+      : `На неё ссылаются: ${found.join(', ')}.`;
+  throw conflict(
+    `Удалить ${what} нельзя. ${detail} Выведите её из работы отключением: ` +
+      'запись останется на месте, а выбрать её в новых документах будет нельзя.',
+  );
+}
+
 // =====================================================================
 // Объекты строительства
 // =====================================================================
@@ -736,6 +854,8 @@ const OBJECT_SELECTION = {
   techCustomerId: constructionObjects.techCustomerId,
   generalContractorId: constructionObjects.generalContractorId,
   actNumberPattern: constructionObjects.actNumberPattern,
+  cadastralNumber: constructionObjects.cadastralNumber,
+  permitIdentifier: constructionObjects.permitIdentifier,
 };
 
 export interface ObjectListParams {
@@ -807,6 +927,8 @@ export interface CreateConstructionObjectInput {
   readonly techCustomerId?: string | null | undefined;
   readonly generalContractorId?: string | null | undefined;
   readonly actNumberPattern?: string | null | undefined;
+  readonly cadastralNumber?: string | null | undefined;
+  readonly permitIdentifier?: string | null | undefined;
 }
 
 export async function createConstructionObject(
@@ -828,6 +950,8 @@ export async function createConstructionObject(
           techCustomerId: input.techCustomerId ?? null,
           generalContractorId: input.generalContractorId ?? null,
           actNumberPattern: input.actNumberPattern ?? null,
+          cadastralNumber: input.cadastralNumber ?? null,
+          permitIdentifier: input.permitIdentifier ?? null,
         })
         .returning({ id: constructionObjects.id });
 
@@ -864,6 +988,8 @@ export interface UpdateConstructionObjectPatch {
   readonly techCustomerId?: string | null | undefined;
   readonly generalContractorId?: string | null | undefined;
   readonly actNumberPattern?: string | null | undefined;
+  readonly cadastralNumber?: string | null | undefined;
+  readonly permitIdentifier?: string | null | undefined;
 }
 
 export async function updateConstructionObject(
@@ -884,6 +1010,8 @@ export async function updateConstructionObject(
       ? { generalContractorId: patch.generalContractorId }
       : {}),
     ...(patch.actNumberPattern !== undefined ? { actNumberPattern: patch.actNumberPattern } : {}),
+    ...(patch.cadastralNumber !== undefined ? { cadastralNumber: patch.cadastralNumber } : {}),
+    ...(patch.permitIdentifier !== undefined ? { permitIdentifier: patch.permitIdentifier } : {}),
   };
   assertNonEmptyPatch(fields);
 
@@ -912,6 +1040,53 @@ export async function updateConstructionObject(
   if (!changed) return null;
 
   return findConstructionObject(db, scope, objectId);
+}
+
+/**
+ * Удаление объекта строительства.
+ *
+ * `null` — объекта нет или он вне области видимости; различать их снаружи
+ * нельзя (§1.6), и маршрут отвечает на оба случая одинаково.
+ */
+export async function deleteConstructionObject(
+  db: Database,
+  scope: AuthScope,
+  objectId: string,
+  actor: AuditActor,
+): Promise<boolean | null> {
+  const existing = await findConstructionObject(db, scope, objectId);
+  if (existing === null) return null;
+
+  try {
+    return await db.transaction(async (tx) => {
+      const blocking = await blockingReferences(tx, CONSTRUCTION_OBJECT_REFERENCES, objectId);
+      if (blocking.length > 0) referencedConflict('объект строительства', blocking);
+
+      const removed = await tx
+        .delete(constructionObjects)
+        .where(eq(constructionObjects.id, objectId))
+        .returning({ id: constructionObjects.id });
+      if (removed.length === 0) return false;
+
+      // Код и наименование попадают в след: после удаления карточки узнать,
+      // что именно исчезло, будет неоткуда.
+      await appendAudit(tx, scope, {
+        ...actor,
+        action: 'object.deleted',
+        entityType: 'construction_object',
+        entityId: objectId,
+        objectId,
+        payload: { code: existing.code, name: existing.name },
+      });
+      return true;
+    });
+  } catch (error) {
+    if (isHttpProblem(error)) throw error;
+    if (driverField(error, 'code') === FOREIGN_KEY_VIOLATION) {
+      referencedConflict('объект строительства', []);
+    }
+    throw error;
+  }
 }
 
 // =====================================================================
@@ -1076,6 +1251,109 @@ export async function updateCounterparty(
   if (!changed) return null;
 
   return findCounterparty(db, scope, counterpartyId);
+}
+
+/** Удаление контрагента. `null` — не найден либо вне области видимости. */
+export async function deleteCounterparty(
+  db: Database,
+  scope: AuthScope,
+  counterpartyId: string,
+  actor: AuditActor,
+): Promise<boolean | null> {
+  const existing = await findCounterparty(db, scope, counterpartyId);
+  if (existing === null) return null;
+
+  try {
+    return await db.transaction(async (tx) => {
+      const blocking = await blockingReferences(tx, COUNTERPARTY_REFERENCES, counterpartyId);
+      if (blocking.length > 0) referencedConflict('контрагента', blocking);
+
+      const removed = await tx
+        .delete(counterparties)
+        .where(eq(counterparties.id, counterpartyId))
+        .returning({ id: counterparties.id });
+      if (removed.length === 0) return false;
+
+      await appendAudit(tx, scope, {
+        ...actor,
+        action: 'counterparty.deleted',
+        entityType: 'counterparty',
+        entityId: counterpartyId,
+        objectId: null,
+        payload: { name: existing.name, kind: existing.kind },
+      });
+      return true;
+    });
+  } catch (error) {
+    if (isHttpProblem(error)) throw error;
+    if (driverField(error, 'code') === FOREIGN_KEY_VIOLATION) {
+      referencedConflict('контрагента', []);
+    }
+    throw error;
+  }
+}
+
+// =====================================================================
+// Виды контрагентов
+// =====================================================================
+
+/**
+ * Виды контрагентов — конфигурация, а не коммерческие данные.
+ *
+ * Читаются всеми аутентифицированными наравне с видами разделов и каталогом
+ * видов ИД: это подписи в форме, а не сведения об участниках стройки.
+ * Отключённые виды остаются в выдаче с признаком — форма их не предлагает, но
+ * карточка, заведённая раньше, обязана показывать свой вид, а не пустую графу.
+ */
+export async function listCounterpartyKinds(
+  db: Database,
+  scope: AuthScope,
+): Promise<readonly CounterpartyKindEntry[]> {
+  return db
+    .select({
+      code: counterpartyKinds.code,
+      name: counterpartyKinds.name,
+      sortOrder: counterpartyKinds.sortOrder,
+      isActive: counterpartyKinds.isActive,
+    })
+    .from(counterpartyKinds)
+    .where(configVisibility(scope))
+    .orderBy(asc(counterpartyKinds.sortOrder), asc(counterpartyKinds.code));
+}
+
+export interface CreateCounterpartyKindInput {
+  readonly code: string;
+  readonly name: string;
+  readonly sortOrder?: number | undefined;
+}
+
+export async function createCounterpartyKind(
+  db: Database,
+  scope: AuthScope,
+  input: CreateCounterpartyKindInput,
+  actor: AuditActor,
+): Promise<CounterpartyKindEntry> {
+  await guardConstraints(() =>
+    db.transaction(async (tx) => {
+      await tx.insert(counterpartyKinds).values({
+        code: input.code,
+        name: input.name,
+        ...(input.sortOrder === undefined ? {} : { sortOrder: input.sortOrder }),
+      });
+
+      await appendAudit(tx, scope, {
+        ...actor,
+        action: 'counterparty_kind.created',
+        entityType: 'counterparty_kind',
+        entityId: input.code,
+        objectId: null,
+        payload: changedFields(input),
+      });
+    }),
+  );
+
+  const created = (await listCounterpartyKinds(db, scope)).find((k) => k.code === input.code);
+  return required(created ?? null, 'вид контрагента');
 }
 
 // =====================================================================

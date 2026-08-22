@@ -100,6 +100,7 @@ import { CLIENT_ERRORS_PATH, registerClientErrorRoutes } from './modules/client-
 import { registerAuditRoutes } from './modules/audit/routes.js';
 import { registerHealthRoutes } from './routes/health.js';
 import { registerCatalogRoutes } from './modules/catalog/routes.js';
+import { registerCatalogImportRoutes } from './modules/catalog/imports.js';
 import { registerObjectRuleProfileRoutes } from './modules/catalog/object-rule-profiles.js';
 import { registerRevisionEventRoutes } from './modules/events/sse.js';
 import { registerNavigationRoutes } from './modules/navigation/routes.js';
@@ -661,6 +662,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppInstan
   registerClientErrorRoutes(app);
   registerRevisionEventRoutes(app);
   registerCatalogRoutes(app);
+  registerCatalogImportRoutes(app);
   // Профили правил объекта — тот же префикс `/catalog`, но свой модуль: у них своя
   // форма наложений и своё разрешение «правила на дату» (§9.2).
   registerObjectRuleProfileRoutes(app);

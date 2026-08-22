@@ -142,6 +142,8 @@ describe('objectCodeSchema', () => {
       techCustomerId: null,
       generalContractorId: null,
       actNumberPattern: null,
+      cadastralNumber: null,
+      permitIdentifier: null,
     };
 
     expect(constructionObjectSchema.safeParse(object).success).toBe(true);

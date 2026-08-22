@@ -48,6 +48,11 @@ export const catalogKeys = {
     ['catalog', 'section-profiles', 'effective', sectionKindCode, at] as const,
   docTypes: (includeInactive: boolean) => ['catalog', 'doc-types', includeInactive] as const,
   candidates: (status: string) => ['catalog', 'doc-type-candidates', status] as const,
+  counterpartyKinds: () => ['catalog', 'counterparty-kinds'] as const,
+  imports: (target: string) => ['catalog', 'imports', target] as const,
+  import: (importId: string) => ['catalog', 'imports', 'one', importId] as const,
+  importRows: (importId: string, verdict: string) =>
+    ['catalog', 'imports', 'one', importId, 'rows', verdict] as const,
 };
 
 export const navigationKeys = {

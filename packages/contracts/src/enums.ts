@@ -18,13 +18,12 @@ import { z } from 'zod';
 export const userRoleSchema = z.enum(['contractor', 'engineer', 'manager', 'admin']);
 export type UserRole = z.infer<typeof userRoleSchema>;
 
-export const counterpartyKindSchema = z.enum([
-  'customer',
-  'general_contractor',
-  'contractor',
-  'supplier',
-]);
-export type CounterpartyKind = z.infer<typeof counterpartyKindSchema>;
+/*
+ * Вид контрагента живёт в `domain.ts` рядом с `codeSlugSchema`: с миграции 0027
+ * это справочник `counterparty_kinds`, а не перечисление. Причина — в шапке той
+ * же миграции: реестр ИД называет лаборатории, органы по сертификации,
+ * метрологов и учебные центры, и каждый новый вид не должен быть релизом.
+ */
 
 // --- Жизненный цикл поставки (§3, §10) ---
 

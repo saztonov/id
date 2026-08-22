@@ -41,6 +41,7 @@ import {
   EnvError,
   firstAllowedProject,
   recognitionSelections,
+  enqueueSystemJob,
   errorDigest,
   installProcessErrorHandlers,
   instrumentPool,
@@ -344,6 +345,24 @@ async function main(): Promise<void> {
   process.on('unhandledRejection', () => {
     shutdown('unhandledRejection', 1);
   });
+
+  // Первичная постановка периодической уборки брошенных импортов справочника
+  // (задача 27). Дальше задача ставит себя сама на следующие сутки, а
+  // `dedupe_key` не даёт перезапуску процесса накопить вторую такую же.
+  // Отказ постановки воркер не роняет: очередь могла быть недоступна секунду,
+  // а обработка задач от уборки не зависит.
+  try {
+    await enqueueSystemJob(db, {
+      type: 'catalog.import.expire',
+      payload: {},
+      dedupeKey: 'catalog.import.expire',
+    });
+  } catch (error: unknown) {
+    logger.warn(
+      { event: 'catalog_import_cleanup_not_scheduled', ...errorDigest(error) },
+      'периодическая уборка импортов справочника не поставлена',
+    );
+  }
 
   runner.start();
 

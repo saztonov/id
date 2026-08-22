@@ -50,6 +50,7 @@ const EXPECTED_TABLES: readonly string[] = [
   'registration_requests',
   'auth_throttle',
   // §3.2 справочники
+  'counterparty_kinds',
   'counterparties',
   'construction_objects',
   'section_kinds',
@@ -141,6 +142,11 @@ const EXPECTED_TABLES: readonly string[] = [
   // накладывается на согласованную ревизию, строка которой неизменяема целиком.
   'submission_archives',
   'legal_holds',
+  // §3.2 массовый ввод справочников (0027): загруженный файл разбирается в
+  // воркере, а его строки ждут подтверждения человеком. Ни одна из них не
+  // попадает в рабочую таблицу сама.
+  'catalog_imports',
+  'catalog_import_rows',
 ];
 
 /** Журнал раннера: он не принадлежит §3, но обязан появиться. */

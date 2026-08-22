@@ -24,6 +24,8 @@ import { z } from 'zod';
 import {
   autonomyLevelSchema,
   constructionObjectSchema,
+  counterpartyKindCodeSchema,
+  counterpartyKindEntrySchema,
   counterpartyKindSchema,
   counterpartySchema,
   cursorPageSchema,
@@ -242,6 +244,8 @@ export const createConstructionObjectBodySchema = z.object({
   techCustomerId: uuidSchema.nullish(),
   generalContractorId: uuidSchema.nullish(),
   actNumberPattern: z.string().max(255).nullish(),
+  cadastralNumber: z.string().max(255).nullish(),
+  permitIdentifier: z.string().max(255).nullish(),
 });
 
 /** `code` в правку не входит: он внешне значим (см. репозиторий). */
@@ -255,6 +259,8 @@ export const updateConstructionObjectBodySchema = z
     techCustomerId: uuidSchema.nullish(),
     generalContractorId: uuidSchema.nullish(),
     actNumberPattern: z.string().max(255).nullish(),
+    cadastralNumber: z.string().max(255).nullish(),
+    permitIdentifier: z.string().max(255).nullish(),
   })
   .refine(nonEmptyPatch, { message: EMPTY_PATCH_MESSAGE });
 
@@ -290,6 +296,21 @@ export const updateCounterpartyBodySchema = z
   .refine(nonEmptyPatch, { message: EMPTY_PATCH_MESSAGE });
 
 export const counterpartyPageSchema = cursorPageSchema(counterpartySchema);
+
+/**
+ * Виды контрагентов (миграция 0027).
+ *
+ * `sortOrder` в теле создания необязателен: порядок в списке — вопрос вкуса, а
+ * не смысла, и требовать его на каждом заведении значило бы просить у
+ * администратора число, которого он не знает. Умолчание задаёт таблица.
+ */
+export const createCounterpartyKindBodySchema = z.object({
+  code: counterpartyKindCodeSchema,
+  name: z.string().min(1).max(255),
+  sortOrder: sortOrderSchema.optional(),
+});
+
+export const counterpartyKindListSchema = z.array(counterpartyKindEntrySchema);
 
 // =====================================================================
 // Разделы работ и их виды

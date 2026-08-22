@@ -141,6 +141,10 @@ import {
   type StoredWorkingPdf,
 } from './bundle-build.js';
 import {
+  createCatalogImportExpireHandler,
+  createCatalogImportParseHandler,
+} from './catalog-import.js';
+import {
   createFileVerifyHandler,
   type FileForVerification,
   type FileJobTarget,
@@ -1713,6 +1717,14 @@ export function registerPipelineJobs(
   // по той же причине, что и остальные стадии.
   registry.register('doc.materialize_pdf', createMaterializePdfHandler(materializeDeps(options)));
   registry.register('submission.build_archive', createBuildArchiveHandler(archiveDeps(options)));
+
+  // Задачи 26–27 (0027): разбор загруженного справочника и уборка брошенных
+  // импортов. К ревизии отношения не имеют и стадией конвейера не являются, но
+  // регистрируются здесь по той же причине, что и всё остальное: обработчик без
+  // регистрации выглядит зависшей очередью, а не отсутствующей возможностью.
+  const catalogImport = { db: options.db, storage: options.storage };
+  registry.register('catalog.import.parse', createCatalogImportParseHandler(catalogImport));
+  registry.register('catalog.import.expire', createCatalogImportExpireHandler(catalogImport));
   return registry;
 }
 

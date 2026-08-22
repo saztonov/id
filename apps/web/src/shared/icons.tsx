@@ -1,0 +1,76 @@
+/**
+ * Иконки навигации — три инлайновых SVG.
+ *
+ * ## Почему не `@ant-design/icons`
+ *
+ * Пакета нет в зависимостях `apps/web`, и добавлять его ради трёх глифов
+ * незачем: он тянет в сборку тысячи путей, из которых портал использует три.
+ * Сама antd берёт иконки из своей копии, поэтому под строгим `node_modules`
+ * импорт из кода воркспейса всё равно не разрешился бы.
+ *
+ * ## Иконка сама по себе ничего не значит
+ *
+ * `aria-hidden` обязателен: в свёрнутом меню рядом с иконкой остаётся визуально
+ * скрытое имя пункта, и без этого атрибута скринридер прочитал бы название
+ * дважды либо — что хуже — сообщил бы «графика» вместо названия раздела.
+ */
+import type { ReactNode } from 'react';
+
+interface IconProps {
+  readonly size?: number;
+}
+
+function frame(size: number, children: ReactNode): ReactNode {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.8}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      focusable="false"
+      style={{ display: 'block' }}
+    >
+      {children}
+    </svg>
+  );
+}
+
+/** Раздел «ИД»: лист с загнутым углом. */
+export function DocumentIcon({ size = 18 }: IconProps = {}): ReactNode {
+  return frame(
+    size,
+    <>
+      <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />
+      <path d="M14 3v5h5" />
+      <path d="M9 13h6M9 17h4" />
+    </>,
+  );
+}
+
+/** Раздел «Справочники»: стопка книг. */
+export function CatalogIcon({ size = 18 }: IconProps = {}): ReactNode {
+  return frame(
+    size,
+    <>
+      <path d="M4 5.5A1.5 1.5 0 0 1 5.5 4H10v16H5.5A1.5 1.5 0 0 1 4 18.5z" />
+      <path d="M10 4h4.5A1.5 1.5 0 0 1 16 5.5v13a1.5 1.5 0 0 1-1.5 1.5H10z" />
+      <path d="M18 6.5 20 18" />
+    </>,
+  );
+}
+
+/** Раздел «Администрирование»: шестерня. */
+export function SettingsIcon({ size = 18 }: IconProps = {}): ReactNode {
+  return frame(
+    size,
+    <>
+      <circle cx="12" cy="12" r="3" />
+      <path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1" />
+    </>,
+  );
+}

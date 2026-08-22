@@ -5,7 +5,7 @@
  * миграцию и выполните `pnpm db:schema:generate`. Ручная правка будет затёрта,
  * а тест на дрейф её заметит.
  */
-import { pgTable, index, foreignKey, check, uuid, text, integer, timestamp, inet, unique, boolean, bigint, jsonb, varchar, uniqueIndex, date, doublePrecision, numeric, primaryKey, pgView } from "drizzle-orm/pg-core"
+import { pgTable, index, foreignKey, check, uuid, text, integer, timestamp, inet, unique, boolean, bigint, jsonb, uniqueIndex, date, doublePrecision, numeric, varchar, primaryKey, pgView } from "drizzle-orm/pg-core"
 import { citext, bytea, int4range } from "../custom-types.js";
 import { sql } from "drizzle-orm"
 
@@ -90,47 +90,11 @@ export const counterparties = pgTable("counterparties", {
 	updatedAt: timestamp("updated_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
 }, (table) => [
 	index("ix_counterparties_inn").using("btree", table.inn.asc().nullsLast().op("text_ops")),
+	index("ix_counterparties_kind").using("btree", table.kind.asc().nullsLast().op("text_ops")),
 	index("ix_counterparties_ogrn").using("btree", table.ogrn.asc().nullsLast().op("text_ops")),
 	check("counterparties_inn_chk", sql`inn ~ '^([0-9]{10}|[0-9]{12})$'::text`),
 	check("counterparties_kpp_chk", sql`kpp ~ '^[0-9]{9}$'::text`),
 	check("counterparties_ogrn_chk", sql`ogrn ~ '^([0-9]{13}|[0-9]{15})$'::text`),
-	check("counterparties_kind_chk", sql`kind = ANY (ARRAY['customer'::text, 'general_contractor'::text, 'contractor'::text, 'supplier'::text])`),
-]);
-
-export const constructionObjects = pgTable("construction_objects", {
-	id: uuid().defaultRandom().primaryKey().notNull(),
-	code: varchar({ length: 5 }).notNull(),
-	name: text().notNull(),
-	fullName: text("full_name").notNull(),
-	address: text(),
-	isActive: boolean("is_active").default(true).notNull(),
-	developerId: uuid("developer_id"),
-	techCustomerId: uuid("tech_customer_id"),
-	generalContractorId: uuid("general_contractor_id"),
-	actNumberPattern: text("act_number_pattern"),
-	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-	updatedAt: timestamp("updated_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-}, (table) => [
-	index("ix_construction_objects_developer").using("btree", table.developerId.asc().nullsLast().op("uuid_ops")),
-	index("ix_construction_objects_general_contractor").using("btree", table.generalContractorId.asc().nullsLast().op("uuid_ops")),
-	index("ix_construction_objects_tech_customer").using("btree", table.techCustomerId.asc().nullsLast().op("uuid_ops")),
-	foreignKey({
-			columns: [table.developerId],
-			foreignColumns: [counterparties.id],
-			name: "construction_objects_developer_id_fkey"
-		}),
-	foreignKey({
-			columns: [table.techCustomerId],
-			foreignColumns: [counterparties.id],
-			name: "construction_objects_tech_customer_id_fkey"
-		}),
-	foreignKey({
-			columns: [table.generalContractorId],
-			foreignColumns: [counterparties.id],
-			name: "construction_objects_general_contractor_id_fkey"
-		}),
-	unique("construction_objects_code_key").on(table.code),
-	check("construction_objects_code_chk", sql`(code)::text ~ '^[A-Za-z0-9]{5}$'::text`),
 ]);
 
 export const objectSections = pgTable("object_sections", {
@@ -144,11 +108,6 @@ export const objectSections = pgTable("object_sections", {
 	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
 }, (table) => [
 	index("ix_object_sections_kind").using("btree", table.sectionKindCode.asc().nullsLast().op("text_ops")),
-	foreignKey({
-			columns: [table.objectId],
-			foreignColumns: [constructionObjects.id],
-			name: "object_sections_object_id_fkey"
-		}),
 	unique("object_sections_object_code_uq").on(table.code, table.objectId),
 	unique("object_sections_object_id_uq").on(table.id, table.objectId),
 	check("object_sections_sort_order_chk", sql`sort_order >= 0`),
@@ -211,11 +170,6 @@ export const objectRuleProfiles = pgTable("object_rule_profiles", {
 	uniqueIndex("ux_object_rule_profiles_object_version").using("btree", table.objectId.asc().nullsLast().op("int4_ops"), table.version.asc().nullsLast().op("uuid_ops")).where(sql`(section_id IS NULL)`),
 	uniqueIndex("ux_object_rule_profiles_section_version").using("btree", table.objectId.asc().nullsLast().op("uuid_ops"), table.sectionId.asc().nullsLast().op("uuid_ops"), table.version.asc().nullsLast().op("int4_ops")).where(sql`(section_id IS NOT NULL)`),
 	foreignKey({
-			columns: [table.objectId],
-			foreignColumns: [constructionObjects.id],
-			name: "object_rule_profiles_object_id_fkey"
-		}),
-	foreignKey({
 			columns: [table.sectionId],
 			foreignColumns: [objectSections.id],
 			name: "object_rule_profiles_section_id_fkey"
@@ -241,11 +195,6 @@ export const rdDocuments = pgTable("rd_documents", {
 }, (table) => [
 	index("ix_rd_documents_designer").using("btree", table.designerId.asc().nullsLast().op("uuid_ops")),
 	index("ix_rd_documents_object_cipher").using("btree", table.objectId.asc().nullsLast().op("text_ops"), table.cipher.asc().nullsLast().op("text_ops")),
-	foreignKey({
-			columns: [table.objectId],
-			foreignColumns: [constructionObjects.id],
-			name: "rd_documents_object_id_fkey"
-		}),
 	foreignKey({
 			columns: [table.designerId],
 			foreignColumns: [counterparties.id],
@@ -347,11 +296,6 @@ export const volumes = pgTable("volumes", {
 	index("ix_volumes_object").using("btree", table.objectId.asc().nullsLast().op("uuid_ops")),
 	index("ix_volumes_section").using("btree", table.sectionId.asc().nullsLast().op("uuid_ops")),
 	foreignKey({
-			columns: [table.objectId],
-			foreignColumns: [constructionObjects.id],
-			name: "volumes_object_id_fkey"
-		}),
-	foreignKey({
 			columns: [table.sectionId],
 			foreignColumns: [objectSections.id],
 			name: "volumes_section_id_fkey"
@@ -385,11 +329,6 @@ export const submissions = pgTable("submissions", {
 			columns: [table.volumeId],
 			foreignColumns: [volumes.id],
 			name: "submissions_volume_id_fkey"
-		}),
-	foreignKey({
-			columns: [table.objectId],
-			foreignColumns: [constructionObjects.id],
-			name: "submissions_object_id_fkey"
 		}),
 	foreignKey({
 			columns: [table.contractorId],
@@ -1861,6 +1800,113 @@ export const errorIssueActions = pgTable("error_issue_actions", {
 			name: "error_issue_actions_actor_user_id_fkey"
 		}),
 	check("error_issue_actions_action_chk", sql`action = ANY (ARRAY['acknowledge'::text, 'comment'::text, 'resolve'::text, 'reopen'::text, 'assign'::text])`),
+]);
+
+export const counterpartyKinds = pgTable("counterparty_kinds", {
+	code: text().primaryKey().notNull(),
+	name: text().notNull(),
+	sortOrder: integer("sort_order").default(0).notNull(),
+	isActive: boolean("is_active").default(true).notNull(),
+}, () => [
+	check("counterparty_kinds_code_chk", sql`code ~ '^[a-z][a-z0-9_]*$'::text`),
+	check("counterparty_kinds_sort_order_chk", sql`sort_order >= 0`),
+]);
+
+export const constructionObjects = pgTable("construction_objects", {
+	id: uuid().defaultRandom().primaryKey().notNull(),
+	code: varchar({ length: 5 }).notNull(),
+	name: text().notNull(),
+	fullName: text("full_name").notNull(),
+	address: text(),
+	isActive: boolean("is_active").default(true).notNull(),
+	developerId: uuid("developer_id"),
+	techCustomerId: uuid("tech_customer_id"),
+	generalContractorId: uuid("general_contractor_id"),
+	actNumberPattern: text("act_number_pattern"),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	updatedAt: timestamp("updated_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	cadastralNumber: text("cadastral_number"),
+	permitIdentifier: text("permit_identifier"),
+}, (table) => [
+	index("ix_construction_objects_developer").using("btree", table.developerId.asc().nullsLast().op("uuid_ops")),
+	index("ix_construction_objects_general_contractor").using("btree", table.generalContractorId.asc().nullsLast().op("uuid_ops")),
+	index("ix_construction_objects_tech_customer").using("btree", table.techCustomerId.asc().nullsLast().op("uuid_ops")),
+	foreignKey({
+			columns: [table.developerId],
+			foreignColumns: [counterparties.id],
+			name: "construction_objects_developer_id_fkey"
+		}),
+	foreignKey({
+			columns: [table.techCustomerId],
+			foreignColumns: [counterparties.id],
+			name: "construction_objects_tech_customer_id_fkey"
+		}),
+	foreignKey({
+			columns: [table.generalContractorId],
+			foreignColumns: [counterparties.id],
+			name: "construction_objects_general_contractor_id_fkey"
+		}),
+	unique("construction_objects_code_key").on(table.code),
+	check("construction_objects_code_chk", sql`(code)::text ~ '^[A-Za-z0-9]{5}$'::text`),
+]);
+
+export const catalogImports = pgTable("catalog_imports", {
+	id: uuid().defaultRandom().primaryKey().notNull(),
+	target: text().notNull(),
+	status: text().default('uploading').notNull(),
+	fileName: text("file_name").notNull(),
+	s3Key: text("s3_key").notNull(),
+	sha256: text(),
+	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
+	sizeBytes: bigint("size_bytes", { mode: "number" }),
+	rowCount: integer("row_count").default(0).notNull(),
+	errorCount: integer("error_count").default(0).notNull(),
+	duplicateCount: integer("duplicate_count").default(0).notNull(),
+	createdCount: integer("created_count").default(0).notNull(),
+	failureReason: text("failure_reason"),
+	createdBy: uuid("created_by").notNull(),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	updatedAt: timestamp("updated_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	parsedAt: timestamp("parsed_at", { withTimezone: true, mode: 'string' }),
+	appliedAt: timestamp("applied_at", { withTimezone: true, mode: 'string' }),
+	expiresAt: timestamp("expires_at", { withTimezone: true, mode: 'string' }).notNull(),
+}, (table) => [
+	index("ix_catalog_imports_created_by").using("btree", table.createdBy.asc().nullsLast().op("timestamptz_ops"), table.createdAt.desc().nullsFirst().op("uuid_ops")),
+	index("ix_catalog_imports_expiry").using("btree", table.expiresAt.asc().nullsLast().op("timestamptz_ops")).where(sql`(status = ANY (ARRAY['uploading'::text, 'ready'::text]))`),
+	foreignKey({
+			columns: [table.createdBy],
+			foreignColumns: [users.id],
+			name: "catalog_imports_created_by_fkey"
+		}),
+	unique("catalog_imports_s3_key_key").on(table.s3Key),
+	check("catalog_imports_target_chk", sql`target = ANY (ARRAY['counterparties'::text, 'construction_objects'::text])`),
+	check("catalog_imports_status_chk", sql`status = ANY (ARRAY['uploading'::text, 'parsing'::text, 'ready'::text, 'applied'::text, 'failed'::text, 'expired'::text])`),
+	check("catalog_imports_sha256_chk", sql`sha256 ~ '^[0-9a-f]{64}$'::text`),
+	check("catalog_imports_size_chk", sql`(size_bytes IS NULL) OR (size_bytes >= 0)`),
+	check("catalog_imports_counts_chk", sql`(row_count >= 0) AND (error_count >= 0) AND (duplicate_count >= 0) AND (created_count >= 0) AND (created_count <= row_count)`),
+]);
+
+export const catalogImportRows = pgTable("catalog_import_rows", {
+	id: uuid().defaultRandom().primaryKey().notNull(),
+	importId: uuid("import_id").notNull(),
+	rowNo: integer("row_no").notNull(),
+	raw: jsonb().notNull(),
+	normalized: jsonb(),
+	verdict: text().notNull(),
+	problems: jsonb().default([]).notNull(),
+	createdEntityId: uuid("created_entity_id"),
+}, (table) => [
+	index("ix_catalog_import_rows_verdict").using("btree", table.importId.asc().nullsLast().op("int4_ops"), table.verdict.asc().nullsLast().op("int4_ops"), table.rowNo.asc().nullsLast().op("int4_ops")),
+	foreignKey({
+			columns: [table.importId],
+			foreignColumns: [catalogImports.id],
+			name: "catalog_import_rows_import_id_fkey"
+		}).onDelete("cascade"),
+	unique("catalog_import_rows_row_uq").on(table.importId, table.rowNo),
+	check("catalog_import_rows_row_no_chk", sql`row_no > 0`),
+	check("catalog_import_rows_verdict_chk", sql`verdict = ANY (ARRAY['create'::text, 'duplicate'::text, 'error'::text])`),
+	check("catalog_import_rows_created_chk", sql`(created_entity_id IS NULL) OR (verdict = 'create'::text)`),
+	check("catalog_import_rows_problems_chk", sql`jsonb_typeof(problems) = 'array'::text`),
 ]);
 
 export const userRoles = pgTable("user_roles", {

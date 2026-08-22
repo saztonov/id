@@ -7,7 +7,7 @@
  * обязан сказать «не настроен», а не показать пустую таблицу.
  */
 import { expect, test } from '@playwright/test';
-import { KC, signIn } from './support/session.js';
+import { apiPost, KC, signIn } from './support/session.js';
 
 test.describe.configure({ mode: 'serial' });
 
@@ -74,4 +74,110 @@ test('подрядчик читает реестр РД своего объек�
   // есть область видимости класса 1. Реестр РД читается по объекту, поэтому
   // отдельного правила ему не нужно, и отдельного пустого экрана — тоже.
   await expect(page.getByRole('cell', { name: 'АР-2.1-КР' })).toBeVisible();
+});
+
+// =====================================================================
+// Заведение карточек и массовый ввод (S18)
+// =====================================================================
+
+test('контрагент заводится формой, а битая контрольная сумма подсвечивает поле', async ({
+  page,
+}) => {
+  await signIn(page, KC.admin, '/catalog?tab=counterparties');
+
+  await page.getByTestId('new-counterparty').click();
+  await page.getByTestId('counterparty-name').fill('ООО «Испытательный центр»');
+  await page.getByTestId('counterparty-kind').click();
+  await page.getByTitle('Испытательная лаборатория').click();
+
+  // Форма верна, контрольная сумма — нет: CHECK в БД такое значение пропустил
+  // бы, поэтому отказ здесь доказывает работу входа справочника.
+  await page.getByTestId('counterparty-inn').fill('7700123458');
+  await page.getByRole('button', { name: 'Сохранить' }).click();
+  await expect(page.getByText(/Контрольная сумма ИНН/u)).toBeVisible();
+
+  await page.getByTestId('counterparty-inn').fill('7700123459');
+  await page.getByRole('button', { name: 'Сохранить' }).click();
+
+  await expect(page.getByRole('cell', { name: 'ООО «Испытательный центр»' })).toBeVisible();
+  // Вид показан наименованием: код `laboratory` человеку ничего не сообщает.
+  await expect(page.getByRole('cell', { name: 'Испытательная лаборатория' })).toBeVisible();
+});
+
+test('объект заводится формой и появляется в разделе ИД', async ({ page }) => {
+  await signIn(page, KC.admin, '/catalog?tab=objects');
+
+  await page.getByTestId('new-object').click();
+  await page.getByTestId('object-code').fill('E2E77');
+  await page.getByTestId('object-name').fill('Объект из формы');
+  await page.getByTestId('object-full-name').fill('ЖК «Форма», корпус 1');
+  await page.getByRole('button', { name: 'Сохранить' }).click();
+
+  await expect(page.getByRole('cell', { name: 'E2E77' })).toBeVisible();
+
+  await page.goto('/ids');
+  await expect(page.getByRole('cell', { name: 'Объект из формы' })).toBeVisible();
+});
+
+test('удаление объекта со связями отклоняется с названной причиной', async ({ page }) => {
+  await signIn(page, KC.admin, '/catalog?tab=objects');
+
+  const row = page.getByRole('row', { name: /E2E01/u });
+  await row.getByRole('button', { name: 'Удалить' }).click();
+  await page.getByRole('button', { name: 'Удалить', exact: true }).last().click();
+
+  // «Нельзя» без причины отправило бы администратора искать ссылку по схеме.
+  await expect(page.getByText(/разделы работ/u)).toBeVisible();
+  await expect(page.getByRole('cell', { name: 'E2E01' })).toBeVisible();
+});
+
+test('импорт из Excel разбирается воркером и заводит карточки после подтверждения', async ({
+  page,
+}) => {
+  await signIn(page, KC.admin, '/catalog?tab=imports');
+
+  // Файл собирается тем же писателем, что отдаёт шаблон: браузер офисные файлы
+  // не разбирает и не собирает, поэтому книга приходит с сервера.
+  const template = await page.request.get('/api/v1/catalog/imports/template?target=counterparties');
+  expect(template.status()).toBe(200);
+
+  // Мутация мимо интерфейса требует CSRF-заголовка ровно так же, как из него:
+  // токен читается из cookie той же вкладки.
+  const init = await apiPost(page, '/api/v1/catalog/imports/init', {
+    data: { target: 'counterparties', fileName: 'e2e.xlsx', sizeBytes: 1024 },
+  });
+  expect(init.status).toBe(201);
+  const ticket = init.body as { importId: string; uploadId: string; uploadUrl: string };
+
+  // Загружается шаблон: в нём есть заголовок и строка подсказок, то есть одна
+  // строка данных, которую разбор обязан отвергнуть как строку с ошибкой, — а
+  // значит виден весь путь до предпросмотра.
+  await page.request.fetch(ticket.uploadUrl, {
+    method: 'PUT',
+    data: await template.body(),
+  });
+  const complete = await apiPost(page, `/api/v1/catalog/imports/${ticket.importId}/complete`, {
+    data: { uploadId: ticket.uploadId },
+  });
+  expect(complete.status).toBe(200);
+
+  await page.reload();
+  // Разбор выполняет настоящий обработчик воркера, поднятый стендом.
+  await expect
+    .poll(
+      async () => {
+        const response = await page.request.get(`/api/v1/catalog/imports/${ticket.importId}`);
+        return ((await response.json()) as { status: string }).status;
+      },
+      { timeout: 15_000 },
+    )
+    .toBe('ready');
+
+  await page.getByRole('cell', { name: 'e2e.xlsx' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Импорт справочника' });
+  await expect(dialog.getByText('предпросмотр готов')).toBeVisible();
+
+  // Единственная строка данных шаблона — подсказки, а не реквизиты: разбор
+  // обязан отвергнуть её замечанием, а не завести карточку с текстом подсказки.
+  await expect(dialog.getByRole('button', { name: 'Заводить нечего' })).toBeVisible();
 });

@@ -22,12 +22,27 @@
  * Подпись — HMAC на выведенном ключе (`deriveTicketKey`), а не на `CSRF_SECRET`
  * напрямую: один секрет на два назначения означает, что утечка одного механизма
  * ломает второй.
+ *
+ * ## Назначение талона входит в домен подписи, а не в тело
+ *
+ * Талон выдаётся двум разным приёмам: файлу ревизии (§4.2) и файлу импорта
+ * справочника (§3.2). Оба кладут байты по ключу `uploads/{uuid}`, и оба
+ * заканчиваются `complete`, который читает объект по адресу ИЗ ТАЛОНА. Если бы
+ * назначение было просто полем внутри подписанного тела, талон на импорт
+ * годился бы для `complete` файлов ревизии при единственной забытой проверке
+ * поля — и файл справочника зарегистрировался бы как содержимое поставки.
+ * Разный домен подписи делает такую подмену невозможной по построению: чужой
+ * талон не проходит проверку HMAC вовсе.
  */
 import { createHmac, timingSafeEqual } from 'node:crypto';
 
+/** Куда предъявляется талон. Значение участвует в ВЫВОДЕ ключа подписи. */
+export type UploadPurpose = 'revision-file' | 'catalog-import';
+
 export interface UploadTicket {
   readonly uploadId: string;
-  readonly revisionId: string;
+  /** Ревизия поставки либо импорт справочника — смотря по назначению талона. */
+  readonly targetId: string;
   readonly userId: string;
   /** Имя, названное пользователем на `init`; в ключ объекта оно не попадает (§13). */
   readonly fileName: string;
@@ -35,18 +50,18 @@ export interface UploadTicket {
   readonly expiresAt: number;
 }
 
-/** Ключ подписи талонов. Домен разделён строкой назначения. */
-export function deriveTicketKey(secret: string): Buffer {
+/** Ключ подписи талонов. Домен разделён назначением и версией формата. */
+export function deriveTicketKey(secret: string, purpose: UploadPurpose): Buffer {
   // `.update()` здесь принадлежит node:crypto, а правило ищет запросы к БД по
   // имени метода и не различает их с хэшированием.
-  return createHmac('sha256', secret).update('id-portal:upload-ticket:v1').digest();
+  return createHmac('sha256', secret).update(`id-portal:upload-ticket:${purpose}:v1`).digest();
 }
 
 export function signUploadTicket(key: Buffer, ticket: UploadTicket): string {
   const body = Buffer.from(
     JSON.stringify({
       u: ticket.uploadId,
-      r: ticket.revisionId,
+      r: ticket.targetId,
       s: ticket.userId,
       n: ticket.fileName,
       k: ticket.key,
@@ -88,7 +103,7 @@ export function verifyUploadTicket(key: Buffer, token: string): UploadTicket | n
   }
   if (e < Date.now()) return null;
 
-  return { uploadId: u, revisionId: r, userId: s, fileName: n, key: k, expiresAt: e };
+  return { uploadId: u, targetId: r, userId: s, fileName: n, key: k, expiresAt: e };
 }
 
 function mac(key: Buffer, body: string): string {

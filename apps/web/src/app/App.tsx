@@ -92,6 +92,12 @@ const queryClient = new QueryClient({
  * | `colorLink` | `#1677ff` | `#0958d9` | 6.2:1 |
  * | `colorTextDescription` | `rgba(0,0,0,.45)` | `rgba(0,0,0,.62)` | 5.9:1 |
  * | `colorTextSecondary` | `rgba(0,0,0,.65)` | `rgba(0,0,0,.72)` | 7.5:1 |
+ * | `colorError` | `#ff4d4f` | `#cf1322` | 5.9:1 |
+ *
+ * `colorError` поднят на S18 и найден тем же способом — прогоном axe. Умолчание
+ * antd даёт 3.1:1: разрушающее действие («Удалить» в справочнике) читалось хуже
+ * всего остального на экране, притом что именно оно требует прочтения. Красный
+ * при этом остаётся красным: понижена яркость, а не смысл.
  */
 const THEME_TOKENS = {
   fontSize: 14,
@@ -101,6 +107,7 @@ const THEME_TOKENS = {
   colorInfo: '#0958d9',
   colorTextDescription: 'rgba(0, 0, 0, 0.62)',
   colorTextSecondary: 'rgba(0, 0, 0, 0.72)',
+  colorError: '#cf1322',
 } as const;
 
 /**

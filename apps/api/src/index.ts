@@ -213,6 +213,35 @@ export type { Redacted, RedactableArtifactKind } from './recognition/redaction.j
 export type { MatchableBlock, MatchResult } from './recognition/match.js';
 export { crc32, readZipEntries, writeZipStream, ZipError } from './lib/zip.js';
 export type { ZipEntry, ZipSourceEntry } from './lib/zip.js';
+export { buildXlsx } from './lib/xlsx.js';
+export { readXlsxSheet, XlsxError, DEFAULT_XLSX_LIMITS } from './lib/xlsx-read.js';
+export type { XlsxCell, XlsxLimits, XlsxRow, XlsxSheet } from './lib/xlsx-read.js';
+export { parseCatalogImport, normalizeOrgName } from './catalog-import/parse.js';
+export {
+  applyCatalogImport,
+  claimExpiredImports,
+  createCatalogImport,
+  failCatalogImport,
+  findCatalogImport,
+  findImportObjectKey,
+  listCatalogImportRows,
+  listCatalogImports,
+  loadCatalogSnapshot,
+  saveCatalogImportRows,
+  startImportParsing,
+} from './db/repositories/catalog-imports.js';
+export type {
+  CatalogImportRecord,
+  CatalogImportRowRecord,
+} from './db/repositories/catalog-imports.js';
+export type {
+  CatalogImportParseResult,
+  CatalogSnapshot,
+  ImportCell,
+  ImportSheet,
+  ImportSheetRow,
+  ParsedImportRow,
+} from './catalog-import/parse.js';
 
 export {
   closeRunDocument,

@@ -301,10 +301,14 @@ describe('маршруты справочников зарегистрирова
     ['GET', `${P}/objects/:objectId`],
     ['POST', `${P}/objects`],
     ['PATCH', `${P}/objects/:objectId`],
+    ['DELETE', `${P}/objects/:objectId`],
     ['GET', `${P}/counterparties`],
     ['GET', `${P}/counterparties/:counterpartyId`],
     ['POST', `${P}/counterparties`],
     ['PATCH', `${P}/counterparties/:counterpartyId`],
+    ['DELETE', `${P}/counterparties/:counterpartyId`],
+    ['GET', `${P}/counterparty-kinds`],
+    ['POST', `${P}/counterparty-kinds`],
     ['GET', `${P}/objects/:objectId/sections`],
     ['POST', `${P}/objects/:objectId/sections`],
     ['PATCH', `${P}/sections/:sectionId`],
@@ -1211,5 +1215,152 @@ describe('кандидаты в виды ИД: очередь по частот�
         })
       ).statusCode,
     ).toBe(404);
+  });
+});
+
+// =====================================================================
+// Виды контрагентов и удаление карточек справочника (0027)
+// =====================================================================
+
+describe('виды контрагентов — справочник, а не перечисление', () => {
+  interface KindResponse {
+    readonly code: string;
+    readonly name: string;
+    readonly sortOrder: number;
+    readonly isActive: boolean;
+  }
+
+  it('сид миграции содержит виды, которых не было в снятом CHECK', async () => {
+    const response = await as(KC.engineer, 'GET', `${P}/counterparty-kinds`);
+    expect(response.statusCode).toBe(200);
+
+    const codes = response.json<KindResponse[]>().map((k) => k.code);
+    // Четыре прежних значения перечисления обязаны сохраниться: на них
+    // ссылаются заведённые карточки.
+    expect(codes).toEqual(
+      expect.arrayContaining(['customer', 'general_contractor', 'contractor', 'supplier']),
+    );
+    // И новые, ради которых справочник заведён (реестр ИД называет их все).
+    expect(codes).toEqual(
+      expect.arrayContaining(['laboratory', 'certification_body', 'metrology', 'manufacturer']),
+    );
+  });
+
+  it('подрядчик читает виды: это конфигурация, а не сведения об участниках', async () => {
+    expect((await as(KC.contractor, 'GET', `${P}/counterparty-kinds`)).statusCode).toBe(200);
+  });
+
+  it('заводит вид только администратор, и карточка сразу его принимает', async () => {
+    const denied = await as(KC.engineer, 'POST', `${P}/counterparty-kinds`, {
+      code: 'expert_organization',
+      name: 'Экспертная организация',
+    });
+    expect(denied.statusCode).toBe(403);
+
+    const created = await asAdmin('POST', `${P}/counterparty-kinds`, {
+      code: 'expert_organization',
+      name: 'Экспертная организация',
+      sortOrder: 120,
+    });
+    expect(created.statusCode).toBe(201);
+    expect(created.json<KindResponse>()).toMatchObject({
+      code: 'expert_organization',
+      isActive: true,
+      sortOrder: 120,
+    });
+
+    // Главное следствие: новый вид доступен карточке БЕЗ миграции.
+    const card = await asAdmin('POST', `${P}/counterparties`, {
+      name: 'ООО «Экспертиза»',
+      kind: 'expert_organization',
+    });
+    expect(card.statusCode).toBe(201);
+  });
+
+  it('повтор кода — 409, неизвестный вид в карточке — 422 с указателем', async () => {
+    const duplicate = await asAdmin('POST', `${P}/counterparty-kinds`, {
+      code: 'contractor',
+      name: 'Ещё подрядчик',
+    });
+    expect(duplicate.statusCode).toBe(409);
+
+    const unknown = await asAdmin('POST', `${P}/counterparties`, {
+      name: 'ООО «Неизвестный вид»',
+      kind: 'no_such_kind',
+    });
+    expect(unknown.statusCode).toBe(422);
+    expect(pointersOf(unknown)).toContain('/kind');
+  });
+});
+
+describe('реквизиты объекта из шапки реестра', () => {
+  interface ObjectResponse {
+    readonly id: string;
+    readonly cadastralNumber: string | null;
+    readonly permitIdentifier: string | null;
+  }
+
+  it('кадастровый номер и идентификатор заводятся и правятся', async () => {
+    const created = await asAdmin('POST', `${P}/objects`, {
+      code: 'CAD01',
+      name: 'Объект с реквизитами',
+      fullName: 'ЖК «Реквизиты», корпус 1',
+      cadastralNumber: '77:07:0010004:24',
+      permitIdentifier: '90-128/КЛ-23',
+    });
+    expect(created.statusCode).toBe(201);
+    expect(created.json<ObjectResponse>()).toMatchObject({
+      cadastralNumber: '77:07:0010004:24',
+      permitIdentifier: '90-128/КЛ-23',
+    });
+
+    const objectId = created.json<ObjectResponse>().id;
+    const patched = await asAdmin('PATCH', `${P}/objects/${objectId}`, {
+      cadastralNumber: '77:07:0010004:24, 77:07:0010004:31',
+    });
+    expect(patched.statusCode).toBe(200);
+    expect(patched.json<ObjectResponse>().cadastralNumber).toContain('77:07:0010004:31');
+  });
+});
+
+describe('удаление карточки справочника', () => {
+  /**
+   * Проверяется не только код ответа, но и ПРИЧИНА отказа в тексте: «нельзя»
+   * без указания, что именно мешает, отправляет администратора искать ссылку
+   * вручную по всей схеме — ровно то, ради чего ссылки пересчитываются заранее.
+   */
+  it('объект с разделами не удаляется, а отказ называет помеху', async () => {
+    const response = await asAdmin('DELETE', `${P}/objects/${OBJECT}`);
+    expect(response.statusCode).toBe(409);
+    expect(detailOf(response)).toContain('разделы работ');
+    expect(detailOf(response)).toContain('отключением');
+
+    // Объект на месте: отказ ничего не удалил частично.
+    expect((await asAdmin('GET', `${P}/objects/${OBJECT}`)).statusCode).toBe(200);
+  });
+
+  it('контрагент, назначенный пользователю, не удаляется', async () => {
+    const response = await asAdmin('DELETE', `${P}/counterparties/${ORG_CONTRACTOR}`);
+    expect(response.statusCode).toBe(409);
+    expect(detailOf(response)).toContain('пользователи портала');
+  });
+
+  it('несвязанная карточка удаляется, повтор — 404', async () => {
+    const created = await asAdmin('POST', `${P}/counterparties`, {
+      name: 'ООО «Ошибка ввода»',
+      kind: 'supplier',
+    });
+    expect(created.statusCode).toBe(201);
+    const id_ = created.json<{ id: string }>().id;
+
+    expect((await asAdmin('DELETE', `${P}/counterparties/${id_}`)).statusCode).toBe(204);
+    expect((await asAdmin('GET', `${P}/counterparties/${id_}`)).statusCode).toBe(404);
+    expect((await asAdmin('DELETE', `${P}/counterparties/${id_}`)).statusCode).toBe(404);
+  });
+
+  it('удаляет только администратор', async () => {
+    expect(
+      (await as(KC.manager, 'DELETE', `${P}/counterparties/${ORG_DEVELOPER}`)).statusCode,
+    ).toBe(403);
   });
 });
