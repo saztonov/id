@@ -96,6 +96,14 @@ import {
   applySegmentation,
   createAiSpendReader,
   createLlmProvider,
+  appendRevisionEvent,
+  findCounterparty,
+  findRegistry,
+  findRegistryFile,
+  listDocumentsOfRevisions,
+  listFieldValuesOfRevisions,
+  listRegistryComplectRevisions,
+  saveReconciliation,
   listFieldValues,
   listLogicalDocuments,
   listPageAssignments,
@@ -179,6 +187,10 @@ import {
   type PublishedPrompt,
   type SegmentationDeps,
 } from './segmentation.js';
+import {
+  createRegistryReconcileHandler,
+  type RegistryReconcileDeps,
+} from './registry-reconcile.js';
 import {
   createAnalyzeCoverageHandler,
   createDetectPagesHandler,
@@ -1461,6 +1473,93 @@ async function* streamStorageObject(
   }
 }
 
+/**
+ * Область сверки описи — по ОБЪЕКТУ реестра, а не по подрядчику ревизии.
+ *
+ * `pinScope` здесь не годится и это не мелочь: она даёт область подрядчика,
+ * подавшего скан описи, а комплекты папки принадлежат ДРУГИМ субподрядчикам.
+ * Под ней сверка увидела бы один комплект из семи и доложила бы «сошлась» —
+ * то есть соврала бы ровно в том вопросе, ради которого её запускают.
+ *
+ * `SYSTEM_SCOPE` тоже не годится: он неограничен, а `works_registry_fk` (0028)
+ * и так гарантирует, что все комплекты реестра лежат на объекте реестра.
+ * Область по объекту не сужает выборку ни на строку, но превращает дефект в
+ * join'е из «прочитали чужой объект» в «прочитали ноль строк».
+ */
+function objectScope(objectId: string): AuthScope {
+  return { kind: 'engineer', userId: WORKER_ACTOR_ID, objectIds: [objectId] };
+}
+
+function registryReconcileDeps(options: PipelineJobsOptions): RegistryReconcileDeps {
+  const db = options.db;
+
+  return {
+    findScan: async (registryId) => {
+      // Файл описи ищется по ключу папки, а не по области: рубеж создал
+      // маршрут (`findRegistry`), а областью здесь пришлось бы гадать, чья она,
+      // ещё не зная объекта. Системное чтение — ровно одна строка `works`.
+      const scan = await findRegistryFile(db, SYSTEM_SCOPE, registryId);
+      if (scan === null) return null;
+
+      return {
+        workId: scan.id,
+        objectId: scan.objectId,
+        kind: scan.kind,
+        registryId: scan.registryId,
+        currentRevisionId: scan.currentRevisionId,
+      };
+    },
+
+    findRegistry: async (objectId, registryId) => {
+      const registry = await findRegistry(db, objectScope(objectId), registryId);
+      if (registry === null) return null;
+      return {
+        id: registry.id,
+        objectId: registry.objectId,
+        number: registry.number,
+        folderNo: registry.folderNo,
+      };
+    },
+
+    loadPages: async (revisionId) => {
+      const scope = await pinScope(db, revisionId);
+      if (scope === null) {
+        throw new PipelineScopeError(
+          `Ревизия ${revisionId} не найдена: задача адресована в никуда.`,
+        );
+      }
+      return loadSegmentationPages(db, scope, revisionId);
+    },
+
+    // Область здесь не нужна и вредна: множество закрыто ключом реестра, а
+    // фильтрация областью дала бы сверку по видимой части папки (см. докстринг
+    // `listRegistryComplectRevisions`).
+    listComplectRevisions: async (registryId) => listRegistryComplectRevisions(db, registryId),
+
+    listContractorNames: async (ids) => {
+      const unique = [...new Set(ids)];
+      const names = new Map<string, string>();
+      for (const id of unique) {
+        const counterparty = await findCounterparty(db, SYSTEM_SCOPE, id);
+        if (counterparty !== null) names.set(id, counterparty.name);
+      }
+      return names;
+    },
+
+    listDocuments: async (objectId, revisionIds) =>
+      listDocumentsOfRevisions(db, objectScope(objectId), revisionIds),
+
+    listFieldValues: async (objectId, revisionIds, fieldCodes) =>
+      listFieldValuesOfRevisions(db, objectScope(objectId), revisionIds, fieldCodes),
+
+    save: async (input) => saveReconciliation(db, input),
+
+    emit: async (revisionId, eventType, payload) => {
+      await appendRevisionEvent(db, { revisionId, eventType, payload });
+    },
+  };
+}
+
 function segmentationDeps(options: PipelineJobsOptions): SegmentationDeps {
   const db = options.db;
 
@@ -1704,6 +1803,13 @@ export function registerPipelineJobs(
   registry.register('doc.parse_registry', createParseRegistryHandler(segmentation));
   registry.register('doc.match_registry', createMatchRegistryHandler(segmentation));
   registry.register('graph.build', createGraphBuildHandler(segmentation));
+
+  // Сверка описи передачи с комплектами папки (S20). Терминальная задача: она
+  // ничего не ставит дальше и ничего не блокирует — её выход читает человек.
+  registry.register(
+    'registry.reconcile',
+    createRegistryReconcileHandler(registryReconcileDeps(options)),
+  );
 
   // Задачи 20–21 (§12): прогон правил и сводка. Регистрируются здесь и
   // безусловно — по той же причине, что и остальные стадии: обработчик без

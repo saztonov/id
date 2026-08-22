@@ -41,9 +41,9 @@
  * которому нужен текст. Список артефактов с хэшами и размерами остаётся
  * доступным как раньше: ссылок он не содержит.
  */
-import type { FastifyRequest } from 'fastify';
 import type { AppInstance } from '../../app.js';
-import { badRequest, conflict, forbidden, internal, notFound } from '../../lib/problem.js';
+import { conflict, forbidden, internal, notFound } from '../../lib/problem.js';
+import { requireIdempotencyKey } from '../../lib/http-headers.js';
 import { currentAuth } from '../../middleware/require-auth.js';
 import { hasPermission, requirePermission } from '../../middleware/require-permission.js';
 import {
@@ -119,26 +119,6 @@ function toView(run: RecognitionRunView) {
     warnings: [...run.warnings],
     runDocumentClosedAt: run.runDocumentClosedAt,
   };
-}
-
-/**
- * Значение `Idempotency-Key`.
- *
- * Отсутствие — ошибка клиента (400), а не молчаливое согласие: §14 объявляет
- * заголовок обязательным именно на дорогих действиях, и «забыли прислать»
- * обязано быть видно сразу, а не превратиться во второй прогон на GPU.
- */
-function requireIdempotencyKey(request: FastifyRequest): string {
-  const raw = request.headers['idempotency-key'];
-  const value = Array.isArray(raw) ? raw[0] : raw;
-  if (value === undefined || value.trim() === '') {
-    throw badRequest('Требуется заголовок Idempotency-Key.');
-  }
-  const trimmed = value.trim();
-  if (trimmed.length > 128 || !/^[\w.:@-]+$/.test(trimmed)) {
-    throw badRequest('Idempotency-Key: до 128 символов из [A-Za-z0-9._:@-].');
-  }
-  return trimmed;
 }
 
 // =====================================================================

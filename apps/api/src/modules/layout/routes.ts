@@ -28,7 +28,8 @@
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import type { AppInstance } from '../../app.js';
 import type { AuthScope } from '../../auth/scope.js';
-import { badRequest, conflict, notFound } from '../../lib/problem.js';
+import { conflict, notFound } from '../../lib/problem.js';
+import { requireIfMatch } from '../../lib/http-headers.js';
 import { currentAuth } from '../../middleware/require-auth.js';
 import { requirePermission } from '../../middleware/require-permission.js';
 import { tracePayload, updateContext } from '../../observability/context.js';
@@ -105,29 +106,6 @@ function toView(layout: LayoutRevisionView) {
   };
 }
 
-/**
- * Разбор `If-Match`.
- *
- * Заголовок обязателен на каждой мутации: без него «последний записавший
- * победил» становится поведением по умолчанию, а на экране разметки это значит
- * потерянную работу второго редактора. Отсутствие заголовка — ошибка клиента, и
- * отвечать на неё 412 нельзя: 412 клиент понимает как «перечитай и повтори», а
- * перечитывание тут не поможет.
- */
-function requireIfMatch(request: FastifyRequest): number {
-  const raw = request.headers['if-match'];
-  const value = Array.isArray(raw) ? raw[0] : raw;
-  if (value === undefined || value.trim() === '') {
-    throw badRequest('Требуется заголовок If-Match с версией разметки.');
-  }
-  const cleaned = value.trim().replace(/^W\//, '').replace(/^"|"$/g, '');
-  const parsed = Number(cleaned);
-  if (!Number.isInteger(parsed) || parsed < 0) {
-    throw badRequest('Заголовок If-Match должен содержать целую версию разметки.');
-  }
-  return parsed;
-}
-
 function withVersion(reply: FastifyReply, version: number): FastifyReply {
   return reply.header('etag', `"${version}"`);
 }
@@ -194,15 +172,17 @@ function registerStartRoute(app: AppInstance): void {
           pages,
           false,
         );
-        return withVersion(reply, layout.version).code(202).send({
-          layoutRevisionId: layout.id,
-          bundleId: bundle.id,
-          created,
-          // Схема ответа отдаёт одну задачу; у локальной ветки их страница к
-          // странице — наружу уходит первая, остальные видны в консоли задач.
-          jobId: jobIds[0] ?? '',
-          jobCreated: true,
-        });
+        return withVersion(reply, layout.version)
+          .code(202)
+          .send({
+            layoutRevisionId: layout.id,
+            bundleId: bundle.id,
+            created,
+            // Схема ответа отдаёт одну задачу; у локальной ветки их страница к
+            // странице — наружу уходит первая, остальные видны в консоли задач.
+            jobId: jobIds[0] ?? '',
+            jobCreated: true,
+          });
       }
 
       // Постановка первой задачи цепочки §12 (задача 4). Ключ идемпотентности —
@@ -351,7 +331,7 @@ function registerBlockRoutes(app: AppInstance): void {
     },
     async (request, reply) => {
       const { scope, user } = currentAuth(request);
-      const expectedVersion = requireIfMatch(request);
+      const expectedVersion = requireIfMatch(request, 'разметки');
       const body = request.body;
 
       const result = await createLayoutBlock(app.db, scope, {
@@ -383,7 +363,7 @@ function registerBlockRoutes(app: AppInstance): void {
     },
     async (request, reply) => {
       const { scope, user } = currentAuth(request);
-      const expectedVersion = requireIfMatch(request);
+      const expectedVersion = requireIfMatch(request, 'разметки');
       const body = request.body;
 
       const result = await updateLayoutBlock(app.db, scope, {
@@ -409,7 +389,7 @@ function registerBlockRoutes(app: AppInstance): void {
     },
     async (request, reply) => {
       const { scope, user } = currentAuth(request);
-      const expectedVersion = requireIfMatch(request);
+      const expectedVersion = requireIfMatch(request, 'разметки');
       const result = await deleteLayoutBlock(app.db, scope, {
         blockId: request.params.blockId,
         layoutRevisionId: request.params.layoutId,
@@ -441,7 +421,7 @@ function registerPageRoutes(app: AppInstance): void {
     },
     async (request, reply) => {
       const { scope, user } = currentAuth(request);
-      const expectedVersion = requireIfMatch(request);
+      const expectedVersion = requireIfMatch(request, 'разметки');
       const result = await replacePageWithFullPageBlock(app.db, scope, {
         layoutRevisionId: request.params.layoutId,
         expectedVersion,
@@ -468,7 +448,7 @@ function registerPageRoutes(app: AppInstance): void {
     },
     async (request, reply) => {
       const { scope, user } = currentAuth(request);
-      const expectedVersion = requireIfMatch(request);
+      const expectedVersion = requireIfMatch(request, 'разметки');
       const result = await applyFullPageTextProfile(app.db, scope, {
         layoutRevisionId: request.params.layoutId,
         expectedVersion,
@@ -632,7 +612,7 @@ function registerFreezeRoute(app: AppInstance): void {
     },
     async (request, reply) => {
       const { scope, user } = currentAuth(request);
-      const expectedVersion = requireIfMatch(request);
+      const expectedVersion = requireIfMatch(request, 'разметки');
       const result = await freezeLayout(app.db, scope, {
         layoutRevisionId: request.params.layoutId,
         expectedVersion,

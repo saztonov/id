@@ -1889,10 +1889,10 @@ export const works = pgTable("works", {
 	index("ix_works_current_revision").using("btree", table.currentRevisionId.asc().nullsLast().op("uuid_ops")),
 	index("ix_works_managed_by").using("btree", table.managedByContractorId.asc().nullsLast().op("uuid_ops")),
 	index("ix_works_object").using("btree", table.objectId.asc().nullsLast().op("uuid_ops")),
-	index("ix_works_object_section_period").using("btree", table.objectId.asc().nullsLast().op("date_ops"), table.sectionCode.asc().nullsLast().op("date_ops"), table.period.asc().nullsLast().op("date_ops")),
+	index("ix_works_object_section_period").using("btree", table.objectId.asc().nullsLast().op("date_ops"), table.sectionCode.asc().nullsLast().op("uuid_ops"), table.period.asc().nullsLast().op("text_ops")),
 	index("ix_works_registry").using("btree", table.registryId.asc().nullsLast().op("uuid_ops")),
 	uniqueIndex("ux_works_registry_file").using("btree", table.registryId.asc().nullsLast().op("uuid_ops")).where(sql`(kind = 'registry'::text)`),
-	uniqueIndex("ux_works_registry_ordinal").using("btree", table.registryId.asc().nullsLast().op("int4_ops"), table.ordinal.asc().nullsLast().op("uuid_ops")).where(sql`(ordinal IS NOT NULL)`),
+	uniqueIndex("ux_works_registry_ordinal").using("btree", table.registryId.asc().nullsLast().op("uuid_ops"), table.ordinal.asc().nullsLast().op("int4_ops")).where(sql`(ordinal IS NOT NULL)`),
 	foreignKey({
 			columns: [table.managedByContractorId],
 			foreignColumns: [counterparties.id],
@@ -1924,10 +1924,74 @@ export const works = pgTable("works", {
 			name: "works_created_by_fkey"
 		}),
 	unique("works_scope_uq").on(table.contractorId, table.id, table.objectId),
+	unique("works_registry_id_uq").on(table.id, table.registryId),
 	check("works_kind_chk", sql`kind = ANY (ARRAY['complect'::text, 'registry'::text])`),
 	check("works_ordinal_chk", sql`(ordinal IS NULL) OR (ordinal > 0)`),
 	check("works_period_chk", sql`EXTRACT(day FROM period) = (1)::numeric`),
 	check("works_registry_kind_chk", sql`(kind <> 'registry'::text) OR (registry_id IS NOT NULL)`),
+]);
+
+export const registryReconciliations = pgTable("registry_reconciliations", {
+	id: uuid().defaultRandom().primaryKey().notNull(),
+	objectId: uuid("object_id").notNull(),
+	registryId: uuid("registry_id").notNull(),
+	workId: uuid("work_id").notNull(),
+	revisionId: uuid("revision_id").notNull(),
+	verdict: text().notNull(),
+	version: integer().default(0).notNull(),
+	headerRegistryNo: text("header_registry_no"),
+	headerFolderNo: text("header_folder_no"),
+	headerMismatch: boolean("header_mismatch").default(false).notNull(),
+	parserVersion: text("parser_version").notNull(),
+	matcherVersion: text("matcher_version").notNull(),
+	finishedAt: timestamp("finished_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	groupsTotal: integer("groups_total").default(0).notNull(),
+	groupsMatched: integer("groups_matched").default(0).notNull(),
+	groupsMissing: integer("groups_missing").default(0).notNull(),
+	groupsAmbiguous: integer("groups_ambiguous").default(0).notNull(),
+	rowsTotal: integer("rows_total").default(0).notNull(),
+	rowsMatched: integer("rows_matched").default(0).notNull(),
+	rowsMissing: integer("rows_missing").default(0).notNull(),
+	rowsAmbiguous: integer("rows_ambiguous").default(0).notNull(),
+	rowsFieldMismatch: integer("rows_field_mismatch").default(0).notNull(),
+	worksTotal: integer("works_total").default(0).notNull(),
+	worksExtra: integer("works_extra").default(0).notNull(),
+	extraDocuments: integer("extra_documents").default(0).notNull(),
+	warnings: text().array().default([""]).notNull(),
+	reviewedBy: uuid("reviewed_by"),
+	reviewedAt: timestamp("reviewed_at", { withTimezone: true, mode: 'string' }),
+	reviewedNote: text("reviewed_note"),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+}, (table) => [
+	index("ix_registry_reconciliations_object").using("btree", table.objectId.asc().nullsLast().op("uuid_ops")),
+	index("ix_registry_reconciliations_registry").using("btree", table.registryId.asc().nullsLast().op("uuid_ops")),
+	index("ix_registry_reconciliations_reviewed_by").using("btree", table.reviewedBy.asc().nullsLast().op("uuid_ops")),
+	foreignKey({
+			columns: [table.reviewedBy],
+			foreignColumns: [users.id],
+			name: "registry_reconciliations_reviewed_by_fkey"
+		}),
+	foreignKey({
+			columns: [table.objectId, table.registryId],
+			foreignColumns: [registries.id, registries.objectId],
+			name: "registry_reconciliations_registry_fk"
+		}),
+	foreignKey({
+			columns: [table.registryId, table.workId],
+			foreignColumns: [works.id, works.registryId],
+			name: "registry_reconciliations_work_fk"
+		}),
+	foreignKey({
+			columns: [table.workId, table.revisionId],
+			foreignColumns: [submissionRevisions.id, submissionRevisions.workId],
+			name: "registry_reconciliations_revision_fk"
+		}),
+	unique("registry_reconciliations_scan_uq").on(table.registryId, table.revisionId),
+	unique("registry_reconciliations_revision_uq").on(table.id, table.revisionId),
+	check("registry_reconciliations_verdict_chk", sql`verdict = ANY (ARRAY['unparsed'::text, 'mismatch'::text, 'clean'::text])`),
+	check("registry_reconciliations_version_chk", sql`version >= 0`),
+	check("registry_reconciliations_counts_chk", sql`(groups_total >= 0) AND (rows_total >= 0) AND (works_total >= 0) AND (((groups_matched + groups_missing) + groups_ambiguous) = groups_total) AND (((rows_matched + rows_missing) + rows_ambiguous) = rows_total) AND ((works_extra >= 0) AND (works_extra <= works_total)) AND ((rows_field_mismatch >= 0) AND (rows_field_mismatch <= rows_total)) AND (extra_documents >= 0)`),
+	check("registry_reconciliations_reviewed_chk", sql`((reviewed_by IS NULL) AND (reviewed_at IS NULL) AND (reviewed_note IS NULL)) OR ((reviewed_by IS NOT NULL) AND (reviewed_at IS NOT NULL) AND (reviewed_note IS NOT NULL) AND ((char_length(reviewed_note) >= 10) AND (char_length(reviewed_note) <= 1000)))`),
 ]);
 
 export const userObjectScopes = pgTable("user_object_scopes", {
@@ -2273,6 +2337,137 @@ export const errorStatsHourly = pgTable("error_stats_hourly", {
 	check("error_stats_hourly_count_chk", sql`count >= 0`),
 ]);
 
+export const registryReconciliationExtraDocs = pgTable("registry_reconciliation_extra_docs", {
+	reconciliationId: uuid("reconciliation_id").notNull(),
+	revisionId: uuid("revision_id").notNull(),
+	documentId: uuid("document_id").notNull(),
+	workId: uuid("work_id").notNull(),
+	docRevisionId: uuid("doc_revision_id").notNull(),
+	contractorId: uuid("contractor_id").notNull(),
+	docNoRaw: text("doc_no_raw"),
+	docNameRaw: text("doc_name_raw"),
+	docTypeCode: text("doc_type_code"),
+}, (table) => [
+	index("ix_registry_reconciliation_extra_docs_contractor").using("btree", table.contractorId.asc().nullsLast().op("uuid_ops")),
+	index("ix_registry_reconciliation_extra_docs_revision").using("btree", table.docRevisionId.asc().nullsLast().op("uuid_ops")),
+	index("ix_registry_reconciliation_extra_docs_work").using("btree", table.reconciliationId.asc().nullsLast().op("uuid_ops"), table.workId.asc().nullsLast().op("uuid_ops")),
+	foreignKey({
+			columns: [table.documentId],
+			foreignColumns: [logicalDocuments.id],
+			name: "registry_reconciliation_extra_docs_document_id_fkey"
+		}),
+	foreignKey({
+			columns: [table.workId],
+			foreignColumns: [works.id],
+			name: "registry_reconciliation_extra_docs_work_id_fkey"
+		}),
+	foreignKey({
+			columns: [table.docRevisionId],
+			foreignColumns: [submissionRevisions.id],
+			name: "registry_reconciliation_extra_docs_doc_revision_id_fkey"
+		}),
+	foreignKey({
+			columns: [table.contractorId],
+			foreignColumns: [counterparties.id],
+			name: "registry_reconciliation_extra_docs_contractor_id_fkey"
+		}),
+	foreignKey({
+			columns: [table.reconciliationId, table.revisionId],
+			foreignColumns: [registryReconciliations.id, registryReconciliations.revisionId],
+			name: "registry_reconciliation_extra_docs_parent_fk"
+		}).onDelete("cascade"),
+	primaryKey({ columns: [table.documentId, table.reconciliationId], name: "registry_reconciliation_extra_docs_pkey"}),
+]);
+
+export const registryReconciliationGroups = pgTable("registry_reconciliation_groups", {
+	reconciliationId: uuid("reconciliation_id").notNull(),
+	revisionId: uuid("revision_id").notNull(),
+	ordinal: integer().notNull(),
+	groupNo: text("group_no"),
+	titleRaw: text("title_raw").notNull(),
+	actNoRaw: text("act_no_raw"),
+	actNoNorm: text("act_no_norm"),
+	contractorRaw: text("contractor_raw"),
+	matchedWorkId: uuid("matched_work_id"),
+	matchedRevisionId: uuid("matched_revision_id"),
+	matchedContractorId: uuid("matched_contractor_id"),
+	matchState: text("match_state").notNull(),
+	matchScore: numeric("match_score", { precision: 4, scale:  3 }),
+	reason: text().notNull(),
+}, (table) => [
+	index("ix_registry_reconciliation_groups_work").using("btree", table.matchedWorkId.asc().nullsLast().op("uuid_ops")),
+	foreignKey({
+			columns: [table.matchedWorkId],
+			foreignColumns: [works.id],
+			name: "registry_reconciliation_groups_matched_work_id_fkey"
+		}),
+	foreignKey({
+			columns: [table.matchedRevisionId],
+			foreignColumns: [submissionRevisions.id],
+			name: "registry_reconciliation_groups_matched_revision_id_fkey"
+		}),
+	foreignKey({
+			columns: [table.matchedContractorId],
+			foreignColumns: [counterparties.id],
+			name: "registry_reconciliation_groups_matched_contractor_id_fkey"
+		}),
+	foreignKey({
+			columns: [table.reconciliationId, table.revisionId],
+			foreignColumns: [registryReconciliations.id, registryReconciliations.revisionId],
+			name: "registry_reconciliation_groups_parent_fk"
+		}).onDelete("cascade"),
+	primaryKey({ columns: [table.ordinal, table.reconciliationId], name: "registry_reconciliation_groups_pkey"}),
+	check("registry_reconciliation_groups_ordinal_chk", sql`ordinal >= 0`),
+	check("registry_reconciliation_groups_state_chk", sql`match_state = ANY (ARRAY['matched'::text, 'missing'::text, 'ambiguous'::text])`),
+	check("registry_reconciliation_groups_score_chk", sql`(match_score IS NULL) OR ((match_score >= (0)::numeric) AND (match_score <= (1)::numeric))`),
+	check("registry_reconciliation_groups_matched_chk", sql`((match_state = 'matched'::text) AND (matched_work_id IS NOT NULL)) OR ((match_state <> 'matched'::text) AND (matched_work_id IS NULL))`),
+]);
+
+export const registryReconciliationWorks = pgTable("registry_reconciliation_works", {
+	reconciliationId: uuid("reconciliation_id").notNull(),
+	revisionId: uuid("revision_id").notNull(),
+	workId: uuid("work_id").notNull(),
+	matchedRevisionId: uuid("matched_revision_id"),
+	contractorId: uuid("contractor_id").notNull(),
+	title: text().notNull(),
+	contractorName: text("contractor_name"),
+	state: text().notNull(),
+	verdict: text().notNull(),
+	rowsTotal: integer("rows_total").default(0).notNull(),
+	rowsMatched: integer("rows_matched").default(0).notNull(),
+	rowsMissing: integer("rows_missing").default(0).notNull(),
+	rowsAmbiguous: integer("rows_ambiguous").default(0).notNull(),
+	rowsFieldMismatch: integer("rows_field_mismatch").default(0).notNull(),
+	extraDocuments: integer("extra_documents").default(0).notNull(),
+}, (table) => [
+	index("ix_registry_reconciliation_works_contractor").using("btree", table.contractorId.asc().nullsLast().op("uuid_ops")),
+	index("ix_registry_reconciliation_works_revision").using("btree", table.matchedRevisionId.asc().nullsLast().op("uuid_ops")),
+	foreignKey({
+			columns: [table.workId],
+			foreignColumns: [works.id],
+			name: "registry_reconciliation_works_work_id_fkey"
+		}),
+	foreignKey({
+			columns: [table.matchedRevisionId],
+			foreignColumns: [submissionRevisions.id],
+			name: "registry_reconciliation_works_matched_revision_id_fkey"
+		}),
+	foreignKey({
+			columns: [table.contractorId],
+			foreignColumns: [counterparties.id],
+			name: "registry_reconciliation_works_contractor_id_fkey"
+		}),
+	foreignKey({
+			columns: [table.reconciliationId, table.revisionId],
+			foreignColumns: [registryReconciliations.id, registryReconciliations.revisionId],
+			name: "registry_reconciliation_works_parent_fk"
+		}).onDelete("cascade"),
+	primaryKey({ columns: [table.reconciliationId, table.workId], name: "registry_reconciliation_works_pkey"}),
+	check("registry_reconciliation_works_state_chk", sql`state = ANY (ARRAY['matched'::text, 'extra'::text])`),
+	check("registry_reconciliation_works_verdict_chk", sql`verdict = ANY (ARRAY['unparsed'::text, 'mismatch'::text, 'clean'::text])`),
+	check("registry_reconciliation_works_counts_chk", sql`(rows_total >= 0) AND (extra_documents >= 0) AND (((rows_matched + rows_missing) + rows_ambiguous) = rows_total) AND ((rows_field_mismatch >= 0) AND (rows_field_mismatch <= rows_total))`),
+]);
+
 export const pageClassifications = pgTable("page_classifications", {
 	revisionId: uuid("revision_id").notNull(),
 	sourcePageId: uuid("source_page_id").notNull(),
@@ -2326,6 +2521,69 @@ export const pageClassifications = pgTable("page_classifications", {
 	check("page_classifications_span_source_chk", sql`(char_span IS NULL) OR (page_text_version_id IS NOT NULL)`),
 	check("page_classifications_span_bounds_chk", sql`(char_span IS NULL) OR (lower(char_span) >= 0)`),
 	check("page_classifications_quote_span_chk", sql`(quote IS NULL) OR (char_span IS NOT NULL)`),
+]);
+
+export const registryReconciliationRows = pgTable("registry_reconciliation_rows", {
+	reconciliationId: uuid("reconciliation_id").notNull(),
+	revisionId: uuid("revision_id").notNull(),
+	ordinal: integer().notNull(),
+	groupOrdinal: integer("group_ordinal").notNull(),
+	workId: uuid("work_id"),
+	contractorId: uuid("contractor_id"),
+	rowNo: text("row_no"),
+	docNameRaw: text("doc_name_raw").notNull(),
+	docNoRaw: text("doc_no_raw"),
+	docNoNorm: text("doc_no_norm"),
+	docNoFolded: text("doc_no_folded"),
+	orgRaw: text("org_raw"),
+	issuedAt: date("issued_at"),
+	validFrom: date("valid_from"),
+	validTo: date("valid_to"),
+	sheets: integer(),
+	copies: integer(),
+	pagesRaw: text("pages_raw"),
+	matchedDocumentId: uuid("matched_document_id"),
+	matchState: text("match_state").notNull(),
+	matchScore: numeric("match_score", { precision: 4, scale:  3 }),
+	fieldMismatches: text("field_mismatches").array().default([""]).notNull(),
+	reason: text().notNull(),
+}, (table) => [
+	index("ix_registry_reconciliation_rows_document").using("btree", table.matchedDocumentId.asc().nullsLast().op("uuid_ops")),
+	index("ix_registry_reconciliation_rows_work").using("btree", table.reconciliationId.asc().nullsLast().op("uuid_ops"), table.workId.asc().nullsLast().op("uuid_ops")),
+	foreignKey({
+			columns: [table.contractorId],
+			foreignColumns: [counterparties.id],
+			name: "registry_reconciliation_rows_contractor_id_fkey"
+		}),
+	foreignKey({
+			columns: [table.matchedDocumentId],
+			foreignColumns: [logicalDocuments.id],
+			name: "registry_reconciliation_rows_matched_document_id_fkey"
+		}),
+	foreignKey({
+			columns: [table.reconciliationId, table.groupOrdinal],
+			foreignColumns: [registryReconciliationGroups.ordinal, registryReconciliationGroups.reconciliationId],
+			name: "registry_reconciliation_rows_group_fk"
+		}).onDelete("cascade"),
+	foreignKey({
+			columns: [table.reconciliationId, table.revisionId],
+			foreignColumns: [registryReconciliations.id, registryReconciliations.revisionId],
+			name: "registry_reconciliation_rows_parent_fk"
+		}).onDelete("cascade"),
+	foreignKey({
+			columns: [table.workId],
+			foreignColumns: [works.id],
+			name: "registry_reconciliation_rows_work_id_fkey"
+		}),
+	primaryKey({ columns: [table.ordinal, table.reconciliationId], name: "registry_reconciliation_rows_pkey"}),
+	check("registry_reconciliation_rows_ordinal_chk", sql`ordinal >= 0`),
+	check("registry_reconciliation_rows_group_chk", sql`group_ordinal >= 0`),
+	check("registry_reconciliation_rows_state_chk", sql`match_state = ANY (ARRAY['matched'::text, 'missing'::text, 'ambiguous'::text])`),
+	check("registry_reconciliation_rows_score_chk", sql`(match_score IS NULL) OR ((match_score >= (0)::numeric) AND (match_score <= (1)::numeric))`),
+	check("registry_reconciliation_rows_matched_chk", sql`((match_state = 'matched'::text) AND (matched_document_id IS NOT NULL)) OR ((match_state <> 'matched'::text) AND (matched_document_id IS NULL))`),
+	check("registry_reconciliation_rows_fields_chk", sql`(match_state = 'matched'::text) OR (cardinality(field_mismatches) = 0)`),
+	check("registry_reconciliation_rows_sheets_chk", sql`(sheets IS NULL) OR (sheets >= 0)`),
+	check("registry_reconciliation_rows_copies_chk", sql`(copies IS NULL) OR (copies >= 0)`),
 ]);
 export const vUnaccountedPages = pgView("v_unaccounted_pages", {	revisionId: uuid("revision_id"),
 	sourcePageId: uuid("source_page_id"),

@@ -1198,3 +1198,211 @@ describe('POST /registries', () => {
     expect(rows[0]?.n).toBe('1');
   });
 });
+
+// =====================================================================
+// Сверка описи: две выдачи с разными единицами и разными правами (S20)
+// =====================================================================
+
+/**
+ * Проверяется не «работают ли маршруты», а РАЗДЕЛЕНИЕ выдач.
+ *
+ * Заказчик: данные по каждому комплекту формируются отдельно, данные по реестру
+ * показываются только сотрудникам генподрядчика. Значит, у подрядчика в ответе
+ * не должно быть ни шапки описи, ни групп, ни чужих комплектов — и доказывать
+ * это надо маркером, который у ведущего папку ВИДЕН, иначе проверка проходила
+ * бы на пустом ответе.
+ */
+describe('сверка описи передачи', () => {
+  const REGISTRY_R = id(70);
+  const FILE_WORK = id(71);
+  const FILE_REV = id(72);
+  const RECON = id(73);
+
+  beforeAll(async () => {
+    // Отдельный реестр объекта 1 со своим файлом описи и готовой сверкой:
+    // маршрутом её не записать — считает её воркер.
+    await db.query(
+      `INSERT INTO registries (id, object_id, section_code, period, number, folder_no, created_by)
+         VALUES ('${REGISTRY_R}', '${OBJECT_1}', '${SECTION}', DATE '${PERIOD}', '77', '7',
+                 '${USER_GC}')`,
+    );
+    await db.query(
+      `INSERT INTO works
+         (id, object_id, contractor_id, managed_by_contractor_id, section_code, period,
+          kind, registry_id, title, created_by)
+       VALUES ('${FILE_WORK}', '${OBJECT_1}', '${ORG_GC}', '${ORG_GC}', '${SECTION}',
+               DATE '${PERIOD}', 'registry', '${REGISTRY_R}', 'Скан описи', '${USER_GC}')`,
+    );
+    await db.query(
+      `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no)
+         VALUES ('${FILE_REV}', '${FILE_WORK}', '${OBJECT_1}', '${ORG_GC}', 1)`,
+    );
+    await db.query(
+      `UPDATE works SET current_revision_id = '${FILE_REV}' WHERE id = '${FILE_WORK}'`,
+    );
+
+    // Маркер лежит и в шапке описи, и в наименовании группы: обе части
+    // принадлежат папке, и ни одна не имеет права попасть подрядчику.
+    await db.query(
+      `INSERT INTO registry_reconciliations
+         (id, object_id, registry_id, work_id, revision_id, verdict, header_registry_no,
+          header_folder_no, header_mismatch, parser_version, matcher_version,
+          works_total, works_extra, rows_total, rows_matched)
+       VALUES ('${RECON}', '${OBJECT_1}', '${REGISTRY_R}', '${FILE_WORK}', '${FILE_REV}',
+               'mismatch', '${SECRET}', '7', true, 'registry.transfer.v1',
+               'registry.reconcile.v1', 1, 0, 1, 1)`,
+    );
+    await db.query(
+      `INSERT INTO registry_reconciliation_works
+         (reconciliation_id, revision_id, work_id, matched_revision_id, contractor_id,
+          title, contractor_name, state, verdict, rows_total, rows_missing)
+       VALUES ('${RECON}', '${FILE_REV}', '${WORK_B}', '${REV_B}', '${ORG_B}',
+               'Комплект Б', 'ООО «Подрядчик Б»', 'matched', 'mismatch', 1, 1)`,
+    );
+    await db.query(
+      `INSERT INTO registry_reconciliation_groups
+         (reconciliation_id, revision_id, ordinal, title_raw, match_state,
+          matched_work_id, matched_revision_id, reason)
+       VALUES ('${RECON}', '${FILE_REV}', 0, '${SECRET}', 'matched',
+               '${WORK_B}', '${REV_B}', 'номер АОСР совпал точно')`,
+    );
+    await db.query(
+      `INSERT INTO registry_reconciliation_rows
+         (reconciliation_id, revision_id, ordinal, group_ordinal, work_id, contractor_id,
+          doc_name_raw, match_state, reason)
+       VALUES ('${RECON}', '${FILE_REV}', 0, 0, '${WORK_B}', '${ORG_B}',
+               'Сертификат соответствия', 'missing', 'документ не найден')`,
+    );
+  });
+
+  it('сводку по папке отдают только сотрудникам генподрядчика', async () => {
+    const gc = await as(KC.gc, 'GET', `/api/v1/registries/${REGISTRY_R}/reconciliation`);
+    expect(gc.statusCode).toBe(200);
+    expect(gc.json<{ reconciliation: { verdict: string } }>().reconciliation.verdict).toBe(
+      'mismatch',
+    );
+    expect(gc.body).toContain(SECRET);
+
+    for (const who of [KC.engineer, KC.manager, KC.b, KC.a]) {
+      const response = await as(who, 'GET', `/api/v1/registries/${REGISTRY_R}/reconciliation`);
+      expect(response.statusCode).toBe(403);
+    }
+  });
+
+  it('сводка по чужому объекту — 404, а не 403', async () => {
+    const response = await as(KC.gc, 'GET', `/api/v1/registries/${REGISTRY_FAR}/reconciliation`);
+    expect(response.statusCode).toBe(404);
+  });
+
+  it('в карточке реестра у подрядчика ключа сверки нет ВОВСЕ, а не null', async () => {
+    const contractor = await as(KC.b, 'GET', `/api/v1/registries/${REGISTRY_R}`);
+    expect(contractor.statusCode).toBe(200);
+    expect('reconciliation' in contractor.json<Record<string, unknown>>()).toBe(false);
+    expect(contractor.body).not.toContain(SECRET);
+
+    // Положительный контроль: у ведущего папку ключ есть — иначе проверка выше
+    // доказывала бы лишь, что сверки нет вовсе.
+    const gc = await as(KC.gc, 'GET', `/api/v1/registries/${REGISTRY_R}`);
+    expect('reconciliation' in gc.json<Record<string, unknown>>()).toBe(true);
+  });
+
+  it('свой комплект подрядчик видит, и в ответе нет ни одного поля о папке', async () => {
+    const response = await as(KC.b, 'GET', `/api/v1/revisions/${REV_B}/reconciliation`);
+    expect(response.statusCode).toBe(200);
+
+    const body = response.json<{
+      work: { workId: string; verdict: string };
+      rows: readonly { docNameRaw: string }[];
+    }>();
+    expect(body.work.workId).toBe(WORK_B);
+    expect(body.work.verdict).toBe('mismatch');
+    expect(body.rows).toHaveLength(1);
+
+    expect(response.body).not.toContain(SECRET);
+    expect(Object.keys(response.json<Record<string, unknown>>()).sort()).toStrictEqual(
+      ['extraDocuments', 'finishedAt', 'parserVersion', 'rows', 'work'].sort(),
+    );
+  });
+
+  it('по чужой ревизии — пустой ответ, а не чужой комплект', async () => {
+    const response = await as(KC.a, 'GET', `/api/v1/revisions/${REV_B}/reconciliation`);
+    expect(response.statusCode).toBe(200);
+    expect(response.json<{ work: unknown }>().work).toBeNull();
+  });
+
+  it('сверку запускают инженер, руководитель и подрядчик, а не только ведущий папку', async () => {
+    for (const who of [KC.engineer, KC.manager, KC.b, KC.gc]) {
+      const response = await as(
+        who,
+        'POST',
+        `/api/v1/registries/${REGISTRY_R}/reconcile`,
+        undefined,
+        { 'idempotency-key': `recon-${who}` },
+      );
+      expect(response.statusCode).toBe(202);
+    }
+
+    // Ключ дедупликации — по РЕЕСТРУ, без `Idempotency-Key`: второе нажатие
+    // получает уже стоящую задачу, а не заводит вторую по той же папке.
+    const jobs = await db.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM jobs WHERE type = 'registry.reconcile'`,
+    );
+    expect(jobs[0]?.n).toBe('1');
+  });
+
+  it('без Idempotency-Key сверка не ставится', async () => {
+    const response = await as(KC.gc, 'POST', `/api/v1/registries/${REGISTRY_R}/reconcile`);
+    expect(response.statusCode).toBe(400);
+  });
+
+  it('отметку «разобрано» ставит принимающая сторона и только с пояснением', async () => {
+    const byContractor = await as(
+      KC.b,
+      'POST',
+      `/api/v1/registries/${REGISTRY_R}/reconciliation/review`,
+      { note: 'Расхождение разобрано: документ верен.' },
+      ifMatch(0),
+    );
+    expect(byContractor.statusCode).toBe(403);
+
+    const noHeader = await as(
+      KC.engineer,
+      'POST',
+      `/api/v1/registries/${REGISTRY_R}/reconciliation/review`,
+      { note: 'Расхождение разобрано: документ верен.' },
+    );
+    expect(noHeader.statusCode).toBe(400);
+
+    const shortNote = await as(
+      KC.engineer,
+      'POST',
+      `/api/v1/registries/${REGISTRY_R}/reconciliation/review`,
+      { note: 'ок' },
+      ifMatch(0),
+    );
+    // 422, а не 400: пояснение короче десяти символов отвергает схема тела, а
+    // не разбор заголовка.
+    expect(shortNote.statusCode).toBe(422);
+
+    const ok = await as(
+      KC.engineer,
+      'POST',
+      `/api/v1/registries/${REGISTRY_R}/reconciliation/review`,
+      { note: 'Расхождение — след распознавания, документ в комплекте верен.' },
+      ifMatch(0),
+    );
+    expect(ok.statusCode).toBe(200);
+    expect(ok.json<{ reviewedBy: string | null }>().reviewedBy).toBe(USER_ENGINEER);
+
+    // Устаревшая версия отвергается: отметка по вчерашней сверке не должна
+    // молча приклеиться к сегодняшней.
+    const stale = await as(
+      KC.engineer,
+      'POST',
+      `/api/v1/registries/${REGISTRY_R}/reconciliation/review`,
+      { note: 'Повтор с прежней версией.' },
+      ifMatch(0),
+    );
+    expect(stale.statusCode).toBe(409);
+  });
+});

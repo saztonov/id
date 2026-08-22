@@ -436,6 +436,31 @@ export type {
   MatchRegistryResult,
   RegistryMatch as RegistryMatchResult,
 } from './segmentation/match.js';
+
+/**
+ * Разбор описи передачи папки и сопоставление её групп с комплектами (S20).
+ *
+ * Это НЕ реестр приложений внутри АОСР (`parseAnnexRegistry` выше): другой
+ * документ, другие формы, другая единица сверки. Общее у них — только разметка,
+ * вынесенная в `md-table.ts` и `registry-cells.ts`.
+ */
+export {
+  matchTransferGroups,
+  parseTransferRegistry,
+  TRANSFER_MATCHER_VERSION,
+  TRANSFER_PARSER_VERSION,
+} from './segmentation/transfer-registry.js';
+export type {
+  ParsedTransferGroup,
+  ParsedTransferHeader,
+  ParsedTransferRow,
+  TransferForm,
+  TransferGroupCandidate,
+  TransferGroupMatch,
+  TransferGroupsOutcome,
+  TransferPageInput,
+  TransferParseResult,
+} from './segmentation/transfer-registry.js';
 export {
   extractBaseFields,
   extractFields,
@@ -482,6 +507,7 @@ export {
 export type {
   ApplySegmentationInput,
   ApplySegmentationOutcome,
+  DocumentFieldValue,
   DocumentRelationInput,
   FieldValueView,
   LogicalDocumentView,
@@ -492,8 +518,40 @@ export type {
   SegmentationInput,
   SegmentationPageRow,
 } from './db/repositories/documents.js';
+export {
+  listDocumentsOfRevisions,
+  listFieldValuesOfRevisions,
+} from './db/repositories/documents.js';
+
+/**
+ * Навигация и сверка описи: то, что нужно задаче `registry.reconcile` (S20).
+ *
+ * Репозиторий навигации до S20 в этой поверхности не значился — воркер с
+ * реестрами дела не имел. Теперь имеет, и нужное отдаётся поимённо, а не
+ * `export *`: воркеру незачем уметь передавать папку.
+ */
+export {
+  findRegistry,
+  findRegistryFile,
+  findWork,
+  listRegistryComplectRevisions,
+} from './db/repositories/navigation.js';
+export type { RegistryComplectRevision } from './db/repositories/navigation.js';
+export {
+  findRegistryReconciliation,
+  findWorkReconciliation,
+  reviewReconciliation,
+  saveReconciliation,
+} from './db/repositories/reconciliation.js';
+export type {
+  RegistryReconciliationView,
+  SaveReconciliationInput,
+  WorkReconciliationView,
+} from './db/repositories/reconciliation.js';
 
 export { observeDocTypeCandidate, normalizeObservedTitle } from './db/repositories/catalog.js';
+/** Наименование организации нужно сверке описи: опись печатает его в графе. */
+export { findCounterparty } from './db/repositories/catalog.js';
 
 /**
  * Проверки §9: сборка графа, прогон и замечания.

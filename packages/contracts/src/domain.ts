@@ -413,6 +413,152 @@ export const registryItemSchema = z.object({
 });
 export type RegistryItem = z.infer<typeof registryItemSchema>;
 
+// =====================================================================
+// Сверка описи передачи с комплектами папки (S20)
+// =====================================================================
+
+/**
+ * Вердикт сверки — ТРЁХЗНАЧНЫЙ, и третье значение здесь не про удобство.
+ *
+ * При нечитаемом распознавании разбор описи отдаёт ноль строк, все счётчики
+ * сходятся сами с собой (0+0=0), и двузначный вердикт объявил бы «расхождений
+ * нет» там, где сверять было нечего. `unparsed` отделяет «мы сверили и всё
+ * сошлось» от «мы не смогли прочитать опись» — разные факты и разные действия
+ * человека.
+ */
+export const reconciliationVerdictSchema = z.enum(['unparsed', 'mismatch', 'clean']);
+export type ReconciliationVerdict = z.infer<typeof reconciliationVerdictSchema>;
+
+/**
+ * Исход сопоставления строки или группы описи.
+ *
+ * Отдельная схема, а не `matchStateSchema` из `enums.ts`: там есть значение
+ * `'extra'`, которое не присваивает ни одна ветка кода с 0005. Комплект или
+ * документ, не названный описью, — это не строка описи, и выражать его
+ * состоянием строки значило бы завести второе мёртвое значение.
+ */
+export const reconciliationMatchStateSchema = z.enum(['matched', 'missing', 'ambiguous']);
+export type ReconciliationMatchState = z.infer<typeof reconciliationMatchStateSchema>;
+
+/** Комплект папки со СВОИМ вердиктом: единица выдачи подрядчику и инженеру. */
+export const reconciliationWorkSchema = z.object({
+  workId: uuidSchema,
+  matchedRevisionId: uuidSchema.nullable(),
+  contractorId: uuidSchema,
+  title: z.string().min(1).max(1000),
+  contractorName: z.string().max(255).nullable(),
+  /** `extra` — комплект, которого опись не назвала ни одной группой. */
+  state: z.enum(['matched', 'extra']),
+  verdict: reconciliationVerdictSchema,
+  rowsTotal: z.int().nonnegative(),
+  rowsMatched: z.int().nonnegative(),
+  rowsMissing: z.int().nonnegative(),
+  rowsAmbiguous: z.int().nonnegative(),
+  rowsFieldMismatch: z.int().nonnegative(),
+  extraDocuments: z.int().nonnegative(),
+});
+export type ReconciliationWork = z.infer<typeof reconciliationWorkSchema>;
+
+/** Группа описи: работа с исполнителем и её сопоставление с комплектом. */
+export const reconciliationGroupSchema = z.object({
+  ordinal: z.int().nonnegative(),
+  groupNo: z.string().max(64).nullable(),
+  titleRaw: z.string().max(2000),
+  actNoRaw: z.string().max(255).nullable(),
+  actNoNorm: z.string().max(255).nullable(),
+  contractorRaw: z.string().max(255).nullable(),
+  matchedWorkId: uuidSchema.nullable(),
+  matchedRevisionId: uuidSchema.nullable(),
+  matchedContractorId: uuidSchema.nullable(),
+  matchState: reconciliationMatchStateSchema,
+  matchScore: confidenceSchema.nullable(),
+  reason: z.string().max(1000),
+});
+export type ReconciliationGroup = z.infer<typeof reconciliationGroupSchema>;
+
+/** Строка описи и её сопоставление с документом комплекта. */
+export const reconciliationRowSchema = z.object({
+  ordinal: z.int().nonnegative(),
+  groupOrdinal: z.int().nonnegative(),
+  workId: uuidSchema.nullable(),
+  contractorId: uuidSchema.nullable(),
+  /** Напечатанный номер позиции: «6.23». Текст, а не число (урок 0015). */
+  rowNo: z.string().max(64).nullable(),
+  docNameRaw: z.string().max(2000),
+  docNoRaw: z.string().max(255).nullable(),
+  docNoNorm: z.string().max(255).nullable(),
+  orgRaw: z.string().max(500).nullable(),
+  issuedAt: isoDateSchema.nullable(),
+  validFrom: isoDateSchema.nullable(),
+  validTo: isoDateSchema.nullable(),
+  sheets: z.int().nonnegative().nullable(),
+  copies: z.int().nonnegative().nullable(),
+  /** «Страница по списку» дословно: бывает диапазоном «46-47». */
+  pagesRaw: z.string().max(64).nullable(),
+  matchedDocumentId: uuidSchema.nullable(),
+  matchState: reconciliationMatchStateSchema,
+  matchScore: confidenceSchema.nullable(),
+  /**
+   * Коды расхождений реквизитов: `issued_at`, `organization`, `sheets`.
+   * Пустое значение с любой стороны расхождением НЕ считается — это «не
+   * извлечено», а не «не совпало» (§9.1, открытый мир).
+   */
+  fieldMismatches: z.array(z.string().max(64)),
+  reason: z.string().max(1000),
+});
+export type ReconciliationRow = z.infer<typeof reconciliationRowSchema>;
+
+/** Документ комплекта, которого опись не назвала ни одной строкой. */
+export const reconciliationExtraDocumentSchema = z.object({
+  documentId: uuidSchema,
+  workId: uuidSchema,
+  revisionId: uuidSchema,
+  contractorId: uuidSchema,
+  docNoRaw: z.string().max(255).nullable(),
+  docNameRaw: z.string().max(2000).nullable(),
+  docTypeCode: z.string().max(64).nullable(),
+});
+export type ReconciliationExtraDocument = z.infer<typeof reconciliationExtraDocumentSchema>;
+
+/**
+ * Сводка сверки ПО ПАПКЕ.
+ *
+ * Отдаётся только тому, кто ведёт папку: в одном реестре комплекты разных
+ * субподрядчиков, и «в папке 7 комплектов, из них ваш один» — сведение о
+ * работе конкурентов, полученное арифметикой.
+ */
+export const registryReconciliationSchema = z.object({
+  id: uuidSchema,
+  registryId: uuidSchema,
+  revisionId: uuidSchema,
+  verdict: reconciliationVerdictSchema,
+  version: rowVersionSchema,
+  headerRegistryNo: z.string().max(128).nullable(),
+  headerFolderNo: z.string().max(64).nullable(),
+  headerMismatch: z.boolean(),
+  /** Версии разбора и сопоставления: ими объясняется расхождение прогонов. */
+  parserVersion: z.string().max(64),
+  matcherVersion: z.string().max(64),
+  finishedAt: isoDateTimeSchema,
+  groupsTotal: z.int().nonnegative(),
+  groupsMatched: z.int().nonnegative(),
+  groupsMissing: z.int().nonnegative(),
+  groupsAmbiguous: z.int().nonnegative(),
+  rowsTotal: z.int().nonnegative(),
+  rowsMatched: z.int().nonnegative(),
+  rowsMissing: z.int().nonnegative(),
+  rowsAmbiguous: z.int().nonnegative(),
+  rowsFieldMismatch: z.int().nonnegative(),
+  worksTotal: z.int().nonnegative(),
+  worksExtra: z.int().nonnegative(),
+  extraDocuments: z.int().nonnegative(),
+  warnings: z.array(z.string().max(1000)),
+  reviewedBy: uuidSchema.nullable(),
+  reviewedAt: isoDateTimeSchema.nullable(),
+  reviewedNote: z.string().max(1000).nullable(),
+});
+export type RegistryReconciliation = z.infer<typeof registryReconciliationSchema>;
+
 /**
  * Ревизия комплекта — неизменяемая после submit единица прохождения конвейера.
  *

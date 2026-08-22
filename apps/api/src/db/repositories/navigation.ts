@@ -867,6 +867,57 @@ export async function findRegistry(
   return row === undefined ? null : toRegistry(row);
 }
 
+/** Комплект папки вместе с его текущей ревизией — вход сверки описи (S20). */
+export interface RegistryComplectRevision {
+  readonly workId: string;
+  readonly revisionId: string;
+  readonly objectId: string;
+  readonly contractorId: string;
+  readonly managedByContractorId: string;
+  readonly title: string;
+}
+
+/**
+ * Комплекты папки с текущими ревизиями — БЕЗ области видимости, намеренно.
+ *
+ * Множество здесь закрывается КЛЮЧОМ, а не областью: `works.registry_id = ?`
+ * плюс `kind = 'complect'`. Область была бы не защитой, а дефектом: сверка
+ * описи сравнивает бумагу со ВСЕЙ папкой, а в одной папке комплекты разных
+ * субподрядчиков. Отфильтруй их областью — и сверка ответила бы «сошлась» в
+ * смысле «сошлась по той части, что мне видна», то есть соврала бы ровно там,
+ * где её и спрашивают.
+ *
+ * **Результат нельзя отдавать наружу HTTP-маршрутом.** Он предназначен задаче
+ * `registry.reconcile`, которая работает под областью, закреплённой объектом
+ * реестра, и записывает итог в замороженные таблицы; выдачу из этих таблиц
+ * режут по правам уже маршруты. Прямая отдача отсюда была бы обходом §4.1.
+ */
+export async function listRegistryComplectRevisions(
+  db: Database,
+  registryId: string,
+): Promise<readonly RegistryComplectRevision[]> {
+  const rows = await db
+    .select({
+      workId: works.id,
+      revisionId: works.currentRevisionId,
+      objectId: works.objectId,
+      contractorId: works.contractorId,
+      managedByContractorId: works.managedByContractorId,
+      title: works.title,
+    })
+    .from(works)
+    .where(
+      and(
+        eq(works.registryId, registryId),
+        eq(works.kind, 'complect'),
+        isNotNull(works.currentRevisionId),
+      ),
+    )
+    .orderBy(asc(works.ordinal), asc(works.createdAt));
+
+  return rows.map((row) => ({ ...row, revisionId: row.revisionId as string }));
+}
+
 /** Файл-скан описи: комплект особого вида, принадлежащий реестру. */
 export async function findRegistryFile(
   db: Database,

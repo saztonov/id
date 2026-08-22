@@ -31,7 +31,18 @@
  */
 
 import { normalizeDocNo } from '@id/contracts';
+import { scanBlocks, type MdTable } from './md-table.js';
+import { HAS_DATE, parseDateCell, parseNumberCell } from './registry-cells.js';
 import type { ParsedRegistryRow } from './types.js';
+
+/**
+ * Нормализация наименования переехала в `registry-cells.ts` вместе с остальным
+ * разбором ячеек, но остаётся частью поверхности ЭТОГО модуля: на неё ссылается
+ * и баррель `@id/api`, и тест разбора. Реэкспорт вместо переноса импорта у
+ * читателей — потому что вынос ядра обязан быть доказуемо безобидным, а правка
+ * чужих импортов делает его правкой чужого кода.
+ */
+export { normalizeRegistryName } from './registry-cells.js';
 
 /** Страница на входе разбора. Тексты — `page_text_versions.text_md`. */
 export interface RegistryPageInput {
@@ -51,101 +62,8 @@ export interface RegistryParseResult {
   readonly warnings: readonly string[];
 }
 
-// =====================================================================
-// Разметка markdown-таблиц
-// =====================================================================
-
-/** Строка таблицы: `| ячейка | ячейка |`. */
-const TABLE_LINE = /^\s*\|(.*)\|\s*$/u;
-
-/** Ячейка разделителя шапки: `---`, `:---:`. */
-const SEPARATOR_CELL = /^:?-{1,}:?$/u;
-
-/** Строка целиком в полужирном начертании — так OCR печатает заголовки разделов. */
-const BOLD_LINE = /^\s*\*\*(.+?)\*\*\s*$/u;
-
 /** Номер позиции реестра: до четырёх цифр и ничего кроме. */
 const POSITION_NO = /^\d{1,4}$/u;
-
-interface MdTable {
-  /** `null` — разделитель шапки стоит первым либо отсутствует вовсе. */
-  readonly header: readonly string[] | null;
-  readonly rows: readonly (readonly string[])[];
-}
-
-type Block =
-  | { readonly kind: 'table'; readonly table: MdTable }
-  | { readonly kind: 'bold'; readonly text: string };
-
-function tableCells(line: string | undefined): string[] | null {
-  if (line === undefined) return null;
-  const match = TABLE_LINE.exec(line);
-  if (match === null) return null;
-
-  return (match[1] ?? '').split('|').map((cell) => cell.replace(/\*\*/gu, '').trim());
-}
-
-function isSeparator(cells: readonly string[]): boolean {
-  return cells.length > 0 && cells.every((cell) => SEPARATOR_CELL.test(cell));
-}
-
-/**
- * Раскладывает текст страницы на таблицы и полужирные строки.
- *
- * Разделитель шапки не обязателен для РАЗБОРА таблицы: без него получается
- * `header: null`, и первая строка остаётся обычной строкой данных. Это ровно
- * то, что описано, и не больше: докстринг первой редакции утверждал, что
- * страница реестра при потерянном разделителе не теряется, — и это было
- * неверно. Реестр открывается КАНОНИЧЕСКОЙ ШАПКОЙ (`isCanonicalHeader`), а
- * шапки без разделителя здесь не возникает вовсе, поэтому реестр без
- * строки-разделителя не открывался и терялся целиком, молча.
- *
- * Восстановление этого случая живёт не здесь, а в `parseAnnexRegistry`
- * (`recoverHeaderlessTable`): решение «первая строка данных на самом деле
- * шапка» имеет смысл только там, где известно, что мы ищем реестр. Здесь оно
- * означало бы, что любая безголовая таблица теряет первую строку.
- */
-function scanBlocks(text: string): Block[] {
-  const lines = text.split(/\r?\n/u);
-  const blocks: Block[] = [];
-
-  let index = 0;
-  while (index < lines.length) {
-    const cells = tableCells(lines[index]);
-    if (cells === null) {
-      const bold = BOLD_LINE.exec(lines[index] ?? '');
-      if (bold !== null) blocks.push({ kind: 'bold', text: (bold[1] ?? '').trim() });
-      index += 1;
-      continue;
-    }
-
-    const run: string[][] = [];
-    while (index < lines.length) {
-      const next = tableCells(lines[index]);
-      if (next === null) break;
-      run.push(next);
-      index += 1;
-    }
-
-    blocks.push({ kind: 'table', table: toTable(run) });
-  }
-
-  return blocks;
-}
-
-function toTable(run: readonly string[][]): MdTable {
-  const first = run[0];
-  const second = run[1];
-
-  if (first !== undefined && isSeparator(first)) {
-    return { header: null, rows: run.slice(1) };
-  }
-  if (first !== undefined && second !== undefined && isSeparator(second)) {
-    return { header: first, rows: run.slice(2) };
-  }
-
-  return { header: null, rows: [...run] };
-}
 
 // =====================================================================
 // Распознавание реестра
@@ -245,120 +163,6 @@ function isColumnNumbering(cells: readonly string[]): boolean {
 }
 
 // =====================================================================
-// Разбор ячеек
-// =====================================================================
-
-const DATE_PART = String.raw`(\d{1,2})\.(\d{1,2})\.(\d{4})`;
-
-/**
- * Интервал действия: «с DD.MM.YYYY по DD.MM.YYYY».
- *
- * `[сc]` — обе буквы: в скане предлог «с» кириллический, но OCR регулярно
- * отдаёт латинскую `c`. Точки с запятой между словами допускаются: OCR
- * вставляет их на месте переносов строки внутри ячейки.
- */
-const VALIDITY_RANGE = new RegExp(
-  String.raw`(?:^|[\s;,(])[сc]\s*[;,]?\s*${DATE_PART}\s*[;,]?\s*по\s*[;,]?\s*${DATE_PART}`,
-  'iu',
-);
-
-/** Разовая дата: «от DD.MM.YYYY», в корпусе встречается и как «от; DD.MM.YYYY». */
-const ISSUED_DATE = new RegExp(String.raw`(?:^|[\s;,(])от\s*[;,]?\s*${DATE_PART}`, 'iu');
-
-/** «б/н» — не отсутствие номера, а его законная форма «без номера». */
-const NO_NUMBER = /^б\s*[/\\.]?\s*н\.?$/iu;
-
-interface CellNumber {
-  readonly docNoRaw: string | null;
-  readonly validFrom: string | null;
-  readonly validTo: string | null;
-  readonly issuedAt: string | null;
-  /** Сравним ли номер: у «б/н» — нет. */
-  readonly comparable: boolean;
-}
-
-function toIsoDate(
-  day: string | undefined,
-  month: string | undefined,
-  year: string | undefined,
-): string | null {
-  const d = Number(day);
-  const m = Number(month);
-  const y = Number(year);
-  if (!Number.isInteger(d) || !Number.isInteger(m) || !Number.isInteger(y)) return null;
-
-  const probe = new Date(Date.UTC(y, m - 1, d));
-  if (probe.getUTCFullYear() !== y || probe.getUTCMonth() !== m - 1 || probe.getUTCDate() !== d) {
-    return null;
-  }
-
-  return `${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
-}
-
-/** Снимает «№», обрамляющую пунктуацию и схлопывает многократные пробелы. */
-function cleanDocNo(value: string): string {
-  return value
-    .replace(/^№+\s*/u, '')
-    .replace(/^[\s;,:]+/u, '')
-    .replace(/[\s;,:]+$/u, '')
-    .replace(/\s{2,}/gu, ' ')
-    .trim();
-}
-
-/**
- * Разбирает графу «№ чертежа, акта, разрешения…».
- *
- * В одной ячейке лежат и номер, и срок: «№RU.MCC.240.445.38406 с 01.10.2024 по
- * 01.10.2028» либо «№2410/48 от 14.10.2024». Тип даты определяется формой
- * записи, и это не косметика: §9.2 выбирает релевантную дату по типу связи, а
- * интервал и разовая дата дают РАЗНЫЕ правила (`DATE.300` против `DATE.310`).
- */
-function parseNumberCell(cell: string): CellNumber {
-  let head = cell;
-  let validFrom: string | null = null;
-  let validTo: string | null = null;
-  let issuedAt: string | null = null;
-
-  const range = VALIDITY_RANGE.exec(cell);
-  if (range !== null) {
-    validFrom = toIsoDate(range[1], range[2], range[3]);
-    validTo = toIsoDate(range[4], range[5], range[6]);
-    head = cell.slice(0, range.index);
-  } else {
-    const issued = ISSUED_DATE.exec(cell);
-    if (issued !== null) {
-      issuedAt = toIsoDate(issued[1], issued[2], issued[3]);
-      head = cell.slice(0, issued.index);
-    }
-  }
-
-  const cleaned = cleanDocNo(head);
-  if (cleaned === '') {
-    return { docNoRaw: null, validFrom, validTo, issuedAt, comparable: false };
-  }
-  if (NO_NUMBER.test(cleaned)) {
-    // «б/н» сравнивать нельзя. Два разных документа «без номера» совпали бы по
-    // такому «номеру» и дали бы ложный `matched` — то есть отчёт утверждал бы,
-    // что строка реестра подтверждена документом, который к ней не относится.
-    return { docNoRaw: 'б/н', validFrom, validTo, issuedAt, comparable: false };
-  }
-
-  return { docNoRaw: cleaned, validFrom, validTo, issuedAt, comparable: true };
-}
-
-/**
- * Нормализация наименования документа и организации.
- *
- * OCR вставляет `;` на месте переносов строки внутри ячейки: «Сертификат
- * качества; Арматура А240С, д.8». Для сравнения и поиска они схлопываются в
- * пробел, но `docNameRaw` и `orgRaw` хранят исходный вид — человек на экране
- * должен видеть реестр таким, каков он есть, включая следы распознавания.
- */
-export function normalizeRegistryName(value: string): string {
-  return value.replace(/;+/gu, ' ').replace(/\s+/gu, ' ').trim();
-}
-
-// =====================================================================
 // Раскладка граф
 // =====================================================================
 
@@ -408,51 +212,6 @@ function mapColumns(header: readonly string[] | null): RegistryColumns {
     number: number >= 0 ? number : POSITIONAL_COLUMNS.number,
     org: org >= 0 ? org : number >= 0 ? null : POSITIONAL_COLUMNS.org,
     date: date >= 0 ? date : null,
-  };
-}
-
-interface CellDates {
-  readonly validFrom: string | null;
-  readonly validTo: string | null;
-  readonly issuedAt: string | null;
-}
-
-const ANY_DATE = new RegExp(DATE_PART, 'gu');
-
-/** Есть ли в ячейке хоть что-то похожее на дату. Без флага `g` — для `test`. */
-const HAS_DATE = new RegExp(DATE_PART, 'u');
-
-/**
- * Разбирает отдельную графу «Дата».
- *
- * В отличие от графы номера, здесь дата бывает и голой («31.12.2024 г.»), без
- * «от» и «с … по». Две даты в одной ячейке читаются как интервал действия.
- * Невозможная дата («31.04.2026») даёт null — решение о предупреждении
- * принимает вызывающий, у него есть номер строки.
- */
-function parseDateCell(cell: string): CellDates {
-  const range = VALIDITY_RANGE.exec(cell);
-  if (range !== null) {
-    return {
-      validFrom: toIsoDate(range[1], range[2], range[3]),
-      validTo: toIsoDate(range[4], range[5], range[6]),
-      issuedAt: null,
-    };
-  }
-  const found = [...cell.matchAll(ANY_DATE)];
-  if (found.length >= 2) {
-    const [first, second] = found;
-    return {
-      validFrom: toIsoDate(first?.[1], first?.[2], first?.[3]),
-      validTo: toIsoDate(second?.[1], second?.[2], second?.[3]),
-      issuedAt: null,
-    };
-  }
-  const single = found[0];
-  return {
-    validFrom: null,
-    validTo: null,
-    issuedAt: single === undefined ? null : toIsoDate(single[1], single[2], single[3]),
   };
 }
 

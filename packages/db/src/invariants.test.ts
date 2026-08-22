@@ -843,3 +843,215 @@ describe('реестр передачи: снимок состава и неиз
     ).rejects.toThrow();
   });
 });
+
+// =====================================================================
+// Сверка описи передачи с комплектами папки (0030)
+// =====================================================================
+
+describe('сверка описи: ключи, вердикт и отсутствие запирания', () => {
+  const REGISTRY = id(71);
+  const FILE_WORK = id(72);
+  const FILE_REVISION = id(73);
+  const RECON = id(74);
+  const OTHER_REGISTRY = id(75);
+
+  const insertReconciliation = (reconId: string): string =>
+    `INSERT INTO registry_reconciliations
+       (id, object_id, registry_id, work_id, revision_id, verdict,
+        parser_version, matcher_version)
+     VALUES ('${reconId}', '${ID.object}', '${REGISTRY}', '${FILE_WORK}', '${FILE_REVISION}',
+             'clean', 'registry.transfer.v1', 'registry.reconcile.v1')`;
+
+  beforeAll(async () => {
+    await db.query(
+      `INSERT INTO registries (id, object_id, section_code, period, number, created_by)
+         VALUES ('${REGISTRY}', '${ID.object}', 'roofing', DATE '2026-03-01', '30', '${ID.user}')`,
+    );
+    await db.query(
+      `INSERT INTO registries (id, object_id, section_code, period, number, created_by)
+         VALUES ('${OTHER_REGISTRY}', '${ID.object}', 'roofing', DATE '2026-04-01', '31', '${ID.user}')`,
+    );
+    await db.query(
+      `INSERT INTO works
+         (id, object_id, contractor_id, managed_by_contractor_id, section_code, period,
+          kind, registry_id, title, created_by)
+       VALUES ('${FILE_WORK}', '${ID.object}', '${ID.contractor}', '${ID.contractor}',
+               'roofing', DATE '2026-03-01', 'registry', '${REGISTRY}', 'Скан описи', '${ID.user}')`,
+    );
+    await db.query(
+      `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no)
+         VALUES ('${FILE_REVISION}', '${FILE_WORK}', '${ID.object}', '${ID.contractor}', 1)`,
+    );
+    await db.query(insertReconciliation(RECON));
+  });
+
+  it('составной ключ не пускает ревизию чужого комплекта', async () => {
+    // `revision_id` от комплекта из общей фикстуры при `work_id` файла описи:
+    // простой внешний ключ на `submission_revisions.id` такое пропустил бы, и
+    // сверка сослалась бы на ревизию чужого объекта.
+    await expect(
+      db.query(
+        `INSERT INTO registry_reconciliations
+           (id, object_id, registry_id, work_id, revision_id, verdict, parser_version, matcher_version)
+         VALUES ('${id(76)}', '${ID.object}', '${REGISTRY}', '${FILE_WORK}', '${ID.revision}',
+                 'clean', 'p', 'm')`,
+      ),
+    ).rejects.toThrow();
+  });
+
+  it('составной ключ не пускает комплект из чужого реестра', async () => {
+    await expect(
+      db.query(
+        `INSERT INTO registry_reconciliations
+           (id, object_id, registry_id, work_id, revision_id, verdict, parser_version, matcher_version)
+         VALUES ('${id(77)}', '${ID.object}', '${OTHER_REGISTRY}', '${FILE_WORK}', '${FILE_REVISION}',
+                 'clean', 'p', 'm')`,
+      ),
+    ).rejects.toThrow();
+  });
+
+  it('вердикт трёхзначен: «расхождений нет» и «опись не разобрана» — разное', async () => {
+    for (const verdict of ['unparsed', 'mismatch', 'clean']) {
+      await db.query(
+        `UPDATE registry_reconciliations SET verdict = '${verdict}' WHERE id = '${RECON}'`,
+      );
+    }
+    await expect(
+      db.query(`UPDATE registry_reconciliations SET verdict = 'ok' WHERE id = '${RECON}'`),
+    ).rejects.toThrow();
+  });
+
+  it('счётчики обязаны сходиться', async () => {
+    await expect(
+      db.query(
+        `UPDATE registry_reconciliations SET groups_total = 3, groups_matched = 1
+           WHERE id = '${RECON}'`,
+      ),
+    ).rejects.toThrow();
+  });
+
+  it('одна сверка на один скан: повтор отвергается ключом', async () => {
+    await expect(
+      db.query(
+        `INSERT INTO registry_reconciliations
+           (id, object_id, registry_id, work_id, revision_id, verdict, parser_version, matcher_version)
+         VALUES ('${id(78)}', '${ID.object}', '${REGISTRY}', '${FILE_WORK}', '${FILE_REVISION}',
+                 'clean', 'p', 'm')`,
+      ),
+    ).rejects.toThrow();
+  });
+
+  it('отметка «разобрано» требует автора, времени и содержательного пояснения', async () => {
+    await expect(
+      db.query(
+        `UPDATE registry_reconciliations SET reviewed_by = '${ID.user}', reviewed_at = now()
+           WHERE id = '${RECON}'`,
+      ),
+    ).rejects.toThrow();
+    await expect(
+      db.query(
+        `UPDATE registry_reconciliations
+            SET reviewed_by = '${ID.user}', reviewed_at = now(), reviewed_note = 'ок'
+          WHERE id = '${RECON}'`,
+      ),
+    ).rejects.toThrow();
+
+    await db.query(
+      `UPDATE registry_reconciliations
+          SET reviewed_by = '${ID.user}', reviewed_at = now(),
+              reviewed_note = 'Расхождение дат — след распознавания, документ верен.'
+        WHERE id = '${RECON}'`,
+    );
+  });
+
+  it('сопоставленная группа обязана назвать комплект, несопоставленная — не вправе', async () => {
+    await db.query(
+      `INSERT INTO registry_reconciliation_groups
+         (reconciliation_id, revision_id, ordinal, title_raw, match_state, reason)
+       VALUES ('${RECON}', '${FILE_REVISION}', 0, 'Работа без комплекта', 'missing', 'нет')`,
+    );
+    await expect(
+      db.query(
+        `INSERT INTO registry_reconciliation_groups
+           (reconciliation_id, revision_id, ordinal, title_raw, match_state, reason)
+         VALUES ('${RECON}', '${FILE_REVISION}', 1, 'Сопоставленная', 'matched', 'да')`,
+      ),
+    ).rejects.toThrow();
+    await expect(
+      db.query(
+        `INSERT INTO registry_reconciliation_groups
+           (reconciliation_id, revision_id, ordinal, title_raw, match_state,
+            matched_work_id, reason)
+         VALUES ('${RECON}', '${FILE_REVISION}', 2, 'Мнимая', 'missing', '${ID.work}', 'нет')`,
+      ),
+    ).rejects.toThrow();
+  });
+
+  it('расхождение реквизитов бывает только у сопоставленной строки', async () => {
+    await expect(
+      db.query(
+        `INSERT INTO registry_reconciliation_rows
+           (reconciliation_id, revision_id, ordinal, group_ordinal, doc_name_raw,
+            match_state, field_mismatches, reason)
+         VALUES ('${RECON}', '${FILE_REVISION}', 0, 0, 'Сертификат', 'missing',
+                 ARRAY['issued_at'], 'нет')`,
+      ),
+    ).rejects.toThrow();
+  });
+
+  it('дочерние строки уходят вместе с прогоном и не переживают его', async () => {
+    const scratch = id(79);
+    const scratchWork = id(80);
+    const scratchRevision = id(81);
+    await db.query(
+      `INSERT INTO works
+         (id, object_id, contractor_id, managed_by_contractor_id, section_code, period,
+          kind, registry_id, title, created_by)
+       VALUES ('${scratchWork}', '${ID.object}', '${ID.contractor}', '${ID.contractor}',
+               'roofing', DATE '2026-04-01', 'registry', '${OTHER_REGISTRY}',
+               'Скан описи другой папки', '${ID.user}')`,
+    );
+    await db.query(
+      `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no)
+         VALUES ('${scratchRevision}', '${scratchWork}', '${ID.object}', '${ID.contractor}', 1)`,
+    );
+    await db.query(
+      `INSERT INTO registry_reconciliations
+         (id, object_id, registry_id, work_id, revision_id, verdict, parser_version, matcher_version)
+       VALUES ('${scratch}', '${ID.object}', '${OTHER_REGISTRY}', '${scratchWork}', '${scratchRevision}',
+               'mismatch', 'p', 'm')`,
+    );
+    await db.query(
+      `INSERT INTO registry_reconciliation_groups
+         (reconciliation_id, revision_id, ordinal, title_raw, match_state, reason)
+       VALUES ('${scratch}', '${scratchRevision}', 0, 'Группа', 'missing', 'нет')`,
+    );
+
+    await db.query(`DELETE FROM registry_reconciliations WHERE id = '${scratch}'`);
+    const left = await db.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM registry_reconciliation_groups
+         WHERE reconciliation_id = '${scratch}'`,
+    );
+    expect(left[0]?.count).toBe('0');
+  });
+
+  it('переданный реестр пересверке НЕ мешает', async () => {
+    // Сверка — производный факт о конкретном скане, а не бумага. Охранник по
+    // статусу реестра, повешенный сюда «по аналогии» с `registry_items`,
+    // означал бы, что после передачи задача `registry.reconcile` падает три
+    // раза и уходит в `dead`: прогон переписывает результат целиком.
+    await db.query(`UPDATE registries SET status = 'issued' WHERE id = '${REGISTRY}'`);
+
+    await db.query(`DELETE FROM registry_reconciliation_rows WHERE reconciliation_id = '${RECON}'`);
+    await db.query(
+      `DELETE FROM registry_reconciliation_groups WHERE reconciliation_id = '${RECON}'`,
+    );
+    await db.query(`DELETE FROM registry_reconciliations WHERE id = '${RECON}'`);
+    await db.query(insertReconciliation(RECON));
+
+    const rows = await db.query<{ verdict: string }>(
+      `SELECT verdict FROM registry_reconciliations WHERE id = '${RECON}'`,
+    );
+    expect(rows[0]?.verdict).toBe('clean');
+  });
+});

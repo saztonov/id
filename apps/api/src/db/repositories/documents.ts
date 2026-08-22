@@ -1056,6 +1056,102 @@ export async function findLogicalDocument(
   return row === undefined ? null : toDocumentView(row);
 }
 
+/**
+ * Потолок межревизионного чтения.
+ *
+ * Папка из двухсот комплектов — уже не папка, а признак того, что вызывающий
+ * собрал список не оттуда. Потолок здесь ради предсказуемого запроса, а не
+ * ради защиты: превышение обязано быть названо вслух вызывающим, поэтому
+ * функция не режет молча, а бросает.
+ */
+export const MAX_REVISIONS_PER_READ = 200;
+
+/**
+ * Документы НЕСКОЛЬКИХ ревизий сразу — первое в проекте чтение через границу
+ * ревизии.
+ *
+ * До S20 каждый запрос к `logical_documents` фильтровался либо по одной
+ * ревизии, либо по конкретному документу. Сверка описи спрашивает иначе: опись
+ * описывает всю папку, и сравнивать её надо со всеми комплектами сразу.
+ * Поэтому область здесь обязательна и применяется тем же `withScope` по
+ * `submission_revisions`: расширение вопроса не расширяет прав.
+ *
+ * Пустой список — ранний выход, а не запрос: `inArray` с пустым массивом в
+ * ряде построителей вырождается в условие, которое ничего не ограничивает.
+ */
+export async function listDocumentsOfRevisions(
+  db: Database,
+  scope: AuthScope,
+  revisionIds: readonly string[],
+): Promise<readonly LogicalDocumentView[]> {
+  if (revisionIds.length === 0) return [];
+  if (revisionIds.length > MAX_REVISIONS_PER_READ) {
+    throw internal({
+      logDetail: `запрошены документы ${revisionIds.length} ревизий при потолке ${MAX_REVISIONS_PER_READ}`,
+    });
+  }
+
+  const rows = await documentQuery(
+    db,
+    scope,
+    inArray(logicalDocuments.revisionId, [...revisionIds]),
+  ).orderBy(asc(logicalDocuments.revisionId), asc(logicalDocuments.ordinal));
+
+  return rows.map(toDocumentView);
+}
+
+/** Реквизит документа в межревизионном чтении: только то, что нужно сверке. */
+export interface DocumentFieldValue {
+  readonly documentId: string;
+  readonly revisionId: string;
+  readonly fieldCode: string;
+  readonly valueText: string | null;
+  readonly valueDate: string | null;
+}
+
+/**
+ * Реквизиты документов нескольких ревизий ОДНИМ запросом.
+ *
+ * Существующая `listFieldValues` читает один документ, и `doc.match_registry`
+ * из-за этого выполняет запрос на каждый документ ревизии. Внутри одной
+ * ревизии это терпимо, на папке из семи комплектов по три десятка документов —
+ * уже сотни round-trip'ов на одну сверку. Форма ответа плоская намеренно:
+ * вызывающий раскладывает её по документам сам, а группировка в SQL заставила
+ * бы читать `jsonb` там, где нужен один `text`.
+ */
+export async function listFieldValuesOfRevisions(
+  db: Database,
+  scope: AuthScope,
+  revisionIds: readonly string[],
+  fieldCodes: readonly string[],
+): Promise<readonly DocumentFieldValue[]> {
+  if (revisionIds.length === 0 || fieldCodes.length === 0) return [];
+  if (revisionIds.length > MAX_REVISIONS_PER_READ) {
+    throw internal({
+      logDetail: `запрошены реквизиты ${revisionIds.length} ревизий при потолке ${MAX_REVISIONS_PER_READ}`,
+    });
+  }
+
+  return db
+    .select({
+      documentId: fieldValues.documentId,
+      revisionId: fieldValues.revisionId,
+      fieldCode: fieldValues.fieldCode,
+      valueText: fieldValues.valueText,
+      valueDate: fieldValues.valueDate,
+    })
+    .from(fieldValues)
+    .innerJoin(submissionRevisions, eq(fieldValues.revisionId, submissionRevisions.id))
+    .where(
+      withScope(
+        scope,
+        REVISION_SCOPE,
+        inArray(fieldValues.revisionId, [...revisionIds]),
+        inArray(fieldValues.fieldCode, [...fieldCodes]),
+      ),
+    );
+}
+
 export interface PageAssignmentView {
   readonly sourcePageId: string;
   readonly revisionOrdinal: number;

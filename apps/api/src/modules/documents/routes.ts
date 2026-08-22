@@ -27,7 +27,8 @@
  */
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import type { AppInstance } from '../../app.js';
-import { badRequest, notFound } from '../../lib/problem.js';
+import { notFound } from '../../lib/problem.js';
+import { requireIdempotencyKey, requireIfMatch } from '../../lib/http-headers.js';
 import { currentAuth } from '../../middleware/require-auth.js';
 import { requirePermission } from '../../middleware/require-permission.js';
 import { auditEmailHmac } from '../../db/repositories/admin.js';
@@ -95,48 +96,6 @@ function toView(document: LogicalDocumentView) {
     version: document.version,
     pageCount: document.pageCount,
   };
-}
-
-/**
- * Значение `Idempotency-Key`.
- *
- * Отсутствие — 400, а не молчаливое согласие: §14 объявляет заголовок
- * обязательным на дорогих действиях, а сегментация — это прогон LLM по всем
- * страницам комплекта. «Забыли прислать» обязано быть видно сразу.
- */
-function requireIdempotencyKey(request: FastifyRequest): string {
-  const raw = request.headers['idempotency-key'];
-  const value = Array.isArray(raw) ? raw[0] : raw;
-  if (value === undefined || value.trim() === '') {
-    throw badRequest('Требуется заголовок Idempotency-Key.');
-  }
-  const trimmed = value.trim();
-  if (trimmed.length > 128 || !/^[\w.:@-]+$/.test(trimmed)) {
-    throw badRequest('Idempotency-Key: до 128 символов из [A-Za-z0-9._:@-].');
-  }
-  return trimmed;
-}
-
-/**
- * Разбор `If-Match` (§14).
- *
- * Обязателен: без него «последний записавший победил» становится поведением по
- * умолчанию, а здесь это значит, что подтверждение типа одним проверяющим молча
- * затрёт подтверждение другого. Отсутствие заголовка — 400, а не 412: 412
- * клиент понимает как «перечитай и повтори», а перечитывание тут не поможет.
- */
-function requireIfMatch(request: FastifyRequest): number {
-  const raw = request.headers['if-match'];
-  const value = Array.isArray(raw) ? raw[0] : raw;
-  if (value === undefined || value.trim() === '') {
-    throw badRequest('Требуется заголовок If-Match с версией документа.');
-  }
-  const cleaned = value.trim().replace(/^W\//, '').replace(/^"|"$/g, '');
-  const parsed = Number(cleaned);
-  if (!Number.isInteger(parsed) || parsed < 0) {
-    throw badRequest('Заголовок If-Match должен содержать целую версию документа.');
-  }
-  return parsed;
 }
 
 function withVersion(reply: FastifyReply, version: number): FastifyReply {
@@ -360,7 +319,7 @@ function registerConfirmRoute(app: AppInstance): void {
     },
     async (request, reply) => {
       const { scope, user } = currentAuth(request);
-      const expectedVersion = requireIfMatch(request);
+      const expectedVersion = requireIfMatch(request, 'документа');
       const { documentId } = request.params;
 
       const document = await confirmDocument(app.db, scope, {

@@ -19,7 +19,12 @@ import {
   DEFAULT_PAGE_LIMIT,
   MAX_PAGE_LIMIT,
   periodSchema,
+  reconciliationExtraDocumentSchema,
+  reconciliationGroupSchema,
+  reconciliationRowSchema,
+  reconciliationWorkSchema,
   registryItemSchema,
+  registryReconciliationSchema,
   registrySchema,
   registryStatusSchema,
   sectionCodeSchema,
@@ -117,6 +122,9 @@ export const registryListQuerySchema = pageQuerySchema.extend({
 
 export const registryIdParamSchema = z.object({ registryId: uuidSchema });
 
+/** Ревизия комплекта: адрес результата сверки по ОДНОМУ комплекту (S20). */
+export const revisionIdParamSchema = z.object({ revisionId: uuidSchema });
+
 export const registryWorkParamsSchema = z.object({
   registryId: uuidSchema,
   workId: uuidSchema,
@@ -168,6 +176,66 @@ export const registryViewSchema = z.object({
   works: z.array(workSchema).optional(),
   file: workSchema.nullish(),
   blockers: z.array(registryBlockerSchema).optional(),
+  /**
+   * Сводка сверки описи — числа и вердикт, без списков (S20).
+   *
+   * Поле того же класса, что `works`/`blockers`: подрядчику не отдаётся вовсе,
+   * потому что относится к папке целиком. Свои расхождения он читает на экране
+   * СВОЕГО комплекта, где нет ни чужих работ, ни общих счётчиков.
+   */
+  reconciliation: registryReconciliationSchema.nullish(),
 });
 
 export const registryItemListSchema = z.array(registryItemSchema);
+
+// =====================================================================
+// Сверка описи передачи (S20)
+// =====================================================================
+
+/**
+ * Постановка сверки. `202`, а не `200`: сверяет воркер, и ответ маршрута
+ * означает «задача принята», а не «результат готов».
+ */
+export const reconcileResponseSchema = z.object({
+  jobId: uuidSchema,
+  /** `false` — такая задача уже стоит в очереди; повтор безопасен (§12). */
+  created: z.boolean(),
+});
+
+/**
+ * Сводка сверки ПО ПАПКЕ.
+ *
+ * Отдаётся только под `registry.manage`. Здесь есть всё, что относится к папке
+ * целиком, — шапка описи, группы без комплекта, комплекты вне описи, общие
+ * счётчики, — и потому маршрут, отдающий эту схему, подрядчику недоступен.
+ */
+export const registryReconciliationViewSchema = z.object({
+  reconciliation: registryReconciliationSchema.nullable(),
+  works: z.array(reconciliationWorkSchema).optional(),
+  groups: z.array(reconciliationGroupSchema).optional(),
+  rows: z.array(reconciliationRowSchema).optional(),
+  extraDocuments: z.array(reconciliationExtraDocumentSchema).optional(),
+});
+
+/**
+ * Результат сверки ПО ОДНОМУ КОМПЛЕКТУ.
+ *
+ * Полей о папке в схеме нет вовсе — ни шапки, ни групп, ни чужих комплектов,
+ * ни общих счётчиков. Это не забывчивость и не «спрячем на экране»: подрядчик
+ * имеет право знать об ошибках в своих документах и не имеет права знать о
+ * работе соседей по папке, и выражено это типом, а не условием в обработчике,
+ * которое однажды забудут.
+ */
+export const workReconciliationViewSchema = z.object({
+  work: reconciliationWorkSchema.nullable(),
+  rows: z.array(reconciliationRowSchema),
+  extraDocuments: z.array(reconciliationExtraDocumentSchema),
+  /** Версия разбора и время прогона: ими объясняется расхождение двух сверок. */
+  parserVersion: z.string().max(64).nullable(),
+  finishedAt: z.string().max(64).nullable(),
+});
+
+/** Отметка «расхождение разобрано»: суждение человека, а не наблюдение. */
+export const reviewReconciliationBodySchema = z.object({
+  note: z.string().min(10).max(1000),
+});

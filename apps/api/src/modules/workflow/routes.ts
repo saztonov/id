@@ -25,6 +25,7 @@
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import type { AppInstance } from '../../app.js';
 import { badRequest, conflict, notFound } from '../../lib/problem.js';
+import { requireIfMatch } from '../../lib/http-headers.js';
 import { currentAuth } from '../../middleware/require-auth.js';
 import { requirePermission } from '../../middleware/require-permission.js';
 import { auditEmailHmac } from '../../db/repositories/admin.js';
@@ -98,28 +99,6 @@ export function registerWorkflowRoutes(app: AppInstance): void {
 // =====================================================================
 // Заголовки
 // =====================================================================
-
-/**
- * `If-Match` обязателен на каждом переходе (§14).
- *
- * Без него «последний записавший победил» становится поведением по умолчанию, а
- * здесь это значит, что возврат одного проверяющего молча затрёт согласование
- * другого. Отсутствие — 400, а не 412: 412 клиент читает как «перечитай и
- * повтори», а перечитывание тут не поможет.
- */
-function requireIfMatch(request: FastifyRequest): number {
-  const raw = request.headers['if-match'];
-  const value = Array.isArray(raw) ? raw[0] : raw;
-  if (value === undefined || value.trim() === '') {
-    throw badRequest('Требуется заголовок If-Match с версией ревизии.');
-  }
-  const cleaned = value.trim().replace(/^W\//, '').replace(/^"|"$/g, '');
-  const parsed = Number(cleaned);
-  if (!Number.isInteger(parsed) || parsed < 0) {
-    throw badRequest('Заголовок If-Match должен содержать целую версию ревизии.');
-  }
-  return parsed;
-}
 
 function idempotencyKey(request: FastifyRequest): string {
   const raw = request.headers['idempotency-key'];
@@ -237,7 +216,7 @@ function registerTransitionRoutes(app: AppInstance): void {
     async (request, reply) => {
       const { scope, user } = currentAuth(request);
       const { revisionId } = request.params;
-      const expectedVersion = requireIfMatch(request);
+      const expectedVersion = requireIfMatch(request, 'ревизии');
       updateContext({ revisionId });
 
       // Хэш состава считает план сборки — тот же код, что пиннит его в
@@ -279,7 +258,7 @@ function registerTransitionRoutes(app: AppInstance): void {
     },
     async (request, reply) => {
       const { scope, user } = currentAuth(request);
-      const expectedVersion = requireIfMatch(request);
+      const expectedVersion = requireIfMatch(request, 'ревизии');
       updateContext({ revisionId: request.params.revisionId });
 
       const result = await takeRevisionToReview(app.db, scope, {
@@ -305,7 +284,7 @@ function registerTransitionRoutes(app: AppInstance): void {
     },
     async (request, reply) => {
       const { scope, user } = currentAuth(request);
-      const expectedVersion = requireIfMatch(request);
+      const expectedVersion = requireIfMatch(request, 'ревизии');
       updateContext({ revisionId: request.params.revisionId });
 
       const result = await returnRevision(app.db, scope, {
@@ -341,7 +320,7 @@ function registerTransitionRoutes(app: AppInstance): void {
     async (request, reply) => {
       const { scope, user } = currentAuth(request);
       const { revisionId } = request.params;
-      const expectedVersion = requireIfMatch(request);
+      const expectedVersion = requireIfMatch(request, 'ревизии');
       updateContext({ revisionId });
 
       const result = await approveRevision(app.db, scope, {

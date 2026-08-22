@@ -71,6 +71,15 @@ const EXPECTED_TABLES: readonly string[] = [
   // поставки исчезли: том был пустым уровнем, поставка стала комплектом.
   'registries',
   'registry_items',
+  // S20 (0030): сверка описи передачи с комплектами папки. Результат по
+  // КАЖДОМУ комплекту материализуется отдельной строкой — подрядчик имеет
+  // право знать об ошибках в своих документах, но не о работах соседей по
+  // папке, и разделение выражено ключом, а не условием в обработчике.
+  'registry_reconciliations',
+  'registry_reconciliation_works',
+  'registry_reconciliation_groups',
+  'registry_reconciliation_rows',
+  'registry_reconciliation_extra_docs',
   'works',
   'submission_revisions',
   'stored_blobs',

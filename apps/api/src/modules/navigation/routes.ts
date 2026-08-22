@@ -46,7 +46,8 @@
  */
 import type { FastifyRequest } from 'fastify';
 import type { AppInstance } from '../../app.js';
-import { badRequest, notFound } from '../../lib/problem.js';
+import { notFound } from '../../lib/problem.js';
+import { requireIdempotencyKey, requireIfMatch } from '../../lib/http-headers.js';
 import { currentAuth } from '../../middleware/require-auth.js';
 import {
   hasPermission,
@@ -76,27 +77,44 @@ import {
   updateRegistry,
   updateWork,
 } from '../../db/repositories/navigation.js';
-import { updateContext } from '../../observability/context.js';
+import {
+  findRegistryReconciliation,
+  findWorkReconciliation,
+  reviewReconciliation,
+} from '../../db/repositories/reconciliation.js';
+import { dedupeKeyFor } from '../../jobs/types.js';
+import { enqueueJob } from '../../db/repositories/jobs.js';
+import { tracePayload, updateContext } from '../../observability/context.js';
 import {
   createRegistryBodySchema,
   createWorkBodySchema,
   createdWorkSchema,
   includeWorkBodySchema,
+  reconcileResponseSchema,
   registryIdParamSchema,
   registryItemListSchema,
   registryListQuerySchema,
   registryPageSchema,
+  registryReconciliationViewSchema,
   registryViewSchema,
   registryWorkParamsSchema,
+  revisionIdParamSchema,
   revisionListQuerySchema,
   revisionPageSchema,
+  reviewReconciliationBodySchema,
   updateRegistryBodySchema,
   updateWorkBodySchema,
   workIdParamSchema,
   workListQuerySchema,
   workPageSchema,
+  workReconciliationViewSchema,
 } from './schemas.js';
-import { registrySchema, submissionRevisionSchema, workSchema } from '@id/contracts';
+import {
+  registryReconciliationSchema,
+  registrySchema,
+  submissionRevisionSchema,
+  workSchema,
+} from '@id/contracts';
 
 const PREFIX = '/api/v1';
 
@@ -114,27 +132,6 @@ function auditActor(app: AppInstance, request: FastifyRequest): AuditActor {
     ip: request.ip,
     requestId: request.id,
   };
-}
-
-/**
- * `If-Match` с версией реестра.
- *
- * Отсутствие — 400, а не 412: 412 клиент читает как «перечитай и повтори», а
- * перечитывание здесь не поможет — заголовка нет вовсе. То же решение, что в
- * переходах workflow.
- */
-function requireIfMatch(request: FastifyRequest): number {
-  const raw = request.headers['if-match'];
-  const value = Array.isArray(raw) ? raw[0] : raw;
-  if (value === undefined || value.trim() === '') {
-    throw badRequest('Требуется заголовок If-Match с версией реестра.');
-  }
-  const cleaned = value.trim().replace(/^W\//, '').replace(/^"|"$/g, '');
-  const parsed = Number(cleaned);
-  if (!Number.isInteger(parsed) || parsed < 0) {
-    throw badRequest('Заголовок If-Match должен содержать целую версию реестра.');
-  }
-  return parsed;
 }
 
 export function registerNavigationRoutes(app: AppInstance): void {
@@ -304,7 +301,28 @@ function registerRegistryRoutes(app: AppInstance): void {
         findRegistryFile(app.db, scope, registryId),
         issueBlockers(app.db, scope, registryId),
       ]);
-      return reply.code(200).send({ registry, works: [...works], file, blockers: [...blockers] });
+
+      // Сводка сверки — только тому, кто ВЕДЁТ папку, а не всякому, кто её
+      // видит. Признак `manages` выше объединяет `registry.manage` и
+      // `registry.accept`, и переиспользовать его здесь нельзя: заказчик
+      // назвал получателем сводки по папке сотрудников генподрядчика.
+      const reconciliation = hasPermission(roles, 'registry.manage')
+        ? ((
+            await findRegistryReconciliation(
+              app.db,
+              registryId,
+              registry.status === 'draft' ? null : registry.issuedFileRevisionId,
+            )
+          )?.reconciliation ?? null)
+        : undefined;
+
+      return reply.code(200).send({
+        registry,
+        works: [...works],
+        file,
+        blockers: [...blockers],
+        ...(reconciliation === undefined ? {} : { reconciliation }),
+      });
     },
   );
 
@@ -338,7 +356,7 @@ function registerRegistryRoutes(app: AppInstance): void {
         app.db,
         scope,
         request.params.registryId,
-        requireIfMatch(request),
+        requireIfMatch(request, 'реестра'),
         request.body,
         auditActor(app, request),
       );
@@ -362,7 +380,7 @@ function registerRegistryRoutes(app: AppInstance): void {
         scope,
         request.params.registryId,
         request.params.workId,
-        requireIfMatch(request),
+        requireIfMatch(request, 'реестра'),
         request.body.ordinal ?? null,
         auditActor(app, request),
       );
@@ -382,7 +400,7 @@ function registerRegistryRoutes(app: AppInstance): void {
         scope,
         request.params.registryId,
         request.params.workId,
-        requireIfMatch(request),
+        requireIfMatch(request, 'реестра'),
         auditActor(app, request),
       );
       return reply.code(200).send(updated);
@@ -428,7 +446,7 @@ function registerRegistryRoutes(app: AppInstance): void {
         app.db,
         scope,
         request.params.registryId,
-        requireIfMatch(request),
+        requireIfMatch(request, 'реестра'),
         auditActor(app, request),
       );
       return reply.code(200).send(issued);
@@ -447,7 +465,7 @@ function registerRegistryRoutes(app: AppInstance): void {
         app.db,
         scope,
         request.params.registryId,
-        requireIfMatch(request),
+        requireIfMatch(request, 'реестра'),
         auditActor(app, request),
       );
       return reply.code(200).send(accepted);
@@ -464,6 +482,200 @@ function registerRegistryRoutes(app: AppInstance): void {
       const { scope } = currentAuth(request);
       const items = await listRegistryItems(app.db, scope, request.params.registryId);
       return reply.code(200).send([...items]);
+    },
+  );
+
+  registerReconciliationRoutes(app);
+}
+
+// =====================================================================
+// Сверка описи передачи (S20)
+// =====================================================================
+
+/**
+ * Три маршрута и ДВА РАЗНЫХ адреса чтения — это решение, а не оформление.
+ *
+ * Заказчик: «данные по каждому комплекту формируются отдельно; данные по
+ * реестру показываются только сотрудникам генподрядчика». Один маршрут,
+ * урезающий ответ по роли, выразил бы это условием внутри обработчика — то
+ * есть местом, где однажды забудут ветку, и подрядчик увидит работы соседей по
+ * папке. Два адреса выражают то же типом ответа: в схеме результата по
+ * комплекту нет ни одного поля о папке, и положить их туда нечего.
+ *
+ * Запускать сверку вправе всякий, кто видит реестр (`submission.read`).
+ * `registry.manage` для этого не годится: оно есть только у генподрядчика и
+ * администратора, а заказчик прямо назвал инженера, руководителя и подрядчика —
+ * «важна информация о том, есть ли ошибки в документе». Рубеж доступа создаёт
+ * не право, а `findRegistry` по области: без него инженер, знающий UUID чужого
+ * реестра на чужом объекте, получил бы наименования работ и номера документов
+ * чужих подрядчиков.
+ */
+function registerReconciliationRoutes(app: AppInstance): void {
+  app.post(
+    `${PREFIX}/registries/:registryId/reconcile`,
+    {
+      preHandler: readRegistries,
+      schema: { params: registryIdParamSchema, response: { 202: reconcileResponseSchema } },
+    },
+    async (request, reply) => {
+      const { scope } = currentAuth(request);
+      const { registryId } = request.params;
+      // Заголовок обязателен (§14: сверка читает документы всей папки), но в
+      // ключ дедупликации НЕ кладётся — см. ниже.
+      requireIdempotencyKey(request);
+
+      const registry = await findRegistry(app.db, scope, registryId);
+      if (registry === null) throw notFound('Реестр не найден.');
+      updateContext({ objectId: registry.objectId });
+
+      // Файл описи по области НЕ ищется, и это не упущение: он подан
+      // генподрядчиком, а запускать сверку вправе и субподрядчик — под его
+      // областью файл невидим. Рубеж здесь создал `findRegistry` выше; саму
+      // ревизию скана обработчик найдёт по ключу, поэтому payload её и не
+      // называет (см. докстринг `registry.reconcile` в `jobs/types.ts`).
+      const { jobId, created } = await enqueueJob(app.db, scope, {
+        type: 'registry.reconcile',
+        payload: tracePayload({ registryId }),
+        // Ключ по РЕЕСТРУ, без `Idempotency-Key`. Отступление от образца
+        // `doc.classify_pages` намеренное: там ключ включает заголовок, и два
+        // нажатия дают две задачи. Здесь две задачи по одной папке одновременно
+        // делали бы `DELETE`+`INSERT` под уникальным ключом, и защитой
+        // оставалась бы одна advisory-блокировка. С ключом по реестру второе
+        // нажатие получает уже стоящую задачу — то самое «повторная постановка
+        // безопасна» из §12.
+        dedupeKey: dedupeKeyFor('registry.reconcile', registryId),
+      });
+
+      request.log.info(
+        { event: 'job_enqueued', jobType: 'registry.reconcile', jobId, created, registryId },
+        'сверка описи поставлена',
+      );
+      return reply.code(202).send({ jobId, created });
+    },
+  );
+
+  /**
+   * Сводка по ПАПКЕ — только под `registry.manage`.
+   *
+   * `readRegistries` здесь не годится: под ним ответ увидел бы подрядчик, а в
+   * нём шапка описи, группы без комплекта и комплекты соседей.
+   */
+  app.get(
+    `${PREFIX}/registries/:registryId/reconciliation`,
+    {
+      preHandler: manageRegistry,
+      schema: {
+        params: registryIdParamSchema,
+        response: { 200: registryReconciliationViewSchema },
+      },
+    },
+    async (request, reply) => {
+      const { scope } = currentAuth(request);
+      const { registryId } = request.params;
+
+      const registry = await findRegistry(app.db, scope, registryId);
+      if (registry === null) throw notFound('Реестр не найден.');
+      updateContext({ objectId: registry.objectId });
+
+      // У переданной папки читается сверка ТОГО скана, который подписан, а не
+      // текущего: иначе замена файла молча показала бы более позднюю сверку под
+      // прежней подписью.
+      const view = await findRegistryReconciliation(
+        app.db,
+        registryId,
+        registry.status === 'draft' ? null : registry.issuedFileRevisionId,
+      );
+      if (view === null) return reply.code(200).send({ reconciliation: null });
+
+      return reply.code(200).send({
+        reconciliation: view.reconciliation,
+        works: [...view.works],
+        groups: [...view.groups],
+        rows: [...view.rows],
+        extraDocuments: [...view.extraDocuments],
+      });
+    },
+  );
+
+  /**
+   * Результат по ОДНОМУ комплекту, адресуемый его ревизией.
+   *
+   * Право `submission.read` — все пять ролей; рубеж создаёт область по ревизии
+   * комплекта, тем же `withScope`, каким закрыты остальные чтения ревизии.
+   * `work: null` — комплект не включён в реестр либо сверки ещё не было; `404`
+   * означает только «ревизия не видна».
+   */
+  app.get(
+    `${PREFIX}/revisions/:revisionId/reconciliation`,
+    {
+      preHandler: readRegistries,
+      schema: {
+        params: revisionIdParamSchema,
+        response: { 200: workReconciliationViewSchema },
+      },
+    },
+    async (request, reply) => {
+      const { scope } = currentAuth(request);
+      const { revisionId } = request.params;
+      updateContext({ revisionId });
+
+      const view = await findWorkReconciliation(app.db, scope, revisionId);
+      if (view === null) {
+        return reply.code(200).send({
+          work: null,
+          rows: [],
+          extraDocuments: [],
+          parserVersion: null,
+          finishedAt: null,
+        });
+      }
+
+      return reply.code(200).send({
+        work: view.work,
+        rows: [...view.rows],
+        extraDocuments: [...view.extraDocuments],
+        parserVersion: view.parserVersion,
+        finishedAt: view.finishedAt,
+      });
+    },
+  );
+
+  /**
+   * Отметка «расхождение разобрано, дефекта нет».
+   *
+   * Под `registry.accept`: это суждение ПРИНИМАЮЩЕЙ стороны, а не наблюдение
+   * портала. Пояснение обязательно — отметка без объяснения не отличима от
+   * «закрыл, чтобы не мозолило», и следующий человек не поймёт, разобрано
+   * расхождение или спрятано.
+   */
+  app.post(
+    `${PREFIX}/registries/:registryId/reconciliation/review`,
+    {
+      preHandler: acceptRegistryPermission,
+      schema: {
+        params: registryIdParamSchema,
+        body: reviewReconciliationBodySchema,
+        response: { 200: registryReconciliationSchema },
+      },
+    },
+    async (request, reply) => {
+      const { scope, user } = currentAuth(request);
+      const { registryId } = request.params;
+
+      const registry = await findRegistry(app.db, scope, registryId);
+      if (registry === null) throw notFound('Реестр не найден.');
+      updateContext({ objectId: registry.objectId });
+
+      const reviewed = await reviewReconciliation(
+        app.db,
+        registryId,
+        requireIfMatch(request, 'сверки'),
+        request.body.note,
+        user.id,
+        auditActor(app, request),
+        scope,
+      );
+      return reply.code(200).send(reviewed);
     },
   );
 }
