@@ -533,10 +533,13 @@ export function buildManifest(plan: ArchivePlan): Record<string, unknown> {
       decidedAt: plan.decidedAt,
       aggregateManifestHash: plan.aggregateManifestHash,
     },
-    submission: {
-      id: plan.submissionId,
-      title: plan.submissionTitle,
-      volumeCode: plan.volumeCode,
+    // Ключ манифеста переименован вместе с сущностью: единица подачи — комплект
+    // работы, а не поставка вообще. Архив читают глазами, и «submission» в нём
+    // отсылал бы к таблице, которой больше нет.
+    work: {
+      id: plan.workId,
+      title: plan.workTitle,
+      sectionCode: plan.sectionCode,
     },
     sourceFiles: plan.sourceFiles.map((file) => ({
       fileName: file.fileName,

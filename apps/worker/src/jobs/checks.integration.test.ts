@@ -84,8 +84,6 @@ function lit(value: string): string {
 const ORG_CUSTOMER = id(1);
 const ORG_CONTRACTOR = id(2);
 const OBJECT = id(4);
-const SECTION = id(5);
-const VOLUME = id(6);
 const RD_DOCUMENT = id(7);
 const SUBMISSION = id(10);
 const REVISION = id(11);
@@ -343,11 +341,10 @@ function catalogStatements(): readonly string[] {
     `INSERT INTO construction_objects (id, code, name, full_name, developer_id, general_contractor_id)
        VALUES ('${OBJECT}', 'CHK01', ${lit('Многоквартирный жилой дом')},
                ${lit('Многоквартирный жилой дом')}, '${ORG_CUSTOMER}', '${ORG_CONTRACTOR}')`,
-    `INSERT INTO section_kinds (code, name) VALUES ('roofing', ${lit('Кровля')})`,
-    `INSERT INTO object_sections (id, object_id, code, name, section_kind_code)
-       VALUES ('${SECTION}', '${OBJECT}', '2.5.1', ${lit('Кровля')}, 'roofing')`,
-    `INSERT INTO volumes (id, object_id, section_id, code, name)
-       VALUES ('${VOLUME}', '${OBJECT}', '${SECTION}', 'V-1', ${lit('Том 1')})`,
+    `INSERT INTO sections (code, name) VALUES ('roofing', ${lit('Кровля')})
+       ON CONFLICT (code) DO NOTHING`,
+    `INSERT INTO object_sections (object_id, section_code)
+       VALUES ('${OBJECT}', 'roofing') ON CONFLICT DO NOTHING`,
     // Шифр из п. 2 акта обязан находиться в реестре РД объекта (AOSR.P2.061).
     `INSERT INTO rd_documents (id, object_id, cipher, revision, name)
        VALUES ('${RD_DOCUMENT}', '${OBJECT}', ${lit('2.5.1-АР')}, '1', ${lit('Кровля')})`,
@@ -357,12 +354,15 @@ function catalogStatements(): readonly string[] {
        VALUES ('${USER_ADMIN}', 'kc-checks-admin', ${lit('Администратор портала')})`,
     `INSERT INTO user_roles (user_id, role) VALUES ('${USER_CONTRACTOR}', 'contractor')`,
     `INSERT INTO user_roles (user_id, role) VALUES ('${USER_ADMIN}', 'admin')`,
-    `INSERT INTO submissions (id, volume_id, object_id, contractor_id, title, created_by)
-       VALUES ('${SUBMISSION}', '${VOLUME}', '${OBJECT}', '${ORG_CONTRACTOR}', ${lit('Поставка 1')}, '${USER_CONTRACTOR}')`,
+    `INSERT INTO object_contractors (object_id, contractor_id)
+       VALUES ('${OBJECT}', '${ORG_CONTRACTOR}') ON CONFLICT DO NOTHING`,
+    `INSERT INTO works
+       (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
+     VALUES ('${SUBMISSION}', '${OBJECT}', '${ORG_CONTRACTOR}', '${ORG_CONTRACTOR}', 'roofing', DATE '2026-01-01', ${lit('Поставка 1')}, '${USER_CONTRACTOR}')`,
     // Ревизия заводится черновиком: класс содержимого `source` (файлы, страницы,
     // рабочий документ) заперт триггером 0008 уже в `in_review`. В боевом пути
     // они и появляются до подачи; статус переводится ниже, перед прогоном.
-    `INSERT INTO submission_revisions (id, submission_id, object_id, contractor_id, revision_no, status)
+    `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
        VALUES ('${REVISION}', '${SUBMISSION}', '${OBJECT}', '${ORG_CONTRACTOR}', 1, 'draft')`,
   ];
 }
@@ -520,7 +520,7 @@ function graphStatements(): readonly string[] {
 }
 
 /**
- * Настройка проверок: опубликованный профиль вида раздела и опубликованная
+ * Настройка проверок: опубликованный профиль раздела и опубликованная
  * версия набора правил, назначенная активной.
  *
  * `enabled_rule_codes` содержит ВЕСЬ каталог намеренно: правило вне списка не
@@ -530,7 +530,7 @@ function graphStatements(): readonly string[] {
 function configurationStatements(): readonly string[] {
   const codes = ALL_RULE_CODES.map((code) => lit(code)).join(', ');
   const statements: string[] = [
-    `INSERT INTO section_profiles (id, section_kind_code, version, effective_from, effective_to,
+    `INSERT INTO section_profiles (id, section_code, version, effective_from, effective_to,
                                    expected_doc_types, material_categories, material_matrix,
                                    enabled_rule_codes, thresholds, autonomy_level,
                                    published_at, published_by)
@@ -1191,7 +1191,7 @@ describe('enabled_rule_codes профиля ограничивает прого�
         WHERE id = '${SECTION_PROFILE_V1}'`,
     );
     await testDb.query(
-      `INSERT INTO section_profiles (id, section_kind_code, version, effective_from, effective_to,
+      `INSERT INTO section_profiles (id, section_code, version, effective_from, effective_to,
                                      expected_doc_types, material_categories, material_matrix,
                                      enabled_rule_codes, thresholds, autonomy_level,
                                      published_at, published_by)

@@ -27,12 +27,13 @@ import type { FastifyRequest } from 'fastify';
 import type { AppInstance } from '../../app.js';
 import type { AuthScope } from '../../auth/scope.js';
 import { notFound } from '../../lib/problem.js';
+import { sectionCodeSchema } from '@id/contracts';
 import { materialCategoryCodeSchema } from './schemas.js';
 import { currentAuth, requireAuth } from '../../middleware/require-auth.js';
 import { requirePermission } from '../../middleware/require-permission.js';
 import { auditEmailHmac } from '../../db/repositories/admin.js';
 import type { AuditActor } from '../../db/repositories/audit.js';
-import { findConstructionObject, findObjectSection } from '../../db/repositories/catalog.js';
+import { findConstructionObject, listObjectSections } from '../../db/repositories/catalog.js';
 import {
   createObjectRuleProfile,
   listObjectRuleProfiles,
@@ -61,7 +62,10 @@ const manageCatalog = requirePermission('settings.manage');
 // =====================================================================
 
 const objectIdParamSchema = z.object({ objectId: uuidSchema });
-const objectSectionParamsSchema = z.object({ objectId: uuidSchema, sectionId: uuidSchema });
+const objectSectionParamsSchema = z.object({
+  objectId: uuidSchema,
+  sectionCode: sectionCodeSchema,
+});
 const profileIdParamSchema = z.object({ profileId: uuidSchema });
 
 /**
@@ -74,13 +78,13 @@ const profileIdParamSchema = z.object({ profileId: uuidSchema });
  */
 const listQuerySchema = z
   .object({
-    sectionId: uuidSchema.optional(),
+    sectionCode: sectionCodeSchema.optional(),
     objectWide: z
       .enum(['true', 'false'])
       .transform((value) => value === 'true')
       .optional(),
   })
-  .refine((query) => !(query.objectWide === true && query.sectionId !== undefined), {
+  .refine((query) => !(query.objectWide === true && query.sectionCode !== undefined), {
     message: 'Одновременно «профиль всего объекта» и раздел запросить нельзя',
     path: ['objectWide'],
   });
@@ -91,7 +95,7 @@ const effectiveRulesQuerySchema = z.object({ at: isoDateSchema.optional() });
 const createBodySchema = z
   .object({
     /** `null` — профиль всего объекта. */
-    sectionId: uuidSchema.nullish(),
+    sectionCode: sectionCodeSchema.nullish(),
     effectiveFrom: isoDateSchema,
     effectiveTo: isoDateSchema.nullish(),
     overrides: ruleOverridesInputSchema.default({}),
@@ -116,7 +120,7 @@ const overridesResponseSchema = z.object({
 const objectRuleProfileSchema = z.object({
   id: uuidSchema,
   objectId: uuidSchema,
-  sectionId: uuidSchema.nullable(),
+  sectionCode: sectionCodeSchema.nullable(),
   version: z.int().positive(),
   effectiveFrom: isoDateSchema,
   effectiveTo: isoDateSchema.nullable(),
@@ -137,8 +141,7 @@ const objectRuleProfileListSchema = z.array(objectRuleProfileSchema);
  */
 const resolvedRulesSchema = z.object({
   objectId: uuidSchema,
-  sectionId: uuidSchema,
-  sectionKindCode: z.string().min(1),
+  sectionCode: sectionCodeSchema,
   onDate: isoDateSchema,
   sectionProfileId: uuidSchema.nullable(),
   sectionProfileVersion: z.int().positive().nullable(),
@@ -177,7 +180,7 @@ export function registerObjectRuleProfileRoutes(app: AppInstance): void {
       await requireVisibleObject(app, scope, objectId);
 
       const profiles = await listObjectRuleProfiles(app.db, scope, objectId, {
-        sectionId: request.query.objectWide === true ? null : request.query.sectionId,
+        sectionCode: request.query.objectWide === true ? null : request.query.sectionCode,
       });
       return reply.code(200).send([...profiles]);
     },
@@ -198,16 +201,19 @@ export function registerObjectRuleProfileRoutes(app: AppInstance): void {
       const { objectId } = request.params;
       await requireVisibleObject(app, scope, objectId);
 
-      const sectionId = request.body.sectionId ?? null;
-      if (sectionId !== null) {
+      const sectionCode = request.body.sectionCode ?? null;
+      if (sectionCode !== null) {
         // Раздел проверяется здесь, хотя составной FK
         // `object_rule_profiles_section_fk` не дал бы записать чужой: 404 «раздел
         // не найден» отвечает на опечатку в идентификаторе, а 422 по ограничению
         // говорил бы о разделе другого объекта — то есть сообщал бы о его
         // существовании.
-        const section = await findObjectSection(app.db, scope, sectionId);
-        if (section === null || section.objectId !== objectId) {
-          throw notFound('Раздел работ не найден на этом объекте.');
+        const section = (await listObjectSections(app.db, scope, request.params.objectId)).find(
+          (row: { sectionCode: string; isActive: boolean }) =>
+            row.sectionCode === sectionCode && row.isActive,
+        );
+        if (section === undefined) {
+          throw notFound('Раздел работ не включён на этом объекте.');
         }
       }
 
@@ -216,7 +222,7 @@ export function registerObjectRuleProfileRoutes(app: AppInstance): void {
         scope,
         {
           objectId,
-          sectionId,
+          sectionCode,
           effectiveFrom: request.body.effectiveFrom,
           effectiveTo: request.body.effectiveTo ?? null,
           overrides: request.body.overrides,
@@ -255,7 +261,7 @@ export function registerObjectRuleProfileRoutes(app: AppInstance): void {
    * работ» — разные вопросы, и подставлять первый вместо второго нельзя.
    */
   app.get(
-    `${PREFIX}/objects/:objectId/sections/:sectionId/effective-rules`,
+    `${PREFIX}/objects/:objectId/sections/:sectionCode/effective-rules`,
     {
       preHandler: (request: FastifyRequest) => requireAuth(request),
       schema: {
@@ -266,10 +272,15 @@ export function registerObjectRuleProfileRoutes(app: AppInstance): void {
     },
     async (request, reply) => {
       const { scope } = currentAuth(request);
-      const { objectId, sectionId } = request.params;
+      const { objectId, sectionCode } = request.params;
       const onDate = request.query.at ?? new Date().toISOString().slice(0, 10);
 
-      const resolved = await resolveEffectiveRules(app.db, scope, { objectId, sectionId }, onDate);
+      const resolved = await resolveEffectiveRules(
+        app.db,
+        scope,
+        { objectId, sectionCode },
+        onDate,
+      );
       // 404, а не пустые правила: подставить настройку другого раздела было бы
       // хуже отказа, а «раздела нет» и «раздел не ваш» запрашивающий различать
       // не должен.

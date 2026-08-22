@@ -39,13 +39,14 @@ export const catalogKeys = {
   counterparties: (search: string, kind: string) =>
     ['catalog', 'counterparties', search, kind] as const,
   sections: (objectId: string) => ['catalog', 'sections', objectId] as const,
-  sectionKinds: () => ['catalog', 'section-kinds'] as const,
+  sectionCatalog: (includeInactive: boolean) =>
+    ['catalog', 'sections', 'all', includeInactive] as const,
+  objectContractors: (objectId: string) => ['catalog', 'object-contractors', objectId] as const,
   rdDocuments: (objectId: string, search: string) =>
     ['catalog', 'rd-documents', objectId, search] as const,
-  sectionProfiles: (sectionKindCode: string) =>
-    ['catalog', 'section-profiles', sectionKindCode] as const,
-  effectiveSectionProfile: (sectionKindCode: string, at: string) =>
-    ['catalog', 'section-profiles', 'effective', sectionKindCode, at] as const,
+  sectionProfiles: (sectionCode: string) => ['catalog', 'section-profiles', sectionCode] as const,
+  effectiveSectionProfile: (sectionCode: string, at: string) =>
+    ['catalog', 'section-profiles', 'effective', sectionCode, at] as const,
   docTypes: (includeInactive: boolean) => ['catalog', 'doc-types', includeInactive] as const,
   candidates: (status: string) => ['catalog', 'doc-type-candidates', status] as const,
   counterpartyKinds: () => ['catalog', 'counterparty-kinds'] as const,
@@ -56,10 +57,12 @@ export const catalogKeys = {
 };
 
 export const navigationKeys = {
-  volumes: (filter: string) => ['nav', 'volumes', filter] as const,
-  volume: (volumeId: string) => ['nav', 'volumes', 'one', volumeId] as const,
-  submissions: (filter: string) => ['nav', 'submissions', filter] as const,
-  revisions: (submissionId: string) => ['nav', 'revisions', submissionId] as const,
+  works: (filter: string) => ['nav', 'works', filter] as const,
+  work: (workId: string) => ['nav', 'works', 'one', workId] as const,
+  registries: (filter: string) => ['nav', 'registries', filter] as const,
+  registry: (registryId: string) => ['nav', 'registries', 'one', registryId] as const,
+  registryItems: (registryId: string) => ['nav', 'registries', 'one', registryId, 'items'] as const,
+  revisions: (workId: string) => ['nav', 'revisions', workId] as const,
 };
 
 export const adminKeys = {

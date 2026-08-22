@@ -24,7 +24,7 @@ export interface ScopeTarget {
  */
 export function scopeWhere(scope: AuthScope, target: ScopeTarget): SQL {
   if (isEmptyScope(scope)) {
-    // Инженер без назначенных объектов не видит ничего. Наивный IN () из
+    // Инженер или генподрядчик без объектов не видит ничего. Наивный IN () из
     // пустого массива вырождается в TRUE, что открыло бы всю таблицу.
     return sql`false`;
   }
@@ -34,7 +34,11 @@ export function scopeWhere(scope: AuthScope, target: ScopeTarget): SQL {
   switch (scope.kind) {
     case 'contractor':
       return eq(target.contractorId, scope.contractorId);
+    case 'general_contractor':
     case 'engineer':
+      // Генподрядчик ограничен ОБЪЕКТОМ, а не организацией: он ведёт реестр из
+      // комплектов субподрядчиков, и фильтр по своей организации оставил бы ему
+      // видимым только файл самого реестра.
       return inArray(target.objectId, [...scope.objectIds]);
     default:
       // Недостижимо: остальные варианты закрыты проверками выше. Возврат

@@ -1,5 +1,5 @@
 /**
- * Навигация ИД: тома → поставки → ревизии (§3, §14).
+ * Навигация ИД: объект → комплект → ревизия и реестры передачи (§3, §14).
  *
  * ## Пути сверены с фактическими маршрутами
  *
@@ -11,24 +11,26 @@
  *
  * | Маршрут | Фильтры |
  * |---|---|
- * | `GET /api/v1/volumes` | `objectId`, `sectionId`, `isActive`, `search` |
- * | `GET /api/v1/volumes/{volumeId}` | — |
- * | `GET /api/v1/submissions` | `volumeId`, `objectId`, `search` |
- * | `GET /api/v1/submissions/{submissionId}` | — |
- * | `POST /api/v1/submissions` | создаёт поставку и первую ревизию |
- * | `GET /api/v1/submissions/{id}/revisions` | — |
- * | `POST /api/v1/submissions/{id}/revisions` | — |
+ * | `GET /api/v1/works` | `objectId`, `sectionCode`, `period`, `unassigned`, `search` |
+ * | `GET /api/v1/works/{workId}` | — |
+ * | `POST /api/v1/works` | заводит комплект и первую ревизию |
+ * | `GET|POST /api/v1/works/{id}/revisions` | — |
+ * | `GET /api/v1/registries` | `objectId`, `sectionCode`, `period`, `status` |
+ * | `GET /api/v1/registries/{id}` | состав и блокеры — по правам актора |
+ * | `PUT|DELETE /api/v1/registries/{id}/works/{workId}` | состав, `If-Match` |
+ * | `POST /api/v1/registries/{id}/file` | заводит комплект-файл описи |
+ * | `POST /api/v1/registries/{id}/issue|accept` | передача и приёмка, `If-Match` |
  *
- * Расхождение исправлено здесь, а не в API: сервер — источник правды, и «том
- * объекта» отличается от «все мои тома» одним условием, а не вторым маршрутом
- * с собственной областью видимости.
+ * Расхождение исправлено здесь, а не в API: сервер — источник правды, и
+ * «комплекты объекта» отличаются от «всех моих комплектов» одним условием, а не
+ * вторым маршрутом с собственной областью видимости.
  *
  * ## Страница — конверт с курсором, а не массив
  *
  * Все списки отвечают `{ items, nextCursor }`. Клиент, читающий только `items`,
- * молча показывал бы первые 50 строк как «все»: том с сотней поставок выглядел
- * бы законченным. Поэтому курсор здесь часть типа, а экраны обязаны его
- * дочитывать.
+ * молча показывал бы первые 50 строк как «все»: объект с сотней комплектов
+ * выглядел бы законченным. Поэтому курсор здесь часть типа, а экраны обязаны
+ * его дочитывать.
  *
  * ## Недоступность обязана отличаться от пустоты
  *
@@ -43,14 +45,14 @@
  *
  * * `route-missing` — маршрута нет в API. Признак точный: 404 с `detail`,
  *   равным сообщению `setNotFoundHandler` из `apps/api/src/app.ts`. Сегодня все
- *   семь маршрутов на месте, и ветка не срабатывает; она остаётся рубежом на
- *   случай отката или опечатки в пути — молчаливо выродиться в «пусто» она уже
- *   не может.
+ *   маршруты на месте, и ветка не срабатывает; она остаётся рубежом на случай
+ *   отката или опечатки в пути — молчаливо выродиться в «пусто» она уже не
+ *   может.
  * * `forbidden` — маршрут есть, права нет (403). Это НЕ пустой список: §1.6
  *   запрещает различать «нет такого» и «не ваше» по идентификатору, но не
  *   запрещает сказать пользователю, что раздел ему не по правам.
  *
- * Отдельно: 404 на конкретном идентификаторе (том, поставка) — обычная ошибка,
+ * Отдельно: 404 на конкретном идентификаторе (комплект, реестр) — обычная ошибка,
  * и она проходит наверх как есть. Чужое и несуществующее неразличимы по
  * построению сервера, и клиент не пытается их разделить.
  */
@@ -65,32 +67,68 @@ const V1 = '/api/v1';
 /** Размер страницы: не больше `MAX_PAGE_LIMIT` из `@id/contracts`. */
 export const PAGE_LIMIT = 50;
 
-export interface Volume {
+export interface Work {
   id: string;
   objectId: string;
-  sectionId: string;
-  code: string;
-  name: string;
-  isActive: boolean;
-  autoRunEnabled: boolean;
-  createdAt: string;
-}
-
-export interface Submission {
-  id: string;
-  volumeId: string;
-  objectId: string;
+  sectionCode: string;
+  /** Месяц первым числом: `ГГГГ-ММ-01`. */
+  period: string;
+  /** Исполнитель работы — он печатается в реестре. */
   contractorId: string;
-  number: string | null;
+  /** Организация, ведущая комплект: только она правит его состав. */
+  managedByContractorId: string;
+  kind: 'complect' | 'registry';
   title: string;
+  registryId: string | null;
+  ordinal: number | null;
+  autoRunEnabled: boolean;
   currentRevisionId: string | null;
   createdBy: string;
   createdAt: string;
 }
 
+export type RegistryStatus = 'draft' | 'issued' | 'accepted';
+
+export interface Registry {
+  id: string;
+  objectId: string;
+  sectionCode: string;
+  period: string;
+  number: string | null;
+  folderNo: string | null;
+  building: string | null;
+  floor: string | null;
+  structure: string | null;
+  status: RegistryStatus;
+  version: number;
+  issuedBy: string | null;
+  issuedAt: string | null;
+  issuedFileRevisionId: string | null;
+  acceptedBy: string | null;
+  acceptedAt: string | null;
+  createdBy: string;
+  createdAt: string;
+}
+
+/** Строка снимка состава переданного реестра. */
+export interface RegistryItem {
+  registryId: string;
+  ordinal: number;
+  workId: string;
+  revisionId: string;
+  contractorId: string;
+  title: string;
+}
+
+/** Причина, по которой реестр ещё нельзя передать. */
+export interface RegistryBlocker {
+  code: string;
+  message: string;
+}
+
 export interface SubmissionRevisionSummary {
   id: string;
-  submissionId: string;
+  workId: string;
   revisionNo: number;
   status: string;
   parentRevisionId: string | null;
@@ -117,10 +155,17 @@ export interface CursorPage<TItem> {
  * `apps/api` — это чтение одного объекта.
  */
 export const NAVIGATION_ROUTES = {
-  volumes: `${V1}/volumes`,
-  volume: (volumeId: string) => `${V1}/volumes/${volumeId}`,
-  submissions: `${V1}/submissions`,
-  revisionsOfSubmission: (submissionId: string) => `${V1}/submissions/${submissionId}/revisions`,
+  works: `${V1}/works`,
+  work: (workId: string) => `${V1}/works/${workId}`,
+  revisionsOfWork: (workId: string) => `${V1}/works/${workId}/revisions`,
+  registries: `${V1}/registries`,
+  registry: (registryId: string) => `${V1}/registries/${registryId}`,
+  registryWork: (registryId: string, workId: string) =>
+    `${V1}/registries/${registryId}/works/${workId}`,
+  registryFile: (registryId: string) => `${V1}/registries/${registryId}/file`,
+  registryIssue: (registryId: string) => `${V1}/registries/${registryId}/issue`,
+  registryAccept: (registryId: string) => `${V1}/registries/${registryId}/accept`,
+  registryItems: (registryId: string) => `${V1}/registries/${registryId}/items`,
 } as const;
 
 export type UnavailableReason = 'route-missing' | 'forbidden';
@@ -205,108 +250,94 @@ function pageQuery(cursor: string | null | undefined, rest: Query): Query {
 }
 
 // =====================================================================
-// Тома
+// Комплекты работ
 // =====================================================================
 
-export interface VolumeFilter {
+export interface WorkFilter {
   readonly objectId?: string | undefined;
-  readonly sectionId?: string | undefined;
-  readonly isActive?: boolean | undefined;
+  readonly sectionCode?: string | undefined;
+  readonly period?: string | undefined;
+  readonly registryId?: string | undefined;
+  readonly unassigned?: boolean | undefined;
   readonly search?: string | undefined;
   readonly cursor?: string | null | undefined;
 }
 
-export async function listVolumes(
-  filter: VolumeFilter = {},
-): Promise<NavigationResult<CursorPage<Volume>>> {
-  return loadNavigation(NAVIGATION_ROUTES.volumes, () =>
-    get<CursorPage<Volume>>(NAVIGATION_ROUTES.volumes, {
+export async function listWorks(
+  filter: WorkFilter = {},
+): Promise<NavigationResult<CursorPage<Work>>> {
+  return loadNavigation(NAVIGATION_ROUTES.works, () =>
+    get<CursorPage<Work>>(NAVIGATION_ROUTES.works, {
       query: pageQuery(filter.cursor, {
         ...(filter.objectId === undefined ? {} : { objectId: filter.objectId }),
-        ...(filter.sectionId === undefined ? {} : { sectionId: filter.sectionId }),
-        // `isActive` передаётся строкой: сервер принимает только `true` и
-        // `false`, потому что `z.coerce.boolean()` считал бы истиной и «false».
-        ...(filter.isActive === undefined ? {} : { isActive: filter.isActive ? 'true' : 'false' }),
+        ...(filter.sectionCode === undefined ? {} : { sectionCode: filter.sectionCode }),
+        ...(filter.period === undefined ? {} : { period: filter.period }),
+        ...(filter.registryId === undefined ? {} : { registryId: filter.registryId }),
+        // Признак передаётся строкой: сервер принимает только `true` и `false`,
+        // потому что `z.coerce.boolean()` считал бы истиной и «false».
+        ...(filter.unassigned === undefined
+          ? {}
+          : { unassigned: filter.unassigned ? 'true' : 'false' }),
         ...(filter.search === undefined || filter.search === '' ? {} : { search: filter.search }),
       }),
     }),
   );
 }
 
-export async function getVolume(volumeId: string): Promise<NavigationResult<Volume>> {
-  return loadNavigation(NAVIGATION_ROUTES.volume(volumeId), () =>
-    get<Volume>(NAVIGATION_ROUTES.volume(volumeId)),
+export async function getWork(workId: string): Promise<NavigationResult<Work>> {
+  return loadNavigation(NAVIGATION_ROUTES.work(workId), () =>
+    get<Work>(NAVIGATION_ROUTES.work(workId)),
   );
 }
 
-// =====================================================================
-// Поставки
-// =====================================================================
-
-export interface SubmissionFilter {
-  readonly volumeId?: string | undefined;
-  readonly objectId?: string | undefined;
-  readonly search?: string | undefined;
-  readonly cursor?: string | null | undefined;
-}
-
-export async function listSubmissions(
-  filter: SubmissionFilter = {},
-): Promise<NavigationResult<CursorPage<Submission>>> {
-  return loadNavigation(NAVIGATION_ROUTES.submissions, () =>
-    get<CursorPage<Submission>>(NAVIGATION_ROUTES.submissions, {
-      query: pageQuery(filter.cursor, {
-        ...(filter.volumeId === undefined ? {} : { volumeId: filter.volumeId }),
-        ...(filter.objectId === undefined ? {} : { objectId: filter.objectId }),
-        ...(filter.search === undefined || filter.search === '' ? {} : { search: filter.search }),
-      }),
-    }),
-  );
-}
-
-export interface CreateSubmissionInput {
-  readonly volumeId: string;
+export interface CreateWorkInput {
+  readonly objectId: string;
+  readonly sectionCode: string;
+  readonly period: string;
   readonly title: string;
-  readonly number?: string | undefined;
+  /** Исполнитель. Задаёт только генподрядчик; подрядчику поле запрещено. */
+  readonly contractorId?: string | undefined;
 }
 
-export interface CreatedSubmission {
-  submission: Submission;
+export interface CreatedWork {
+  work: Work;
   revision: SubmissionRevisionSummary;
 }
 
 /**
- * Создание поставки вместе с её первой ревизией — одной транзакцией на сервере.
+ * Заведение комплекта вместе с его первой ревизией — одной транзакцией.
  *
- * `contractorId` в теле НЕТ, и добавлять его нельзя: организация берётся из
- * области видимости (`db/repositories/navigation.ts`). Поле в теле было бы
- * приглашением завести поставку от чужого имени.
+ * `contractorId` подрядчик не передаёт: исполнитель берётся из его области
+ * видимости, и поле в теле было бы приглашением завести работу от чужого имени.
+ * Генподрядчику оно, наоборот, необходимо — субподрядчики учётных записей не
+ * имеют, и ПТО собирает их комплекты само.
  *
  * `Idempotency-Key` не передаётся: §14 требует его на дорогих действиях
  * (freeze, recognize, checks, переходы workflow), а вставка одной строки к ним
- * не относится — повтор виден в списке и правится человеком. Слать заголовок
- * там, где он ничего не защищает, значит приучать клиента к формальности.
+ * не относится — повтор виден в списке и правится человеком.
  */
-export async function createSubmission(input: CreateSubmissionInput): Promise<CreatedSubmission> {
-  const response = await request<CreatedSubmission>('POST', NAVIGATION_ROUTES.submissions, {
+export async function createWork(input: CreateWorkInput): Promise<CreatedWork> {
+  const response = await request<CreatedWork>('POST', NAVIGATION_ROUTES.works, {
     body: {
-      volumeId: input.volumeId,
+      objectId: input.objectId,
+      sectionCode: input.sectionCode,
+      period: input.period,
       title: input.title,
-      ...(input.number === undefined || input.number === '' ? {} : { number: input.number }),
+      ...(input.contractorId === undefined ? {} : { contractorId: input.contractorId }),
     },
   });
   return response.data;
 }
 
 // =====================================================================
-// Ревизии поставки
+// Ревизии комплекта
 // =====================================================================
 
 export async function listRevisions(
-  submissionId: string,
+  workId: string,
   cursor?: string | null,
 ): Promise<NavigationResult<CursorPage<SubmissionRevisionSummary>>> {
-  const route = NAVIGATION_ROUTES.revisionsOfSubmission(submissionId);
+  const route = NAVIGATION_ROUTES.revisionsOfWork(workId);
   return loadNavigation(route, () =>
     get<CursorPage<SubmissionRevisionSummary>>(route, { query: pageQuery(cursor, {}) }),
   );
@@ -320,10 +351,162 @@ export async function listRevisions(
  * решения и уже отработавший возврат дают 409 с внятным текстом — экран
  * показывает этот текст, а не прячет кнопку по собственной догадке о состоянии.
  */
-export async function createRevision(submissionId: string): Promise<SubmissionRevisionSummary> {
+export async function createRevision(workId: string): Promise<SubmissionRevisionSummary> {
   const response = await request<SubmissionRevisionSummary>(
     'POST',
-    NAVIGATION_ROUTES.revisionsOfSubmission(submissionId),
+    NAVIGATION_ROUTES.revisionsOfWork(workId),
   );
   return response.data;
+}
+
+// =====================================================================
+// Реестры передачи
+// =====================================================================
+
+export interface RegistryFilter {
+  readonly objectId?: string | undefined;
+  readonly sectionCode?: string | undefined;
+  readonly period?: string | undefined;
+  readonly status?: RegistryStatus | undefined;
+  readonly cursor?: string | null | undefined;
+}
+
+export async function listRegistries(
+  filter: RegistryFilter = {},
+): Promise<NavigationResult<CursorPage<Registry>>> {
+  return loadNavigation(NAVIGATION_ROUTES.registries, () =>
+    get<CursorPage<Registry>>(NAVIGATION_ROUTES.registries, {
+      query: pageQuery(filter.cursor, {
+        ...(filter.objectId === undefined ? {} : { objectId: filter.objectId }),
+        ...(filter.sectionCode === undefined ? {} : { sectionCode: filter.sectionCode }),
+        ...(filter.period === undefined ? {} : { period: filter.period }),
+        ...(filter.status === undefined ? {} : { status: filter.status }),
+      }),
+    }),
+  );
+}
+
+/**
+ * Карточка реестра.
+ *
+ * `works`, `file` и `blockers` необязательны, и это часть контракта: подрядчику
+ * сервер их не отдаёт вовсе. Нулевой счётчик вместо отсутствия был бы ответом на
+ * вопрос «сколько работ у соседей», а не умолчанием.
+ */
+export interface RegistryView {
+  registry: Registry;
+  works?: Work[];
+  file?: Work | null;
+  blockers?: RegistryBlocker[];
+}
+
+export async function getRegistry(registryId: string): Promise<NavigationResult<RegistryView>> {
+  const route = NAVIGATION_ROUTES.registry(registryId);
+  return loadNavigation(route, () => get<RegistryView>(route));
+}
+
+export interface CreateRegistryInput {
+  readonly objectId: string;
+  readonly sectionCode: string;
+  readonly period: string;
+  readonly number?: string | undefined;
+  readonly folderNo?: string | undefined;
+  readonly building?: string | undefined;
+}
+
+export async function createRegistry(input: CreateRegistryInput): Promise<Registry> {
+  const response = await request<Registry>('POST', NAVIGATION_ROUTES.registries, {
+    body: {
+      objectId: input.objectId,
+      sectionCode: input.sectionCode,
+      period: input.period,
+      ...(input.number === undefined || input.number === '' ? {} : { number: input.number }),
+      ...(input.folderNo === undefined || input.folderNo === ''
+        ? {}
+        : { folderNo: input.folderNo }),
+      ...(input.building === undefined || input.building === ''
+        ? {}
+        : { building: input.building }),
+    },
+  });
+  return response.data;
+}
+
+/**
+ * Версия реестра в `If-Match` на каждом изменении состава.
+ *
+ * Реестр собирают минутами, а передают одним нажатием: без версии второй
+ * сотрудник ПТО молча затёр бы состав, собранный первым, и подпись оказалась бы
+ * под тем, чего никто не видел.
+ */
+function ifMatch(version: number): Record<string, string> {
+  return { 'if-match': `"${String(version)}"` };
+}
+
+export async function updateRegistry(
+  registryId: string,
+  version: number,
+  patch: Record<string, string | null>,
+): Promise<Registry> {
+  const response = await request<Registry>('PATCH', NAVIGATION_ROUTES.registry(registryId), {
+    headers: ifMatch(version),
+    body: patch,
+  });
+  return response.data;
+}
+
+export async function includeWork(
+  registryId: string,
+  workId: string,
+  version: number,
+): Promise<Registry> {
+  const response = await request<Registry>(
+    'PUT',
+    NAVIGATION_ROUTES.registryWork(registryId, workId),
+    { headers: ifMatch(version), body: {} },
+  );
+  return response.data;
+}
+
+export async function excludeWork(
+  registryId: string,
+  workId: string,
+  version: number,
+): Promise<Registry> {
+  const response = await request<Registry>(
+    'DELETE',
+    NAVIGATION_ROUTES.registryWork(registryId, workId),
+    { headers: ifMatch(version) },
+  );
+  return response.data;
+}
+
+/** Заведение файла описи: сам скан грузится обычным приёмом на его ревизию. */
+export async function attachRegistryFile(registryId: string): Promise<CreatedWork> {
+  const response = await request<CreatedWork>('POST', NAVIGATION_ROUTES.registryFile(registryId));
+  return response.data;
+}
+
+export async function issueRegistry(registryId: string, version: number): Promise<Registry> {
+  const response = await request<Registry>('POST', NAVIGATION_ROUTES.registryIssue(registryId), {
+    headers: ifMatch(version),
+  });
+  return response.data;
+}
+
+export async function acceptRegistry(registryId: string, version: number): Promise<Registry> {
+  const response = await request<Registry>('POST', NAVIGATION_ROUTES.registryAccept(registryId), {
+    headers: ifMatch(version),
+  });
+  return response.data;
+}
+
+/**
+ * Снимок состава переданного реестра.
+ *
+ * Отдаётся массивом, а не курсорной страницей: состав описи — это то, что
+ * поместилось в подписанную бумагу, и он конечен по построению.
+ */
+export async function listRegistryItems(registryId: string): Promise<RegistryItem[]> {
+  return get<RegistryItem[]>(NAVIGATION_ROUTES.registryItems(registryId));
 }

@@ -25,8 +25,8 @@ import { session as sessionApi } from '../api/endpoints.js';
 import { isApiError, isUnauthenticated } from '../api/problem.js';
 import { ErrorState } from '../shared/ui.js';
 import { IdsScreen } from '../features/ids/IdsScreen.js';
-import { ObjectVolumesScreen } from '../features/ids/ObjectVolumesScreen.js';
-import { VolumeSubmissionsScreen } from '../features/ids/VolumeSubmissionsScreen.js';
+import { ObjectScreen } from '../features/ids/ObjectScreen.js';
+import { RegistryScreen } from '../features/ids/RegistryScreen.js';
 import { RevisionScreen } from '../features/revision/RevisionScreen.js';
 import { CatalogScreen } from '../features/catalog/CatalogScreen.js';
 import { AdminScreen } from '../features/admin/AdminScreen.js';
@@ -138,11 +138,11 @@ const ROUTES: readonly RouteDefinition[] = [
   { pattern: '/ids', render: () => <IdsScreen /> },
   {
     pattern: '/ids/objects/:objectId',
-    render: (params) => <ObjectVolumesScreen objectId={params['objectId'] ?? ''} />,
+    render: (params) => <ObjectScreen objectId={params['objectId'] ?? ''} />,
   },
   {
-    pattern: '/ids/volumes/:volumeId',
-    render: (params) => <VolumeSubmissionsScreen volumeId={params['volumeId'] ?? ''} />,
+    pattern: '/ids/registries/:registryId',
+    render: (params) => <RegistryScreen registryId={params['registryId'] ?? ''} />,
   },
   {
     pattern: '/ids/revisions/:revisionId',

@@ -162,9 +162,8 @@ export function makeRevision(patch: Partial<RevisionNode> = {}): RevisionNode {
     id: 'rev-1',
     objectId: 'obj-1',
     contractorId: 'cp-1',
-    sectionId: 'sec-1',
-    sectionKindCode: 'roofing',
-    volumeCode: '2.5.1',
+    sectionCode: 'roofing',
+    workTitle: 'Кровля автостоянки',
     status: 'submitted',
     ...patch,
   };

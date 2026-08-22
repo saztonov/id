@@ -44,7 +44,7 @@ export interface Me {
   };
   roles: UserRole[];
   scope: {
-    kind: 'contractor' | 'engineer' | 'manager' | 'admin';
+    kind: 'contractor' | 'general_contractor' | 'engineer' | 'manager' | 'admin';
     objectIds: string[] | null;
     contractorId: string | null;
   } | null;
@@ -432,7 +432,7 @@ export interface RuleCatalogEntry {
 
 export interface RevisionWorkflow {
   id: string;
-  submissionId: string;
+  workId: string;
   revisionNo: number;
   status: WorkflowStatus;
   parentRevisionId: string | null;
@@ -548,14 +548,11 @@ export type {
   ConstructionObject,
   Counterparty,
   CounterpartyKindEntry,
+  ObjectContractor,
   ObjectSection,
+  Section,
   SectionProfile,
 } from '@id/contracts';
-
-export interface SectionKind {
-  code: string;
-  name: string;
-}
 
 /** Карточка массового ввода справочника (§3.2, миграция 0027). */
 export interface CatalogImport {

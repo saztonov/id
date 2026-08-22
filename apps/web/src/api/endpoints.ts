@@ -56,6 +56,7 @@ import type {
   ManualPageLabel,
   Me,
   NormalizedCoords,
+  ObjectContractor,
   ObjectSection,
   Page,
   PageAccounting,
@@ -75,7 +76,7 @@ import type {
   RulesetDetail,
   RulesetRuleInput,
   RulesetVersion,
-  SectionKind,
+  Section,
   SectionProfile,
   SettingsView,
   SourceFile,
@@ -533,11 +534,51 @@ export const catalog = {
 
   counterpartyKinds: () => get<CounterpartyKindEntry[]>(`${V1}/catalog/counterparty-kinds`),
 
-  /** Список разделов приходит массивом, а не конвертом — так объявлена схема. */
-  sections: (objectId: string) =>
+  /**
+   * Справочник разделов работ — плоский список, общий для всех объектов.
+   *
+   * Списки разделов приходят массивом, а не конвертом: их два-три десятка, и
+   * курсорная страница на такой размер была бы конструкцией без назначения.
+   */
+  sections: (includeInactive = false) =>
+    get<Section[]>(`${V1}/catalog/sections`, {
+      query: includeInactive ? { includeInactive: 'true' } : {},
+    }),
+
+  createSection: (body: { code: string; name: string; sortOrder?: number }) =>
+    request<Section>('POST', `${V1}/catalog/sections`, { body }).then((r) => r.data),
+
+  updateSection: (
+    sectionCode: string,
+    body: { name?: string; sortOrder?: number; isActive?: boolean },
+  ) =>
+    request<Section>('PATCH', `${V1}/catalog/sections/${sectionCode}`, { body }).then(
+      (r) => r.data,
+    ),
+
+  /**
+   * Разделы объекта — ВЕСЬ справочник с отметкой о включённости.
+   *
+   * Не «включённые разделы»: список из одних включённых не дал бы способа
+   * включить первый, а экран объекта — это и есть то место, где включают.
+   */
+  objectSections: (objectId: string) =>
     get<ObjectSection[]>(`${V1}/catalog/objects/${objectId}/sections`),
 
-  sectionKinds: () => get<SectionKind[]>(`${V1}/catalog/section-kinds`),
+  setObjectSection: (objectId: string, sectionCode: string, isActive: boolean) =>
+    request<ObjectSection>('PUT', `${V1}/catalog/objects/${objectId}/sections/${sectionCode}`, {
+      body: { isActive },
+    }).then((r) => r.data),
+
+  objectContractors: (objectId: string) =>
+    get<ObjectContractor[]>(`${V1}/catalog/objects/${objectId}/contractors`),
+
+  setObjectContractor: (objectId: string, contractorId: string, isActive: boolean) =>
+    request<ObjectContractor>(
+      'PUT',
+      `${V1}/catalog/objects/${objectId}/contractors/${contractorId}`,
+      { body: { isActive } },
+    ).then((r) => r.data),
 
   rdDocuments: (objectId: string, search?: string) =>
     get<Page<RdDocument>>(`${V1}/catalog/objects/${objectId}/rd-documents`, {
@@ -545,13 +586,13 @@ export const catalog = {
     }),
 
   /**
-   * Все версии профиля вида раздела.
+   * Все версии профиля раздела работ.
    *
    * Отдаётся массивом, а не конвертом — так объявлена `sectionProfileListSchema`.
    */
-  sectionProfiles: (sectionKindCode?: string) =>
+  sectionProfiles: (sectionCode?: string) =>
     get<SectionProfile[]>(`${V1}/catalog/section-profiles`, {
-      query: sectionKindCode === undefined ? {} : { sectionKindCode },
+      query: sectionCode === undefined ? {} : { sectionCode },
     }),
 
   /**
@@ -561,13 +602,13 @@ export const catalog = {
    * дату нет, и это законное состояние открытого мира — «раздел не настроен», а
    * не «список пуст». Экран обязан различать их (§9.1).
    */
-  effectiveSectionProfile: (sectionKindCode: string, at?: string) =>
-    get<SectionProfile>(`${V1}/catalog/section-kinds/${sectionKindCode}/effective-profile`, {
+  effectiveSectionProfile: (sectionCode: string, at?: string) =>
+    get<SectionProfile>(`${V1}/catalog/sections/${sectionCode}/effective-profile`, {
       query: at === undefined ? {} : { at },
     }),
 
   createSectionProfile: (body: {
-    sectionKindCode: string;
+    sectionCode: string;
     effectiveFrom: string;
     effectiveTo?: string | null;
     expectedDocTypes: readonly string[];

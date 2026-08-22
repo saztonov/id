@@ -7,9 +7,9 @@
  * а §9.2 ссылался на сущность, которой не существовало в коде: «дата
  * производства, поставки или применения — по профилю правил объекта».
  *
- * ## Зачем два уровня настройки, если профиль вида раздела уже есть
+ * ## Зачем два уровня настройки, если профиль раздела уже есть
  *
- * Профиль вида раздела отвечает на вопрос «чего ждать от кровли вообще»
+ * Профиль раздела отвечает на вопрос «чего ждать от кровли вообще»
  * (§0.5): состав комплекта, категории материалов, включённые правила, пороги.
  * Ответ одинаков для всех объектов, где такой раздел есть, — и это правильно по
  * умолчанию, но не всегда верно на конкретной стройке: у одного застройщика
@@ -21,7 +21,7 @@
  *
  * Отсюда цепочка разрешения (`resolveEffectiveRules`):
  *
- *   профиль вида раздела → наложение объекта → наложение объекта и раздела
+ *   профиль раздела → наложение объекта → наложение объекта и раздела
  *
  * Порядок именно такой: чем уже область решения, тем позже оно применяется.
  * `section_id IS NULL` означает «на весь объект» — ради этого столбец и сделан
@@ -65,8 +65,8 @@ import { conflict, internal } from '../../lib/problem.js';
 import { appendAudit, type AuditActor } from './audit.js';
 import {
   findEffectiveSectionProfile,
-  findObjectSection,
   guardConstraints,
+  listObjectSections,
   objectVisibility,
   visibleWhere,
   assertKnownProfileReferences,
@@ -121,7 +121,7 @@ export interface ObjectRuleProfileView {
   readonly id: string;
   readonly objectId: string;
   /** `null` — профиль всего объекта, иначе профиль конкретного раздела. */
-  readonly sectionId: string | null;
+  readonly sectionCode: string | null;
   readonly version: number;
   readonly effectiveFrom: string;
   readonly effectiveTo: string | null;
@@ -133,7 +133,7 @@ export interface ObjectRuleProfileView {
 const PROFILE_SELECTION = {
   id: objectRuleProfiles.id,
   objectId: objectRuleProfiles.objectId,
-  sectionId: objectRuleProfiles.sectionId,
+  sectionCode: objectRuleProfiles.sectionCode,
   version: objectRuleProfiles.version,
   effectiveFrom: objectRuleProfiles.effectiveFrom,
   effectiveTo: objectRuleProfiles.effectiveTo,
@@ -155,7 +155,7 @@ const PROFILE_SELECTION = {
 
 export interface ObjectRuleProfileFilter {
   /** `null` — только профили всего объекта; `undefined` — и объектные, и разделные. */
-  readonly sectionId?: string | null | undefined;
+  readonly sectionCode?: string | null | undefined;
 }
 
 /**
@@ -177,10 +177,10 @@ export async function listObjectRuleProfiles(
       visibleWhere(
         objectVisibility(scope, objectRuleProfiles.objectId),
         eq(objectRuleProfiles.objectId, objectId),
-        sectionCondition(filter.sectionId),
+        sectionCondition(filter.sectionCode),
       ),
     )
-    .orderBy(asc(objectRuleProfiles.sectionId), desc(objectRuleProfiles.version));
+    .orderBy(asc(objectRuleProfiles.sectionCode), desc(objectRuleProfiles.version));
   return rows.map(toProfileView);
 }
 
@@ -215,7 +215,7 @@ export async function findObjectRuleProfile(
 export async function findEffectiveObjectRuleProfile(
   db: Database,
   scope: AuthScope,
-  target: { readonly objectId: string; readonly sectionId: string | null },
+  target: { readonly objectId: string; readonly sectionCode: string | null },
   onDate: string,
 ): Promise<ObjectRuleProfileView | null> {
   const rows = await db
@@ -225,7 +225,7 @@ export async function findEffectiveObjectRuleProfile(
       visibleWhere(
         objectVisibility(scope, objectRuleProfiles.objectId),
         eq(objectRuleProfiles.objectId, target.objectId),
-        sectionCondition(target.sectionId),
+        sectionCondition(target.sectionCode),
         sql`${objectRuleProfiles.publishedAt} is not null`,
         sql`${objectRuleProfiles.effectiveFrom} <= ${onDate}::date`,
         sql`(${objectRuleProfiles.effectiveTo} is null or ${objectRuleProfiles.effectiveTo} >= ${onDate}::date)`,
@@ -243,7 +243,7 @@ export async function findEffectiveObjectRuleProfile(
 
 export interface CreateObjectRuleProfileInput {
   readonly objectId: string;
-  readonly sectionId: string | null;
+  readonly sectionCode: string | null;
   readonly effectiveFrom: string;
   readonly effectiveTo?: string | null | undefined;
   readonly overrides: RuleOverrides;
@@ -279,7 +279,7 @@ export async function createObjectRuleProfile(
       // Наложение объекта ПОЛНОСТЬЮ заменяет действующий список, поэтому
       // опечатка в коде не просто добавляет мусор, а вытесняет настоящие
       // правила: прогон ответит «замечаний нет», и отличить это от исправной
-      // работы будет нечем (§9.1). Сверка та же, что у профиля вида раздела.
+      // работы будет нечем (§9.1). Сверка та же, что у профиля раздела.
       await assertKnownProfileReferences(tx, {
         expectedDocTypes: input.overrides.expectedDocTypes ?? [],
         enabledRuleCodes: [
@@ -292,7 +292,7 @@ export async function createObjectRuleProfile(
         .select({ version: objectRuleProfiles.version })
         .from(objectRuleProfiles)
         .where(
-          and(eq(objectRuleProfiles.objectId, input.objectId), sectionCondition(input.sectionId)),
+          and(eq(objectRuleProfiles.objectId, input.objectId), sectionCondition(input.sectionCode)),
         );
       const nextVersion = existing.reduce((max, row) => Math.max(max, row.version), 0) + 1;
 
@@ -304,7 +304,7 @@ export async function createObjectRuleProfile(
         .insert(objectRuleProfiles)
         .values({
           objectId: input.objectId,
-          sectionId: input.sectionId,
+          sectionCode: input.sectionCode,
           version: nextVersion,
           effectiveFrom: input.effectiveFrom,
           effectiveTo: input.effectiveTo ?? null,
@@ -325,7 +325,7 @@ export async function createObjectRuleProfile(
         entityId: row.id,
         objectId: input.objectId,
         payload: {
-          sectionId: input.sectionId,
+          sectionCode: input.sectionCode,
           version: nextVersion,
           effectiveFrom: input.effectiveFrom,
           effectiveTo: input.effectiveTo ?? null,
@@ -352,7 +352,7 @@ export async function createObjectRuleProfile(
 /**
  * Публикация версии — она же момент, когда закрывается период предыдущей.
  *
- * Отдельным действием, как у профиля вида раздела: опубликованная версия
+ * Отдельным действием, как у профиля раздела: опубликованная версия
  * участвует в прогонах, и повторная публикация переставила бы `published_at`
  * вперёд у профиля, по которому прогоны уже выполнены.
  *
@@ -390,7 +390,7 @@ export async function publishObjectRuleProfile(
         entityId: profileId,
         objectId: current.objectId,
         payload: {
-          sectionId: current.sectionId,
+          sectionCode: current.sectionCode,
           version: current.version,
           effectiveFrom: current.effectiveFrom,
         },
@@ -420,8 +420,7 @@ export async function publishObjectRuleProfile(
  */
 export interface ResolvedRules {
   readonly objectId: string;
-  readonly sectionId: string;
-  readonly sectionKindCode: string;
+  readonly sectionCode: string;
   readonly onDate: string;
   readonly sectionProfileId: string | null;
   readonly sectionProfileVersion: number | null;
@@ -447,28 +446,27 @@ export interface ResolvedRules {
 export async function resolveEffectiveRules(
   db: Database,
   scope: AuthScope,
-  target: { readonly objectId: string; readonly sectionId: string },
+  target: { readonly objectId: string; readonly sectionCode: string },
   onDate: string,
 ): Promise<ResolvedRules | null> {
-  const section = await findObjectSection(db, scope, target.sectionId);
-  if (section === null || section.objectId !== target.objectId) return null;
+  // Раздел обязан быть ВКЛЮЧЁН на объекте: иначе прогон считал бы правила по
+  // работам, которых на этой стройке не ведут. Проверка чтением, а не ключом:
+  // здесь читают, а не пишут, и составному FK нечего защищать.
+  const enabled = await listObjectSections(db, scope, target.objectId);
+  const section = enabled.find((row) => row.sectionCode === target.sectionCode && row.isActive);
+  if (section === undefined) return null;
 
-  const sectionProfile = await findEffectiveSectionProfile(
-    db,
-    scope,
-    section.sectionKindCode,
-    onDate,
-  );
+  const sectionProfile = await findEffectiveSectionProfile(db, scope, target.sectionCode, onDate);
   const objectWide = await findEffectiveObjectRuleProfile(
     db,
     scope,
-    { objectId: target.objectId, sectionId: null },
+    { objectId: target.objectId, sectionCode: null },
     onDate,
   );
   const sectionScoped = await findEffectiveObjectRuleProfile(
     db,
     scope,
-    { objectId: target.objectId, sectionId: target.sectionId },
+    { objectId: target.objectId, sectionCode: target.sectionCode },
     onDate,
   );
 
@@ -481,15 +479,14 @@ export async function resolveEffectiveRules(
   for (const profile of applied) {
     rules = applyOverrides(rules, profile.overrides);
     // Наложение, задающее состав комплекта, настраивает полноту само — даже если
-    // у вида раздела опубликованного профиля нет.
+    // у раздела опубликованного профиля нет.
     completenessConfigured =
       completenessConfigured || profile.overrides.expectedDocTypes !== undefined;
   }
 
   return {
     objectId: target.objectId,
-    sectionId: target.sectionId,
-    sectionKindCode: section.sectionKindCode,
+    sectionCode: target.sectionCode,
     onDate,
     sectionProfileId: sectionProfile?.id ?? null,
     sectionProfileVersion: sectionProfile?.version ?? null,
@@ -499,12 +496,11 @@ export async function resolveEffectiveRules(
   };
 }
 
-/** Значения без наложений: либо из профиля вида раздела, либо безопасные пустые. */
+/** Значения без наложений: либо из профиля раздела, либо безопасные пустые. */
 type RuleValues = Omit<
   ResolvedRules,
   | 'objectId'
-  | 'sectionId'
-  | 'sectionKindCode'
+  | 'sectionCode'
   | 'onDate'
   | 'sectionProfileId'
   | 'sectionProfileVersion'
@@ -570,7 +566,7 @@ function applyOverrides(base: RuleValues, overrides: RuleOverrides): RuleValues 
 /**
  * Слияние по верхним ключам.
  *
- * Если действующее значение не объект (в профиле вида раздела `jsonb` мог
+ * Если действующее значение не объект (в профиле раздела `jsonb` мог
  * оказаться массивом или числом), наложение заменяет его целиком: сливать
  * массив со словарём нечем, а угадывать здесь опаснее, чем заменить.
  */
@@ -598,7 +594,7 @@ function mergeJsonObjects(
  */
 async function closePrecedingPeriods(
   executor: Pick<Database, 'update'>,
-  target: { readonly objectId: string; readonly sectionId: string | null },
+  target: { readonly objectId: string; readonly sectionCode: string | null },
   effectiveFrom: string,
   exceptProfileId?: string,
 ): Promise<void> {
@@ -608,7 +604,7 @@ async function closePrecedingPeriods(
     .where(
       and(
         eq(objectRuleProfiles.objectId, target.objectId),
-        sectionCondition(target.sectionId),
+        sectionCondition(target.sectionCode),
         isNull(objectRuleProfiles.effectiveTo),
         sql`${objectRuleProfiles.publishedAt} is not null`,
         lt(objectRuleProfiles.effectiveFrom, effectiveFrom),
@@ -624,17 +620,17 @@ async function closePrecedingPeriods(
  * второй случай не выражается: `section_id = NULL` не истинно ни для одной
  * строки, и профиль объекта был бы невидим, а его версия — назначена повторно.
  */
-function sectionCondition(sectionId: string | null | undefined) {
-  if (sectionId === undefined) return undefined;
-  return sectionId === null
-    ? isNull(objectRuleProfiles.sectionId)
-    : eq(objectRuleProfiles.sectionId, sectionId);
+function sectionCondition(sectionCode: string | null | undefined) {
+  if (sectionCode === undefined) return undefined;
+  return sectionCode === null
+    ? isNull(objectRuleProfiles.sectionCode)
+    : eq(objectRuleProfiles.sectionCode, sectionCode);
 }
 
 function toProfileView(row: {
   id: string;
   objectId: string;
-  sectionId: string | null;
+  sectionCode: string | null;
   version: number;
   effectiveFrom: string;
   effectiveTo: string | null;

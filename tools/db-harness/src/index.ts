@@ -221,3 +221,79 @@ function normalizeRow(row: Record<string, unknown>): Record<string, unknown> {
   for (const [key, value] of Object.entries(row)) out[key] = normalizeCell(value);
   return out;
 }
+
+// =====================================================================
+// Дерево «объект → комплект → ревизия» для фикстур тестов
+// =====================================================================
+
+/**
+ * Одинаковая пятёрка INSERT'ов, с которой начинается почти каждый тест.
+ *
+ * До 0028 она была семёркой (`section_kinds`, `object_sections`, `volumes`,
+ * `submissions`, `submission_revisions`), выписанной вручную примерно в
+ * тридцати пяти файлах. Каждая правка схемы означала тридцать пять
+ * механических правок, и на S19 стало видно, чем это кончается: часть файлов
+ * расходится с остальными не по смыслу теста, а по тому, кто из авторов
+ * скопировал более старую версию.
+ *
+ * Функция возвращает МАССИВ SQL-строк, а не выполняет их: тесты в проекте
+ * держат фикстуру списком строк и прогоняют его сами (иногда — вперемешку со
+ * своими вставками, иногда — в другой транзакции). Возврат строк сохраняет этот
+ * стиль и не навязывает исполнителя.
+ *
+ * Идентификаторы передаются вызывающим, а не генерируются здесь: тесты
+ * проверяют ответы по конкретным UUID и печатают их в ожиданиях.
+ */
+export interface RevisionTreeIds {
+  /** Организация-исполнитель. Строку `counterparties` создаёт вызывающий. */
+  readonly contractorId: string;
+  readonly objectId: string;
+  readonly userId: string;
+  readonly workId: string;
+  readonly revisionId: string;
+  /** Код раздела работ. Заводится этой же функцией, если его ещё нет. */
+  readonly sectionCode?: string;
+  readonly sectionName?: string;
+  /** Месяц комплекта первым числом. По умолчанию — январь 2026. */
+  readonly period?: string;
+  readonly workTitle?: string;
+  readonly revisionNo?: number;
+  readonly revisionStatus?: string;
+  /**
+   * Организация, ведущая комплект. По умолчанию совпадает с исполнителем;
+   * задаётся отдельно там, где комплект заводит ПТО генподрядчика.
+   */
+  readonly managedByContractorId?: string;
+}
+
+function quote(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+export function revisionTreeSql(ids: RevisionTreeIds): string[] {
+  const sectionCode = ids.sectionCode ?? 'roofing';
+  const sectionName = ids.sectionName ?? 'Кровля';
+  const period = ids.period ?? '2026-01-01';
+  const title = ids.workTitle ?? 'Комплект работ';
+  const managedBy = ids.managedByContractorId ?? ids.contractorId;
+
+  return [
+    // `ON CONFLICT DO NOTHING`: раздел общий для портала, и второй комплект того
+    // же раздела в той же фикстуре не должен ронять вставку.
+    `INSERT INTO sections (code, name) VALUES (${quote(sectionCode)}, ${quote(sectionName)})
+       ON CONFLICT (code) DO NOTHING`,
+    `INSERT INTO object_sections (object_id, section_code)
+       VALUES ('${ids.objectId}', ${quote(sectionCode)}) ON CONFLICT DO NOTHING`,
+    `INSERT INTO object_contractors (object_id, contractor_id)
+       VALUES ('${ids.objectId}', '${ids.contractorId}') ON CONFLICT DO NOTHING`,
+    `INSERT INTO object_contractors (object_id, contractor_id)
+       VALUES ('${ids.objectId}', '${managedBy}') ON CONFLICT DO NOTHING`,
+    `INSERT INTO works
+       (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
+     VALUES ('${ids.workId}', '${ids.objectId}', '${ids.contractorId}', '${managedBy}',
+             ${quote(sectionCode)}, DATE ${quote(period)}, ${quote(title)}, '${ids.userId}')`,
+    `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
+     VALUES ('${ids.revisionId}', '${ids.workId}', '${ids.objectId}', '${ids.contractorId}',
+             ${String(ids.revisionNo ?? 1)}, ${quote(ids.revisionStatus ?? 'draft')})`,
+  ];
+}

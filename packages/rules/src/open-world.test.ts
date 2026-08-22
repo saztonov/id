@@ -114,16 +114,15 @@ function unknownSectionGraph(): CheckGraph {
       makeRelation({ parentDocumentId: act.id, childDocumentId: passport.id, relation: 'annex' }),
       makeRelation({ parentDocumentId: act.id, childDocumentId: uncertain.id, relation: 'annex' }),
     ],
-    // Профиль вида раздела не опубликован: раздел новый, настройки для него ещё
+    // Профиль раздела не опубликован: раздел новый, настройки для него ещё
     // нет (§9.1, строка 2).
     profile: makeUnconfiguredProfile(),
     revision: {
       id: 'rev-unknown',
       objectId: 'obj-1',
       contractorId: 'cp-1',
-      sectionId: 'sec-networks',
-      sectionKindCode: 'networks_water',
-      volumeCode: '5.1.1',
+      sectionCode: 'external_mechanical_systems',
+      workTitle: 'Наружные сети водоснабжения',
       status: 'submitted',
     },
     today: '2026-03-01',

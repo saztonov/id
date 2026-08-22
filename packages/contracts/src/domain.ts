@@ -68,13 +68,13 @@ export const codeSlugSchema = z
   .regex(/^[a-z][a-z0-9_]*$/, 'Код — латиница в нижнем регистре, цифры и подчёркивание');
 
 /**
- * Вид раздела работ и код вида ИД — строки, а не enum.
+ * Код раздела работ и код вида ИД — строки, а не enum.
  *
  * Корпус покрывает два раздела из многих (§0.5): каталог обязан расти
  * эксплуатацией через справочник и `doc_type_candidates`. Закрытый enum
  * превратил бы заведение нового раздела в релиз портала.
  */
-export const sectionKindCodeSchema = codeSlugSchema;
+export const sectionCodeSchema = codeSlugSchema;
 export const docTypeCodeSchema = codeSlugSchema;
 
 /**
@@ -216,19 +216,58 @@ export const counterpartyKindEntrySchema = z.object({
 });
 export type CounterpartyKindEntry = z.infer<typeof counterpartyKindEntrySchema>;
 
-export const objectSectionSchema = z.object({
-  id: uuidSchema,
-  objectId: uuidSchema,
-  code: z.string().min(1).max(64),
+/**
+ * Раздел работ — строка глобального справочника (миграция 0028).
+ *
+ * До 0028 раздел был копией на каждом объекте, а рядом жил «раздел» —
+ * конфигурация, общая для всех. Различие существовало ровно из-за копии: разделы
+ * взяты из сметного деления и на всех стройках одни и те же, поэтому копия
+ * исчезла, а вместе с ней и различие.
+ */
+export const sectionSchema = z.object({
+  code: sectionCodeSchema,
   name: z.string().min(1).max(500),
   sortOrder: sortOrderSchema,
   isActive: z.boolean(),
-  sectionKindCode: sectionKindCodeSchema,
+});
+export type Section = z.infer<typeof sectionSchema>;
+
+/**
+ * Раздел, включённый на объекте.
+ *
+ * Не копия справочника, а отметка «такие работы здесь ведутся». Наименование
+ * приходит из `sections` и здесь не дублируется: два источника одного имени
+ * разошлись бы при первом же переименовании.
+ */
+export const objectSectionSchema = z.object({
+  objectId: uuidSchema,
+  sectionCode: sectionCodeSchema,
+  name: z.string().min(1).max(500),
+  sortOrder: sortOrderSchema,
+  /** Включён ли раздел на объекте. `false` — новый комплект в него не завести. */
+  isActive: z.boolean(),
+  /** Активен ли сам раздел в справочнике: отключённый нельзя включить заново. */
+  sectionIsActive: z.boolean(),
 });
 export type ObjectSection = z.infer<typeof objectSectionSchema>;
 
 /**
- * Версионный профиль вида раздела (§3.2).
+ * Закрепление подрядчика за объектом (миграция 0028).
+ *
+ * До 0028 связи не существовало вовсе, и единственным признаком закрепления была
+ * уже существующая поставка — из-за чего подрядчик не мог завести первую.
+ */
+export const objectContractorSchema = z.object({
+  objectId: uuidSchema,
+  contractorId: uuidSchema,
+  name: z.string().min(1).max(500),
+  inn: innSchema.nullable(),
+  isActive: z.boolean(),
+});
+export type ObjectContractor = z.infer<typeof objectContractorSchema>;
+
+/**
+ * Версионный профиль раздела работ (§3.2).
  *
  * Профиль версионный с периодом действия, потому что иначе прогон проверок
  * месячной давности невоспроизводим. Пустой `expectedDocTypes` — не «комплект
@@ -238,7 +277,7 @@ export type ObjectSection = z.infer<typeof objectSectionSchema>;
 export const sectionProfileSchema = z
   .object({
     id: uuidSchema,
-    sectionKindCode: sectionKindCodeSchema,
+    sectionCode: sectionCodeSchema,
     version: z.int().positive(),
     effectiveFrom: isoDateSchema,
     effectiveTo: isoDateSchema.nullable(),
@@ -258,59 +297,137 @@ export const sectionProfileSchema = z
 export type SectionProfile = z.infer<typeof sectionProfileSchema>;
 
 // =====================================================================
-// §3 Том, поставка, ревизия
+// §3 Реестр, комплект, ревизия
 // =====================================================================
 
 /**
- * Том — раздел работ конкретного объекта, единица работы (§3).
+ * Месяц, за который собран комплект.
  *
- * `autoRunEnabled` — единственная настройка, при которой конвейер проходит
- * остановки §6 без участия человека. По умолчанию выключена: распознавание
- * дороже всего, а неверная рамка после OCR стоит полного повторного прогона.
+ * Хранится и передаётся первым числом: месяц — это период, а не дата. Свободный
+ * день внутри месяца сделал бы два комплекта одного месяца неравными при
+ * сравнении, и «собрать реестр за август» перестало бы быть однозначным.
  */
-export const volumeSchema = z.object({
-  id: uuidSchema,
-  objectId: uuidSchema,
-  sectionId: uuidSchema,
-  code: z.string().min(1).max(64),
-  name: z.string().min(1).max(500),
-  isActive: z.boolean(),
-  autoRunEnabled: z.boolean(),
-  createdAt: isoDateTimeSchema,
+export const periodSchema = isoDateSchema.refine((value) => value.endsWith('-01'), {
+  message: 'Месяц задаётся первым числом (ГГГГ-ММ-01)',
 });
-export type Volume = z.infer<typeof volumeSchema>;
 
 /**
- * Поставка — комплект ИД, поданный подрядчиком по тому.
+ * Что за единицу подачи представляет строка `works`.
+ *
+ * `complect` — комплект ИД по одной работе: АОСР и его приложения. `registry` —
+ * подписанный скан самой описи. Второй вид существует потому, что весь конвейер
+ * из 23 задач адресуется ревизией, а `source_files.revision_id` объявлен
+ * NOT NULL: отдельная таблица под один файл означала бы второй конвейер.
+ */
+export const workKindSchema = z.enum(['complect', 'registry']);
+export type WorkKind = z.infer<typeof workKindSchema>;
+
+/**
+ * Комплект работы — то, что подрядчик собирает и подаёт (§3).
  *
  * `objectId` и `contractorId` денормализованы сознательно: на них опирается
- * третий уровень изоляции доступа — composite FK (§4.1). Без них проверка
- * области видимости требовала бы join'а на каждый запрос.
+ * третий уровень изоляции доступа — составной внешний ключ (§4.1). Без них
+ * проверка области видимости требовала бы join'а на каждый запрос.
+ *
+ * `managedByContractorId` отделён от `contractorId` намеренно. Первое — кто
+ * ВЕДЁТ комплект в портале, второе — кто ВЫПОЛНИЛ работу. Они расходятся, когда
+ * инженер ПТО генподрядчика заводит комплект за субподрядчика: состав в этом
+ * случае правит генподрядчик, а исполнителем в реестре остаётся субподрядчик.
  */
-export const submissionSchema = z.object({
+export const workSchema = z.object({
   id: uuidSchema,
-  volumeId: uuidSchema,
   objectId: uuidSchema,
+  sectionCode: sectionCodeSchema,
+  period: periodSchema,
   contractorId: uuidSchema,
-  number: z.string().max(128).nullable(),
+  managedByContractorId: uuidSchema,
+  kind: workKindSchema,
   title: z.string().min(1).max(1000),
+  /** Реестр, в который комплект включён. `null` — собран, но ещё не в папке. */
+  registryId: uuidSchema.nullable(),
+  /** Порядок работы в реестре — тот же, что в бумаге. */
+  ordinal: sortOrderSchema.nullable(),
+  autoRunEnabled: z.boolean(),
   currentRevisionId: uuidSchema.nullable(),
   createdBy: uuidSchema,
   createdAt: isoDateTimeSchema,
 });
-export type Submission = z.infer<typeof submissionSchema>;
+export type Work = z.infer<typeof workSchema>;
 
 /**
- * Ревизия поставки — неизменяемая после submit единица прохождения конвейера.
+ * Состояние реестра передачи.
+ *
+ * `issued` — папка передана (подпись «Передал»), `accepted` — получена
+ * техзаказчиком («Принял»). Согласование СОДЕРЖИМОГО живёт в ревизиях
+ * комплектов и в статусе реестра не отражается: реестр — сопроводительная опись,
+ * а не решение по документам.
+ */
+export const registryStatusSchema = z.enum(['draft', 'issued', 'accepted']);
+export type RegistryStatus = z.infer<typeof registryStatusSchema>;
+
+/**
+ * Реестр исполнительной документации — нумерованный документ передачи (§3).
+ *
+ * Не контейнер месяца: реестров за один месяц по одному разделу бывает
+ * несколько, и это разные подписанные бумаги. Номер обязателен к передаче, но не
+ * к заведению — черновик собирают заранее.
+ */
+export const registrySchema = z.object({
+  id: uuidSchema,
+  objectId: uuidSchema,
+  sectionCode: sectionCodeSchema,
+  period: periodSchema,
+  number: z.string().max(128).nullable(),
+  /** Реквизиты шапки, как они напечатаны в бумаге. */
+  folderNo: z.string().max(64).nullable(),
+  building: z.string().max(128).nullable(),
+  floor: z.string().max(64).nullable(),
+  structure: z.string().max(255).nullable(),
+  status: registryStatusSchema,
+  version: rowVersionSchema,
+  issuedBy: uuidSchema.nullable(),
+  issuedAt: isoDateTimeSchema.nullable(),
+  /** Ревизия файла-скана, поданная на момент передачи. */
+  issuedFileRevisionId: uuidSchema.nullable(),
+  acceptedBy: uuidSchema.nullable(),
+  acceptedAt: isoDateTimeSchema.nullable(),
+  createdBy: uuidSchema,
+  createdAt: isoDateTimeSchema,
+});
+export type Registry = z.infer<typeof registrySchema>;
+
+/**
+ * Строка снимка состава переданного реестра.
+ *
+ * Наименование и исполнитель скопированы, а не прочитаны по ссылке:
+ * переименование работы не должно переписывать уже переданную опись. Ровно тот
+ * же принцип, по которому прогон проверок пиннит версию набора правил.
+ */
+export const registryItemSchema = z.object({
+  registryId: uuidSchema,
+  ordinal: z.int().positive(),
+  workId: uuidSchema,
+  revisionId: uuidSchema,
+  contractorId: uuidSchema,
+  title: z.string().min(1).max(1000),
+});
+export type RegistryItem = z.infer<typeof registryItemSchema>;
+
+/**
+ * Ревизия комплекта — неизменяемая после submit единица прохождения конвейера.
  *
  * `aggregateManifestHash` — хэш состава ревизии (файлы и их порядок). Только
  * его совпадение разрешает переиспользовать результаты предыдущей ревизии
  * при повторной подаче после возврата.
+ *
+ * Тип и таблица сохранили имя `submissionRevision` после переезда поставки в
+ * комплект (0028): переименование не изменило бы ни одного инварианта, а стоило
+ * бы правки пятнадцати репозиториев и трёх функций-триггеров.
  */
 export const submissionRevisionSchema = z
   .object({
     id: uuidSchema,
-    submissionId: uuidSchema,
+    workId: uuidSchema,
     revisionNo: z.int().positive(),
     parentRevisionId: uuidSchema.nullable(),
     status: workflowStatusSchema,

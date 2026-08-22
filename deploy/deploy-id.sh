@@ -55,6 +55,12 @@ echo "==> [2/6] build (тег $ID_TAG)"
 MIGRATE_STATUS="нет"
 if [ "$MIGRATE" = 1 ]; then
   echo "==> [3/6] migrate"
+  # Воркер останавливается ДО наката. Миграции переименовывают таблицы (0028:
+  # submissions -> works), и работающий воркер старого образа продолжал бы
+  # обращаться к именам, которых уже нет: задачи падали бы, а следы этого
+  # выглядели бы отказом конвейера, а не выкладкой. API останавливать не нужно —
+  # его образ поднимается заново шагом ниже и до этого отвечает читателям.
+  "${COMPOSE[@]}" stop id-worker >/dev/null 2>&1 || true
   [ -r "$MIGRATE_ENV_FILE" ] || { echo "Нет доступа к $MIGRATE_ENV_FILE — см. deploy/README.md" >&2; exit 1; }
   MIGRATE_DATABASE_URL="$(grep -E '^MIGRATE_DATABASE_URL=' "$MIGRATE_ENV_FILE" | head -n1 | cut -d= -f2-)"
   [ -n "$MIGRATE_DATABASE_URL" ] || { echo "MIGRATE_DATABASE_URL не задан в $MIGRATE_ENV_FILE" >&2; exit 1; }

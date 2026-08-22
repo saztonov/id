@@ -103,14 +103,25 @@ declare module 'fastify' {
 }
 
 /**
- * Приоритет ролей (§4.1): admin > manager > engineer > contractor.
+ * Приоритет ролей (§4.1): admin > manager > engineer > general_contractor >
+ * contractor.
  *
  * Порядок задаёт, какая роль определяет ОБЛАСТЬ ВИДИМОСТИ при нескольких
  * ролях. Права при этом складываются: `admin` + `manager` даёт и
  * администрирование, и бизнес-согласование, потому что `hasPermission()`
  * смотрит на весь набор ролей.
+ *
+ * Генподрядчик стоит ниже инженера и выше подрядчика: его область шире
+ * подрядческой (объект целиком, а не своя организация) и уже инженерной
+ * (объекты выводятся из карточек, а не назначаются).
  */
-const ROLE_PRIORITY: readonly UserRole[] = ['admin', 'manager', 'engineer', 'contractor'];
+const ROLE_PRIORITY: readonly UserRole[] = [
+  'admin',
+  'manager',
+  'engineer',
+  'general_contractor',
+  'contractor',
+];
 
 type PrincipalRow = {
   id: string;
@@ -122,6 +133,8 @@ type PrincipalRow = {
   contractor_id: string | null;
   roles: string[];
   object_ids: string[];
+  /** Объекты, где организация пользователя названа генподрядчиком (0028). */
+  gc_object_ids: string[];
   must_change_password: boolean | null;
 };
 
@@ -143,11 +156,18 @@ export async function buildScope(pool: Pool, userId: string): Promise<ScopeResol
                      '{}'::text[]) as roles,
             coalesce(array_agg(distinct s.object_id::text) filter (where s.object_id is not null),
                      '{}'::text[]) as object_ids,
+            -- Область генподрядчика ВЫВОДИТСЯ из карточек объектов, а не
+            -- назначается: второй источник той же истины разошёлся бы с первым
+            -- молча — генподрядчика сменили в карточке, область осталась старой.
+            coalesce(array_agg(distinct g.id::text) filter (where g.id is not null),
+                     '{}'::text[]) as gc_object_ids,
             bool_or(c.must_change_password) as must_change_password
        from users u
        left join user_roles r on r.user_id = u.id
        left join user_object_scopes s on s.user_id = u.id
        left join user_credentials c on c.user_id = u.id
+       left join construction_objects g
+              on g.general_contractor_id = u.contractor_id and g.is_active
       where u.id = $1
       group by u.id`,
     [userId],
@@ -203,6 +223,33 @@ export async function buildScope(pool: Pool, userId: string): Promise<ScopeResol
         roles,
         principal,
         scope: { kind: 'engineer', userId: user.id, objectIds: row.object_ids },
+      };
+    case 'general_contractor':
+      if (user.contractorId === null) {
+        // Та же ошибка администрирования, что у подрядчика, и по той же
+        // причине: организация — не только область видимости, но и то, от чьего
+        // имени подаётся файл реестра. Придумать её за пользователя нельзя.
+        return {
+          granted: false,
+          reason: 'contractor-without-organization',
+          user,
+          roles,
+          principal,
+        };
+      }
+      // Пустой список объектов — законное состояние: генподрядчик заведён, но
+      // ни на одном объекте генподрядчиком ещё не назван.
+      return {
+        granted: true,
+        user,
+        roles,
+        principal,
+        scope: {
+          kind: 'general_contractor',
+          userId: user.id,
+          objectIds: row.gc_object_ids,
+          contractorId: user.contractorId,
+        },
       };
     case 'contractor':
       if (user.contractorId === null) {

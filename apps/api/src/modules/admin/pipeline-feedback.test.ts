@@ -45,8 +45,6 @@ const USER_ADMIN = id(601);
 const USER_ENGINEER = id(602);
 const ORG_CUSTOMER = id(610);
 const OBJECT_A = id(611);
-const SECTION_A = id(612);
-const VOLUME_A = id(613);
 const SUBMISSION_A = id(614);
 const REVISION_A = id(615);
 const BLOCK_A = id(620);
@@ -61,11 +59,9 @@ const FIXTURE: readonly string[] = [
   `INSERT INTO counterparties (id, name, kind) VALUES ('${ORG_CUSTOMER}', 'ООО «Заказчик»', 'customer')`,
   `INSERT INTO construction_objects (id, code, name, full_name)
      VALUES ('${OBJECT_A}', 'FBK01', 'Объект обратной связи', 'ЖК «Связь», корпус 1')`,
-  `INSERT INTO section_kinds (code, name) VALUES ('roofing', 'Кровля') ON CONFLICT (code) DO NOTHING`,
-  `INSERT INTO object_sections (id, object_id, code, name, section_kind_code)
-     VALUES ('${SECTION_A}', '${OBJECT_A}', 'roof', 'Кровля', 'roofing')`,
-  `INSERT INTO volumes (id, object_id, section_id, code, name)
-     VALUES ('${VOLUME_A}', '${OBJECT_A}', '${SECTION_A}', 'V-1', 'Том 1')`,
+  `INSERT INTO sections (code, name) VALUES ('roofing', 'Кровля') ON CONFLICT (code) DO NOTHING`,
+  `INSERT INTO object_sections (object_id, section_code)
+       VALUES ('${OBJECT_A}', 'roofing') ON CONFLICT DO NOTHING`,
   // Пользователи заводятся ДО поставки: `submissions.created_by` — обязательная
   // ссылка на автора, и порядок здесь не косметика.
   `INSERT INTO users (id, kc_sub, full_name, email)
@@ -75,10 +71,13 @@ const FIXTURE: readonly string[] = [
   `INSERT INTO user_roles (user_id, role) VALUES ('${USER_ADMIN}', 'admin')`,
   `INSERT INTO user_roles (user_id, role) VALUES ('${USER_ENGINEER}', 'engineer')`,
 
-  `INSERT INTO submissions (id, volume_id, object_id, contractor_id, title, created_by)
-     VALUES ('${SUBMISSION_A}', '${VOLUME_A}', '${OBJECT_A}', '${ORG_CUSTOMER}', 'Комплект',
+  `INSERT INTO object_contractors (object_id, contractor_id)
+       VALUES ('${OBJECT_A}', '${ORG_CUSTOMER}') ON CONFLICT DO NOTHING`,
+  `INSERT INTO works
+       (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
+     VALUES ('${SUBMISSION_A}', '${OBJECT_A}', '${ORG_CUSTOMER}', '${ORG_CUSTOMER}', 'roofing', DATE '2026-01-01', 'Комплект',
              '${USER_ADMIN}')`,
-  `INSERT INTO submission_revisions (id, submission_id, object_id, contractor_id, revision_no, status)
+  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
      VALUES ('${REVISION_A}', '${SUBMISSION_A}', '${OBJECT_A}', '${ORG_CUSTOMER}', 1, 'draft')`,
 ];
 

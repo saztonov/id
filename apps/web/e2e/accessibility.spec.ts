@@ -104,6 +104,13 @@ test('журнал ошибок проходит axe', async ({ page }) => {
 
 test('справочник профилей разделов проходит проверку axe', async ({ page }) => {
   await signIn(page, KC.admin, '/catalog?tab=section-profiles');
+  // Панель открывается на первом разделе справочника, а профиль заведён у
+  // кровли: раздел выбирается явно, иначе проверялась бы пустая карточка.
+  const picker = page.getByRole('combobox', { name: 'Раздел работ' });
+  await picker.click();
+  // Ввод, а не прокрутка: список виртуальный, и «Кровля» в нём далеко не первая.
+  await picker.fill('Кровля');
+  await page.locator('.ant-select-dropdown:visible').getByTitle('Кровля').click();
   await expect(page.getByTestId('section-profile-card').first()).toBeVisible();
   await analyze(page);
 });

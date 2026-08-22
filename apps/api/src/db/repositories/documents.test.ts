@@ -82,9 +82,6 @@ const ORG_A = id(3);
 const ORG_B = id(4);
 const USER = id(5);
 
-const SECTION = id(10);
-const VOLUME = id(11);
-
 const SUBMISSION_A = id(20);
 const REVISION_A = id(21);
 const SUBMISSION_B = id(22);
@@ -142,11 +139,9 @@ const FIXTURE: readonly string[] = [
   `INSERT INTO construction_objects (id, code, name, full_name)
      VALUES ('${OBJECT}', 'TST01', 'Объект 1', 'ЖК «Тест», корпус 1')`,
   `INSERT INTO users (id, kc_sub, full_name) VALUES ('${USER}', 'kc-documents', 'Тестовый пользователь')`,
-  `INSERT INTO section_kinds (code, name) VALUES ('roofing', 'Кровля автостоянки')`,
-  `INSERT INTO object_sections (id, object_id, code, name, section_kind_code)
-     VALUES ('${SECTION}', '${OBJECT}', '2.5.1', 'Кровля', 'roofing')`,
-  `INSERT INTO volumes (id, object_id, section_id, code, name)
-     VALUES ('${VOLUME}', '${OBJECT}', '${SECTION}', 'V-1', 'Том 1')`,
+  `INSERT INTO sections (code, name) VALUES ('roofing', 'Кровля автостоянки') ON CONFLICT (code) DO NOTHING`,
+  `INSERT INTO object_sections (object_id, section_code)
+       VALUES ('${OBJECT}', 'roofing') ON CONFLICT DO NOTHING`,
 
   `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
      VALUES ('${SHA('a')}', 'blobs/${SHA('a')}', 2048, 'application/pdf')`,
@@ -160,9 +155,12 @@ const FIXTURE: readonly string[] = [
      VALUES ('${SHA('e')}', 'blobs/${SHA('e')}', 4096, 'application/pdf')`,
 
   // --- Ревизия А (draft, подрядчик А) --------------------------------------
-  `INSERT INTO submissions (id, volume_id, object_id, contractor_id, title, created_by)
-     VALUES ('${SUBMISSION_A}', '${VOLUME}', '${OBJECT}', '${ORG_A}', 'Поставка А', '${USER}')`,
-  `INSERT INTO submission_revisions (id, submission_id, object_id, contractor_id, revision_no, status)
+  `INSERT INTO object_contractors (object_id, contractor_id)
+       VALUES ('${OBJECT}', '${ORG_A}') ON CONFLICT DO NOTHING`,
+  `INSERT INTO works
+       (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
+     VALUES ('${SUBMISSION_A}', '${OBJECT}', '${ORG_A}', '${ORG_A}', 'roofing', DATE '2026-01-01', 'Поставка А', '${USER}')`,
+  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
      VALUES ('${REVISION_A}', '${SUBMISSION_A}', '${OBJECT}', '${ORG_A}', 1, 'draft')`,
   `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order, verify_state)
      VALUES ('${FILE_A}', '${REVISION_A}', '${SHA('a')}', 'akt.pdf', 0, 'ok')`,
@@ -238,9 +236,12 @@ const FIXTURE: readonly string[] = [
              '${TEXT_CERT}', '${SHA('9')}')`,
 
   // --- Ревизия Б (чужая) ----------------------------------------------------
-  `INSERT INTO submissions (id, volume_id, object_id, contractor_id, title, created_by)
-     VALUES ('${SUBMISSION_B}', '${VOLUME}', '${OBJECT}', '${ORG_B}', 'Поставка Б', '${USER}')`,
-  `INSERT INTO submission_revisions (id, submission_id, object_id, contractor_id, revision_no, status)
+  `INSERT INTO object_contractors (object_id, contractor_id)
+       VALUES ('${OBJECT}', '${ORG_B}') ON CONFLICT DO NOTHING`,
+  `INSERT INTO works
+       (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
+     VALUES ('${SUBMISSION_B}', '${OBJECT}', '${ORG_B}', '${ORG_B}', 'roofing', DATE '2026-01-01', 'Поставка Б', '${USER}')`,
+  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
      VALUES ('${REVISION_B}', '${SUBMISSION_B}', '${OBJECT}', '${ORG_B}', 1, 'draft')`,
   `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order, verify_state)
      VALUES ('${FILE_B}', '${REVISION_B}', '${SHA('c')}', 'chuzhoy.pdf', 0, 'ok')`,
@@ -248,9 +249,12 @@ const FIXTURE: readonly string[] = [
      VALUES ('${PAGE_B0}', '${REVISION_B}', '${FILE_B}', 0, 0, 1654, 2339, 0)`,
 
   // --- Ревизия на проверке (in_review): класс derived писать РАЗРЕШЕНО -------
-  `INSERT INTO submissions (id, volume_id, object_id, contractor_id, title, created_by)
-     VALUES ('${SUBMISSION_REVIEW}', '${VOLUME}', '${OBJECT}', '${ORG_A}', 'Поставка на проверке', '${USER}')`,
-  `INSERT INTO submission_revisions (id, submission_id, object_id, contractor_id, revision_no, status)
+  `INSERT INTO object_contractors (object_id, contractor_id)
+       VALUES ('${OBJECT}', '${ORG_A}') ON CONFLICT DO NOTHING`,
+  `INSERT INTO works
+       (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
+     VALUES ('${SUBMISSION_REVIEW}', '${OBJECT}', '${ORG_A}', '${ORG_A}', 'roofing', DATE '2026-01-01', 'Поставка на проверке', '${USER}')`,
+  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
      VALUES ('${REVISION_REVIEW}', '${SUBMISSION_REVIEW}', '${OBJECT}', '${ORG_A}', 1, 'draft')`,
   `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order, verify_state)
      VALUES ('${FILE_REVIEW}', '${REVISION_REVIEW}', '${SHA('d')}', 'review.pdf', 0, 'ok')`,
@@ -259,9 +263,12 @@ const FIXTURE: readonly string[] = [
   `UPDATE submission_revisions SET status = 'in_review' WHERE id = '${REVISION_REVIEW}'`,
 
   // --- Согласованная ревизия: класс derived писать ЗАПРЕЩЕНО -----------------
-  `INSERT INTO submissions (id, volume_id, object_id, contractor_id, title, created_by)
-     VALUES ('${SUBMISSION_APPROVED}', '${VOLUME}', '${OBJECT}', '${ORG_A}', 'Поставка согласованная', '${USER}')`,
-  `INSERT INTO submission_revisions (id, submission_id, object_id, contractor_id, revision_no, status)
+  `INSERT INTO object_contractors (object_id, contractor_id)
+       VALUES ('${OBJECT}', '${ORG_A}') ON CONFLICT DO NOTHING`,
+  `INSERT INTO works
+       (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
+     VALUES ('${SUBMISSION_APPROVED}', '${OBJECT}', '${ORG_A}', '${ORG_A}', 'roofing', DATE '2026-01-01', 'Поставка согласованная', '${USER}')`,
+  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
      VALUES ('${REVISION_APPROVED}', '${SUBMISSION_APPROVED}', '${OBJECT}', '${ORG_A}', 1, 'draft')`,
   `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order, verify_state)
      VALUES ('${FILE_APPROVED}', '${REVISION_APPROVED}', '${SHA('d')}', 'approved.pdf', 0, 'ok')`,

@@ -1,18 +1,34 @@
 /**
  * Справочники §14: профили разделов и реестр РД.
  *
- * Профиль вида раздела — это то, чем правила полноты отличают «комплект
- * неполон» от «раздел не настроен» (§9.1). Поэтому проверяется не только показ
- * действующей версии, но и обратный случай: у вида раздела без профиля экран
- * обязан сказать «не настроен», а не показать пустую таблицу.
+ * Профиль раздела — это то, чем правила полноты отличают «комплект неполон» от
+ * «раздел не настроен» (§9.1). Поэтому проверяется не только показ действующей
+ * версии, но и обратный случай: у раздела без профиля экран обязан сказать «не
+ * настроен», а не показать пустую таблицу.
  */
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 import { apiPost, KC, signIn } from './support/session.js';
 
 test.describe.configure({ mode: 'serial' });
 
-test('действующий профиль вида раздела показан составом, а не ссылкой', async ({ page }) => {
+/**
+ * Выбор раздела в панели профилей.
+ *
+ * До 0028 в справочнике был ровно один раздел из фикстуры, и панель открывалась
+ * на нём. Теперь разделов двадцать четыре — они пришли сидом 0029, — и первым
+ * идёт «Благоустройство». Раздел, у которого есть профиль, выбирается явно.
+ */
+async function pickRoofing(page: Page): Promise<void> {
+  const picker = page.getByRole('combobox', { name: 'Раздел работ' });
+  await picker.click();
+  // Ввод, а не прокрутка: список виртуальный, и «Кровля» в нём далеко не первая.
+  await picker.fill('Кровля');
+  await page.locator('.ant-select-dropdown:visible').getByTitle('Кровля').click();
+}
+
+test('действующий профиль раздела показан составом, а не ссылкой', async ({ page }) => {
   await signIn(page, KC.admin, '/catalog?tab=section-profiles');
+  await pickRoofing(page);
 
   const card = page.getByTestId('section-profile-card').first();
   await expect(card).toBeVisible();
@@ -26,6 +42,7 @@ test('действующий профиль вида раздела показа
 
 test('черновик версии профиля публикуется отдельным действием', async ({ page }) => {
   await signIn(page, KC.admin, '/catalog?tab=section-profiles');
+  await pickRoofing(page);
 
   await expect(page.getByText('черновик')).toBeVisible();
   await page.getByTestId('publish-profile-2').click();
@@ -33,7 +50,7 @@ test('черновик версии профиля публикуется отд
   await expect
     .poll(async () => {
       const response = await page.request.get(
-        '/api/v1/catalog/section-profiles?sectionKindCode=roofing',
+        '/api/v1/catalog/section-profiles?sectionCode=roofing',
       );
       const body = (await response.json()) as { version: number; publishedAt: string | null }[];
       const second = body.find((item) => item.version === 2);
@@ -42,15 +59,16 @@ test('черновик версии профиля публикуется отд
     .toBe('опубликован');
 });
 
-test('вид раздела без профиля назван не настроенным, а не пустым', async ({ page }) => {
+test('раздел без профиля назван не настроенным, а не пустым', async ({ page }) => {
   await signIn(page, KC.admin, '/catalog?tab=section-profiles');
+  await pickRoofing(page);
 
   // Проверяется ответ 404 маршрута действующего профиля: он законный и обязан
   // читаться как состояние открытого мира, а не как сбой. Запрос идёт ПОСЛЕ
   // входа: `page.request` ходит с cookie вкладки, и до входа её просто нет —
   // 401 здесь означал бы неавторизованного клиента, а не отсутствие профиля.
   const response = await page.request.get(
-    '/api/v1/catalog/section-kinds/roofing/effective-profile?at=2000-01-01',
+    '/api/v1/catalog/sections/roofing/effective-profile?at=2000-01-01',
   );
   expect(response.status()).toBe(404);
   await page.getByLabel('Дата, на которую нужен действующий профиль').fill('2000-01-01');

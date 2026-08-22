@@ -85,8 +85,8 @@ export interface ReferencePage {
 export interface ReferencePackage {
   /** Обезличенный ключ комплекта: без номера акта, шифра и адреса объекта. */
   readonly packageKey: string;
-  /** `section_kinds.code`: 'roofing' | 'concrete_frame'. */
-  readonly sectionKindCode: string;
+  /** `sections.code`: 'roofing' | 'concrete_frame'. */
+  readonly sectionCode: string;
   readonly pages: readonly ReferencePage[];
   /** Сколько строк ожидается в реестре приложений; `null` — реестра нет. */
   readonly expectedRegistryRowCount: number | null;
@@ -118,7 +118,7 @@ export interface ReferenceDocSpec {
 
 export interface ReferencePackageSpec {
   readonly packageKey: string;
-  readonly sectionKindCode: string;
+  readonly sectionCode: string;
   /**
    * Число страниц. Единственный признак, которым спецификация связывается с
    * папкой закрытого корпуса.
@@ -154,7 +154,7 @@ const ROLE_ANNEX = 'annex_continuation';
  */
 const PACKAGE_A: ReferencePackageSpec = {
   packageKey: 'package-a',
-  sectionKindCode: 'roofing',
+  sectionCode: 'roofing',
   pageCount: 50,
   expectedRegistryRowCount: 23,
   documents: [
@@ -336,7 +336,7 @@ const PACKAGE_A: ReferencePackageSpec = {
  */
 const PACKAGE_B: ReferencePackageSpec = {
   packageKey: 'package-b',
-  sectionKindCode: 'roofing',
+  sectionCode: 'roofing',
   pageCount: 9,
   expectedRegistryRowCount: null,
   documents: [
@@ -385,7 +385,7 @@ const PACKAGE_B: ReferencePackageSpec = {
  */
 const PACKAGE_C: ReferencePackageSpec = {
   packageKey: 'package-c',
-  sectionKindCode: 'concrete_frame',
+  sectionCode: 'concrete_frame',
   pageCount: 83,
   expectedRegistryRowCount: 29,
   documents: [
@@ -1671,7 +1671,7 @@ export function buildReferencePackage(
 
   return {
     packageKey: spec.packageKey,
-    sectionKindCode: spec.sectionKindCode,
+    sectionCode: spec.sectionCode,
     pages: referencePages,
     expectedRegistryRowCount: spec.expectedRegistryRowCount,
   };

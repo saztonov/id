@@ -19,7 +19,7 @@
  * 2. **Разграничение прав отдельно для чтения и записи** (§4.1): читают
  *    справочник все роли, пишет только администратор, а очередь кандидатов
  *    закрыта и на чтение, потому что в ней лежат фрагменты чужих документов.
- * 3. **Новый вид раздела стартует в `assisted`** (§0.5, п.5) — и отказ приходит
+ * 3. **Новый раздел стартует в `assisted`** (§0.5, п.5) — и отказ приходит
  *    именно отказом, а не молчаливым понижением уровня.
  * 4. **Версионность профиля** — прогон проверок месячной давности обязан
  *    разрешаться в ту же версию профиля после публикации новой.
@@ -85,9 +85,9 @@ const KC = {
   contractor: 'kc-catalog-contractor',
 } as const;
 
-/** Вид раздела из корпуса; профили версионируются именно по нему. */
-const KIND_ROOFING = 'roofing';
-const KIND_RC = 'rc_structures';
+/** Раздел из корпуса; профили версионируются именно по нему. */
+const SECTION_ROOFING = 'roofing';
+const SECTION_RC = 'rc_structures';
 
 /** Системный вид ИД из seed-миграции 0009: на нём проверяются наложения. */
 const DOC_TYPE_SYSTEM = 'aosr';
@@ -114,9 +114,8 @@ const FIXTURE: readonly string[] = [
   // фикстур нет: собственная строка rule_definitions ломала бы сверку реестра
   // с реализациями при старте приложения (§9.6). Коды ниже — настоящие.
 
-  `INSERT INTO section_kinds (code, name) VALUES ('${KIND_ROOFING}', 'Кровля автостоянки')`,
-  `INSERT INTO section_kinds (code, name)
-     VALUES ('${KIND_RC}', 'Несущие ЖБ конструкции надземной части')`,
+  `INSERT INTO sections (code, name) VALUES ('${SECTION_ROOFING}', 'Кровля автостоянки') ON CONFLICT (code) DO NOTHING`,
+  `INSERT INTO sections (code, name) VALUES ('${SECTION_RC}', 'Несущие ЖБ конструкции надземной части') ON CONFLICT (code) DO NOTHING`,
 
   `INSERT INTO users (id, kc_sub, full_name) VALUES ('${USER_ADMIN}', '${KC.admin}', 'Администратор портала')`,
   `INSERT INTO users (id, kc_sub, full_name) VALUES ('${USER_ENGINEER}', '${KC.engineer}', 'Инженер объекта')`,
@@ -184,7 +183,7 @@ afterAll(async () => {
 // Вход и запросы
 // =====================================================================
 
-type Method = 'GET' | 'POST' | 'PATCH' | 'DELETE';
+type Method = 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
 
 interface SignedIn {
   readonly cookie: string;
@@ -309,12 +308,14 @@ describe('маршруты справочников зарегистрирова
     ['DELETE', `${P}/counterparties/:counterpartyId`],
     ['GET', `${P}/counterparty-kinds`],
     ['POST', `${P}/counterparty-kinds`],
+    ['GET', `${P}/sections`],
+    ['POST', `${P}/sections`],
+    ['PATCH', `${P}/sections/:sectionCode`],
     ['GET', `${P}/objects/:objectId/sections`],
-    ['POST', `${P}/objects/:objectId/sections`],
-    ['PATCH', `${P}/sections/:sectionId`],
-    ['GET', `${P}/section-kinds`],
-    ['POST', `${P}/section-kinds`],
-    ['GET', `${P}/section-kinds/:kindCode/effective-profile`],
+    ['PUT', `${P}/objects/:objectId/sections/:sectionCode`],
+    ['GET', `${P}/objects/:objectId/contractors`],
+    ['PUT', `${P}/objects/:objectId/contractors/:contractorId`],
+    ['GET', `${P}/sections/:sectionCode/effective-profile`],
     ['GET', `${P}/section-profiles`],
     ['POST', `${P}/section-profiles`],
     ['POST', `${P}/section-profiles/:profileId/publish`],
@@ -352,7 +353,7 @@ describe('маршруты справочников зарегистрирова
     const session = await sessionFor(KC.admin);
     const response = await app.inject({
       method: 'POST',
-      url: `${P}/section-kinds`,
+      url: `${P}/sections`,
       headers: { cookie: session.cookie },
       payload: { code: 'no_csrf', name: 'Без CSRF' },
     });
@@ -377,7 +378,7 @@ describe('права на справочники: чтение всем, зап�
     for (const kcSub of [KC.contractor, KC.engineer, KC.manager, KC.admin]) {
       expect((await as(kcSub, 'GET', `${P}/objects`)).statusCode).toBe(200);
       expect((await as(kcSub, 'GET', `${P}/counterparties`)).statusCode).toBe(200);
-      expect((await as(kcSub, 'GET', `${P}/section-kinds`)).statusCode).toBe(200);
+      expect((await as(kcSub, 'GET', `${P}/sections`)).statusCode).toBe(200);
     }
   });
 
@@ -385,8 +386,8 @@ describe('права на справочники: чтение всем, зап�
     const writes: readonly (readonly [Method, string, unknown])[] = [
       ['POST', `${P}/counterparties`, { name: 'ООО «Проба»', kind: 'supplier' }],
       ['POST', `${P}/objects`, { code: 'DENY1', name: 'Проба', fullName: 'Проба' }],
-      ['POST', `${P}/section-kinds`, { code: 'denied_kind', name: 'Проба' }],
-      ['POST', `${P}/section-profiles`, { sectionKindCode: KIND_RC, effectiveFrom: '2026-01-01' }],
+      ['POST', `${P}/sections`, { code: 'denied_section', name: 'Проба' }],
+      ['POST', `${P}/section-profiles`, { sectionCode: SECTION_RC, effectiveFrom: '2026-01-01' }],
       ['PATCH', `${P}/doc-types/${DOC_TYPE_SYSTEM}`, { name: 'Проба' }],
     ];
 
@@ -589,47 +590,104 @@ describe('контрагент: битые реквизиты отвергают
 // =====================================================================
 
 describe('разделы объекта и реестр рабочей документации', () => {
-  it('раздел создаётся с видом раздела из справочника', async () => {
-    const created = await asAdmin('POST', `${P}/objects/${OBJECT}/sections`, {
-      code: '2.5.1',
-      name: 'Кровля автостоянки',
-      sectionKindCode: KIND_ROOFING,
-      sortOrder: 10,
-    });
-    expect(created.statusCode).toBe(201);
-    expect(created.json<{ sectionKindCode: string; objectId: string }>()).toMatchObject({
-      sectionKindCode: KIND_ROOFING,
-      objectId: OBJECT,
-    });
-
+  it('раздел объекта включается и выключается переключателем', async () => {
     const listed = await as(KC.engineer, 'GET', `${P}/objects/${OBJECT}/sections`);
-    expect(listed.json<{ code: string }[]>().map((section) => section.code)).toEqual(['2.5.1']);
+    expect(listed.statusCode).toBe(200);
+
+    // Отдаётся ВЕСЬ справочник с отметкой: список из одних включённых не дал бы
+    // способа включить первый.
+    const before = listed.json<{ sectionCode: string; isActive: boolean }[]>();
+    expect(before.map((row) => row.sectionCode)).toContain(SECTION_ROOFING);
+    expect(before.find((row) => row.sectionCode === SECTION_ROOFING)?.isActive).toBe(false);
+
+    const enabled = await asAdmin('PUT', `${P}/objects/${OBJECT}/sections/${SECTION_ROOFING}`, {
+      isActive: true,
+    });
+    expect(enabled.statusCode).toBe(200);
+    // Наименование приходит из справочника, а не из фикстуры: вставка раздела
+    // в тесте идёт `ON CONFLICT DO NOTHING` поверх сида 0029, и второй источник
+    // имени здесь нарочно не заводится.
+    expect(enabled.json<{ isActive: boolean; sectionCode: string; name: string }>()).toMatchObject({
+      isActive: true,
+      sectionCode: SECTION_ROOFING,
+      name: 'Кровля',
+    });
+
+    // Повтор того же включения — не ошибка: переключатель идемпотентен, и
+    // второе нажатие обязано означать то же, что первое.
+    const again = await asAdmin('PUT', `${P}/objects/${OBJECT}/sections/${SECTION_ROOFING}`, {
+      isActive: true,
+    });
+    expect(again.statusCode).toBe(200);
+
+    const off = await asAdmin('PUT', `${P}/objects/${OBJECT}/sections/${SECTION_ROOFING}`, {
+      isActive: false,
+    });
+    expect(off.json<{ isActive: boolean }>().isActive).toBe(false);
   });
 
-  it('неизвестный вид раздела — 422 с указанием поля; повтор кода — 409', async () => {
-    const unknownKind = await asAdmin('POST', `${P}/objects/${OBJECT}/sections`, {
-      code: '9.9.9',
-      name: 'Раздел с неизвестным видом',
-      sectionKindCode: 'no_such_kind',
-    });
-    expect(unknownKind.statusCode).toBe(422);
-    expect(pointersOf(unknownKind)).toContain('/sectionKindCode');
-
-    const duplicate = await asAdmin('POST', `${P}/objects/${OBJECT}/sections`, {
-      code: '2.5.1',
-      name: 'Дубль раздела',
-      sectionKindCode: KIND_ROOFING,
-    });
-    expect(duplicate.statusCode).toBe(409);
-  });
-
-  it('раздел неизвестного объекта — 404, а не нарушение внешнего ключа', async () => {
-    const response = await asAdmin('POST', `${P}/objects/${id(901)}/sections`, {
-      code: '1.1.1',
-      name: 'Раздел',
-      sectionKindCode: KIND_ROOFING,
+  it('раздела нет в справочнике — 404, а не нарушение внешнего ключа', async () => {
+    const response = await asAdmin('PUT', `${P}/objects/${OBJECT}/sections/no_such_section`, {
+      isActive: true,
     });
     expect(response.statusCode).toBe(404);
+  });
+
+  it('раздел неизвестного объекта — 404', async () => {
+    const response = await asAdmin('PUT', `${P}/objects/${id(901)}/sections/${SECTION_ROOFING}`, {
+      isActive: true,
+    });
+    expect(response.statusCode).toBe(404);
+  });
+
+  it('подрядчик закрепляется за объектом и открепляется', async () => {
+    const assigned = await asAdmin('PUT', `${P}/objects/${OBJECT}/contractors/${ORG_CONTRACTOR}`, {
+      isActive: true,
+    });
+    expect(assigned.statusCode).toBe(200);
+    expect(assigned.json<{ contractorId: string; isActive: boolean }>()).toMatchObject({
+      contractorId: ORG_CONTRACTOR,
+      isActive: true,
+    });
+
+    const listed = await as(KC.engineer, 'GET', `${P}/objects/${OBJECT}/contractors`);
+    expect(listed.json<{ contractorId: string }[]>().map((row) => row.contractorId)).toContain(
+      ORG_CONTRACTOR,
+    );
+
+    const released = await asAdmin('PUT', `${P}/objects/${OBJECT}/contractors/${ORG_CONTRACTOR}`, {
+      isActive: false,
+    });
+    expect(released.json<{ isActive: boolean }>().isActive).toBe(false);
+  });
+
+  it('раздел заводится в справочник и отключается в нём же', async () => {
+    const created = await asAdmin('POST', `${P}/sections`, {
+      code: 'catalog_probe',
+      name: 'Раздел-проба',
+      sortOrder: 990,
+    });
+    expect(created.statusCode).toBe(201);
+
+    const duplicate = await asAdmin('POST', `${P}/sections`, {
+      code: 'catalog_probe',
+      name: 'Он же ещё раз',
+    });
+    expect(duplicate.statusCode).toBe(409);
+
+    const badCode = await asAdmin('POST', `${P}/sections`, { code: 'Кровля', name: 'Кириллица' });
+    expect(badCode.statusCode).toBe(422);
+
+    const off = await asAdmin('PATCH', `${P}/sections/catalog_probe`, { isActive: false });
+    expect(off.json<{ isActive: boolean }>().isActive).toBe(false);
+
+    // Отключённый в справочнике раздел на объекте включить нельзя: иначе
+    // «отключён» означало бы только «не показывать в списке». Отказ — 409, а не
+    // 422: тело запроса верное, противоречит ему состояние справочника.
+    const enable = await asAdmin('PUT', `${P}/objects/${OBJECT}/sections/catalog_probe`, {
+      isActive: true,
+    });
+    expect(enable.statusCode).toBe(409);
   });
 
   it('документ РД создаётся, неизвестный проектировщик даёт 422', async () => {
@@ -661,7 +719,7 @@ describe('разделы объекта и реестр рабочей доку�
 
 interface ProfileResponse {
   id: string;
-  sectionKindCode: string;
+  sectionCode: string;
   version: number;
   effectiveFrom: string;
   effectiveTo: string | null;
@@ -672,13 +730,13 @@ interface ProfileResponse {
   publishedBy: string | null;
 }
 
-describe('профиль вида раздела: новый раздел стартует в assisted', () => {
+describe('профиль раздела: новый раздел стартует в assisted', () => {
   let first: ProfileResponse;
   let second: ProfileResponse;
 
   it('создание раздела сразу в automatic отвергается', async () => {
     const response = await asAdmin('POST', `${P}/section-profiles`, {
-      sectionKindCode: KIND_ROOFING,
+      sectionCode: SECTION_ROOFING,
       effectiveFrom: '2026-01-01',
       expectedDocTypes: [DOC_TYPE_SYSTEM, 'annex_registry'],
       enabledRuleCodes: ['AOSR.HDR.022'],
@@ -694,14 +752,14 @@ describe('профиль вида раздела: новый раздел ста
     expect(detailOf(response)).toContain('Автоматический режим');
 
     const rows = await db.query<{ total: string }>(
-      `SELECT count(*)::text AS total FROM section_profiles WHERE section_kind_code = '${KIND_ROOFING}'`,
+      `SELECT count(*)::text AS total FROM section_profiles WHERE section_code = '${SECTION_ROOFING}'`,
     );
     expect(rows[0]?.total).toBe('0');
   });
 
   it('первая версия публикуется в assisted', async () => {
     const response = await asAdmin('POST', `${P}/section-profiles`, {
-      sectionKindCode: KIND_ROOFING,
+      sectionCode: SECTION_ROOFING,
       effectiveFrom: '2026-01-01',
       expectedDocTypes: [DOC_TYPE_SYSTEM, 'annex_registry'],
       enabledRuleCodes: ['AOSR.HDR.022'],
@@ -728,7 +786,7 @@ describe('профиль вида раздела: новый раздел ста
     // отказ — единственный правильный ответ. Молчаливый переход был бы хуже
     // отсутствия гейта: раздел стал бы автоматическим без подтверждения качества.
     const response = await asAdmin('POST', `${P}/section-profiles`, {
-      sectionKindCode: KIND_ROOFING,
+      sectionCode: SECTION_ROOFING,
       effectiveFrom: '2026-06-01',
       expectedDocTypes: [DOC_TYPE_SYSTEM, 'annex_registry', 'mill_certificate'],
       enabledRuleCodes: ['AOSR.HDR.022', 'DATE.312'],
@@ -742,7 +800,7 @@ describe('профиль вида раздела: новый раздел ста
 
   it('вторая версия в assisted публикуется и закрывает период первой', async () => {
     const response = await asAdmin('POST', `${P}/section-profiles`, {
-      sectionKindCode: KIND_ROOFING,
+      sectionCode: SECTION_ROOFING,
       effectiveFrom: '2026-06-01',
       expectedDocTypes: [DOC_TYPE_SYSTEM, 'annex_registry', 'mill_certificate'],
       enabledRuleCodes: ['AOSR.HDR.022', 'DATE.312'],
@@ -757,7 +815,7 @@ describe('профиль вида раздела: новый раздел ста
   });
 
   it('публикация новой версии не ломает прежнюю', async () => {
-    const listed = await asAdmin('GET', `${P}/section-profiles?sectionKindCode=${KIND_ROOFING}`);
+    const listed = await asAdmin('GET', `${P}/section-profiles?sectionCode=${SECTION_ROOFING}`);
     expect(listed.statusCode).toBe(200);
     const versions = listed.json<ProfileResponse[]>();
 
@@ -781,7 +839,7 @@ describe('профиль вида раздела: новый раздел ста
     // 15 марта, воспроизводим после того, как в июне опубликован новый профиль.
     const past = await asAdmin(
       'GET',
-      `${P}/section-kinds/${KIND_ROOFING}/effective-profile?at=2026-03-15`,
+      `${P}/sections/${SECTION_ROOFING}/effective-profile?at=2026-03-15`,
     );
     expect(past.statusCode).toBe(200);
     expect(past.json<ProfileResponse>().id).toBe(first.id);
@@ -789,20 +847,20 @@ describe('профиль вида раздела: новый раздел ста
 
     const now = await asAdmin(
       'GET',
-      `${P}/section-kinds/${KIND_ROOFING}/effective-profile?at=2026-08-01`,
+      `${P}/sections/${SECTION_ROOFING}/effective-profile?at=2026-08-01`,
     );
     expect(now.json<ProfileResponse>().id).toBe(second.id);
 
     const beforeAnyProfile = await asAdmin(
       'GET',
-      `${P}/section-kinds/${KIND_ROOFING}/effective-profile?at=2025-12-31`,
+      `${P}/sections/${SECTION_ROOFING}/effective-profile?at=2025-12-31`,
     );
     expect(beforeAnyProfile.statusCode).toBe(404);
   });
 
   it('черновик версии не участвует в выборе действующего профиля', async () => {
     const draft = await asAdmin('POST', `${P}/section-profiles`, {
-      sectionKindCode: KIND_ROOFING,
+      sectionCode: SECTION_ROOFING,
       effectiveFrom: '2026-03-01',
       expectedDocTypes: ['unknown_document'],
       publish: false,
@@ -814,7 +872,7 @@ describe('профиль вида раздела: новый раздел ста
     // получить версию 1: неопубликованная настройка не меняет результат проверки.
     const past = await asAdmin(
       'GET',
-      `${P}/section-kinds/${KIND_ROOFING}/effective-profile?at=2026-03-15`,
+      `${P}/sections/${SECTION_ROOFING}/effective-profile?at=2026-03-15`,
     );
     expect(past.json<ProfileResponse>().id).toBe(first.id);
   });
@@ -824,14 +882,14 @@ describe('профиль вида раздела: новый раздел ста
     expect(response.statusCode).toBe(409);
 
     // `published_at` прежней версии не поехал вперёд: по ней уже есть прогоны.
-    const listed = await asAdmin('GET', `${P}/section-profiles?sectionKindCode=${KIND_ROOFING}`);
+    const listed = await asAdmin('GET', `${P}/section-profiles?sectionCode=${SECTION_ROOFING}`);
     const previous = listed.json<ProfileResponse[]>().find((profile) => profile.id === first.id);
     expect(previous?.publishedAt).toBe(first.publishedAt);
   });
 
   it('черновик публикуется отдельным действием и получает автора', async () => {
     const created = await asAdmin('POST', `${P}/section-profiles`, {
-      sectionKindCode: KIND_RC,
+      sectionCode: SECTION_RC,
       effectiveFrom: '2026-02-01',
       publish: false,
     });
@@ -839,12 +897,12 @@ describe('профиль вида раздела: новый раздел ста
     const draft = created.json<ProfileResponse>();
     expect(draft.publishedAt).toBeNull();
 
-    // До публикации вид раздела не имеет действующего профиля, и это законное
+    // До публикации раздел не имеет действующего профиля, и это законное
     // состояние открытого мира: правила полноты обязаны отличать его от
     // «комплект неполон» (§9.1), поэтому 404, а не пустой профиль.
     const missing = await asAdmin(
       'GET',
-      `${P}/section-kinds/${KIND_RC}/effective-profile?at=2026-03-01`,
+      `${P}/sections/${SECTION_RC}/effective-profile?at=2026-03-01`,
     );
     expect(missing.statusCode).toBe(404);
 
@@ -855,14 +913,14 @@ describe('профиль вида раздела: новый раздел ста
 
     const effective = await asAdmin(
       'GET',
-      `${P}/section-kinds/${KIND_RC}/effective-profile?at=2026-03-01`,
+      `${P}/sections/${SECTION_RC}/effective-profile?at=2026-03-01`,
     );
     expect(effective.json<ProfileResponse>().id).toBe(draft.id);
   });
 
   it('период с концом раньше начала отвергается схемой', async () => {
     const response = await asAdmin('POST', `${P}/section-profiles`, {
-      sectionKindCode: KIND_RC,
+      sectionCode: SECTION_RC,
       effectiveFrom: '2026-05-01',
       effectiveTo: '2026-04-01',
     });

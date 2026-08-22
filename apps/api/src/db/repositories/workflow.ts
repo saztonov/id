@@ -33,7 +33,7 @@ import {
   reviewActions,
   sourceFiles,
   submissionRevisions,
-  submissions,
+  works,
   validationRuns,
 } from '@id/db';
 import type { WorkflowStatus } from '@id/contracts';
@@ -66,7 +66,7 @@ export type ReviewAction = 'submit' | 'take_to_review' | 'return' | 'approve' | 
 
 export interface RevisionWorkflowView {
   readonly id: string;
-  readonly submissionId: string;
+  readonly workId: string;
   readonly objectId: string;
   readonly contractorId: string;
   readonly revisionNo: number;
@@ -86,7 +86,7 @@ const iso = (column: unknown, alias: string) =>
 
 const REVISION_SELECTION = {
   id: submissionRevisions.id,
-  submissionId: submissionRevisions.submissionId,
+  workId: submissionRevisions.workId,
   objectId: submissionRevisions.objectId,
   contractorId: submissionRevisions.contractorId,
   revisionNo: submissionRevisions.revisionNo,
@@ -479,7 +479,7 @@ async function parentManifestHash(
   if (revision.parentRevisionId === null) return null;
   // Область не применяется намеренно и безопасно: родитель — это ревизия ТОЙ ЖЕ
   // поставки, а сама ревизия уже прошла проверку области. Фильтр по
-  // `submission_id` делает запрос замкнутым внутри одной поставки, поэтому
+  // `work_id` делает запрос замкнутым внутри одного комплекта, поэтому
   // чужую строку он вернуть не может по построению.
   const rows = await db
     .select({ hash: submissionRevisions.aggregateManifestHash })
@@ -487,7 +487,7 @@ async function parentManifestHash(
     .where(
       and(
         eq(submissionRevisions.id, revision.parentRevisionId),
-        eq(submissionRevisions.submissionId, revision.submissionId),
+        eq(submissionRevisions.workId, revision.workId),
       ),
     )
     .limit(1);
@@ -584,7 +584,7 @@ export async function returnRevision(
       const created = await tx
         .insert(submissionRevisions)
         .values({
-          submissionId: revision.submissionId,
+          workId: revision.workId,
           objectId: revision.objectId,
           contractorId: revision.contractorId,
           revisionNo: revision.revisionNo + 1,
@@ -595,15 +595,15 @@ export async function returnRevision(
 
       const next = created[0];
       if (next === undefined) {
-        throw conflict('Новая ревизия поставки не создана: повторите действие.');
+        throw conflict('Новая ревизия комплекта не создана: повторите действие.');
       }
 
-      // Указатель поставки переводится на новую ревизию: без этого экран
-      // поставки продолжал бы открывать закрытую возвратом.
+      // Указатель комплекта переводится на новую ревизию: без этого экран
+      // комплекта продолжал бы открывать закрытую возвратом.
       await tx
-        .update(submissions)
+        .update(works)
         .set({ currentRevisionId: next.id })
-        .where(eq(submissions.id, revision.submissionId));
+        .where(eq(works.id, revision.workId));
 
       await recordAction(tx, scope, {
         revisionId: input.revisionId,

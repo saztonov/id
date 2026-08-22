@@ -47,8 +47,6 @@ const ORG_CUSTOMER = id(1);
 const ORG_A = id(2);
 const ORG_B = id(3);
 const OBJECT = id(4);
-const SECTION = id(5);
-const VOLUME = id(6);
 
 const SUBMISSION_A = id(10);
 const REVISION_A = id(11);
@@ -104,11 +102,14 @@ function submission(input: {
   readonly fileName: string;
 }): readonly string[] {
   return [
-    `INSERT INTO submissions (id, volume_id, object_id, contractor_id, title, created_by)
-       VALUES ('${input.submissionId}', '${VOLUME}', '${OBJECT}', '${input.contractorId}', 'Поставка', '${USER_A}')`,
-    `INSERT INTO submission_revisions (id, submission_id, object_id, contractor_id, revision_no, status)
+    `INSERT INTO object_contractors (object_id, contractor_id)
+       VALUES ('${OBJECT}', '${input.contractorId}') ON CONFLICT DO NOTHING`,
+    `INSERT INTO works
+       (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
+     VALUES ('${input.submissionId}', '${OBJECT}', '${input.contractorId}', '${input.contractorId}', 'roofing', DATE '2026-01-01', 'Поставка', '${USER_A}')`,
+    `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
        VALUES ('${input.revisionId}', '${input.submissionId}', '${OBJECT}', '${input.contractorId}', 1, 'draft')`,
-    `UPDATE submissions SET current_revision_id = '${input.revisionId}' WHERE id = '${input.submissionId}'`,
+    `UPDATE works SET current_revision_id = '${input.revisionId}' WHERE id = '${input.submissionId}'`,
     `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order, verify_state)
        VALUES ('${input.fileId}', '${input.revisionId}', '${input.sha}', '${input.fileName}', 0, 'ok')`,
     `INSERT INTO source_pages (id, revision_id, source_file_id, file_page_index, revision_ordinal, width_px, height_px, rotation)
@@ -166,11 +167,9 @@ beforeAll(async () => {
     `INSERT INTO counterparties (id, name, kind) VALUES ('${ORG_B}', 'ООО «Подрядчик Б»', 'contractor')`,
     `INSERT INTO construction_objects (id, code, name, full_name)
        VALUES ('${OBJECT}', 'TST01', 'Объект 1', 'ЖК «Тест», корпус 1')`,
-    `INSERT INTO section_kinds (code, name) VALUES ('roofing', 'Кровля')`,
-    `INSERT INTO object_sections (id, object_id, code, name, section_kind_code)
-       VALUES ('${SECTION}', '${OBJECT}', '2.5.1', 'Кровля', 'roofing')`,
-    `INSERT INTO volumes (id, object_id, section_id, code, name)
-       VALUES ('${VOLUME}', '${OBJECT}', '${SECTION}', 'V-1', 'Том 1')`,
+    `INSERT INTO sections (code, name) VALUES ('roofing', 'Кровля') ON CONFLICT (code) DO NOTHING`,
+    `INSERT INTO object_sections (object_id, section_code)
+       VALUES ('${OBJECT}', 'roofing') ON CONFLICT DO NOTHING`,
 
     `INSERT INTO users (id, kc_sub, full_name, contractor_id)
        VALUES ('${USER_A}', '${KC.a}', 'Сотрудник А', '${ORG_A}')`,
@@ -686,7 +685,7 @@ describe('POST /revisions/{id}/return', () => {
     // Указатель поставки переведён: экран поставки обязан открывать новую
     // ревизию, а не закрытую возвратом.
     const submissionRow = await db.query<{ current_revision_id: string }>(
-      `SELECT current_revision_id FROM submissions WHERE id = '${SUBMISSION_A}'`,
+      `SELECT current_revision_id FROM works WHERE id = '${SUBMISSION_A}'`,
     );
     expect(submissionRow[0]?.current_revision_id).toBe(body.nextRevisionId);
   });

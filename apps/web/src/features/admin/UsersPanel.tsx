@@ -3,7 +3,7 @@
  *
  * Роль `contractor` не совмещается с другими — это требование сервера
  * (`userRolesBodySchema`), и причина названа там же: при нескольких ролях один
- * человек и подаёт поставку, и согласует её. Форма подсказывает это ДО отправки,
+ * человек и подаёт комплект, и согласует его. Форма подсказывает это ДО отправки,
  * но не является защитой: отвергает сервер.
  */
 import { useState, type ReactNode } from 'react';
@@ -19,10 +19,24 @@ import { useSession } from '../../app/session.js';
 import { CreateUserModal } from './CreateUserModal.js';
 import { TemporaryPasswordModal } from './TemporaryPasswordModal.js';
 
-const ROLES: readonly UserRole[] = ['contractor', 'engineer', 'manager', 'admin'];
+const ROLES: readonly UserRole[] = [
+  'contractor',
+  'general_contractor',
+  'engineer',
+  'manager',
+  'admin',
+];
 
+/**
+ * Ярлык генподрядчика называет должность, а не сторону договора.
+ *
+ * В портале работает не «генподрядчик» как организация, а его инженер ПТО: он
+ * собирает реестры и заводит комплекты за субподрядчиков, у которых учётных
+ * записей нет. Роль «подрядчик» рядом означала бы то же слово о другом человеке.
+ */
 const ROLE_LABELS: Record<UserRole, string> = {
   contractor: 'подрядчик',
+  general_contractor: 'генподрядчик (ПТО)',
   engineer: 'инженер',
   manager: 'руководитель',
   admin: 'администратор',
@@ -168,6 +182,7 @@ export function UsersPanel(): ReactNode {
           expandedRowRender: (row) => (
             <ScopeEditor
               userId={row.id}
+              roles={row.roles}
               objectOptions={objectOptions}
               busy={setScopes.isPending}
               onSave={(objectIds) => setScopes.mutate({ userId: row.id, objectIds })}
@@ -240,8 +255,19 @@ export function UsersPanel(): ReactNode {
   );
 }
 
+/**
+ * Назначение объектов.
+ *
+ * Читается сервером только для инженера и руководителя. У подрядчика область
+ * выводится из его организации, у генподрядчика — из карточек объектов, где его
+ * организация указана генподрядчиком. Сохранённые здесь строки в этих двух
+ * случаях не читает никто, поэтому редактор не показывается вовсе: список,
+ * который ничего не меняет, — худший из возможных ответов на вопрос «что видит
+ * этот человек».
+ */
 function ScopeEditor(props: {
   readonly userId: string;
+  readonly roles: readonly UserRole[];
   readonly objectOptions: readonly { value: string; label: string }[];
   readonly busy: boolean;
   readonly onSave: (objectIds: string[]) => void;
@@ -251,6 +277,19 @@ function ScopeEditor(props: {
     queryFn: () => admin.user(props.userId),
   });
   const [draft, setDraft] = useState<string[] | null>(null);
+
+  if (props.roles.includes('contractor') || props.roles.includes('general_contractor')) {
+    return (
+      <Space direction="vertical" size={4}>
+        <span>Область видимости выводится, а не назначается.</span>
+        <span>
+          {props.roles.includes('general_contractor')
+            ? 'Генподрядчик видит объекты, где его организация указана генподрядчиком в карточке объекта.'
+            : 'Подрядчик видит объекты, за которыми закреплена его организация, и объекты со своими комплектами.'}
+        </span>
+      </Space>
+    );
+  }
 
   if (card.isPending) return <LoadingState />;
   if (card.isError) return <ErrorState error={card.error} />;

@@ -53,8 +53,12 @@ const EXPECTED_TABLES: readonly string[] = [
   'counterparty_kinds',
   'counterparties',
   'construction_objects',
-  'section_kinds',
+  // §3.2 после 0028: разделы — плоский глобальный справочник, а `object_sections`
+  // стал списком включённых на объекте. Прежняя пара «раздел / раздел
+  // объекта» исчезла вместе с копированием справочника на каждый объект.
+  'sections',
   'object_sections',
+  'object_contractors',
   'section_profiles',
   'object_rule_profiles',
   'rd_documents',
@@ -62,9 +66,12 @@ const EXPECTED_TABLES: readonly string[] = [
   'doc_type_overrides',
   'doc_type_candidates',
   'page_roles',
-  // §3 том → поставка → ревизия и §3.3 файлы, страницы, рабочий документ
-  'volumes',
-  'submissions',
+  // §3 после 0028: объект → раздел → комплект работы → ревизия, плюс реестр как
+  // нумерованный документ передачи и неизменяемый снимок его состава. Тома и
+  // поставки исчезли: том был пустым уровнем, поставка стала комплектом.
+  'registries',
+  'registry_items',
+  'works',
   'submission_revisions',
   'stored_blobs',
   'source_files',

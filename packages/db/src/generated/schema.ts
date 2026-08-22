@@ -97,32 +97,28 @@ export const counterparties = pgTable("counterparties", {
 	check("counterparties_ogrn_chk", sql`ogrn ~ '^([0-9]{13}|[0-9]{15})$'::text`),
 ]);
 
-export const objectSections = pgTable("object_sections", {
+export const objectRuleProfiles = pgTable("object_rule_profiles", {
 	id: uuid().defaultRandom().primaryKey().notNull(),
 	objectId: uuid("object_id").notNull(),
-	code: text().notNull(),
-	name: text().notNull(),
-	sortOrder: integer("sort_order").default(0).notNull(),
-	isActive: boolean("is_active").default(true).notNull(),
-	sectionKindCode: text("section_kind_code").notNull(),
+	version: integer().notNull(),
+	effectiveFrom: date("effective_from").notNull(),
+	effectiveTo: date("effective_to"),
+	overrides: jsonb().default({}).notNull(),
+	publishedAt: timestamp("published_at", { withTimezone: true, mode: 'string' }),
 	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	sectionCode: text("section_code"),
 }, (table) => [
-	index("ix_object_sections_kind").using("btree", table.sectionKindCode.asc().nullsLast().op("text_ops")),
-	unique("object_sections_object_code_uq").on(table.code, table.objectId),
-	unique("object_sections_object_id_uq").on(table.id, table.objectId),
-	check("object_sections_sort_order_chk", sql`sort_order >= 0`),
-]);
-
-export const sectionKinds = pgTable("section_kinds", {
-	code: text().primaryKey().notNull(),
-	name: text().notNull(),
-}, () => [
-	check("section_kinds_code_chk", sql`code ~ '^[a-z][a-z0-9_]*$'::text`),
+	index("ix_object_rule_profiles_object").using("btree", table.objectId.asc().nullsLast().op("date_ops"), table.effectiveFrom.desc().nullsFirst().op("date_ops")),
+	index("ix_object_rule_profiles_section").using("btree", table.sectionCode.asc().nullsLast().op("text_ops")),
+	uniqueIndex("ux_object_rule_profiles_object_version").using("btree", table.objectId.asc().nullsLast().op("uuid_ops"), table.version.asc().nullsLast().op("uuid_ops")).where(sql`(section_code IS NULL)`),
+	uniqueIndex("ux_object_rule_profiles_section_version").using("btree", table.objectId.asc().nullsLast().op("text_ops"), table.sectionCode.asc().nullsLast().op("uuid_ops"), table.version.asc().nullsLast().op("uuid_ops")).where(sql`(section_code IS NOT NULL)`),
+	check("object_rule_profiles_version_chk", sql`version > 0`),
+	check("object_rule_profiles_period_chk", sql`(effective_to IS NULL) OR (effective_from <= effective_to)`),
 ]);
 
 export const sectionProfiles = pgTable("section_profiles", {
 	id: uuid().defaultRandom().primaryKey().notNull(),
-	sectionKindCode: text("section_kind_code").notNull(),
+	sectionCode: text("section_code").notNull(),
 	version: integer().notNull(),
 	effectiveFrom: date("effective_from").notNull(),
 	effectiveTo: date("effective_to"),
@@ -137,50 +133,16 @@ export const sectionProfiles = pgTable("section_profiles", {
 	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
 }, (table) => [
 	index("ix_section_profiles_published").using("btree", table.publishedBy.asc().nullsLast().op("uuid_ops")),
-	uniqueIndex("ux_section_profiles_open_period").using("btree", table.sectionKindCode.asc().nullsLast().op("text_ops")).where(sql`((effective_to IS NULL) AND (published_at IS NOT NULL))`),
-	foreignKey({
-			columns: [table.sectionKindCode],
-			foreignColumns: [sectionKinds.code],
-			name: "section_profiles_section_kind_code_fkey"
-		}),
+	uniqueIndex("ux_section_profiles_open_period").using("btree", table.sectionCode.asc().nullsLast().op("text_ops")).where(sql`((effective_to IS NULL) AND (published_at IS NOT NULL))`),
 	foreignKey({
 			columns: [table.publishedBy],
 			foreignColumns: [users.id],
 			name: "section_profiles_published_by_fkey"
 		}),
-	unique("section_profiles_kind_version_uq").on(table.sectionKindCode, table.version),
+	unique("section_profiles_section_version_uq").on(table.sectionCode, table.version),
 	check("section_profiles_version_chk", sql`version > 0`),
 	check("section_profiles_period_chk", sql`(effective_to IS NULL) OR (effective_from <= effective_to)`),
 	check("section_profiles_autonomy_chk", sql`autonomy_level = ANY (ARRAY['assisted'::text, 'automatic'::text])`),
-]);
-
-export const objectRuleProfiles = pgTable("object_rule_profiles", {
-	id: uuid().defaultRandom().primaryKey().notNull(),
-	objectId: uuid("object_id").notNull(),
-	sectionId: uuid("section_id"),
-	version: integer().notNull(),
-	effectiveFrom: date("effective_from").notNull(),
-	effectiveTo: date("effective_to"),
-	overrides: jsonb().default({}).notNull(),
-	publishedAt: timestamp("published_at", { withTimezone: true, mode: 'string' }),
-	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-}, (table) => [
-	index("ix_object_rule_profiles_object").using("btree", table.objectId.asc().nullsLast().op("date_ops"), table.effectiveFrom.desc().nullsFirst().op("uuid_ops")),
-	index("ix_object_rule_profiles_section").using("btree", table.sectionId.asc().nullsLast().op("uuid_ops")),
-	uniqueIndex("ux_object_rule_profiles_object_version").using("btree", table.objectId.asc().nullsLast().op("int4_ops"), table.version.asc().nullsLast().op("uuid_ops")).where(sql`(section_id IS NULL)`),
-	uniqueIndex("ux_object_rule_profiles_section_version").using("btree", table.objectId.asc().nullsLast().op("uuid_ops"), table.sectionId.asc().nullsLast().op("uuid_ops"), table.version.asc().nullsLast().op("int4_ops")).where(sql`(section_id IS NOT NULL)`),
-	foreignKey({
-			columns: [table.sectionId],
-			foreignColumns: [objectSections.id],
-			name: "object_rule_profiles_section_id_fkey"
-		}),
-	foreignKey({
-			columns: [table.objectId, table.sectionId],
-			foreignColumns: [objectSections.id, objectSections.objectId],
-			name: "object_rule_profiles_section_fk"
-		}),
-	check("object_rule_profiles_version_chk", sql`version > 0`),
-	check("object_rule_profiles_period_chk", sql`(effective_to IS NULL) OR (effective_from <= effective_to)`),
 ]);
 
 export const rdDocuments = pgTable("rd_documents", {
@@ -283,74 +245,9 @@ export const docTypeCandidates = pgTable("doc_type_candidates", {
 	check("doc_type_candidates_mapped_chk", sql`(status <> 'mapped'::text) OR (mapped_doc_type_code IS NOT NULL)`),
 ]);
 
-export const volumes = pgTable("volumes", {
-	id: uuid().defaultRandom().primaryKey().notNull(),
-	objectId: uuid("object_id").notNull(),
-	sectionId: uuid("section_id").notNull(),
-	code: text().notNull(),
-	name: text().notNull(),
-	isActive: boolean("is_active").default(true).notNull(),
-	autoRunEnabled: boolean("auto_run_enabled").default(false).notNull(),
-	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-}, (table) => [
-	index("ix_volumes_object").using("btree", table.objectId.asc().nullsLast().op("uuid_ops")),
-	index("ix_volumes_section").using("btree", table.sectionId.asc().nullsLast().op("uuid_ops")),
-	foreignKey({
-			columns: [table.sectionId],
-			foreignColumns: [objectSections.id],
-			name: "volumes_section_id_fkey"
-		}),
-	foreignKey({
-			columns: [table.objectId, table.sectionId],
-			foreignColumns: [objectSections.id, objectSections.objectId],
-			name: "volumes_section_fk"
-		}),
-	unique("volumes_object_code_uq").on(table.code, table.objectId),
-	unique("volumes_object_id_uq").on(table.id, table.objectId),
-]);
-
-export const submissions = pgTable("submissions", {
-	id: uuid().defaultRandom().primaryKey().notNull(),
-	volumeId: uuid("volume_id").notNull(),
-	objectId: uuid("object_id").notNull(),
-	contractorId: uuid("contractor_id").notNull(),
-	number: text(),
-	title: text().notNull(),
-	currentRevisionId: uuid("current_revision_id"),
-	createdBy: uuid("created_by").notNull(),
-	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-}, (table) => [
-	index("ix_submissions_contractor").using("btree", table.contractorId.asc().nullsLast().op("uuid_ops")),
-	index("ix_submissions_created_by").using("btree", table.createdBy.asc().nullsLast().op("uuid_ops")),
-	index("ix_submissions_current_revision").using("btree", table.currentRevisionId.asc().nullsLast().op("uuid_ops")),
-	index("ix_submissions_object").using("btree", table.objectId.asc().nullsLast().op("uuid_ops")),
-	index("ix_submissions_volume").using("btree", table.volumeId.asc().nullsLast().op("uuid_ops")),
-	foreignKey({
-			columns: [table.volumeId],
-			foreignColumns: [volumes.id],
-			name: "submissions_volume_id_fkey"
-		}),
-	foreignKey({
-			columns: [table.contractorId],
-			foreignColumns: [counterparties.id],
-			name: "submissions_contractor_id_fkey"
-		}),
-	foreignKey({
-			columns: [table.createdBy],
-			foreignColumns: [users.id],
-			name: "submissions_created_by_fkey"
-		}),
-	foreignKey({
-			columns: [table.volumeId, table.objectId],
-			foreignColumns: [volumes.id, volumes.objectId],
-			name: "submissions_volume_fk"
-		}),
-	unique("submissions_scope_uq").on(table.contractorId, table.id, table.objectId),
-]);
-
 export const submissionRevisions = pgTable("submission_revisions", {
 	id: uuid().defaultRandom().primaryKey().notNull(),
-	submissionId: uuid("submission_id").notNull(),
+	workId: uuid("work_id").notNull(),
 	objectId: uuid("object_id").notNull(),
 	contractorId: uuid("contractor_id").notNull(),
 	revisionNo: integer("revision_no").notNull(),
@@ -372,12 +269,7 @@ export const submissionRevisions = pgTable("submission_revisions", {
 	index("ix_submission_revisions_parent").using("btree", table.parentRevisionId.asc().nullsLast().op("uuid_ops")),
 	index("ix_submission_revisions_status").using("btree", table.status.asc().nullsLast().op("text_ops")),
 	index("ix_submission_revisions_submitted_by").using("btree", table.submittedBy.asc().nullsLast().op("uuid_ops")),
-	uniqueIndex("ux_submission_revisions_single_draft").using("btree", table.submissionId.asc().nullsLast().op("uuid_ops")).where(sql`(status = 'draft'::text)`),
-	foreignKey({
-			columns: [table.submissionId],
-			foreignColumns: [submissions.id],
-			name: "submission_revisions_submission_id_fkey"
-		}),
+	uniqueIndex("ux_submission_revisions_single_draft").using("btree", table.workId.asc().nullsLast().op("uuid_ops")).where(sql`(status = 'draft'::text)`),
 	foreignKey({
 			columns: [table.parentRevisionId],
 			foreignColumns: [table.id],
@@ -393,15 +285,10 @@ export const submissionRevisions = pgTable("submission_revisions", {
 			foreignColumns: [users.id],
 			name: "submission_revisions_decided_by_fkey"
 		}),
-	foreignKey({
-			columns: [table.submissionId, table.objectId, table.contractorId],
-			foreignColumns: [submissions.contractorId, submissions.id, submissions.objectId],
-			name: "submission_revisions_scope_fk"
-		}),
-	unique("submission_revisions_no_uq").on(table.revisionNo, table.submissionId),
-	unique("submission_revisions_submission_id_uq").on(table.id, table.submissionId),
 	unique("submission_revisions_scope_uq").on(table.contractorId, table.id, table.objectId),
 	unique("submission_revisions_object_uq").on(table.id, table.objectId),
+	unique("submission_revisions_work_no_uq").on(table.revisionNo, table.workId),
+	unique("submission_revisions_work_id_uq").on(table.id, table.workId),
 	check("submission_revisions_revision_no_chk", sql`revision_no > 0`),
 	check("submission_revisions_version_chk", sql`version >= 0`),
 	check("submission_revisions_status_chk", sql`status = ANY (ARRAY['draft'::text, 'submitted'::text, 'in_review'::text, 'returned'::text, 'approved'::text, 'superseded'::text])`),
@@ -1072,7 +959,7 @@ export const ruleDefinitions = pgTable("rule_definitions", {
 	check("rule_definitions_severity_chk", sql`default_severity = ANY (ARRAY['error'::text, 'warning'::text, 'info'::text])`),
 	check("rule_definitions_level_chk", sql`level ~ '^[a-z][a-z0-9_]*$'::text`),
 	check("rule_definitions_kind_chk", sql`kind ~ '^[a-z][a-z0-9_]*$'::text`),
-	check("rule_definitions_waiver_roles_chk", sql`waiver_roles <@ ARRAY['contractor'::text, 'engineer'::text, 'manager'::text, 'admin'::text]`),
+	check("rule_definitions_waiver_roles_chk", sql`waiver_roles <@ ARRAY['contractor'::text, 'general_contractor'::text, 'engineer'::text, 'manager'::text, 'admin'::text]`),
 ]);
 
 export const rulesetVersions = pgTable("ruleset_versions", {
@@ -1909,18 +1796,138 @@ export const catalogImportRows = pgTable("catalog_import_rows", {
 	check("catalog_import_rows_problems_chk", sql`jsonb_typeof(problems) = 'array'::text`),
 ]);
 
-export const userRoles = pgTable("user_roles", {
-	userId: uuid("user_id").notNull(),
-	role: text().notNull(),
-	grantedAt: timestamp("granted_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+export const sections = pgTable("sections", {
+	code: text().primaryKey().notNull(),
+	name: text().notNull(),
+	sortOrder: integer("sort_order").default(0).notNull(),
+	isActive: boolean("is_active").default(true).notNull(),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+}, () => [
+	check("sections_code_chk", sql`code ~ '^[a-z][a-z0-9_]*$'::text`),
+	check("sections_sort_order_chk", sql`sort_order >= 0`),
+]);
+
+export const registries = pgTable("registries", {
+	id: uuid().defaultRandom().primaryKey().notNull(),
+	objectId: uuid("object_id").notNull(),
+	sectionCode: text("section_code").notNull(),
+	period: date().notNull(),
+	number: text(),
+	folderNo: text("folder_no"),
+	building: text(),
+	floor: text(),
+	structure: text(),
+	status: text().default('draft').notNull(),
+	version: integer().default(0).notNull(),
+	issuedBy: uuid("issued_by"),
+	issuedAt: timestamp("issued_at", { withTimezone: true, mode: 'string' }),
+	issuedFileRevisionId: uuid("issued_file_revision_id"),
+	acceptedBy: uuid("accepted_by"),
+	acceptedAt: timestamp("accepted_at", { withTimezone: true, mode: 'string' }),
+	createdBy: uuid("created_by").notNull(),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	updatedAt: timestamp("updated_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
 }, (table) => [
+	index("ix_registries_accepted_by").using("btree", table.acceptedBy.asc().nullsLast().op("uuid_ops")),
+	index("ix_registries_created_by").using("btree", table.createdBy.asc().nullsLast().op("uuid_ops")),
+	index("ix_registries_issued_by").using("btree", table.issuedBy.asc().nullsLast().op("uuid_ops")),
+	index("ix_registries_issued_file").using("btree", table.issuedFileRevisionId.asc().nullsLast().op("uuid_ops")),
+	index("ix_registries_object_status").using("btree", table.objectId.asc().nullsLast().op("uuid_ops"), table.status.asc().nullsLast().op("uuid_ops")),
+	index("ix_registries_section").using("btree", table.sectionCode.asc().nullsLast().op("text_ops")),
+	uniqueIndex("ux_registries_object_number").using("btree", table.objectId.asc().nullsLast().op("uuid_ops"), table.number.asc().nullsLast().op("text_ops")).where(sql`(number IS NOT NULL)`),
 	foreignKey({
-			columns: [table.userId],
+			columns: [table.objectId],
+			foreignColumns: [constructionObjects.id],
+			name: "registries_object_id_fkey"
+		}),
+	foreignKey({
+			columns: [table.issuedBy],
 			foreignColumns: [users.id],
-			name: "user_roles_user_id_fkey"
-		}).onDelete("cascade"),
-	primaryKey({ columns: [table.role, table.userId], name: "user_roles_pkey"}),
-	check("user_roles_role_chk", sql`role = ANY (ARRAY['contractor'::text, 'engineer'::text, 'manager'::text, 'admin'::text])`),
+			name: "registries_issued_by_fkey"
+		}),
+	foreignKey({
+			columns: [table.issuedFileRevisionId],
+			foreignColumns: [submissionRevisions.id],
+			name: "registries_issued_file_revision_id_fkey"
+		}),
+	foreignKey({
+			columns: [table.acceptedBy],
+			foreignColumns: [users.id],
+			name: "registries_accepted_by_fkey"
+		}),
+	foreignKey({
+			columns: [table.createdBy],
+			foreignColumns: [users.id],
+			name: "registries_created_by_fkey"
+		}),
+	unique("registries_object_id_uq").on(table.id, table.objectId),
+	check("registries_status_chk", sql`status = ANY (ARRAY['draft'::text, 'issued'::text, 'accepted'::text])`),
+	check("registries_version_chk", sql`version >= 0`),
+	check("registries_period_chk", sql`EXTRACT(day FROM period) = (1)::numeric`),
+	check("registries_number_required_chk", sql`(status = 'draft'::text) OR (number IS NOT NULL)`),
+]);
+
+export const works = pgTable("works", {
+	id: uuid().defaultRandom().primaryKey().notNull(),
+	objectId: uuid("object_id").notNull(),
+	contractorId: uuid("contractor_id").notNull(),
+	title: text().notNull(),
+	currentRevisionId: uuid("current_revision_id"),
+	createdBy: uuid("created_by").notNull(),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	sectionCode: text("section_code").notNull(),
+	period: date().notNull(),
+	managedByContractorId: uuid("managed_by_contractor_id").notNull(),
+	registryId: uuid("registry_id"),
+	kind: text().default('complect').notNull(),
+	ordinal: integer(),
+	autoRunEnabled: boolean("auto_run_enabled").default(false).notNull(),
+	updatedAt: timestamp("updated_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+}, (table) => [
+	index("ix_works_contractor").using("btree", table.contractorId.asc().nullsLast().op("uuid_ops")),
+	index("ix_works_created_by").using("btree", table.createdBy.asc().nullsLast().op("uuid_ops")),
+	index("ix_works_current_revision").using("btree", table.currentRevisionId.asc().nullsLast().op("uuid_ops")),
+	index("ix_works_managed_by").using("btree", table.managedByContractorId.asc().nullsLast().op("uuid_ops")),
+	index("ix_works_object").using("btree", table.objectId.asc().nullsLast().op("uuid_ops")),
+	index("ix_works_object_section_period").using("btree", table.objectId.asc().nullsLast().op("date_ops"), table.sectionCode.asc().nullsLast().op("date_ops"), table.period.asc().nullsLast().op("date_ops")),
+	index("ix_works_registry").using("btree", table.registryId.asc().nullsLast().op("uuid_ops")),
+	uniqueIndex("ux_works_registry_file").using("btree", table.registryId.asc().nullsLast().op("uuid_ops")).where(sql`(kind = 'registry'::text)`),
+	uniqueIndex("ux_works_registry_ordinal").using("btree", table.registryId.asc().nullsLast().op("int4_ops"), table.ordinal.asc().nullsLast().op("uuid_ops")).where(sql`(ordinal IS NOT NULL)`),
+	foreignKey({
+			columns: [table.managedByContractorId],
+			foreignColumns: [counterparties.id],
+			name: "works_managed_by_contractor_id_fkey"
+		}),
+	foreignKey({
+			columns: [table.objectId, table.registryId],
+			foreignColumns: [registries.id, registries.objectId],
+			name: "works_registry_fk"
+		}),
+	foreignKey({
+			columns: [table.id, table.currentRevisionId],
+			foreignColumns: [submissionRevisions.id, submissionRevisions.workId],
+			name: "works_current_revision_fk"
+		}),
+	foreignKey({
+			columns: [table.objectId],
+			foreignColumns: [constructionObjects.id],
+			name: "works_object_id_fkey"
+		}),
+	foreignKey({
+			columns: [table.contractorId],
+			foreignColumns: [counterparties.id],
+			name: "works_contractor_id_fkey"
+		}),
+	foreignKey({
+			columns: [table.createdBy],
+			foreignColumns: [users.id],
+			name: "works_created_by_fkey"
+		}),
+	unique("works_scope_uq").on(table.contractorId, table.id, table.objectId),
+	check("works_kind_chk", sql`kind = ANY (ARRAY['complect'::text, 'registry'::text])`),
+	check("works_ordinal_chk", sql`(ordinal IS NULL) OR (ordinal > 0)`),
+	check("works_period_chk", sql`EXTRACT(day FROM period) = (1)::numeric`),
+	check("works_registry_kind_chk", sql`(kind <> 'registry'::text) OR (registry_id IS NOT NULL)`),
 ]);
 
 export const userObjectScopes = pgTable("user_object_scopes", {
@@ -1940,6 +1947,20 @@ export const userObjectScopes = pgTable("user_object_scopes", {
 			name: "user_object_scopes_object_fk"
 		}),
 	primaryKey({ columns: [table.objectId, table.userId], name: "user_object_scopes_pkey"}),
+]);
+
+export const userRoles = pgTable("user_roles", {
+	userId: uuid("user_id").notNull(),
+	role: text().notNull(),
+	grantedAt: timestamp("granted_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+}, (table) => [
+	foreignKey({
+			columns: [table.userId],
+			foreignColumns: [users.id],
+			name: "user_roles_user_id_fkey"
+		}).onDelete("cascade"),
+	primaryKey({ columns: [table.role, table.userId], name: "user_roles_pkey"}),
+	check("user_roles_role_chk", sql`role = ANY (ARRAY['contractor'::text, 'general_contractor'::text, 'engineer'::text, 'manager'::text, 'admin'::text])`),
 ]);
 
 export const processingBundlePages = pgTable("processing_bundle_pages", {
@@ -2012,6 +2033,46 @@ export const findingEvidence = pgTable("finding_evidence", {
 		}),
 	primaryKey({ columns: [table.charSpan, table.findingId, table.pageTextVersionId], name: "finding_evidence_pkey"}),
 	check("finding_evidence_span_chk", sql`lower(char_span) >= 0`),
+]);
+
+export const objectSections = pgTable("object_sections", {
+	objectId: uuid("object_id").notNull(),
+	sectionCode: text("section_code").notNull(),
+	isActive: boolean("is_active").default(true).notNull(),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+}, (table) => [
+	index("ix_object_sections_section").using("btree", table.sectionCode.asc().nullsLast().op("text_ops")),
+	foreignKey({
+			columns: [table.objectId],
+			foreignColumns: [constructionObjects.id],
+			name: "object_sections_object_id_fkey"
+		}),
+	foreignKey({
+			columns: [table.sectionCode],
+			foreignColumns: [sections.code],
+			name: "object_sections_section_code_fkey"
+		}),
+	primaryKey({ columns: [table.objectId, table.sectionCode], name: "object_sections_pkey"}),
+]);
+
+export const objectContractors = pgTable("object_contractors", {
+	objectId: uuid("object_id").notNull(),
+	contractorId: uuid("contractor_id").notNull(),
+	isActive: boolean("is_active").default(true).notNull(),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+}, (table) => [
+	index("ix_object_contractors_contractor").using("btree", table.contractorId.asc().nullsLast().op("uuid_ops")),
+	foreignKey({
+			columns: [table.objectId],
+			foreignColumns: [constructionObjects.id],
+			name: "object_contractors_object_id_fkey"
+		}),
+	foreignKey({
+			columns: [table.contractorId],
+			foreignColumns: [counterparties.id],
+			name: "object_contractors_contractor_id_fkey"
+		}),
+	primaryKey({ columns: [table.contractorId, table.objectId], name: "object_contractors_pkey"}),
 ]);
 
 export const documentRelations = pgTable("document_relations", {
@@ -2091,6 +2152,37 @@ export const rulesetRules = pgTable("ruleset_rules", {
 		}),
 	primaryKey({ columns: [table.ruleCode, table.rulesetVersionId], name: "ruleset_rules_pkey"}),
 	check("ruleset_rules_severity_chk", sql`severity = ANY (ARRAY['error'::text, 'warning'::text, 'info'::text])`),
+]);
+
+export const registryItems = pgTable("registry_items", {
+	registryId: uuid("registry_id").notNull(),
+	ordinal: integer().notNull(),
+	workId: uuid("work_id").notNull(),
+	revisionId: uuid("revision_id").notNull(),
+	contractorId: uuid("contractor_id").notNull(),
+	title: text().notNull(),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+}, (table) => [
+	index("ix_registry_items_contractor").using("btree", table.contractorId.asc().nullsLast().op("uuid_ops")),
+	index("ix_registry_items_work").using("btree", table.workId.asc().nullsLast().op("uuid_ops")),
+	foreignKey({
+			columns: [table.registryId],
+			foreignColumns: [registries.id],
+			name: "registry_items_registry_id_fkey"
+		}),
+	foreignKey({
+			columns: [table.contractorId],
+			foreignColumns: [counterparties.id],
+			name: "registry_items_contractor_id_fkey"
+		}),
+	foreignKey({
+			columns: [table.workId, table.revisionId],
+			foreignColumns: [submissionRevisions.id, submissionRevisions.workId],
+			name: "registry_items_revision_fk"
+		}),
+	primaryKey({ columns: [table.ordinal, table.registryId], name: "registry_items_pkey"}),
+	unique("registry_items_work_uq").on(table.registryId, table.workId),
+	check("registry_items_ordinal_chk", sql`ordinal > 0`),
 ]);
 
 export const recognitionRunPages = pgTable("recognition_run_pages", {

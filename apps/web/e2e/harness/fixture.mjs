@@ -28,17 +28,31 @@ export const IDS = {
   orgCustomer: id(1),
   orgContractor: id(2),
   object: id(4),
-  section: id(5),
-  volume: id(6),
-  /** Закрытый том того же объекта: подать в него новую поставку нельзя. */
-  volumeClosed: id(7),
+  /** Организация генподрядчика объекта: из неё выводится область ПТО. */
+  orgGeneral: id(5),
+  /** Реестр-черновик за январь: на нём проверяется сборка и препятствия. */
+  registry: id(6),
+  /**
+   * Реестр, готовый к передаче: номер присвоен, комплект включён, опись подана.
+   *
+   * Отдельный реестр, а не тот же самый, потому что стенд поднимается БЕЗ
+   * воркера: подать ревизию описи через интерфейс нельзя — для этого нужен
+   * собранный рабочий документ, который строит задача очереди. Состояние
+   * «опись подана» задаётся строкой, как и всё прочее в фикстуре.
+   */
+  registryReady: id(7),
+  registryFileWork: id(8),
+  registryFileRevision: id(9),
 
-  submissionEmpty: id(10),
+  workEmpty: id(10),
   revisionEmpty: id(11),
-  submissionMarkup: id(12),
+  workMarkup: id(12),
   revisionMarkup: id(13),
-  submissionReview: id(14),
+  workReview: id(14),
   revisionReview: id(15),
+  /** Комплект, уже поданный и включённый в готовый к передаче реестр. */
+  workIssued: id(16),
+  revisionIssued: id(17),
 
   userContractor: id(20),
   userEngineer: id(21),
@@ -53,6 +67,8 @@ export const IDS = {
    * сказать это до нажатия, а не показать непонятный отказ после.
    */
   userMixed: id(24),
+  /** Инженер ПТО генподрядчика: собирает реестры и заводит комплекты за других. */
+  userGeneral: id(25),
 
   fileMarkup: id(30),
   page0: id(40),
@@ -72,7 +88,7 @@ export const IDS = {
   pageReview: id(75),
   bundleReview: id(76),
 
-  /** Профиль вида раздела: опубликованная версия и черновик поверх неё. */
+  /** Профиль раздела: опубликованная версия и черновик поверх неё. */
   sectionProfilePublished: id(80),
   sectionProfileDraft: id(81),
   /** Шифр рабочей документации объекта. */
@@ -93,6 +109,7 @@ export const JOURNAL = {
 
 export const KC = {
   contractor: 'kc-e2e-contractor',
+  general: 'kc-e2e-general',
   engineer: 'kc-e2e-engineer',
   manager: 'kc-e2e-manager',
   admin: 'kc-e2e-admin',
@@ -108,6 +125,7 @@ export const KC = {
  */
 export const LOCAL_LOGINS = {
   contractor: 'contractor@e2e.example',
+  general: 'general@e2e.example',
   engineer: 'engineer@e2e.example',
   manager: 'manager@e2e.example',
   admin: 'admin@e2e.example',
@@ -175,16 +193,18 @@ export function fixtureSql(pdfSha) {
   return [
     `INSERT INTO counterparties (id, name, kind) VALUES ('${IDS.orgCustomer}', 'ООО «Застройщик»', 'customer')`,
     `INSERT INTO counterparties (id, name, kind) VALUES ('${IDS.orgContractor}', 'ООО «Подрядчик»', 'contractor')`,
-    `INSERT INTO construction_objects (id, code, name, full_name, address)
-       VALUES ('${IDS.object}', 'E2E01', 'Объект сквозного прогона', 'ЖК «Проверка», корпус 1', 'г. Москва')`,
-    `INSERT INTO section_kinds (code, name) VALUES ('roofing', 'Кровля автостоянки')
-       ON CONFLICT (code) DO NOTHING`,
-    `INSERT INTO object_sections (id, object_id, code, name, section_kind_code)
-       VALUES ('${IDS.section}', '${IDS.object}', '2.5.1', 'Кровля автостоянки', 'roofing')`,
-    `INSERT INTO volumes (id, object_id, section_id, code, name)
-       VALUES ('${IDS.volume}', '${IDS.object}', '${IDS.section}', 'V-1', 'Том 1')`,
-    `INSERT INTO volumes (id, object_id, section_id, code, name, is_active)
-       VALUES ('${IDS.volumeClosed}', '${IDS.object}', '${IDS.section}', 'V-2', 'Том 2. Закрытый', false)`,
+    `INSERT INTO counterparties (id, name, kind) VALUES ('${IDS.orgGeneral}', 'ООО «Генподрядчик»', 'general_contractor')`,
+    // Область генподрядчика выводится из карточки объекта, а не назначается.
+    `INSERT INTO construction_objects (id, code, name, full_name, address, general_contractor_id)
+       VALUES ('${IDS.object}', 'E2E01', 'Объект сквозного прогона', 'ЖК «Проверка», корпус 1', 'г. Москва',
+               '${IDS.orgGeneral}')`,
+    // Раздел `roofing` есть в сиде 0029: здесь он только включается на объекте.
+    `INSERT INTO object_sections (object_id, section_code)
+       VALUES ('${IDS.object}', 'roofing')`,
+    `INSERT INTO object_contractors (object_id, contractor_id)
+       VALUES ('${IDS.object}', '${IDS.orgContractor}')`,
+    `INSERT INTO object_contractors (object_id, contractor_id)
+       VALUES ('${IDS.object}', '${IDS.orgGeneral}')`,
 
     `INSERT INTO users (id, kc_sub, full_name, contractor_id)
        VALUES ('${IDS.userContractor}', '${KC.contractor}', 'Сотрудник подрядчика', '${IDS.orgContractor}')`,
@@ -199,6 +219,39 @@ export function fixtureSql(pdfSha) {
     `INSERT INTO user_roles (user_id, role) VALUES ('${IDS.userManager}', 'manager')`,
     `INSERT INTO user_roles (user_id, role) VALUES ('${IDS.userAdmin}', 'admin')`,
     `INSERT INTO users (id, kc_sub, full_name, contractor_id)
+       VALUES ('${IDS.userGeneral}', '${KC.general}', 'Инженер ПТО генподрядчика', '${IDS.orgGeneral}')`,
+    `INSERT INTO user_roles (user_id, role) VALUES ('${IDS.userGeneral}', 'general_contractor')`,
+
+    // Реестр-черновик за январь: сценарий передачи собирает его из комплектов.
+    `INSERT INTO registries (id, object_id, section_code, period, created_by)
+       VALUES ('${IDS.registry}', '${IDS.object}', 'roofing', DATE '2026-01-01', '${IDS.userAdmin}')`,
+    `INSERT INTO registries (id, object_id, section_code, period, number, created_by)
+       VALUES ('${IDS.registryReady}', '${IDS.object}', 'roofing', DATE '2026-01-01', '9',
+               '${IDS.userGeneral}')`,
+    `INSERT INTO works
+       (id, object_id, contractor_id, managed_by_contractor_id, section_code, period,
+        kind, registry_id, title, auto_run_enabled, created_by)
+       VALUES ('${IDS.registryFileWork}', '${IDS.object}', '${IDS.orgGeneral}', '${IDS.orgGeneral}',
+               'roofing', DATE '2026-01-01', 'registry', '${IDS.registryReady}',
+               'Файл реестра №9', true, '${IDS.userGeneral}')`,
+    `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status,
+                                       submitted_at, submitted_by)
+       VALUES ('${IDS.registryFileRevision}', '${IDS.registryFileWork}', '${IDS.object}',
+               '${IDS.orgGeneral}', 1, 'submitted', now(), '${IDS.userGeneral}')`,
+    `UPDATE works SET current_revision_id = '${IDS.registryFileRevision}'
+      WHERE id = '${IDS.registryFileWork}'`,
+    `INSERT INTO works
+       (id, object_id, contractor_id, managed_by_contractor_id, section_code, period,
+        registry_id, ordinal, title, created_by)
+       VALUES ('${IDS.workIssued}', '${IDS.object}', '${IDS.orgContractor}', '${IDS.orgContractor}',
+               'roofing', DATE '2026-01-01', '${IDS.registryReady}', 1,
+               'Комплект в готовой папке', '${IDS.userContractor}')`,
+    `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status,
+                                       submitted_at, submitted_by)
+       VALUES ('${IDS.revisionIssued}', '${IDS.workIssued}', '${IDS.object}', '${IDS.orgContractor}',
+               1, 'submitted', now(), '${IDS.userContractor}')`,
+    `UPDATE works SET current_revision_id = '${IDS.revisionIssued}' WHERE id = '${IDS.workIssued}'`,
+    `INSERT INTO users (id, kc_sub, full_name, contractor_id)
        VALUES ('${IDS.userMixed}', '${KC.mixed}', 'Совмещающий роли', '${IDS.orgContractor}')`,
     `INSERT INTO user_roles (user_id, role) VALUES ('${IDS.userMixed}', 'contractor')`,
     `INSERT INTO user_roles (user_id, role) VALUES ('${IDS.userMixed}', 'engineer')`,
@@ -206,18 +259,22 @@ export function fixtureSql(pdfSha) {
     `INSERT INTO user_object_scopes (user_id, object_id) VALUES ('${IDS.userEngineer}', '${IDS.object}')`,
 
     // --- Ревизия под сценарий приёма файла ---
-    `INSERT INTO submissions (id, volume_id, object_id, contractor_id, title, created_by)
-       VALUES ('${IDS.submissionEmpty}', '${IDS.volume}', '${IDS.object}', '${IDS.orgContractor}',
-               'Поставка без файлов', '${IDS.userContractor}')`,
-    `INSERT INTO submission_revisions (id, submission_id, object_id, contractor_id, revision_no, status)
-       VALUES ('${IDS.revisionEmpty}', '${IDS.submissionEmpty}', '${IDS.object}', '${IDS.orgContractor}', 1, 'draft')`,
+    `INSERT INTO works
+       (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
+       VALUES ('${IDS.workEmpty}', '${IDS.object}', '${IDS.orgContractor}', '${IDS.orgContractor}',
+               'roofing', DATE '2026-01-01', 'Комплект без файлов', '${IDS.userContractor}')`,
+    `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
+       VALUES ('${IDS.revisionEmpty}', '${IDS.workEmpty}', '${IDS.object}', '${IDS.orgContractor}', 1, 'draft')`,
+    `UPDATE works SET current_revision_id = '${IDS.revisionEmpty}' WHERE id = '${IDS.workEmpty}'`,
 
     // --- Ревизия под экран разметки ---
-    `INSERT INTO submissions (id, volume_id, object_id, contractor_id, title, created_by)
-       VALUES ('${IDS.submissionMarkup}', '${IDS.volume}', '${IDS.object}', '${IDS.orgContractor}',
-               'Поставка с разметкой', '${IDS.userContractor}')`,
-    `INSERT INTO submission_revisions (id, submission_id, object_id, contractor_id, revision_no, status)
-       VALUES ('${IDS.revisionMarkup}', '${IDS.submissionMarkup}', '${IDS.object}', '${IDS.orgContractor}', 1, 'draft')`,
+    `INSERT INTO works
+       (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
+       VALUES ('${IDS.workMarkup}', '${IDS.object}', '${IDS.orgContractor}', '${IDS.orgContractor}',
+               'roofing', DATE '2026-01-01', 'Комплект с разметкой', '${IDS.userContractor}')`,
+    `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
+       VALUES ('${IDS.revisionMarkup}', '${IDS.workMarkup}', '${IDS.object}', '${IDS.orgContractor}', 1, 'draft')`,
+    `UPDATE works SET current_revision_id = '${IDS.revisionMarkup}' WHERE id = '${IDS.workMarkup}'`,
     `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
        VALUES ('${pdfSha.sha}', '${blobKey(pdfSha.sha)}', ${pdfSha.size}, 'application/pdf')`,
     `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
@@ -264,17 +321,19 @@ export function fixtureSql(pdfSha) {
     ),
 
     // --- Ревизия под согласование ---
-    `INSERT INTO submissions (id, volume_id, object_id, contractor_id, title, created_by)
-       VALUES ('${IDS.submissionReview}', '${IDS.volume}', '${IDS.object}', '${IDS.orgContractor}',
-               'Поставка на проверке', '${IDS.userContractor}')`,
+    `INSERT INTO works
+       (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
+       VALUES ('${IDS.workReview}', '${IDS.object}', '${IDS.orgContractor}', '${IDS.orgContractor}',
+               'roofing', DATE '2026-01-01', 'Комплект на проверке', '${IDS.userContractor}')`,
     // Ревизия создаётся ЧЕРНОВИКОМ и проводится по статусам ниже, после набивки
     // содержимого. Иначе триггер неизменяемости отвергает вставку файлов и
     // страниц: класс `source` заперт с момента подачи (§3.9, урок S2), и
     // фикстура, набивающая содержимое сразу в `in_review`, падает с 23001.
-    `INSERT INTO submission_revisions (id, submission_id, object_id, contractor_id, revision_no, status,
+    `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status,
                                        aggregate_manifest_hash)
-       VALUES ('${IDS.revisionReview}', '${IDS.submissionReview}', '${IDS.object}', '${IDS.orgContractor}', 1,
+       VALUES ('${IDS.revisionReview}', '${IDS.workReview}', '${IDS.object}', '${IDS.orgContractor}', 1,
                'draft', '${'f'.repeat(64)}')`,
+    `UPDATE works SET current_revision_id = '${IDS.revisionReview}' WHERE id = '${IDS.workReview}'`,
     `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
        VALUES ('${reviewSha}', '${blobKey(reviewSha)}', 2048, 'application/pdf')`,
     `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
@@ -314,11 +373,11 @@ export function fixtureSql(pdfSha) {
 
     // --- Справочники §14, у которых на S11 появились экраны ---
     //
-    // Профиль вида раздела: опубликованная версия отвечает на «действующий на
+    // Профиль раздела: опубликованная версия отвечает на «действующий на
     // дату», черновик поверх неё — на «версию можно опубликовать отдельным
     // действием». Одной строки не хватило бы: два состояния различаются на
     // экране кнопкой, и проверять надо оба.
-    `INSERT INTO section_profiles (id, section_kind_code, version, effective_from,
+    `INSERT INTO section_profiles (id, section_code, version, effective_from,
                                     expected_doc_types, material_categories, material_matrix,
                                     enabled_rule_codes, thresholds, autonomy_level,
                                     published_at, published_by)
@@ -327,7 +386,7 @@ export function fixtureSql(pdfSha) {
                '{"roll_waterproofing": {"passport": true}}'::jsonb,
                ARRAY['AOSR.HDR.022']::text[], '{"minCoverage": 0.6}'::jsonb, 'assisted',
                now(), '${IDS.userAdmin}')`,
-    `INSERT INTO section_profiles (id, section_kind_code, version, effective_from,
+    `INSERT INTO section_profiles (id, section_code, version, effective_from,
                                     expected_doc_types, autonomy_level)
        VALUES ('${IDS.sectionProfileDraft}', 'roofing', 2, DATE '2027-01-01',
                ARRAY['aosr']::text[], 'assisted')`,
@@ -408,7 +467,7 @@ export function fixtureSql(pdfSha) {
                                 release, request_id, route, status_code, error_code)
        VALUES ('${JOURNAL.issueOpen}', 'e2e0000000000001', now() - interval '2 minutes', 'api',
                'http', 'db', 'error', '2026.08.1', 'req-e2e-000000000001',
-               '/api/v1/submissions', 500, '53300')`,
+               '/api/v1/works', 500, '53300')`,
 
     // Проведение ревизии по статусам — последним шагом, когда содержимое уже
     // на месте. Ровно тот порядок, которым чинилась фикстура на S2.

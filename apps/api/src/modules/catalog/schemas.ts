@@ -36,10 +36,12 @@ import {
   jsonValueSchema,
   MAX_PAGE_LIMIT,
   objectCodeSchema,
+  objectContractorSchema,
   objectSectionSchema,
   ruleCodeSchema,
-  sectionKindCodeSchema,
+  sectionCodeSchema,
   sectionProfileSchema,
+  sectionSchema,
   sortOrderSchema,
   uuidSchema,
 } from '@id/contracts';
@@ -118,7 +120,7 @@ export const docTypeCandidateReviewStatusSchema = z.enum(DOC_TYPE_CANDIDATE_REVI
  * Категории материалов профиля раздела — ЗАКРЫТЫЙ перечень, и это не оплошность
  * рядом с открытым каталогом видов ИД.
  *
- * Виды ИД и виды разделов растут эксплуатацией (§0.5): новый тип документа
+ * Виды ИД и разделы растут эксплуатацией (§0.5): новый тип документа
  * приносит польза сразу — его можно распознать, подтвердить, сложить в комплект.
  * Категория материала так не работает: она осмысленна ровно настолько, насколько
  * её понимают матрица требований и правила §9.4 («на арматуру нужен сертификат и
@@ -227,7 +229,6 @@ export const rdDocumentIdParamSchema = z.object({ rdDocumentId: uuidSchema });
 export const profileIdParamSchema = z.object({ profileId: uuidSchema });
 export const candidateIdParamSchema = z.object({ candidateId: uuidSchema });
 export const docTypeCodeParamSchema = z.object({ code: docTypeCodeSchema });
-export const sectionKindCodeParamSchema = z.object({ kindCode: sectionKindCodeSchema });
 
 // =====================================================================
 // Объекты строительства
@@ -313,42 +314,58 @@ export const createCounterpartyKindBodySchema = z.object({
 export const counterpartyKindListSchema = z.array(counterpartyKindEntrySchema);
 
 // =====================================================================
-// Разделы работ и их виды
+// Разделы работ, включённость на объекте и закрепление подрядчиков
 // =====================================================================
 
 export const sectionListQuerySchema = z.object({ isActive: queryFlagSchema.optional() });
 
-export const createObjectSectionBodySchema = z.object({
-  code: z.string().min(1).max(64),
+export const sectionCodeParamSchema = z.object({ sectionCode: sectionCodeSchema });
+
+export const objectSectionParamsSchema = z.object({
+  objectId: uuidSchema,
+  sectionCode: sectionCodeSchema,
+});
+
+export const objectContractorParamsSchema = z.object({
+  objectId: uuidSchema,
+  contractorId: uuidSchema,
+});
+
+/**
+ * Тело переключателя включённости.
+ *
+ * Одно поле, а не два маршрута (`PUT` и `DELETE`): включение и отключение — это
+ * одно и то же решение с разным значением, и раздельные маршруты заставили бы
+ * клиента выбирать метод по текущему состоянию, которое он мог прочитать
+ * секунду назад.
+ */
+export const toggleBodySchema = z.object({ isActive: z.boolean() });
+
+export const createSectionBodySchema = z.object({
+  code: sectionCodeSchema,
   name: z.string().min(1).max(500),
-  sectionKindCode: sectionKindCodeSchema,
   sortOrder: sortOrderSchema.optional(),
 });
 
-export const updateObjectSectionBodySchema = z
+/** `code` в правку не входит: он внешне значим (см. репозиторий). */
+export const updateSectionBodySchema = z
   .object({
     name: z.string().min(1).max(500).optional(),
-    sectionKindCode: sectionKindCodeSchema.optional(),
     sortOrder: sortOrderSchema.optional(),
     isActive: z.boolean().optional(),
   })
   .refine(nonEmptyPatch, { message: EMPTY_PATCH_MESSAGE });
 
+export const sectionListSchema = z.array(sectionSchema);
 export const objectSectionListSchema = z.array(objectSectionSchema);
-
-export const sectionKindSchema = z.object({
-  code: sectionKindCodeSchema,
-  name: z.string().min(1).max(255),
-});
-
-export const sectionKindListSchema = z.array(sectionKindSchema);
+export const objectContractorListSchema = z.array(objectContractorSchema);
 
 // =====================================================================
-// Профили видов разделов
+// Профили разделов
 // =====================================================================
 
 export const sectionProfileListQuerySchema = z.object({
-  sectionKindCode: sectionKindCodeSchema.optional(),
+  sectionCode: sectionCodeSchema.optional(),
 });
 
 /** Дата, на которую нужен действующий профиль. По умолчанию — текущая по UTC. */
@@ -379,7 +396,7 @@ export const effectiveProfileQuerySchema = z.object({ at: isoDateSchema.optional
  */
 export const createSectionProfileBodySchema = z
   .object({
-    sectionKindCode: sectionKindCodeSchema,
+    sectionCode: sectionCodeSchema,
     effectiveFrom: isoDateSchema,
     effectiveTo: isoDateSchema.nullish(),
     expectedDocTypes: z.array(docTypeCodeSchema).default([]),

@@ -17,6 +17,7 @@ import { applyFieldErrors } from '../../shared/formErrors.js';
 
 const ROLE_OPTIONS: readonly { value: UserRole; label: string }[] = [
   { value: 'contractor', label: 'подрядчик' },
+  { value: 'general_contractor', label: 'генподрядчик (ПТО)' },
   { value: 'engineer', label: 'инженер' },
   { value: 'manager', label: 'руководитель' },
   { value: 'admin', label: 'администратор' },
@@ -68,10 +69,10 @@ export function CreateUserModal(props: {
     },
   });
 
-  // Подрядчик обязан иметь организацию: без неё у него нет области видимости и
-  // он не увидит ни одной поставки. Сервер отвергает такое сочетание, форма
-  // лишь подсказывает это раньше.
-  const contractorSelected = roles.includes('contractor');
+  // Подрядчик и генподрядчик обязаны иметь организацию: у первого из неё
+  // выводится изоляция комплектов, у второго — перечень своих объектов. Сервер
+  // отвергает такое сочетание, форма лишь подсказывает это раньше.
+  const contractorSelected = roles.includes('contractor') || roles.includes('general_contractor');
 
   return (
     <Modal
@@ -128,7 +129,7 @@ export function CreateUserModal(props: {
           label="Организация"
           extra={
             contractorSelected
-              ? 'Подрядчику организация обязательна: без неё он не увидит ни одной поставки.'
+              ? 'Без организации у него нет области видимости: он не увидит ни одного комплекта.'
               : undefined
           }
           rules={contractorSelected ? [{ required: true, message: 'Укажите организацию' }] : []}

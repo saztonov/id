@@ -20,6 +20,7 @@ import {
   useEffect,
   useMemo,
   useState,
+  type CSSProperties,
   type MouseEvent,
   type ReactNode,
 } from 'react';
@@ -87,6 +88,13 @@ export interface LinkProps {
   readonly children: ReactNode;
   readonly title?: string | undefined;
   readonly 'aria-current'?: 'page' | undefined;
+  /**
+   * Оформление ссылки по месту.
+   *
+   * Нужно ровно там, где ссылка стоит ВНУТРИ абзаца текста: цвет один её от
+   * текста не отличает (WCAG 1.4.1), и подчёркивание задаётся явно.
+   */
+  readonly style?: CSSProperties | undefined;
 }
 
 export function Link({ to, children, ...rest }: LinkProps): ReactNode {

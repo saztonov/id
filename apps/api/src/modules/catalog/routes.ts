@@ -10,7 +10,7 @@
  *   бы выдано всем четырём ролям и не отвечало бы ни на один вопрос. Но право на
  *   маршрут НЕ означает право на все строки: справочники делятся на
  *   коммерческие сведения (объекты, контрагенты, разделы, реестр РД) и
- *   конфигурацию (виды разделов и их профили, каталог видов ИД), и первые
+ *   конфигурацию (разделы и их профили, каталог видов ИД), и первые
  *   сужаются областью видимости в SQL. Деление и его причины — в заголовке
  *   `db/repositories/catalog.ts`; здесь важно следствие: одинаковый статус 200 у
  *   подрядчика и у руководителя означает РАЗНЫЙ состав ответа.
@@ -46,7 +46,7 @@ import type { AppInstance } from '../../app.js';
 import type { AuthScope } from '../../auth/scope.js';
 import { notFound } from '../../lib/problem.js';
 import { currentAuth, requireAuth } from '../../middleware/require-auth.js';
-import { requirePermission } from '../../middleware/require-permission.js';
+import { requireAnyPermission, requirePermission } from '../../middleware/require-permission.js';
 import { auditEmailHmac } from '../../db/repositories/admin.js';
 import type { AuditActor } from '../../db/repositories/audit.js';
 import {
@@ -56,9 +56,8 @@ import {
   createCounterpartyKind,
   createDocType,
   createDocTypeFromCandidate,
-  createObjectSection,
   createRdDocument,
-  createSectionKind,
+  createSection,
   createSectionProfile,
   deleteConstructionObject,
   deleteCounterparty,
@@ -72,18 +71,21 @@ import {
   listCounterpartyKinds,
   listDocTypeCandidates,
   listDocTypes,
+  listObjectContractors,
   listObjectSections,
   listRdDocuments,
-  listSectionKinds,
   listSectionProfiles,
+  listSections,
   mapDocTypeCandidate,
   publishSectionProfile,
   setDocTypeCandidateStatus,
   setDocTypeOverride,
+  setObjectContractor,
+  setObjectSection,
   updateConstructionObject,
   updateCounterparty,
-  updateObjectSection,
   updateRdDocument,
+  updateSection,
 } from '../../db/repositories/catalog.js';
 import {
   candidateIdParamSchema,
@@ -98,7 +100,7 @@ import {
   createCounterpartyBodySchema,
   createCounterpartyKindBodySchema,
   createDocTypeBodySchema,
-  createObjectSectionBodySchema,
+  createSectionBodySchema,
   createRdDocumentBodySchema,
   createSectionProfileBodySchema,
   docTypeCandidatePageSchema,
@@ -119,24 +121,28 @@ import {
   rdDocumentListQuerySchema,
   rdDocumentPageSchema,
   rdDocumentSchema,
-  sectionIdParamSchema,
-  sectionKindCodeParamSchema,
-  sectionKindListSchema,
-  sectionKindSchema,
+  objectContractorListSchema,
+  objectContractorParamsSchema,
+  objectSectionParamsSchema,
+  sectionCodeParamSchema,
+  sectionListSchema,
+  toggleBodySchema,
   sectionListQuerySchema,
   sectionProfileListQuerySchema,
   sectionProfileListSchema,
   updateConstructionObjectBodySchema,
   updateCounterpartyBodySchema,
-  updateObjectSectionBodySchema,
+  updateSectionBodySchema,
   updateRdDocumentBodySchema,
 } from './schemas.js';
 import {
   constructionObjectSchema,
   counterpartyKindEntrySchema,
   counterpartySchema,
+  objectContractorSchema,
   objectSectionSchema,
   sectionProfileSchema,
+  sectionSchema,
 } from '@id/contracts';
 
 const PREFIX = '/api/v1/catalog';
@@ -189,6 +195,16 @@ function auditActor(app: AppInstance, request: FastifyRequest): AuditActor {
 
 /** Правка справочников — администрирование (§4.1). */
 const manageCatalog = requirePermission('settings.manage');
+
+/**
+ * Настройка конкретного объекта: какие разделы на нём ведутся и кто закреплён.
+ *
+ * Не `settings.manage`, потому что это не справочник портала, а состояние
+ * стройки: его ведёт тот, кто ведёт стройку. Требовать администратора на каждое
+ * включение раздела значило бы, что работа подрядчика встаёт до начала его
+ * рабочего дня. Администратор входит сюда тем же правом, что и везде.
+ */
+const manageObjectSetup = requireAnyPermission(['registry.manage', 'settings.manage']);
 
 /** Каталог видов ИД и очередь кандидатов — отдельное право (§4.1). */
 const manageDocTypes = requirePermission('doc_types.manage');
@@ -455,10 +471,75 @@ function registerCounterpartyKindRoutes(app: AppInstance): void {
 }
 
 // =====================================================================
-// Разделы работ и виды разделов
+// Разделы работ, их включённость на объекте и закрепление подрядчиков
 // =====================================================================
 
+/**
+ * Справочник разделов читается всеми, правится администратором.
+ *
+ * Включённость на объекте и закрепление подрядчиков — не совсем справочник:
+ * это настройка конкретной стройки, и её ведёт тот, кто эту стройку ведёт.
+ * Поэтому они открыты и под `registry.manage` (генподрядчик), и под
+ * `settings.manage` (администратор): требовать администратора на каждое
+ * включение раздела означало бы, что работа встаёт до его рабочего дня.
+ */
 function registerSectionRoutes(app: AppInstance): void {
+  app.get(
+    `${PREFIX}/sections`,
+    {
+      preHandler: authenticated,
+      schema: { querystring: sectionListQuerySchema, response: { 200: sectionListSchema } },
+    },
+    async (request, reply) => {
+      const { scope } = currentAuth(request);
+      const rows = await listSections(app.db, scope, request.query);
+      return reply.code(200).send([...rows]);
+    },
+  );
+
+  app.post(
+    `${PREFIX}/sections`,
+    {
+      preHandler: manageCatalog,
+      schema: { body: createSectionBodySchema, response: { 201: sectionSchema } },
+    },
+    async (request, reply) => {
+      const { scope } = currentAuth(request);
+      const created = await createSection(app.db, scope, request.body, auditActor(app, request));
+      return reply.code(201).send(created);
+    },
+  );
+
+  app.patch(
+    `${PREFIX}/sections/:sectionCode`,
+    {
+      preHandler: manageCatalog,
+      schema: {
+        params: sectionCodeParamSchema,
+        body: updateSectionBodySchema,
+        response: { 200: sectionSchema },
+      },
+    },
+    async (request, reply) => {
+      const { scope } = currentAuth(request);
+      const updated = await updateSection(
+        app.db,
+        scope,
+        request.params.sectionCode,
+        request.body,
+        auditActor(app, request),
+      );
+      if (updated === null) throw notFound('Раздел работ не найден.');
+      return reply.code(200).send(updated);
+    },
+  );
+
+  /**
+   * Разделы объекта — ВЕСЬ справочник с отметкой о включённости.
+   *
+   * Список из одних включённых не дал бы способа включить первый: экран объекта
+   * это и есть то место, где раздел включают.
+   */
   app.get(
     `${PREFIX}/objects/:objectId/sections`,
     {
@@ -473,91 +554,88 @@ function registerSectionRoutes(app: AppInstance): void {
       const { scope } = currentAuth(request);
       const { objectId } = request.params;
       await requireVisibleObject(app, scope, objectId);
-      const sections = await listObjectSections(app.db, scope, objectId, request.query);
-      return reply.code(200).send([...sections]);
+      const rows = await listObjectSections(app.db, scope, objectId, request.query);
+      return reply.code(200).send([...rows]);
     },
   );
 
-  app.post(
-    `${PREFIX}/objects/:objectId/sections`,
+  app.route({
+    method: 'PUT',
+    url: `${PREFIX}/objects/:objectId/sections/:sectionCode`,
+    preHandler: manageObjectSetup,
+    schema: {
+      params: objectSectionParamsSchema,
+      body: toggleBodySchema,
+      response: { 200: objectSectionSchema },
+    },
+    handler: async (request, reply) => {
+      const { scope } = currentAuth(request);
+      const { objectId, sectionCode } = request.params;
+      await requireVisibleObject(app, scope, objectId);
+      const updated = await setObjectSection(
+        app.db,
+        scope,
+        objectId,
+        sectionCode,
+        request.body.isActive,
+        auditActor(app, request),
+      );
+      if (updated === null) throw notFound('Раздел работ не найден в справочнике.');
+      return reply.code(200).send(updated);
+    },
+  });
+
+  app.get(
+    `${PREFIX}/objects/:objectId/contractors`,
     {
-      preHandler: manageCatalog,
-      schema: {
-        params: objectIdParamSchema,
-        body: createObjectSectionBodySchema,
-        response: { 201: objectSectionSchema },
-      },
+      preHandler: authenticated,
+      schema: { params: objectIdParamSchema, response: { 200: objectContractorListSchema } },
     },
     async (request, reply) => {
       const { scope } = currentAuth(request);
       const { objectId } = request.params;
       await requireVisibleObject(app, scope, objectId);
-      const created = await createObjectSection(
+      const rows = await listObjectContractors(app.db, scope, objectId);
+      return reply.code(200).send([...rows]);
+    },
+  );
+
+  /**
+   * Закрепление подрядчика за объектом.
+   *
+   * До 0028 закрепления не существовало, и подрядчик не мог завести первый
+   * комплект: единственным признаком связи была уже существующая поставка.
+   * Теперь связь заводится здесь и становится целью составного внешнего ключа.
+   */
+  app.route({
+    method: 'PUT',
+    url: `${PREFIX}/objects/:objectId/contractors/:contractorId`,
+    preHandler: manageObjectSetup,
+    schema: {
+      params: objectContractorParamsSchema,
+      body: toggleBodySchema,
+      response: { 200: objectContractorSchema },
+    },
+    handler: async (request, reply) => {
+      const { scope } = currentAuth(request);
+      const { objectId, contractorId } = request.params;
+      await requireVisibleObject(app, scope, objectId);
+      const updated = await setObjectContractor(
         app.db,
         scope,
         objectId,
-        request.body,
+        contractorId,
+        request.body.isActive,
         auditActor(app, request),
       );
-      return reply.code(201).send(created);
-    },
-  );
-
-  app.patch(
-    `${PREFIX}/sections/:sectionId`,
-    {
-      preHandler: manageCatalog,
-      schema: {
-        params: sectionIdParamSchema,
-        body: updateObjectSectionBodySchema,
-        response: { 200: objectSectionSchema },
-      },
-    },
-    async (request, reply) => {
-      const { scope } = currentAuth(request);
-      const updated = await updateObjectSection(
-        app.db,
-        scope,
-        request.params.sectionId,
-        request.body,
-        auditActor(app, request),
-      );
-      if (updated === null) throw notFound('Раздел работ не найден.');
+      if (updated === null) throw notFound('Контрагент не найден.');
       return reply.code(200).send(updated);
     },
-  );
-
-  app.get(
-    `${PREFIX}/section-kinds`,
-    { preHandler: authenticated, schema: { response: { 200: sectionKindListSchema } } },
-    async (request, reply) => {
-      const { scope } = currentAuth(request);
-      const kinds = await listSectionKinds(app.db, scope);
-      return reply.code(200).send([...kinds]);
-    },
-  );
-
-  app.post(
-    `${PREFIX}/section-kinds`,
-    {
-      preHandler: manageCatalog,
-      schema: { body: sectionKindSchema, response: { 201: sectionKindSchema } },
-    },
-    async (request, reply) => {
-      const { scope } = currentAuth(request);
-      const created = await createSectionKind(
-        app.db,
-        scope,
-        request.body,
-        auditActor(app, request),
-      );
-      return reply.code(201).send(created);
-    },
-  );
+  });
 }
 
 // =====================================================================
-// Профили видов разделов
+// Профили разделов
 // =====================================================================
 
 function registerSectionProfileRoutes(app: AppInstance): void {
@@ -586,11 +664,11 @@ function registerSectionProfileRoutes(app: AppInstance): void {
    * текущая по UTC; прогон проверок передаёт дату события явно (§9.2).
    */
   app.get(
-    `${PREFIX}/section-kinds/:kindCode/effective-profile`,
+    `${PREFIX}/sections/:sectionCode/effective-profile`,
     {
       preHandler: authenticated,
       schema: {
-        params: sectionKindCodeParamSchema,
+        params: sectionCodeParamSchema,
         querystring: effectiveProfileQuerySchema,
         response: { 200: sectionProfileSchema },
       },
@@ -601,14 +679,14 @@ function registerSectionProfileRoutes(app: AppInstance): void {
       const profile = await findEffectiveSectionProfile(
         app.db,
         scope,
-        request.params.kindCode,
+        request.params.sectionCode,
         onDate,
       );
       if (profile === null) {
         // 404, а не пустой профиль: «профиль раздела не настроен» — законное
         // состояние открытого мира, и правила полноты обязаны отличать его от
         // «комплект неполон» (§9.1). Пустой объект стёр бы это различие.
-        throw notFound('Для этого вида раздела нет опубликованного профиля на указанную дату.');
+        throw notFound('Для этого раздела нет опубликованного профиля на указанную дату.');
       }
       return reply.code(200).send(profile);
     },
@@ -646,7 +724,7 @@ function registerSectionProfileRoutes(app: AppInstance): void {
         request.params.profileId,
         auditActor(app, request),
       );
-      if (published === null) throw notFound('Профиль вида раздела не найден.');
+      if (published === null) throw notFound('Профиль раздела не найден.');
       return reply.code(200).send(published);
     },
   );

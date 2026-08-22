@@ -140,9 +140,7 @@ const ID = {
   user: id(1),
   contractor: id(2),
   object: id(3),
-  section: id(4),
-  volume: id(5),
-  submission: id(6),
+  work: id(6),
   revision: id(7),
   sourceFile: id(8),
   page1: id(9),
@@ -157,13 +155,13 @@ const ID = {
   recognitionRun: id(18),
   artifact: id(19),
   publishedPrompt: id(20),
-  otherSubmission: id(21),
+  otherWork: id(21),
   otherRevision: id(22),
   otherDocument: id(23),
-  approvedSubmission: id(24),
+  approvedWork: id(24),
   approvedRevision: id(25),
   approvedDocument: id(26),
-  reviewSubmission: id(27),
+  reviewWork: id(27),
   reviewRevision: id(28),
   reviewDocument: id(29),
   reviewFile: id(30),
@@ -173,10 +171,11 @@ const ID = {
 } as const;
 
 /**
- * Законный граф: объект → раздел → том → поставка → ревизия → файл → страницы →
- * рабочий документ → разметка → прогон распознавания → документы. Негативные
- * тесты пристраиваются к нему, поэтому его успешная вставка сама по себе
- * доказывает, что ограничения не запрещают штатный сценарий.
+ * Законный граф: объект → включённый раздел → закреплённый подрядчик →
+ * комплект → ревизия → файл → страницы → рабочий документ → разметка → прогон
+ * распознавания → документы. Негативные тесты пристраиваются к нему, поэтому
+ * его успешная вставка сама по себе доказывает, что ограничения не запрещают
+ * штатный сценарий.
  */
 const FIXTURE: readonly string[] = [
   `INSERT INTO users (id, kc_sub, full_name)
@@ -186,16 +185,16 @@ const FIXTURE: readonly string[] = [
              '1027700123450', 'contractor')`,
   `INSERT INTO construction_objects (id, code, name, full_name)
      VALUES ('${ID.object}', 'ABC12', 'Корпус 1', 'ЖК «Тест», корпус 1')`,
-  `INSERT INTO section_kinds (code, name) VALUES ('roofing', 'Кровля')`,
-  `INSERT INTO object_sections (id, object_id, code, name, section_kind_code)
-     VALUES ('${ID.section}', '${ID.object}', '2.5.1', 'Кровля автостоянки', 'roofing')`,
-  `INSERT INTO volumes (id, object_id, section_id, code, name)
-     VALUES ('${ID.volume}', '${ID.object}', '${ID.section}', 'V1', 'Том 1')`,
-  `INSERT INTO submissions (id, volume_id, object_id, contractor_id, title, created_by)
-     VALUES ('${ID.submission}', '${ID.volume}', '${ID.object}', '${ID.contractor}',
-             'Поставка 1', '${ID.user}')`,
-  `INSERT INTO submission_revisions (id, submission_id, object_id, contractor_id, revision_no)
-     VALUES ('${ID.revision}', '${ID.submission}', '${ID.object}', '${ID.contractor}', 1)`,
+  `INSERT INTO sections (code, name) VALUES ('roofing', 'Кровля') ON CONFLICT (code) DO NOTHING`,
+  `INSERT INTO object_sections (object_id, section_code)
+       VALUES ('${ID.object}', 'roofing') ON CONFLICT DO NOTHING`,
+  `INSERT INTO object_contractors (object_id, contractor_id)
+       VALUES ('${ID.object}', '${ID.contractor}') ON CONFLICT DO NOTHING`,
+  `INSERT INTO works
+       (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
+     VALUES ('${ID.work}', '${ID.object}', '${ID.contractor}', '${ID.contractor}', 'roofing', DATE '2026-01-01', 'Комплект 1', '${ID.user}')`,
+  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no)
+     VALUES ('${ID.revision}', '${ID.work}', '${ID.object}', '${ID.contractor}', 1)`,
   `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
      VALUES ('${sha('a')}', 'blobs/a', 1024, 'application/pdf')`,
   `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order)
@@ -240,25 +239,29 @@ const FIXTURE: readonly string[] = [
              'системный промт', 'шаблон {{page}}', now(), '${ID.user}')`,
   // Вторая поставка нужна ровно для проверки составного FK: у одной поставки
   // может быть только одна draft-ревизия (частичный уникальный индекс).
-  `INSERT INTO submissions (id, volume_id, object_id, contractor_id, title, created_by)
-     VALUES ('${ID.otherSubmission}', '${ID.volume}', '${ID.object}', '${ID.contractor}',
-             'Поставка 2', '${ID.user}')`,
-  `INSERT INTO submission_revisions (id, submission_id, object_id, contractor_id, revision_no)
-     VALUES ('${ID.otherRevision}', '${ID.otherSubmission}', '${ID.object}',
+  `INSERT INTO object_contractors (object_id, contractor_id)
+       VALUES ('${ID.object}', '${ID.contractor}') ON CONFLICT DO NOTHING`,
+  `INSERT INTO works
+       (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
+     VALUES ('${ID.otherWork}', '${ID.object}', '${ID.contractor}', '${ID.contractor}', 'roofing', DATE '2026-01-01', 'Комплект 2', '${ID.user}')`,
+  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no)
+     VALUES ('${ID.otherRevision}', '${ID.otherWork}', '${ID.object}',
              '${ID.contractor}', 1)`,
   `INSERT INTO logical_documents (id, revision_id, object_id, contractor_id, ordinal)
      VALUES ('${ID.otherDocument}', '${ID.otherRevision}', '${ID.object}',
              '${ID.contractor}', 0)`,
-  `INSERT INTO submissions (id, volume_id, object_id, contractor_id, title, created_by)
-     VALUES ('${ID.approvedSubmission}', '${ID.volume}', '${ID.object}', '${ID.contractor}',
-             'Поставка 3', '${ID.user}')`,
+  `INSERT INTO object_contractors (object_id, contractor_id)
+       VALUES ('${ID.object}', '${ID.contractor}') ON CONFLICT DO NOTHING`,
+  `INSERT INTO works
+       (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
+     VALUES ('${ID.approvedWork}', '${ID.object}', '${ID.contractor}', '${ID.contractor}', 'roofing', DATE '2026-01-01', 'Комплект 3', '${ID.user}')`,
   // Содержимое создаётся в черновике, и только потом ревизия проводится по
   // статусам: вставить документ прямо в approved-ревизию нельзя — её запирает
   // тот самый триггер, который проверяют тесты ниже. Без этого шага тест
   // «запрещает правку согласованной ревизии» совпал бы с нулём строк и
   // проходил бы, ничего не проверяя.
-  `INSERT INTO submission_revisions (id, submission_id, object_id, contractor_id, revision_no)
-     VALUES ('${ID.approvedRevision}', '${ID.approvedSubmission}', '${ID.object}',
+  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no)
+     VALUES ('${ID.approvedRevision}', '${ID.approvedWork}', '${ID.object}',
              '${ID.contractor}', 1)`,
   `INSERT INTO logical_documents (id, revision_id, object_id, contractor_id, ordinal)
      VALUES ('${ID.approvedDocument}', '${ID.approvedRevision}', '${ID.object}',
@@ -281,14 +284,16 @@ const FIXTURE: readonly string[] = [
   // in_review — это рабочее состояние, а не терминальное: первая версия
   // триггеров запирала его вместе с approved и оставляла инженеру единственное
   // действие — вернуть всю ревизию подрядчику.
-  `INSERT INTO submissions (id, volume_id, object_id, contractor_id, title, created_by)
-     VALUES ('${ID.reviewSubmission}', '${ID.volume}', '${ID.object}', '${ID.contractor}',
-             'Поставка 4', '${ID.user}')`,
+  `INSERT INTO object_contractors (object_id, contractor_id)
+       VALUES ('${ID.object}', '${ID.contractor}') ON CONFLICT DO NOTHING`,
+  `INSERT INTO works
+       (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
+     VALUES ('${ID.reviewWork}', '${ID.object}', '${ID.contractor}', '${ID.contractor}', 'roofing', DATE '2026-01-01', 'Комплект 4', '${ID.user}')`,
   // Состав подаётся черновиком и только потом ревизия уходит на проверку:
   // вставить файл и страницы прямо в in_review нельзя — это и есть запрет,
   // который проверяется ниже.
-  `INSERT INTO submission_revisions (id, submission_id, object_id, contractor_id, revision_no)
-     VALUES ('${ID.reviewRevision}', '${ID.reviewSubmission}', '${ID.object}',
+  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no)
+     VALUES ('${ID.reviewRevision}', '${ID.reviewWork}', '${ID.object}',
              '${ID.contractor}', 1)`,
   `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order)
      VALUES ('${ID.reviewFile}', '${ID.reviewRevision}', '${sha('a')}', 'komplekt.pdf', 0)`,
@@ -478,7 +483,7 @@ describe('учёт страниц и связи документов', () => {
 });
 
 describe('неизменяемость на уровне БД (§3.9)', () => {
-  it('запрещает UPDATE согласованной ревизии поставки', async () => {
+  it('запрещает UPDATE согласованной ревизии комплекта', async () => {
     await expect(
       db.query(
         `UPDATE submission_revisions SET return_reason = 'переоткрыть'
@@ -488,7 +493,7 @@ describe('неизменяемость на уровне БД (§3.9)', () => {
   });
 
   // Контроль: триггер обязан различать состояния, а не запрещать любой UPDATE.
-  it('разрешает UPDATE черновика ревизии поставки', async () => {
+  it('разрешает UPDATE черновика ревизии комплекта', async () => {
     await db.query(
       `UPDATE submission_revisions SET version = version + 1 WHERE id = '${ID.revision}'`,
     );
@@ -670,5 +675,171 @@ describe('неизменяемость на уровне БД (§3.9)', () => {
          WHERE code = 'page_classify_base' AND version = 2`,
     );
     expect(rows[0]?.system_prompt).toBe('исправленный черновик');
+  });
+});
+
+// =====================================================================
+// Реестр передачи: снимок и замок (0028)
+// =====================================================================
+
+/**
+ * Реестр и его опись проверяются отдельным набором, потому что их инварианты
+ * держат не форму данных, а НЕОБРАТИМОСТЬ передачи. Подпись «Передал» стоит под
+ * конкретным списком работ; если этот список после подписи можно дописать,
+ * переименовать или удалить, подпись перестаёт что-либо значить — и никакая
+ * проверка в приложении этого не заменит, потому что она обходится прямым SQL.
+ */
+describe('реестр передачи: снимок состава и неизменяемость после передачи', () => {
+  const REGISTRY = id(60);
+  const REGISTRY_OTHER = id(61);
+  const FILE_WORK = id(62);
+  const FILE_WORK_SECOND = id(63);
+  const FILE_REVISION = id(64);
+
+  beforeAll(async () => {
+    await db.query(
+      `INSERT INTO registries (id, object_id, section_code, period, number, created_by)
+         VALUES ('${REGISTRY}', '${ID.object}', 'roofing', DATE '2026-01-01', '1', '${ID.user}')`,
+    );
+    await db.query(
+      `INSERT INTO registries (id, object_id, section_code, period, created_by)
+         VALUES ('${REGISTRY_OTHER}', '${ID.object}', 'roofing', DATE '2026-01-01', '${ID.user}')`,
+    );
+    await db.query(
+      `INSERT INTO registry_items (registry_id, ordinal, work_id, revision_id, contractor_id, title)
+         VALUES ('${REGISTRY}', 1, '${ID.work}', '${ID.revision}', '${ID.contractor}', 'Комплект 1')`,
+    );
+  });
+
+  it('месяц реестра задаётся первым числом', async () => {
+    await expect(
+      db.query(
+        `INSERT INTO registries (id, object_id, section_code, period, created_by)
+           VALUES ('${id(65)}', '${ID.object}', 'roofing', DATE '2026-01-15', '${ID.user}')`,
+      ),
+    ).rejects.toThrow();
+  });
+
+  it('номер реестра уникален в пределах объекта', async () => {
+    await expect(
+      db.query(
+        `INSERT INTO registries (id, object_id, section_code, period, number, created_by)
+           VALUES ('${id(66)}', '${ID.object}', 'roofing', DATE '2026-02-01', '1', '${ID.user}')`,
+      ),
+    ).rejects.toThrow();
+  });
+
+  it('строка снимка неизменяема и неудаляема, пока реестр не черновик', async () => {
+    // Пока реестр черновик, снимок ещё правится: он собирается той же
+    // транзакцией, которая переводит статус, и запрет на черновике сделал бы
+    // передачу невозможной.
+    await db.query(
+      `UPDATE registry_items SET title = 'Комплект 1, уточнённый'
+         WHERE registry_id = '${REGISTRY}'`,
+    );
+
+    await db.query(`UPDATE registries SET status = 'issued' WHERE id = '${REGISTRY}'`);
+
+    await expect(
+      db.query(`UPDATE registry_items SET title = 'подмена' WHERE registry_id = '${REGISTRY}'`),
+    ).rejects.toThrow(/реестр/iu);
+    await expect(
+      db.query(`DELETE FROM registry_items WHERE registry_id = '${REGISTRY}'`),
+    ).rejects.toThrow(/реестр/iu);
+
+    const rows = await db.query<{ title: string }>(
+      `SELECT title FROM registry_items WHERE registry_id = '${REGISTRY}'`,
+    );
+    expect(rows[0]?.title).toBe('Комплект 1, уточнённый');
+  });
+
+  it('переданный реестр меняет только статус, версию и подпись приёмки', async () => {
+    // Приёмка проходит: это и есть разрешённый переход.
+    await db.query(
+      `UPDATE registries SET status = 'accepted', accepted_by = '${ID.user}',
+              accepted_at = now(), version = version + 1 WHERE id = '${REGISTRY}'`,
+    );
+
+    // Шапка — нет: она напечатана в подписанной бумаге.
+    await expect(
+      db.query(`UPDATE registries SET number = '99' WHERE id = '${REGISTRY}'`),
+    ).rejects.toThrow(/реестр/iu);
+    await expect(
+      db.query(`UPDATE registries SET period = DATE '2026-03-01' WHERE id = '${REGISTRY}'`),
+    ).rejects.toThrow(/реестр/iu);
+    await expect(db.query(`DELETE FROM registries WHERE id = '${REGISTRY}'`)).rejects.toThrow(
+      /реестр/iu,
+    );
+  });
+
+  it('переданный реестр не возвращается в черновик', async () => {
+    await expect(
+      db.query(`UPDATE registries SET status = 'draft' WHERE id = '${REGISTRY}'`),
+    ).rejects.toThrow(/реестр/iu);
+  });
+
+  it('у реестра не больше одного файла описи', async () => {
+    await db.query(
+      `INSERT INTO works
+         (id, object_id, contractor_id, managed_by_contractor_id, section_code, period,
+          kind, registry_id, title, created_by)
+       VALUES ('${FILE_WORK}', '${ID.object}', '${ID.contractor}', '${ID.contractor}',
+               'roofing', DATE '2026-01-01', 'registry', '${REGISTRY_OTHER}',
+               'Файл реестра', '${ID.user}')`,
+    );
+    await db.query(
+      `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no)
+         VALUES ('${FILE_REVISION}', '${FILE_WORK}', '${ID.object}', '${ID.contractor}', 1)`,
+    );
+
+    await expect(
+      db.query(
+        `INSERT INTO works
+           (id, object_id, contractor_id, managed_by_contractor_id, section_code, period,
+            kind, registry_id, title, created_by)
+         VALUES ('${FILE_WORK_SECOND}', '${ID.object}', '${ID.contractor}', '${ID.contractor}',
+                 'roofing', DATE '2026-01-01', 'registry', '${REGISTRY_OTHER}',
+                 'Второй файл', '${ID.user}')`,
+      ),
+    ).rejects.toThrow();
+  });
+
+  it('файл описи без реестра завести нельзя', async () => {
+    await expect(
+      db.query(
+        `INSERT INTO works
+           (id, object_id, contractor_id, managed_by_contractor_id, section_code, period,
+            kind, title, created_by)
+         VALUES ('${id(67)}', '${ID.object}', '${ID.contractor}', '${ID.contractor}',
+                 'roofing', DATE '2026-01-01', 'registry', 'Файл без папки', '${ID.user}')`,
+      ),
+    ).rejects.toThrow();
+  });
+
+  it('комплект нельзя завести в разделе, не включённом на объекте', async () => {
+    await expect(
+      db.query(
+        `INSERT INTO works
+           (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
+         VALUES ('${id(68)}', '${ID.object}', '${ID.contractor}', '${ID.contractor}',
+                 'masonry', DATE '2026-01-01', 'Кладка без включённого раздела', '${ID.user}')`,
+      ),
+    ).rejects.toThrow();
+  });
+
+  it('комплект нельзя завести подрядчику, не закреплённому за объектом', async () => {
+    const stranger = id(69);
+    await db.query(
+      `INSERT INTO counterparties (id, name, kind)
+         VALUES ('${stranger}', 'ООО «Незакреплённый»', 'contractor')`,
+    );
+    await expect(
+      db.query(
+        `INSERT INTO works
+           (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
+         VALUES ('${id(70)}', '${ID.object}', '${stranger}', '${stranger}',
+                 'roofing', DATE '2026-01-01', 'Комплект незакреплённого', '${ID.user}')`,
+      ),
+    ).rejects.toThrow();
   });
 });

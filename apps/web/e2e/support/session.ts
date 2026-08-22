@@ -14,6 +14,8 @@ import type { Page, APIRequestContext, BrowserContext } from '@playwright/test';
 
 export const KC = {
   contractor: 'kc-e2e-contractor',
+  /** Инженер ПТО генподрядчика: ведёт реестры и заводит комплекты за других. */
+  general: 'kc-e2e-general',
   engineer: 'kc-e2e-engineer',
   manager: 'kc-e2e-manager',
   admin: 'kc-e2e-admin',
@@ -30,6 +32,7 @@ export const KC = {
  */
 export const LOCAL_LOGINS = {
   contractor: 'contractor@e2e.example',
+  general: 'general@e2e.example',
   engineer: 'engineer@e2e.example',
   manager: 'manager@e2e.example',
   admin: 'admin@e2e.example',
@@ -40,10 +43,20 @@ export const LOCAL_PASSWORD = 'Mostovoy-Kran-77!';
 
 export const IDS = {
   object: '00000000-0000-4000-8000-000000000004',
-  volume: '00000000-0000-4000-8000-000000000006',
-  volumeClosed: '00000000-0000-4000-8000-000000000007',
-  submissionEmpty: '00000000-0000-4000-8000-000000000010',
+  orgContractor: '00000000-0000-4000-8000-000000000002',
+  orgGeneral: '00000000-0000-4000-8000-000000000005',
+  /** Реестр-черновик объекта за январь 2026. */
+  registry: '00000000-0000-4000-8000-000000000006',
+  /** Реестр, готовый к передаче: номер, состав и поданная опись уже на месте. */
+  registryReady: '00000000-0000-4000-8000-000000000007',
+  workIssued: '00000000-0000-4000-8000-000000000016',
+  revisionIssued: '00000000-0000-4000-8000-000000000017',
+  sectionCode: 'roofing',
+  period: '2026-01-01',
+  workEmpty: '00000000-0000-4000-8000-000000000010',
   revisionEmpty: '00000000-0000-4000-8000-000000000011',
+  workMarkup: '00000000-0000-4000-8000-000000000012',
+  workReview: '00000000-0000-4000-8000-000000000014',
   revisionMarkup: '00000000-0000-4000-8000-000000000013',
   revisionReview: '00000000-0000-4000-8000-000000000015',
   layoutMarkup: '00000000-0000-4000-8000-000000000051',

@@ -51,8 +51,6 @@ const ORG_CUSTOMER = id(1);
 const ORG_A = id(2);
 const ORG_B = id(3);
 const OBJECT = id(4);
-const SECTION = id(5);
-const VOLUME = id(6);
 
 const SUBMISSION_A = id(10);
 const REVISION_A = id(11);
@@ -148,11 +146,9 @@ const FIXTURE: readonly string[] = [
   `INSERT INTO counterparties (id, name, kind) VALUES ('${ORG_B}', 'ООО «Подрядчик Б»', 'contractor')`,
   `INSERT INTO construction_objects (id, code, name, full_name)
      VALUES ('${OBJECT}', 'TST01', 'Объект 1', 'ЖК «Тест», корпус 1')`,
-  `INSERT INTO section_kinds (code, name) VALUES ('roofing', 'Кровля автостоянки')`,
-  `INSERT INTO object_sections (id, object_id, code, name, section_kind_code)
-     VALUES ('${SECTION}', '${OBJECT}', '2.5.1', 'Кровля', 'roofing')`,
-  `INSERT INTO volumes (id, object_id, section_id, code, name)
-     VALUES ('${VOLUME}', '${OBJECT}', '${SECTION}', 'V-1', 'Том 1')`,
+  `INSERT INTO sections (code, name) VALUES ('roofing', 'Кровля автостоянки') ON CONFLICT (code) DO NOTHING`,
+  `INSERT INTO object_sections (object_id, section_code)
+       VALUES ('${OBJECT}', 'roofing') ON CONFLICT DO NOTHING`,
 
   `INSERT INTO users (id, kc_sub, full_name, contractor_id)
      VALUES ('${USER_A}', '${KC.a}', 'Сотрудник А', '${ORG_A}')`,
@@ -172,9 +168,12 @@ const FIXTURE: readonly string[] = [
   `INSERT INTO user_object_scopes (user_id, object_id) VALUES ('${USER_ENGINEER}', '${OBJECT}')`,
 
   // --- Подрядчик А: замороженная разметка и черновик ------------------------
-  `INSERT INTO submissions (id, volume_id, object_id, contractor_id, title, created_by)
-     VALUES ('${SUBMISSION_A}', '${VOLUME}', '${OBJECT}', '${ORG_A}', 'Поставка А', '${USER_A}')`,
-  `INSERT INTO submission_revisions (id, submission_id, object_id, contractor_id, revision_no, status)
+  `INSERT INTO object_contractors (object_id, contractor_id)
+       VALUES ('${OBJECT}', '${ORG_A}') ON CONFLICT DO NOTHING`,
+  `INSERT INTO works
+       (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
+     VALUES ('${SUBMISSION_A}', '${OBJECT}', '${ORG_A}', '${ORG_A}', 'roofing', DATE '2026-01-01', 'Поставка А', '${USER_A}')`,
+  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
      VALUES ('${REVISION_A}', '${SUBMISSION_A}', '${OBJECT}', '${ORG_A}', 1, 'draft')`,
   `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
      VALUES ('${SHA('a')}', 'blobs/${SHA('a')}', 2048, 'application/pdf')`,
@@ -215,9 +214,12 @@ const FIXTURE: readonly string[] = [
      VALUES ('${LAYOUT_DRAFT}', '${REVISION_A}', '${OBJECT}', '${BUNDLE_A}', 2, 'draft')`,
 
   // --- Подрядчик Б: готовый чужой прогон с артефактом и текстом -------------
-  `INSERT INTO submissions (id, volume_id, object_id, contractor_id, title, created_by)
-     VALUES ('${SUBMISSION_B}', '${VOLUME}', '${OBJECT}', '${ORG_B}', 'Поставка Б', '${USER_B}')`,
-  `INSERT INTO submission_revisions (id, submission_id, object_id, contractor_id, revision_no, status)
+  `INSERT INTO object_contractors (object_id, contractor_id)
+       VALUES ('${OBJECT}', '${ORG_B}') ON CONFLICT DO NOTHING`,
+  `INSERT INTO works
+       (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
+     VALUES ('${SUBMISSION_B}', '${OBJECT}', '${ORG_B}', '${ORG_B}', 'roofing', DATE '2026-01-01', 'Поставка Б', '${USER_B}')`,
+  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
      VALUES ('${REVISION_B}', '${SUBMISSION_B}', '${OBJECT}', '${ORG_B}', 1, 'draft')`,
   `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
      VALUES ('${SHA('c')}', 'blobs/${SHA('c')}', 700, 'application/pdf')`,

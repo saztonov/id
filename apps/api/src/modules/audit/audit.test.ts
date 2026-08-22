@@ -64,9 +64,6 @@ const ORG_DEVELOPER = id(201);
 const ORG_CONTRACTOR = id(202);
 const OBJECT_A = id(203);
 const OBJECT_B = id(204);
-const SECTION_ROOF = id(205);
-const SECTION_PILES = id(206);
-const SECTION_B_ROOF = id(207);
 const PROFILE_ROOFING = id(208);
 
 const USER_ADMIN = id(210);
@@ -89,9 +86,9 @@ const KC = {
 
 const ADMIN_EMAIL = 'audit-admin@example.test';
 
-const KIND_ROOFING = 'roofing';
-/** Вид раздела БЕЗ опубликованного профиля: проверяет `n_a`, а не «комплект пуст». */
-const KIND_PILES = 'piles';
+const SECTION_ROOFING = 'roofing';
+/** Раздел БЕЗ опубликованного профиля: проверяет `n_a`, а не «комплект пуст». */
+const SECTION_PILES = 'piles';
 
 /** Резервные виды ИД поставки (seed 0009): их и защищает запрет. */
 const FALLBACK_ANY_ACT = 'other_acts';
@@ -113,24 +110,24 @@ const FIXTURE: readonly string[] = [
   // фикстур нет: собственная строка rule_definitions ломала бы сверку реестра
   // с реализациями при старте приложения (§9.6). Коды ниже — настоящие.
 
-  `INSERT INTO section_kinds (code, name) VALUES ('${KIND_ROOFING}', 'Кровля')`,
-  `INSERT INTO section_kinds (code, name) VALUES ('${KIND_PILES}', 'Свайное основание')`,
+  `INSERT INTO sections (code, name) VALUES ('${SECTION_ROOFING}', 'Кровля') ON CONFLICT (code) DO NOTHING`,
+  `INSERT INTO sections (code, name) VALUES ('${SECTION_PILES}', 'Свайное основание') ON CONFLICT (code) DO NOTHING`,
 
-  `INSERT INTO object_sections (id, object_id, code, name, section_kind_code)
-     VALUES ('${SECTION_ROOF}', '${OBJECT_A}', 'roof', 'Кровля корпуса 1', '${KIND_ROOFING}')`,
-  `INSERT INTO object_sections (id, object_id, code, name, section_kind_code)
-     VALUES ('${SECTION_PILES}', '${OBJECT_A}', 'piles', 'Сваи корпуса 1', '${KIND_PILES}')`,
-  `INSERT INTO object_sections (id, object_id, code, name, section_kind_code)
-     VALUES ('${SECTION_B_ROOF}', '${OBJECT_B}', 'roof', 'Кровля корпуса 2', '${KIND_ROOFING}')`,
+  `INSERT INTO object_sections (object_id, section_code)
+       VALUES ('${OBJECT_A}', '${SECTION_ROOFING}') ON CONFLICT DO NOTHING`,
+  `INSERT INTO object_sections (object_id, section_code)
+       VALUES ('${OBJECT_A}', '${SECTION_PILES}') ON CONFLICT DO NOTHING`,
+  `INSERT INTO object_sections (object_id, section_code)
+       VALUES ('${OBJECT_B}', '${SECTION_ROOFING}') ON CONFLICT DO NOTHING`,
 
-  // Профиль вида раздела вставляется прямым SQL: проверяется РАЗРЕШЕНИЕ правил, а
+  // Профиль раздела вставляется прямым SQL: проверяется РАЗРЕШЕНИЕ правил, а
   // не создание профиля (оно проверено в catalog.test.ts). Уровень `automatic`
   // взят намеренно — на нём видно, что наложение объекта умеет только понижать.
   `INSERT INTO section_profiles
-     (id, section_kind_code, version, effective_from, expected_doc_types,
+     (id, section_code, version, effective_from, expected_doc_types,
       material_categories, material_matrix, enabled_rule_codes, thresholds,
       autonomy_level, published_at)
-     VALUES ('${PROFILE_ROOFING}', '${KIND_ROOFING}', 1, '2026-01-01',
+     VALUES ('${PROFILE_ROOFING}', '${SECTION_ROOFING}', 1, '2026-01-01',
              '{aosr,cert_conformity}', '{roll_waterproofing}',
              '{"roll_waterproofing": {"documents": ["cert_conformity"]}}'::jsonb,
              '{AOSR.HDR.020,DATE.312,MAT.110}',
@@ -199,7 +196,7 @@ afterAll(async () => {
 // Вход и запросы
 // =====================================================================
 
-type Method = 'GET' | 'POST' | 'PATCH' | 'DELETE';
+type Method = 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
 
 interface SignedIn {
   readonly cookie: string;
@@ -327,7 +324,7 @@ interface DocTypeResponse {
 interface RuleProfileResponse {
   id: string;
   objectId: string;
-  sectionId: string | null;
+  sectionCode: string | null;
   version: number;
   effectiveFrom: string;
   effectiveTo: string | null;
@@ -336,7 +333,7 @@ interface RuleProfileResponse {
 }
 
 interface ResolvedRulesResponse {
-  sectionKindCode: string;
+  sectionCode: string;
   sectionProfileId: string | null;
   objectProfileIds: string[];
   expectedDocTypes: string[];
@@ -397,25 +394,26 @@ describe('след правок справочников в audit_log', () => {
       (await asAdmin('PATCH', `${P}/objects/${createdObjectId}`, { isActive: false })).statusCode,
     ).toBe(200);
 
-    const section = await asAdmin('POST', `${P}/objects/${OBJECT_A}/sections`, {
-      code: 'facade',
-      name: 'Фасад корпуса 1',
-      sectionKindCode: KIND_ROOFING,
-    });
-    expect(section.statusCode).toBe(201);
-    const sectionId = section.json<{ id: string }>().id;
-
     expect(
-      (await asAdmin('PATCH', `${P}/sections/${sectionId}`, { name: 'Фасад, 1 этап' })).statusCode,
+      (
+        await asAdmin('PUT', `${P}/objects/${OBJECT_A}/sections/${SECTION_ROOFING}`, {
+          isActive: true,
+        })
+      ).statusCode,
     ).toBe(200);
 
     expect(
-      (await asAdmin('POST', `${P}/section-kinds`, { code: 'audit_kind', name: 'Вид для аудита' }))
+      (await asAdmin('POST', `${P}/sections`, { code: 'audit_section', name: 'Раздел для аудита' }))
         .statusCode,
     ).toBe(201);
 
+    expect(
+      (await asAdmin('PATCH', `${P}/sections/audit_section`, { name: 'Раздел аудита, 2' }))
+        .statusCode,
+    ).toBe(200);
+
     const profile = await asAdmin('POST', `${P}/section-profiles`, {
-      sectionKindCode: 'audit_kind',
+      sectionCode: 'audit_section',
       effectiveFrom: '2026-02-01',
     });
     expect(profile.statusCode).toBe(201);
@@ -487,7 +485,7 @@ describe('след правок справочников в audit_log', () => {
       'counterparty.updated',
       'section.created',
       'section.updated',
-      'section_kind.created',
+      'object_section.enabled',
       'section_profile.created',
       'section_profile.published',
       'rd_document.created',
@@ -531,8 +529,12 @@ describe('след правок справочников в audit_log', () => {
     expect(rows[0]?.payload).toEqual({ isActive: false });
   });
 
-  it('след раздела и шифра РД привязан к объекту', async () => {
-    expect((await auditRows('section.created'))[0]?.object_id).toBe(OBJECT_A);
+  it('след включения раздела и шифра РД привязан к объекту', async () => {
+    // К объекту привязано ВКЛЮЧЕНИЕ раздела, а не заведение самого раздела:
+    // справочник разделов общий для портала, и его правка ни к какой стройке
+    // не относится. Запись `section.created` объекта не имеет намеренно.
+    expect((await auditRows('object_section.enabled'))[0]?.object_id).toBe(OBJECT_A);
+    expect((await auditRows('section.created'))[0]?.object_id).toBeNull();
     expect((await auditRows('rd_document.updated'))[0]?.object_id).toBe(OBJECT_A);
   });
 
@@ -662,16 +664,16 @@ describe('резервные виды ИД защищены от отключе�
 let objectWideProfileId = '';
 
 describe('профили правил объекта и разрешение действующих правил (§9.2)', () => {
-  it('без наложений действуют правила профиля вида раздела', async () => {
+  it('без наложений действуют правила профиля раздела', async () => {
     const response = await asAdmin(
       'GET',
-      `${P}/objects/${OBJECT_B}/sections/${SECTION_B_ROOF}/effective-rules?at=2026-06-01`,
+      `${P}/objects/${OBJECT_B}/sections/${SECTION_ROOFING}/effective-rules?at=2026-06-01`,
     );
     expect(response.statusCode).toBe(200);
 
     const rules = response.json<ResolvedRulesResponse>();
     expect(rules).toMatchObject({
-      sectionKindCode: KIND_ROOFING,
+      sectionCode: SECTION_ROOFING,
       sectionProfileId: PROFILE_ROOFING,
       objectProfileIds: [],
       expectedDocTypes: ['aosr', 'cert_conformity'],
@@ -701,7 +703,7 @@ describe('профили правил объекта и разрешение д�
     });
   });
 
-  it('наложение объекта переопределяет профиль вида раздела', async () => {
+  it('наложение объекта переопределяет профиль раздела', async () => {
     const created = await asAdmin('POST', `${P}/objects/${OBJECT_A}/rule-profiles`, {
       effectiveFrom: '2026-01-01',
       publish: true,
@@ -716,13 +718,13 @@ describe('профили правил объекта и разрешение д�
     expect(created.statusCode).toBe(201);
     const profile = created.json<RuleProfileResponse>();
     objectWideProfileId = profile.id;
-    expect(profile).toMatchObject({ version: 1, sectionId: null });
+    expect(profile).toMatchObject({ version: 1, sectionCode: null });
     expect(profile.publishedAt).not.toBeNull();
 
     const rules = (
       await asAdmin(
         'GET',
-        `${P}/objects/${OBJECT_A}/sections/${SECTION_ROOF}/effective-rules?at=2026-06-01`,
+        `${P}/objects/${OBJECT_A}/sections/${SECTION_ROOFING}/effective-rules?at=2026-06-01`,
       )
     ).json<ResolvedRulesResponse>();
 
@@ -739,7 +741,7 @@ describe('профили правил объекта и разрешение д�
       completenessConfigured: true,
     });
     expect(rules.thresholds).toEqual({ ageDays: 14, minStrengthPct: 100 });
-    // Матрица материалов не переопределялась — осталась от вида раздела.
+    // Матрица материалов не переопределялась — осталась от раздела.
     expect(rules.materialMatrix).toEqual({
       roll_waterproofing: { documents: ['cert_conformity'] },
     });
@@ -747,7 +749,7 @@ describe('профили правил объекта и разрешение д�
 
   it('наложение раздела применяется поверх наложения объекта', async () => {
     const created = await asAdmin('POST', `${P}/objects/${OBJECT_A}/rule-profiles`, {
-      sectionId: SECTION_ROOF,
+      sectionCode: SECTION_ROOFING,
       effectiveFrom: '2026-01-01',
       publish: true,
       overrides: {
@@ -761,7 +763,7 @@ describe('профили правил объекта и разрешение д�
     const rules = (
       await asAdmin(
         'GET',
-        `${P}/objects/${OBJECT_A}/sections/${SECTION_ROOF}/effective-rules?at=2026-06-01`,
+        `${P}/objects/${OBJECT_A}/sections/${SECTION_ROOFING}/effective-rules?at=2026-06-01`,
       )
     ).json<ResolvedRulesResponse>();
 
@@ -820,7 +822,7 @@ describe('профили правил объекта и разрешение д�
     const past = (
       await asAdmin(
         'GET',
-        `${P}/objects/${OBJECT_B}/sections/${SECTION_B_ROOF}/effective-rules?at=2026-03-01`,
+        `${P}/objects/${OBJECT_B}/sections/${SECTION_ROOFING}/effective-rules?at=2026-03-01`,
       )
     ).json<ResolvedRulesResponse>();
     expect(past.thresholds).toEqual({ ageDays: 7, minStrengthPct: 100 });
@@ -828,7 +830,7 @@ describe('профили правил объекта и разрешение д�
     const now = (
       await asAdmin(
         'GET',
-        `${P}/objects/${OBJECT_B}/sections/${SECTION_B_ROOF}/effective-rules?at=2026-09-01`,
+        `${P}/objects/${OBJECT_B}/sections/${SECTION_ROOFING}/effective-rules?at=2026-09-01`,
       )
     ).json<ResolvedRulesResponse>();
     expect(now.thresholds).toEqual({ ageDays: 3, minStrengthPct: 100 });
@@ -846,7 +848,7 @@ describe('профили правил объекта и разрешение д�
     const beforePublish = (
       await asAdmin(
         'GET',
-        `${P}/objects/${OBJECT_B}/sections/${SECTION_B_ROOF}/effective-rules?at=2026-11-01`,
+        `${P}/objects/${OBJECT_B}/sections/${SECTION_ROOFING}/effective-rules?at=2026-11-01`,
       )
     ).json<ResolvedRulesResponse>();
     expect(beforePublish.thresholds).toEqual({ ageDays: 3, minStrengthPct: 100 });
@@ -856,7 +858,7 @@ describe('профили правил объекта и разрешение д�
     const afterPublish = (
       await asAdmin(
         'GET',
-        `${P}/objects/${OBJECT_B}/sections/${SECTION_B_ROOF}/effective-rules?at=2026-11-01`,
+        `${P}/objects/${OBJECT_B}/sections/${SECTION_ROOFING}/effective-rules?at=2026-11-01`,
       )
     ).json<ResolvedRulesResponse>();
     expect(afterPublish.thresholds).toEqual({ ageDays: 1, minStrengthPct: 100 });
@@ -867,18 +869,21 @@ describe('профили правил объекта и разрешение д�
     expect((await asAdmin('POST', `${P}/rule-profiles/${id(999)}/publish`)).statusCode).toBe(404);
   });
 
-  it('раздел другого объекта не настраивается и не разрешается', async () => {
+  it('раздел, не включённый на объекте, не настраивается и не разрешается', async () => {
+    // `masonry` есть в справочнике (сид 0029), но на объекте А не включён.
+    // Отказ — 404, а не 422: 422 по составному ключу сообщал бы, что такой
+    // раздел вообще существует где-то ещё.
     expect(
       (
         await asAdmin('POST', `${P}/objects/${OBJECT_A}/rule-profiles`, {
-          sectionId: SECTION_B_ROOF,
+          sectionCode: 'masonry',
           effectiveFrom: '2026-01-01',
         })
       ).statusCode,
     ).toBe(404);
 
     expect(
-      (await asAdmin('GET', `${P}/objects/${OBJECT_A}/sections/${SECTION_B_ROOF}/effective-rules`))
+      (await asAdmin('GET', `${P}/objects/${OBJECT_A}/sections/masonry/effective-rules`))
         .statusCode,
     ).toBe(404);
   });

@@ -24,7 +24,7 @@
  *
  * ## Пиннинг
  *
- * `validation_runs` хранит ссылки на версию набора правил, профиль вида раздела
+ * `validation_runs` хранит ссылки на версию набора правил, профиль раздела
  * и профиль правил объекта. Пересчитывать их по дате при чтении нельзя: после
  * публикации новой версии профиля прошлый прогон «переехал» бы на другой набор
  * ожиданий, и §3.2 с §3.7 потеряли бы смысл. Это уже чинилось на S4 миграцией
@@ -43,7 +43,6 @@ import {
   logicalDocuments,
   materialDocuments,
   materials,
-  objectSections,
   pageAssignments,
   pageTextVersions,
   rdDocuments,
@@ -53,9 +52,8 @@ import {
   rulesetVersions,
   sourcePages,
   submissionRevisions,
-  submissions,
+  works,
   validationRuns,
-  volumes,
 } from '@id/db';
 import type {
   BatchNode,
@@ -181,9 +179,9 @@ interface RevisionContext {
   readonly id: string;
   readonly objectId: string;
   readonly contractorId: string;
-  readonly sectionId: string;
-  readonly sectionKindCode: string;
-  readonly volumeCode: string;
+  readonly sectionCode: string;
+  /** Наименование работы: попадает в тексты замечаний вместо кода тома. */
+  readonly workTitle: string;
   readonly status: string;
 }
 
@@ -197,20 +195,17 @@ async function loadRevisionContext(
       id: submissionRevisions.id,
       objectId: submissionRevisions.objectId,
       contractorId: submissionRevisions.contractorId,
-      sectionId: volumes.sectionId,
-      sectionKindCode: objectSections.sectionKindCode,
-      volumeCode: volumes.code,
+      sectionCode: works.sectionCode,
+      workTitle: works.title,
       status: submissionRevisions.status,
     })
     .from(submissionRevisions)
-    .innerJoin(submissions, eq(submissionRevisions.submissionId, submissions.id))
-    .innerJoin(volumes, eq(submissions.volumeId, volumes.id))
-    .innerJoin(objectSections, eq(volumes.sectionId, objectSections.id))
+    .innerJoin(works, eq(submissionRevisions.workId, works.id))
     .where(withScope(scope, REVISION_SCOPE, eq(submissionRevisions.id, revisionId)))
     .limit(1);
 
   const row = rows[0];
-  if (row === undefined) throw notFound('Ревизия поставки не найдена.');
+  if (row === undefined) throw notFound('Ревизия комплекта не найдена.');
   return row;
 }
 
@@ -292,11 +287,11 @@ export async function loadCheckGraph(
   const rules = await resolveEffectiveRules(
     db,
     scope,
-    { objectId: revision.objectId, sectionId: revision.sectionId },
+    { objectId: revision.objectId, sectionCode: revision.sectionCode },
     input.today,
   );
   if (rules === null) {
-    throw internal({ logDetail: `раздел ${revision.sectionId} не разрешился для объекта` });
+    throw internal({ logDetail: `раздел ${revision.sectionCode} не разрешился для объекта` });
   }
 
   const objectRows = await db

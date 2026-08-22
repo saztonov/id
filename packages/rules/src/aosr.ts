@@ -1682,7 +1682,7 @@ function evaluateDuplicateActs(graph: CheckGraph): RuleResult {
         defect({
           ...anchorOfDocument(duplicate),
           origin: 'deterministic',
-          message: `В комплекте больше одного акта ${actLabel(duplicate)}: документы ${group.map((act) => String(act.ordinal)).join(', ')} при одном объекте «${graph.object.code}», подрядчике и разделе ${graph.revision.volumeCode}.`,
+          message: `В комплекте больше одного акта ${actLabel(duplicate)}: документы ${group.map((act) => String(act.ordinal)).join(', ')} при одном объекте «${graph.object.code}», подрядчике и разделе ${graph.revision.sectionCode}.`,
           hint: `Оставьте в комплекте один акт с этим номером; при исправлении ранее поданного акта подайте новую ревизию, а не второй экземпляр (сравните с документом ${String(first.ordinal)}).`,
         }),
       );

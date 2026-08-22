@@ -27,19 +27,45 @@ import { requireAuth, type PortalRole } from './require-auth.js';
  * где-то ещё перечисляются.
  */
 export const PERMISSIONS = {
-  /** Чтение поставок и ревизий в пределах своей области видимости. */
-  'submission.read': ['contractor', 'engineer', 'manager', 'admin'],
-  'submission.upload': ['contractor'],
-  'submission.submit': ['contractor'],
+  /** Чтение комплектов и ревизий в пределах своей области видимости. */
+  'submission.read': ['contractor', 'general_contractor', 'engineer', 'manager', 'admin'],
+  /**
+   * Заведение комплекта и загрузка файлов.
+   *
+   * Генподрядчик получает его наравне с подрядчиком: инженер ПТО собирает
+   * комплекты за субподрядчиков, у которых нет учётной записи в портале. Кого
+   * именно он вправе указать исполнителем, решает не право, а закрепление
+   * подрядчика за объектом (`works_contractor_fk`).
+   */
+  'submission.upload': ['contractor', 'general_contractor'],
+  'submission.submit': ['contractor', 'general_contractor'],
 
-  'markup.read': ['contractor', 'engineer', 'manager', 'admin'],
-  'markup.edit': ['contractor', 'engineer'],
-  'markup.freeze': ['contractor', 'engineer'],
-  'recognition.start': ['contractor', 'engineer'],
+  'markup.read': ['contractor', 'general_contractor', 'engineer', 'manager', 'admin'],
+  'markup.edit': ['contractor', 'general_contractor', 'engineer'],
+  'markup.freeze': ['contractor', 'general_contractor', 'engineer'],
+  'recognition.start': ['contractor', 'general_contractor', 'engineer'],
 
   /** Границы документов, тип, реквизиты: правит проверяющий, не подрядчик. */
   'document.edit': ['engineer', 'manager'],
   'checks.run': ['engineer', 'manager'],
+
+  /**
+   * Ведение реестра: собрать состав, загрузить скан описи, передать папку.
+   *
+   * Отдельно от `submission.*`, потому что это другое действие и другой актор:
+   * подрядчик подаёт свой комплект, а реестр собирает и подписывает ПТО
+   * генподрядчика. Администратор входит сюда как обычно — ему нужно уметь
+   * разобрать застрявшую папку.
+   */
+  'registry.manage': ['general_contractor', 'admin'],
+  /**
+   * Приёмка переданной папки — подпись «Принял» в подвале реестра.
+   *
+   * Это сторона заказчика, а не генподрядчика: тот, кто передал, не принимает
+   * сам у себя. `admin` здесь отсутствует по той же причине, что и в
+   * `revision.approve` (§4.1).
+   */
+  'registry.accept': ['engineer', 'manager'],
 
   // Бизнес-согласование. `admin` здесь намеренно отсутствует (§4.1).
   'revision.approve': ['engineer', 'manager'],
@@ -47,7 +73,7 @@ export const PERMISSIONS = {
   /** Обоснованный отказ от результата проверки — только руководитель. */
   'revision.override': ['manager'],
 
-  'archive.download': ['contractor', 'engineer', 'manager', 'admin'],
+  'archive.download': ['contractor', 'general_contractor', 'engineer', 'manager', 'admin'],
 
   'users.manage': ['admin'],
   'settings.manage': ['admin'],
@@ -84,6 +110,28 @@ export function requirePermission(permission: Permission): preHandlerAsyncHookHa
     await requireAuth(request);
     if (!hasPermission(request.authContext?.roles ?? [], permission)) {
       throw permissionDenied(permission);
+    }
+  };
+}
+
+/**
+ * Достаточно ЛЮБОГО из перечисленных прав.
+ *
+ * Нужно там, где одно и то же действие принадлежит двум разным ролям по разным
+ * причинам: настройку объекта ведёт генподрядчик, потому что это его стройка, и
+ * администратор, потому что он разбирает застрявшее. Складывать роли в одно
+ * право было бы неверно — право отвечает на вопрос «что за действие», а не «кто
+ * его делает», и `registry.manage` у администратора означал бы, что он ещё и
+ * передаёт папки.
+ */
+export function requireAnyPermission(
+  permissions: readonly Permission[],
+): preHandlerAsyncHookHandler {
+  return async function checkAnyPermission(request: FastifyRequest) {
+    await requireAuth(request);
+    const roles = request.authContext?.roles ?? [];
+    if (!permissions.some((permission) => hasPermission(roles, permission))) {
+      throw permissionDenied(permissions[0] ?? 'settings.manage');
     }
   };
 }

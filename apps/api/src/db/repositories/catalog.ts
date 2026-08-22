@@ -19,12 +19,12 @@
  *   что «свой контрагент» задаётся не колонкой, а участием в поставках.
  *
  * У подрядчика связь с объектом КОСВЕННАЯ: объект виден, если на нём есть хотя
- * бы одна его поставка. Это подзапрос `EXISTS` по `submissions`, а не список
+ * бы один его комплект. Это подзапрос `EXISTS` по `works`, а не список
  * объектов, собранный в приложении: список означал бы второй запрос, окно между
  * запросами и фильтр вне SQL — ровно тот способ, которым фильтрация теряется
  * молча. Фильтровать обязана база.
  *
- * **Класс 2 — конфигурация поведения системы.** `section_kinds`,
+ * **Класс 2 — конфигурация поведения системы.** `sections`,
  * `section_profiles`, `doc_types`, `doc_type_overrides`, `doc_type_candidates`.
  * Она читается всеми аутентифицированными и областью НЕ сужается. Отсутствие
  * `withScope()` здесь умышленное, а не забытое: это настройка портала — какие
@@ -117,17 +117,19 @@ import {
   docTypeCandidates,
   docTypeOverrides,
   docTypes,
+  objectContractors,
   objectRuleProfiles,
   objectSections,
   rdDocuments,
+  registries,
+  registryItems,
   ruleDefinitions,
-  sectionKinds,
   sectionProfiles,
+  sections,
   submissionRevisions,
-  submissions,
   userObjectScopes,
   users,
-  volumes,
+  works,
 } from '@id/db';
 import type {
   AutonomyLevel,
@@ -136,7 +138,9 @@ import type {
   CounterpartyKind,
   CounterpartyKindEntry,
   JsonValue,
+  ObjectContractor,
   ObjectSection,
+  Section,
   SectionProfile,
 } from '@id/contracts';
 import type { DocTypeGroup, DocTypeKind } from '@id/doc-types';
@@ -247,20 +251,21 @@ export interface DocTypeCandidateView {
  * и одноимённая таблица внутри и снаружи связала бы условие не с той стороной. С
  * псевдонимом такая ошибка невозможна — имена различны.
  */
-const scopeSubmissions = alias(submissions, 'scope_submissions');
+const scopeWorks = alias(works, 'scope_works');
+const scopeObjectContractors = alias(objectContractors, 'scope_object_contractors');
 const scopeObjects = alias(constructionObjects, 'scope_objects');
 const scopeRdDocuments = alias(rdDocuments, 'scope_rd_documents');
 
 /**
- * Цель области для подзапроса по поставкам.
+ * Цель области для подзапроса по комплектам.
  *
  * Единственная таблица в этом файле, где обе колонки области лежат в самой
  * строке, — поэтому именно через неё выражается косвенная связь подрядчика с
- * объектом.
+ * объектом «у меня здесь есть работа».
  */
-const SUBMISSION_SCOPE_TARGET: ScopeTarget = {
-  objectId: scopeSubmissions.objectId,
-  contractorId: scopeSubmissions.contractorId,
+const WORK_SCOPE_TARGET: ScopeTarget = {
+  objectId: scopeWorks.objectId,
+  contractorId: scopeWorks.contractorId,
 };
 
 /**
@@ -279,32 +284,47 @@ const PRESENT = sql`1`;
  *
  * Форм SQL две, потому что «объект в области» у ролей означает разное:
  *
- * - **Подрядчик** связан с объектом косвенно — через собственные поставки.
- *   Отсюда `EXISTS` по `submissions`: у объекта нет колонки `contractor_id`, и
- *   единственный факт, делающий объект «своим», — наличие поставки. Подрядчик,
- *   у которого поставок на объекте ещё нет, объекта не видит; область следует из
- *   фактов в БД, а не из ожиданий.
- * - **Инженер, руководитель, администратор** ограничены (или не ограничены) прямо
- *   по объекту, и это уже умеет `withScope()`: список назначенных объектов,
- *   пустая область и отсутствие ограничения — всё там.
+ * - **Подрядчик** связан с объектом двумя способами, и оба нужны. Прямой —
+ *   закрепление `object_contractors` (0028): именно оно делает объект видимым
+ *   ДО первого комплекта и тем закрывает долг «первую поставку завести нельзя».
+ *   Косвенный — собственные комплекты: закрепление могли снять, а работа,
+ *   сданная до этого, обязана остаться доступной ему самому. Убрать второй
+ *   способ значило бы, что снятие закрепления стирает у подрядчика его же
+ *   историю; убрать первый — вернуть прежний тупик.
+ * - **Генподрядчик, инженер, руководитель, администратор** ограничены (или не
+ *   ограничены) прямо по объекту, и это уже умеет `withScope()`: список
+ *   объектов, пустая область и отсутствие ограничения — всё там.
  *
  * `contractorId` в цели второй ветки указывает на колонку подзапроса, которой в
  * этом запросе нет, и это не небрежность: ветка подрядчика обработана выше, а
  * для остальных областей `scopeWhere()` колонку подрядчика не читает. Если
  * правило области когда-нибудь начнёт читать её и для инженера, PostgreSQL
- * ответит «missing FROM-clause entry for table scope_submissions» — то есть
- * расхождение станет отказом сразу, а не лишними строками в ответе.
+ * ответит «missing FROM-clause entry» — то есть расхождение станет отказом
+ * сразу, а не лишними строками в ответе.
  */
 export function objectVisibility(scope: AuthScope, objectId: PgColumn): SQL {
   if (scope.kind === 'contractor') {
-    return exists(
+    const assigned = exists(
       subquery
         .select({ present: PRESENT })
-        .from(scopeSubmissions)
-        .where(withScope(scope, SUBMISSION_SCOPE_TARGET, eq(scopeSubmissions.objectId, objectId))),
+        .from(scopeObjectContractors)
+        .where(
+          and(
+            eq(scopeObjectContractors.objectId, objectId),
+            eq(scopeObjectContractors.contractorId, scope.contractorId),
+            eq(scopeObjectContractors.isActive, true),
+          ),
+        ),
     );
+    const hasWork = exists(
+      subquery
+        .select({ present: PRESENT })
+        .from(scopeWorks)
+        .where(withScope(scope, WORK_SCOPE_TARGET, eq(scopeWorks.objectId, objectId))),
+    );
+    return or(assigned, hasWork) ?? sql`false`;
   }
-  return withScope(scope, { objectId, contractorId: scopeSubmissions.contractorId });
+  return withScope(scope, { objectId, contractorId: scopeWorks.contractorId });
 }
 
 /**
@@ -334,7 +354,7 @@ function counterpartyVisibility(scope: AuthScope): SQL {
   // Область в обеих ветках берётся из withScope(): «строка справочника — это я»
   // выражается целью, где колонкой подрядчика служит сам первичный ключ.
   const itself = withScope(scope, {
-    objectId: scopeSubmissions.objectId,
+    objectId: scopeWorks.objectId,
     contractorId: counterparties.id,
   });
 
@@ -526,25 +546,30 @@ const CONSTRAINT_PROBLEMS: Readonly<Record<string, ConstraintProblem>> = {
     pointer: '/generalContractorId',
     message: 'Генеральный подрядчик не найден в справочнике контрагентов.',
   },
-  object_sections_object_code_uq: {
-    status: 409,
-    pointer: '/code',
-    message: 'Раздел с таким кодом на этом объекте уже существует.',
-  },
-  object_sections_section_kind_code_fkey: {
+  object_sections_section_code_fkey: {
     status: 422,
-    pointer: '/sectionKindCode',
-    message: 'Вид раздела не найден в справочнике.',
+    pointer: '/sectionCode',
+    message: 'Раздел работ не найден в справочнике.',
   },
-  section_kinds_pkey: {
+  object_contractors_contractor_id_fkey: {
+    status: 422,
+    pointer: '/contractorId',
+    message: 'Контрагент не найден в справочнике.',
+  },
+  sections_pkey: {
     status: 409,
     pointer: '/code',
-    message: 'Вид раздела с таким кодом уже существует.',
+    message: 'Раздел работ с таким кодом уже существует.',
   },
-  section_profiles_kind_version_uq: {
+  sections_code_chk: {
+    status: 422,
+    pointer: '/code',
+    message: 'Код раздела записывается латиницей: строчные буквы, цифры и подчёркивание.',
+  },
+  section_profiles_section_version_uq: {
     status: 409,
     pointer: null,
-    message: 'Профиль этого вида раздела изменён параллельно. Повторите запрос.',
+    message: 'Профиль этого раздела изменён параллельно. Повторите запрос.',
   },
   // Инвариант «на дату действует не более одного профиля» держит частичный
   // уникальный индекс 0011. Сюда попадает проигравший в гонке двух публикаций:
@@ -554,13 +579,13 @@ const CONSTRAINT_PROBLEMS: Readonly<Record<string, ConstraintProblem>> = {
     status: 409,
     pointer: null,
     message:
-      'У этого вида раздела параллельно опубликован профиль с открытым периодом. ' +
+      'У этого раздела параллельно опубликован профиль с открытым периодом. ' +
       'Повторите запрос: закрывать период задним числом портал не станет.',
   },
-  section_profiles_section_kind_code_fkey: {
+  section_profiles_section_code_fkey: {
     status: 422,
-    pointer: '/sectionKindCode',
-    message: 'Вид раздела не найден в справочнике.',
+    pointer: '/sectionCode',
+    message: 'Раздел работ не найден в справочнике.',
   },
   rd_documents_designer_id_fkey: {
     status: 422,
@@ -798,15 +823,19 @@ const COUNTERPARTY_REFERENCES: readonly ReferenceCheck[] = [
     constructionObjects.generalContractorId,
   ),
   refs('шифры рабочей документации', rdDocuments, rdDocuments.designerId),
-  refs('поставки', submissions, submissions.contractorId),
+  refs('комплекты работ', works, works.contractorId),
+  refs('комплекты (ведущая организация)', works, works.managedByContractorId),
+  refs('закрепления за объектами', objectContractors, objectContractors.contractorId),
+  refs('строки переданных реестров', registryItems, registryItems.contractorId),
 ];
 
 /** Кто ссылается на объект строительства. */
 const CONSTRUCTION_OBJECT_REFERENCES: readonly ReferenceCheck[] = [
-  refs('разделы работ', objectSections, objectSections.objectId),
+  refs('включённые разделы работ', objectSections, objectSections.objectId),
   refs('шифры рабочей документации', rdDocuments, rdDocuments.objectId),
-  refs('тома', volumes, volumes.objectId),
-  refs('поставки', submissions, submissions.objectId),
+  refs('закреплённые подрядчики', objectContractors, objectContractors.objectId),
+  refs('реестры', registries, registries.objectId),
+  refs('комплекты работ', works, works.objectId),
   refs('профили правил объекта', objectRuleProfiles, objectRuleProfiles.objectId),
   refs('назначенные области видимости', userObjectScopes, userObjectScopes.objectId),
 ];
@@ -1357,194 +1386,63 @@ export async function createCounterpartyKind(
 }
 
 // =====================================================================
-// Разделы работ объекта
+// Разделы работ: справочник, включённость на объекте, закрепление подрядчиков
 // =====================================================================
 
-const SECTION_SELECTION = {
-  id: objectSections.id,
-  objectId: objectSections.objectId,
-  code: objectSections.code,
-  name: objectSections.name,
-  sortOrder: objectSections.sortOrder,
-  isActive: objectSections.isActive,
-  sectionKindCode: objectSections.sectionKindCode,
-};
-
 /**
- * Разделы объекта отдаются списком целиком, без курсора.
+ * Справочник разделов — КОНФИГУРАЦИЯ, а не коммерческие сведения.
  *
- * Их единицы на объект, а клиенту они нужны все сразу: раздел выбирается в
- * форме, и страница выдачи означала бы, что часть разделов в форме не видна.
+ * Читается всеми аутентифицированными наравне с каталогом видов ИД: перечень
+ * названий работ ничего не сообщает о конкретной стройке. Коммерческим он
+ * становится ровно там, где привязан к объекту, — и это уже `object_sections`
+ * ниже, у которых область видимости объектная.
  */
-export async function listObjectSections(
+export async function listSections(
   db: Database,
   scope: AuthScope,
-  objectId: string,
   filter: { readonly isActive?: boolean | undefined } = {},
-): Promise<readonly ObjectSection[]> {
+): Promise<readonly Section[]> {
   return db
-    .select(SECTION_SELECTION)
-    .from(objectSections)
+    .select({
+      code: sections.code,
+      name: sections.name,
+      sortOrder: sections.sortOrder,
+      isActive: sections.isActive,
+    })
+    .from(sections)
     .where(
       visibleWhere(
-        objectVisibility(scope, objectSections.objectId),
-        eq(objectSections.objectId, objectId),
-        filter.isActive === undefined ? undefined : eq(objectSections.isActive, filter.isActive),
+        configVisibility(scope),
+        filter.isActive === undefined ? undefined : eq(sections.isActive, filter.isActive),
       ),
     )
-    .orderBy(asc(objectSections.sortOrder), asc(objectSections.code));
+    .orderBy(asc(sections.sortOrder), asc(sections.code));
 }
 
-export async function findObjectSection(
-  db: Database,
-  scope: AuthScope,
-  sectionId: string,
-): Promise<ObjectSection | null> {
-  const rows = await db
-    .select(SECTION_SELECTION)
-    .from(objectSections)
-    .where(
-      visibleWhere(
-        objectVisibility(scope, objectSections.objectId),
-        eq(objectSections.id, sectionId),
-      ),
-    )
-    .limit(1);
-  return rows[0] ?? null;
-}
-
-export interface CreateObjectSectionInput {
+export interface CreateSectionInput {
   readonly code: string;
   readonly name: string;
-  readonly sectionKindCode: string;
   readonly sortOrder?: number | undefined;
 }
 
-export async function createObjectSection(
+export async function createSection(
   db: Database,
   scope: AuthScope,
-  objectId: string,
-  input: CreateObjectSectionInput,
+  input: CreateSectionInput,
   actor: AuditActor,
-): Promise<ObjectSection> {
-  const sectionId = await guardConstraints(() =>
+): Promise<Section> {
+  await guardConstraints(() =>
     db.transaction(async (tx) => {
-      const inserted = await tx
-        .insert(objectSections)
-        .values({
-          objectId,
-          code: input.code,
-          name: input.name,
-          sectionKindCode: input.sectionKindCode,
-          ...(input.sortOrder === undefined ? {} : { sortOrder: input.sortOrder }),
-        })
-        .returning({ id: objectSections.id });
+      await tx.insert(sections).values({
+        code: input.code,
+        name: input.name,
+        ...(input.sortOrder === undefined ? {} : { sortOrder: input.sortOrder }),
+      });
 
-      const id = idOf(inserted);
       await appendAudit(tx, scope, {
         ...actor,
         action: 'section.created',
-        entityType: 'object_section',
-        entityId: id,
-        objectId,
-        payload: changedFields(input),
-      });
-      return id;
-    }),
-  );
-
-  return required(await findObjectSection(db, scope, sectionId), 'раздел работ');
-}
-
-/** `code` неизменяем по той же причине, что и код объекта: он внешне значим. */
-export interface UpdateObjectSectionPatch {
-  readonly name?: string | undefined;
-  readonly sectionKindCode?: string | undefined;
-  readonly sortOrder?: number | undefined;
-  readonly isActive?: boolean | undefined;
-}
-
-export async function updateObjectSection(
-  db: Database,
-  scope: AuthScope,
-  sectionId: string,
-  patch: UpdateObjectSectionPatch,
-  actor: AuditActor,
-): Promise<ObjectSection | null> {
-  const fields: Partial<typeof objectSections.$inferInsert> = {
-    ...(patch.name !== undefined ? { name: patch.name } : {}),
-    ...(patch.sectionKindCode !== undefined ? { sectionKindCode: patch.sectionKindCode } : {}),
-    ...(patch.sortOrder !== undefined ? { sortOrder: patch.sortOrder } : {}),
-    ...(patch.isActive !== undefined ? { isActive: patch.isActive } : {}),
-  };
-  assertNonEmptyPatch(fields);
-
-  const changed = await guardConstraints(() =>
-    db.transaction(async (tx) => {
-      // Объект берётся из RETURNING, а не отдельным чтением: он нужен записи
-      // журнала, и второй запрос дал бы значение уже после правки.
-      const updated = await tx
-        .update(objectSections)
-        .set(fields)
-        .where(eq(objectSections.id, sectionId))
-        .returning({ id: objectSections.id, objectId: objectSections.objectId });
-      const row = updated[0];
-      if (row === undefined) return false;
-
-      await appendAudit(tx, scope, {
-        ...actor,
-        action: 'section.updated',
-        entityType: 'object_section',
-        entityId: sectionId,
-        objectId: row.objectId,
-        payload: changedFields(patch),
-      });
-      return true;
-    }),
-  );
-  if (!changed) return null;
-
-  return findObjectSection(db, scope, sectionId);
-}
-
-// =====================================================================
-// Виды разделов
-// =====================================================================
-
-/**
- * Виды разделов — открытый справочник (§0.5).
- *
- * Корпус покрывает два раздела из многих, поэтому новый вид заводится
- * эксплуатацией, а не релизом портала: закрытое перечисление в коде превратило
- * бы появление инженерных сетей в задачу на разработку.
- */
-export async function listSectionKinds(
-  db: Database,
-  scope: AuthScope,
-): Promise<readonly SectionKind[]> {
-  return db
-    .select({ code: sectionKinds.code, name: sectionKinds.name })
-    .from(sectionKinds)
-    .where(configVisibility(scope))
-    .orderBy(asc(sectionKinds.code));
-}
-
-export async function createSectionKind(
-  db: Database,
-  scope: AuthScope,
-  input: SectionKind,
-  actor: AuditActor,
-): Promise<SectionKind> {
-  await guardConstraints(() =>
-    db.transaction(async (tx) => {
-      await tx.insert(sectionKinds).values({ code: input.code, name: input.name }).returning({
-        code: sectionKinds.code,
-      });
-
-      await appendAudit(tx, scope, {
-        ...actor,
-        action: 'section_kind.created',
-        entityType: 'section_kind',
+        entityType: 'section',
         entityId: input.code,
         objectId: null,
         payload: changedFields(input),
@@ -1552,21 +1450,233 @@ export async function createSectionKind(
     }),
   );
 
+  const created = (await listSections(db, scope)).find((row) => row.code === input.code);
+  return required(created ?? null, 'раздел работ');
+}
+
+export interface UpdateSectionPatch {
+  readonly name?: string | undefined;
+  readonly sortOrder?: number | undefined;
+  readonly isActive?: boolean | undefined;
+}
+
+/**
+ * Правка раздела. `code` в неё не входит.
+ *
+ * Код раздела — ссылка: на него смотрят профили правил, наложения объектов,
+ * комплекты и реестры. Смена задним числом означала бы, что уже переданные
+ * реестры ссылаются в пустоту. Опечатка исправляется отключением раздела и
+ * заведением нового — так же, как у кода объекта.
+ */
+export async function updateSection(
+  db: Database,
+  scope: AuthScope,
+  code: string,
+  patch: UpdateSectionPatch,
+  actor: AuditActor,
+): Promise<Section | null> {
+  const fields: Partial<typeof sections.$inferInsert> = {
+    ...(patch.name !== undefined ? { name: patch.name } : {}),
+    ...(patch.sortOrder !== undefined ? { sortOrder: patch.sortOrder } : {}),
+    ...(patch.isActive !== undefined ? { isActive: patch.isActive } : {}),
+  };
+  assertNonEmptyPatch(fields);
+
+  const changed = await guardConstraints(() =>
+    db.transaction(async (tx) => {
+      const updated = await tx
+        .update(sections)
+        .set(fields)
+        .where(eq(sections.code, code))
+        .returning({ code: sections.code });
+      if (updated.length === 0) return false;
+
+      await appendAudit(tx, scope, {
+        ...actor,
+        action: 'section.updated',
+        entityType: 'section',
+        entityId: code,
+        objectId: null,
+        payload: changedFields(patch),
+      });
+      return true;
+    }),
+  );
+  if (!changed) return null;
+
+  return (await listSections(db, scope)).find((row) => row.code === code) ?? null;
+}
+
+/**
+ * Разделы объекта: ВЕСЬ справочник с отметкой о включённости.
+ *
+ * Не только включённые, и это не расточительность. Экран объекта — то место,
+ * где раздел включают, и список из одних включённых не дал бы способа включить
+ * первый. `sectionIsActive` отделён от `isActive` намеренно: раздел, отключённый
+ * в справочнике, нельзя включить на объекте, и различить «выключен здесь» от
+ * «выключен везде» обязан интерфейс, а не догадка пользователя.
+ */
+export async function listObjectSections(
+  db: Database,
+  scope: AuthScope,
+  objectId: string,
+  filter: { readonly isActive?: boolean | undefined } = {},
+): Promise<readonly ObjectSection[]> {
   const rows = await db
-    .select({ code: sectionKinds.code, name: sectionKinds.name })
-    .from(sectionKinds)
-    .where(visibleWhere(configVisibility(scope), eq(sectionKinds.code, input.code)))
+    .select({
+      objectId: sql<string>`${objectId}::uuid`.as('object_id'),
+      sectionCode: sections.code,
+      name: sections.name,
+      sortOrder: sections.sortOrder,
+      isActive: sql<boolean>`coalesce(${objectSections.isActive}, false)`.as('enabled'),
+      sectionIsActive: sections.isActive,
+    })
+    .from(sections)
+    .leftJoin(
+      objectSections,
+      and(eq(objectSections.sectionCode, sections.code), eq(objectSections.objectId, objectId)),
+    )
+    .where(visibleWhere(configVisibility(scope)))
+    .orderBy(asc(sections.sortOrder), asc(sections.code));
+
+  return filter.isActive === undefined
+    ? rows
+    : rows.filter((row) => row.isActive === filter.isActive);
+}
+
+/**
+ * Включение и отключение раздела на объекте.
+ *
+ * Отключение не удаляет строку: у отключённого раздела остаются реестры и
+ * комплекты прошлых месяцев, и «раздел исчез» читалось бы как потеря данных.
+ * Новый комплект в отключённый раздел не заводится — это держит проверка при
+ * заведении, а не удаление строки.
+ */
+export async function setObjectSection(
+  db: Database,
+  scope: AuthScope,
+  objectId: string,
+  sectionCode: string,
+  isActive: boolean,
+  actor: AuditActor,
+): Promise<ObjectSection | null> {
+  const known = await db
+    .select({ isActive: sections.isActive })
+    .from(sections)
+    .where(eq(sections.code, sectionCode))
     .limit(1);
-  return required(rows[0] ?? null, 'вид раздела');
+  const section = known[0];
+  if (section === undefined) return null;
+  if (isActive && !section.isActive) {
+    throw conflict(
+      'Раздел отключён в справочнике: включить его на объекте нельзя. ' +
+        'Сначала включите сам раздел.',
+    );
+  }
+
+  await guardConstraints(() =>
+    db.transaction(async (tx) => {
+      await tx
+        .insert(objectSections)
+        .values({ objectId, sectionCode, isActive })
+        .onConflictDoUpdate({
+          target: [objectSections.objectId, objectSections.sectionCode],
+          set: { isActive },
+        });
+
+      await appendAudit(tx, scope, {
+        ...actor,
+        action: isActive ? 'object_section.enabled' : 'object_section.disabled',
+        entityType: 'object_section',
+        entityId: `${objectId}:${sectionCode}`,
+        objectId,
+        payload: { sectionCode, isActive },
+      });
+    }),
+  );
+
+  return (
+    (await listObjectSections(db, scope, objectId)).find(
+      (row) => row.sectionCode === sectionCode,
+    ) ?? null
+  );
+}
+
+/**
+ * Подрядчики, закреплённые за объектом.
+ *
+ * До 0028 закрепления не существовало вовсе, и признаком его была уже
+ * существующая поставка — из-за чего подрядчик не мог завести первую. Теперь это
+ * явная связь, и она же цель составного внешнего ключа комплекта: маршрут,
+ * забывший проверить закрепление, не станет способом его обойти.
+ */
+export async function listObjectContractors(
+  db: Database,
+  scope: AuthScope,
+  objectId: string,
+): Promise<readonly ObjectContractor[]> {
+  return db
+    .select({
+      objectId: objectContractors.objectId,
+      contractorId: objectContractors.contractorId,
+      name: counterparties.name,
+      inn: counterparties.inn,
+      isActive: objectContractors.isActive,
+    })
+    .from(objectContractors)
+    .innerJoin(counterparties, eq(counterparties.id, objectContractors.contractorId))
+    .where(
+      visibleWhere(
+        objectVisibility(scope, objectContractors.objectId),
+        eq(objectContractors.objectId, objectId),
+      ),
+    )
+    .orderBy(asc(counterparties.name));
+}
+
+export async function setObjectContractor(
+  db: Database,
+  scope: AuthScope,
+  objectId: string,
+  contractorId: string,
+  isActive: boolean,
+  actor: AuditActor,
+): Promise<ObjectContractor | null> {
+  await guardConstraints(() =>
+    db.transaction(async (tx) => {
+      await tx
+        .insert(objectContractors)
+        .values({ objectId, contractorId, isActive })
+        .onConflictDoUpdate({
+          target: [objectContractors.objectId, objectContractors.contractorId],
+          set: { isActive },
+        });
+
+      await appendAudit(tx, scope, {
+        ...actor,
+        action: isActive ? 'object_contractor.assigned' : 'object_contractor.released',
+        entityType: 'object_contractor',
+        entityId: `${objectId}:${contractorId}`,
+        objectId,
+        payload: { contractorId, isActive },
+      });
+    }),
+  );
+
+  return (
+    (await listObjectContractors(db, scope, objectId)).find(
+      (row) => row.contractorId === contractorId,
+    ) ?? null
+  );
 }
 
 // =====================================================================
-// Профили видов разделов (версионные)
+// Профили разделов (версионные)
 // =====================================================================
 
 const SECTION_PROFILE_SELECTION = {
   id: sectionProfiles.id,
-  sectionKindCode: sectionProfiles.sectionKindCode,
+  sectionCode: sectionProfiles.sectionCode,
   version: sectionProfiles.version,
   effectiveFrom: sectionProfiles.effectiveFrom,
   effectiveTo: sectionProfiles.effectiveTo,
@@ -1583,7 +1693,7 @@ const SECTION_PROFILE_SELECTION = {
 export async function listSectionProfiles(
   db: Database,
   scope: AuthScope,
-  filter: { readonly sectionKindCode?: string | undefined } = {},
+  filter: { readonly sectionCode?: string | undefined } = {},
 ): Promise<readonly SectionProfile[]> {
   const rows = await db
     .select(SECTION_PROFILE_SELECTION)
@@ -1591,12 +1701,12 @@ export async function listSectionProfiles(
     .where(
       visibleWhere(
         configVisibility(scope),
-        filter.sectionKindCode === undefined
+        filter.sectionCode === undefined
           ? undefined
-          : eq(sectionProfiles.sectionKindCode, filter.sectionKindCode),
+          : eq(sectionProfiles.sectionCode, filter.sectionCode),
       ),
     )
-    .orderBy(asc(sectionProfiles.sectionKindCode), desc(sectionProfiles.version));
+    .orderBy(asc(sectionProfiles.sectionCode), desc(sectionProfiles.version));
   return rows.map(toSectionProfile);
 }
 
@@ -1643,7 +1753,7 @@ export async function findSectionProfile(
 export async function findEffectiveSectionProfile(
   db: Database,
   scope: AuthScope,
-  sectionKindCode: string,
+  sectionCode: string,
   onDate: string,
 ): Promise<SectionProfile | null> {
   const rows = await db
@@ -1652,7 +1762,7 @@ export async function findEffectiveSectionProfile(
     .where(
       visibleWhere(
         configVisibility(scope),
-        eq(sectionProfiles.sectionKindCode, sectionKindCode),
+        eq(sectionProfiles.sectionCode, sectionCode),
         sql`${sectionProfiles.publishedAt} is not null`,
         sql`${sectionProfiles.effectiveFrom} <= ${onDate}::date`,
         sql`(${sectionProfiles.effectiveTo} is null or ${sectionProfiles.effectiveTo} >= ${onDate}::date)`,
@@ -1664,7 +1774,7 @@ export async function findEffectiveSectionProfile(
   if (rows.length > 1) {
     throw internal({
       logDetail:
-        `на дату ${onDate} у вида раздела ${sectionKindCode} действует больше одного ` +
+        `на дату ${onDate} у раздела ${sectionCode} действует больше одного ` +
         'опубликованного профиля: нарушен ux_section_profiles_open_period',
     });
   }
@@ -1678,7 +1788,7 @@ export async function findEffectiveSectionProfile(
 // ---------------------------------------------------------------------
 
 /**
- * Строка того же вида раздела в объёме, который нужен инвариантам периода.
+ * Строка того же раздела в объёме, который нужен инвариантам периода.
  *
  * `effectiveFrom` и `effectiveTo` — тип `date`, драйвер отдаёт их строкой
  * `YYYY-MM-DD`. Такие строки сравниваются лексикографически ровно так же, как
@@ -1692,7 +1802,7 @@ interface ProfilePeriodRow {
 }
 
 /** Минимум поставок раздела для перехода в `automatic` (§16). */
-const AUTONOMY_MIN_SUBMISSIONS = 5;
+const AUTONOMY_MIN_WORKS = 5;
 
 /** Порог доли документов с ручной правкой типа (§16); измеряется на S8. */
 const AUTONOMY_MAX_MANUAL_TYPE_SHARE = 0.1;
@@ -1705,39 +1815,39 @@ interface AutonomyRefusal {
 
 export interface AutonomyReadiness {
   readonly ready: boolean;
-  /** Поставок этого вида раздела, доведённых до подачи. */
-  readonly submissions: number;
-  readonly requiredSubmissions: number;
+  /** Комплектов этого раздела, доведённых до подачи. */
+  readonly works: number;
+  readonly requiredWorks: number;
   readonly refusals: readonly AutonomyRefusal[];
   /** Критерии §16, которых пока нечем измерить: они названы, а не забыты. */
   readonly unmeasured: readonly string[];
 }
 
 /**
- * Готовность вида раздела к автоматическому режиму (§16).
+ * Готовность раздела работ к автоматическому режиму (§16).
  *
  * Отдельная экспортируемая функция, а не условие внутри записи, по двум
  * причинам. Во-первых, тот же ответ нужен экрану администрирования: «до
- * автоматизма не хватает двух поставок» — это то, что администратор обязан
+ * автоматизма не хватает двух комплектов» — это то, что администратор обязан
  * видеть ДО попытки переключения, а не узнавать из 422. Во-вторых, гейт §16
  * численный, и численное правило должно быть проверяемо само по себе.
  *
- * Считаются поставки, ДОВЕДЁННЫЕ ДО ПОДАЧИ (`submitted_at is not null`), а не
- * все созданные: черновик поставки не даёт ни одной единицы статистики
- * распознавания, и засчитывать его значило бы открывать автоматизм на пустых
- * записях. Ревизий у поставки много, поэтому счёт идёт по `distinct` поставкам —
- * §16 говорит о поставках раздела, а не о попытках их подать.
+ * Считаются комплекты, ДОВЕДЁННЫЕ ДО ПОДАЧИ (`submitted_at is not null`), а не
+ * все заведённые: черновик не даёт ни одной единицы статистики распознавания, и
+ * засчитывать его значило бы открывать автоматизм на пустых записях. Ревизий у
+ * комплекта много, поэтому счёт идёт по `distinct` комплектам — §16 говорит о
+ * поданных комплектах раздела, а не о попытках их подать.
  *
  * TODO(S8): второй и третий критерии §16 — доля документов, тип которых человек
  * изменил вручную (порог `AUTONOMY_MAX_MANUAL_TYPE_SHARE`), и отсутствие тихих
  * высокоуверенных ошибок границы документа. Их источник — подтверждения разметки
  * и классификации, которые появляются вместе с конвейером S8. До тех пор гейт
- * держится на числе поставок, и неизмеренные критерии перечислены в `unmeasured`
- * явно: молчаливо считать их выполненными нельзя.
+ * держится на числе комплектов, и неизмеренные критерии перечислены в
+ * `unmeasured` явно: молчаливо считать их выполненными нельзя.
  */
 export async function evaluateSectionAutonomyReadiness(
   executor: Executor,
-  sectionKindCode: string,
+  sectionCode: string,
   siblings: readonly ProfilePeriodRow[],
 ): Promise<AutonomyReadiness> {
   const refusals: AutonomyRefusal[] = [];
@@ -1749,30 +1859,32 @@ export async function evaluateSectionAutonomyReadiness(
     refusals.push({
       code: 'autonomy_bootstrap',
       message:
-        'Новый вид раздела стартует в режиме assisted: автоматический режим ' +
+        'Новый раздел стартует в режиме assisted: автоматический режим ' +
         'включается только после опубликованной версии профиля.',
     });
   }
 
+  // Раздел теперь лежит на самом комплекте, поэтому цепочка «поставка → том →
+  // раздел объекта» схлопнулась в одно условие. Файлы реестров в
+  // счёт не идут: это не работы, и автоматизм по ним не калибруется.
   const counted = await executor
-    .select({ total: sql<number>`count(distinct ${submissions.id})::int` })
-    .from(submissions)
-    .innerJoin(volumes, eq(volumes.id, submissions.volumeId))
-    .innerJoin(objectSections, eq(objectSections.id, volumes.sectionId))
-    .innerJoin(submissionRevisions, eq(submissionRevisions.submissionId, submissions.id))
+    .select({ total: sql<number>`count(distinct ${works.id})::int` })
+    .from(works)
+    .innerJoin(submissionRevisions, eq(submissionRevisions.workId, works.id))
     .where(
       and(
-        eq(objectSections.sectionKindCode, sectionKindCode),
+        eq(works.sectionCode, sectionCode),
+        eq(works.kind, 'complect'),
         sql`${submissionRevisions.submittedAt} is not null`,
       ),
     );
   const delivered = counted[0]?.total ?? 0;
 
-  if (delivered < AUTONOMY_MIN_SUBMISSIONS) {
+  if (delivered < AUTONOMY_MIN_WORKS) {
     refusals.push({
       code: 'autonomy_insufficient_data',
       message:
-        `Недостаточно данных: поставок ${delivered} из ${AUTONOMY_MIN_SUBMISSIONS}. ` +
+        `Недостаточно данных: поданных комплектов ${delivered} из ${AUTONOMY_MIN_WORKS}. ` +
         'Автоматический режим включается по накопленной статистике раздела (§16), ' +
         'а не сразу после публикации первой версии профиля.',
     });
@@ -1780,8 +1892,8 @@ export async function evaluateSectionAutonomyReadiness(
 
   return {
     ready: refusals.length === 0,
-    submissions: delivered,
-    requiredSubmissions: AUTONOMY_MIN_SUBMISSIONS,
+    works: delivered,
+    requiredWorks: AUTONOMY_MIN_WORKS,
     refusals,
     unmeasured: [
       `доля документов с ручной правкой типа ниже ${AUTONOMY_MAX_MANUAL_TYPE_SHARE * 100}%`,
@@ -1799,10 +1911,10 @@ export async function evaluateSectionAutonomyReadiness(
  */
 async function assertAutonomyConfirmed(
   executor: Executor,
-  sectionKindCode: string,
+  sectionCode: string,
   siblings: readonly ProfilePeriodRow[],
 ): Promise<void> {
-  const readiness = await evaluateSectionAutonomyReadiness(executor, sectionKindCode, siblings);
+  const readiness = await evaluateSectionAutonomyReadiness(executor, sectionCode, siblings);
   if (readiness.ready) return;
 
   throw unprocessable(
@@ -1854,7 +1966,7 @@ function assertHistoryNotRewritten(
         pointer: '/effectiveFrom',
         code: 'profile_history_immutable',
         message:
-          `У этого вида раздела уже опубликован профиль с началом действия ${latest}. ` +
+          `У этого раздела уже опубликован профиль с началом действия ${latest}. ` +
           'История версий не переписывается: опубликуйте новую версию с датой начала позже ' +
           `${latest} — например, с сегодняшней.`,
       },
@@ -1873,7 +1985,7 @@ function assertHistoryNotRewritten(
  *
  * Закрываются только ОПУБЛИКОВАННЫЕ версии, и только при публикации новой.
  * Черновик ничего не заканчивает: закрой период действующего профиля черновиком,
- * который потом не опубликуют, — и у вида раздела не станет действующего профиля
+ * который потом не опубликуют, — и у раздела не станет действующего профиля
  * вовсе, причём молча.
  *
  * `effective_from < новая дата` в условии оставлено сознательно: только такую
@@ -1884,7 +1996,7 @@ function assertHistoryNotRewritten(
  */
 async function closeSupersededPeriods(
   executor: Executor,
-  sectionKindCode: string,
+  sectionCode: string,
   effectiveFrom: string,
   exceptProfileId: string | null,
 ): Promise<void> {
@@ -1893,7 +2005,7 @@ async function closeSupersededPeriods(
     .set({ effectiveTo: sql`(${effectiveFrom}::date - 1)` })
     .where(
       and(
-        eq(sectionProfiles.sectionKindCode, sectionKindCode),
+        eq(sectionProfiles.sectionCode, sectionCode),
         sql`${sectionProfiles.publishedAt} is not null`,
         lt(sectionProfiles.effectiveFrom, effectiveFrom),
         or(
@@ -1981,7 +2093,7 @@ export async function assertKnownProfileReferences(
 }
 
 export interface CreateSectionProfileInput {
-  readonly sectionKindCode: string;
+  readonly sectionCode: string;
   readonly effectiveFrom: string;
   readonly effectiveTo?: string | null | undefined;
   readonly expectedDocTypes: readonly string[];
@@ -1994,7 +2106,7 @@ export interface CreateSectionProfileInput {
 }
 
 /**
- * Новая версия профиля вида раздела.
+ * Новая версия профиля раздела.
  *
  * Всё, что делается здесь, а не в обработчике маршрута, — вопросы к состоянию
  * БД, и потому решается в одной транзакции с самой вставкой:
@@ -2033,23 +2145,23 @@ export async function createSectionProfile(
           publishedAt: sectionProfiles.publishedAt,
         })
         .from(sectionProfiles)
-        .where(eq(sectionProfiles.sectionKindCode, input.sectionKindCode));
+        .where(eq(sectionProfiles.sectionCode, input.sectionCode));
 
       const nextVersion = existing.reduce((max, row) => Math.max(max, row.version), 0) + 1;
 
       if (input.autonomyLevel === 'automatic') {
-        await assertAutonomyConfirmed(tx, input.sectionKindCode, existing);
+        await assertAutonomyConfirmed(tx, input.sectionCode, existing);
       }
 
       if (input.publish) {
         assertHistoryNotRewritten(existing, input.effectiveFrom);
-        await closeSupersededPeriods(tx, input.sectionKindCode, input.effectiveFrom, null);
+        await closeSupersededPeriods(tx, input.sectionCode, input.effectiveFrom, null);
       }
 
       const inserted = await tx
         .insert(sectionProfiles)
         .values({
-          sectionKindCode: input.sectionKindCode,
+          sectionCode: input.sectionCode,
           version: nextVersion,
           effectiveFrom: input.effectiveFrom,
           effectiveTo: input.effectiveTo ?? null,
@@ -2079,7 +2191,7 @@ export async function createSectionProfile(
         // на всех объектах, где такой раздел есть.
         objectId: null,
         payload: {
-          sectionKindCode: input.sectionKindCode,
+          sectionCode: input.sectionCode,
           version: nextVersion,
           effectiveFrom: input.effectiveFrom,
           effectiveTo: input.effectiveTo ?? null,
@@ -2091,7 +2203,7 @@ export async function createSectionProfile(
     }),
   );
 
-  return required(await findSectionProfile(db, scope, profileId), 'профиль вида раздела');
+  return required(await findSectionProfile(db, scope, profileId), 'профиль раздела');
 }
 
 /**
@@ -2104,7 +2216,7 @@ export async function createSectionProfile(
  *
  * Публикация проходит те же четыре проверки, что и создание опубликованной
  * версии, и повторяет их НЕ ради симметрии: черновик мог быть заведён месяц
- * назад, и с тех пор у вида раздела появился профиль с более поздним периодом,
+ * назад, и с тех пор у раздела появился профиль с более поздним периодом,
  * вид ИД мог не появиться в каталоге, а `automatic` в черновике не значит, что
  * статистика §16 набрана. Проверить состояние можно только сейчас — и в той же
  * транзакции, которая ставит `published_at`.
@@ -2132,13 +2244,13 @@ export async function publishSectionProfile(
           publishedAt: sectionProfiles.publishedAt,
         })
         .from(sectionProfiles)
-        .where(eq(sectionProfiles.sectionKindCode, current.sectionKindCode));
+        .where(eq(sectionProfiles.sectionCode, current.sectionCode));
 
       if (current.autonomyLevel === 'automatic') {
-        await assertAutonomyConfirmed(tx, current.sectionKindCode, siblings);
+        await assertAutonomyConfirmed(tx, current.sectionCode, siblings);
       }
       assertHistoryNotRewritten(siblings, current.effectiveFrom);
-      await closeSupersededPeriods(tx, current.sectionKindCode, current.effectiveFrom, profileId);
+      await closeSupersededPeriods(tx, current.sectionCode, current.effectiveFrom, profileId);
 
       // Условие `publishedAt is null` остаётся в самом UPDATE: между чтением
       // выше и этой записью профиль мог опубликовать другой администратор, и
@@ -2157,7 +2269,7 @@ export async function publishSectionProfile(
         entityId: profileId,
         objectId: null,
         payload: {
-          sectionKindCode: current.sectionKindCode,
+          sectionCode: current.sectionCode,
           version: current.version,
           effectiveFrom: current.effectiveFrom,
         },
@@ -3101,7 +3213,7 @@ function toCounterparty(row: {
 
 function toSectionProfile(row: {
   id: string;
-  sectionKindCode: string;
+  sectionCode: string;
   version: number;
   effectiveFrom: string;
   effectiveTo: string | null;

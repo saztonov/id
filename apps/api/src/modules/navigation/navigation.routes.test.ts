@@ -1,31 +1,29 @@
 /**
- * Навигация «тома → поставки → ревизия» через HTTP на собранном приложении
- * (§3, §14).
+ * Навигация «объект → комплект → ревизия» и реестры передачи через HTTP на
+ * собранном приложении (§3, §14).
  *
  * Поднимается штатный `buildApp()`, а не роутер модуля: маршрут, написанный и
  * не зарегистрированный в `app.ts`, проходит собственные тесты и недостижим
  * снаружи — это отказ, преследующий проект с S3, и проверять его надо тем же
- * способом, каким он проявляется. Поэтому каждый новый путь получает здесь
- * настоящий ответ настоящего приложения.
+ * способом, каким он проявляется.
  *
  * Что доказывается, кроме кодов ответа:
  *
  * 1. **Изоляция по ВСЕМ путям** (§1.6, non-degradable): список, прямой
- *    идентификатор, вложенный список ревизий и создание в чужом томе. Ни один
- *    из них не отдаёт чужого и не различает «нет такого» и «не ваше».
+ *    идентификатор, вложенный список ревизий, состав реестра и снимок описи. Ни
+ *    один из них не отдаёт чужого и не различает «нет такого» и «не ваше».
  * 2. **Положительный контроль рядом с каждым отрицательным.** Проверка «маркера
- *    чужой поставки нет в ответе» проходит и на пустой выдаче, поэтому рядом
+ *    чужой работы нет в ответе» проходит и на пустой выдаче, поэтому рядом
  *    всегда стоит проверка, что владелец этот же маркер ВИДИТ.
- * 3. **Инженер без назначенных объектов не видит ничего** — пустая область не
- *    вырождается в отсутствие ограничения.
- * 4. **Организация не берётся из тела запроса.** Пользователь с ролями
- *    `contractor` и `engineer` имеет право `submission.upload`, но его область
- *    построена по старшей роли и организации не содержит: создание отвергается,
- *    а не выполняется от чьего-нибудь имени.
- * 5. **Ручное создание ревизии не спорит с возвратом** (§3, S10): открытый
- *    черновик, ожидание решения и уже отработавший возврат дают 409, а
- *    следующая ревизия после согласования создаётся с `parent_revision_id` той
- *    же формы, что и у возврата.
+ * 3. **Организация не берётся из тела запроса** — у подрядчика. У генподрядчика,
+ *    наоборот, берётся: он собирает комплекты за субподрядчиков, у которых
+ *    учётных записей нет. Разница между этими двумя случаями и есть содержание
+ *    `resolveActingContractor`.
+ * 4. **Правка состава отделена от видимости** (`managed_by_contractor_id`):
+ *    генподрядчик видит чужой комплект, но не открывает в нём ревизию.
+ * 5. **Передача реестра конкурентна и необратима**: два запроса с одной версией
+ *    дают 200 и 412, снимок состава после передачи неизменяем, а сам реестр
+ *    заперт триггером.
  */
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -53,62 +51,67 @@ function id(n: number): string {
 const ORG_CUSTOMER = id(1);
 const ORG_A = id(2);
 const ORG_B = id(3);
+/** Генподрядчик объекта 1: его область выводится из карточки объекта. */
+const ORG_GC = id(4);
 
-/** Объект, где работает подрядчик А и назначен инженер. */
-const OBJECT_1 = id(4);
-/** Чужой объект: у А нет ни одной поставки, инженер не назначен. */
-const OBJECT_2 = id(5);
+/** Объект, где закреплены оба подрядчика и назначен инженер. */
+const OBJECT_1 = id(5);
+/** Чужой объект: генподрядчик там другой, инженер не назначен. */
+const OBJECT_2 = id(6);
 
-const SECTION_1 = id(6);
-const SECTION_2 = id(7);
-
-const VOLUME_1 = id(8);
-/** Том чужого объекта: его имя несёт маркер. */
-const VOLUME_2 = id(9);
-/** Закрытый том того же объекта: подавать в него новую поставку нельзя. */
-const VOLUME_CLOSED = id(10);
+const SECTION = 'roofing';
+const SECTION_OTHER = 'facade';
+const PERIOD = '2026-01-01';
+const PERIOD_NEXT = '2026-02-01';
 
 const USER_A = id(20);
 const USER_B = id(21);
-const USER_ENGINEER = id(22);
-const USER_MANAGER = id(23);
-const USER_ADMIN = id(24);
+const USER_GC = id(22);
+const USER_ENGINEER = id(23);
+const USER_MANAGER = id(24);
+const USER_ADMIN = id(25);
 /** Инженер БЕЗ назначенных объектов: право есть, область пуста. */
-const USER_ENGINEER_NO_SCOPE = id(25);
+const USER_ENGINEER_NO_SCOPE = id(26);
 /** Роли `contractor` + `engineer`: право есть, области подрядчика нет. */
-const USER_MIXED = id(26);
+const USER_MIXED = id(27);
 
-/** Поставка А с открытым черновиком. */
-const SUB_A_DRAFT = id(30);
+/** Комплект А с открытым черновиком. */
+const WORK_A_DRAFT = id(30);
 const REV_A_DRAFT = id(31);
-/** Поставка А с согласованной ревизией: следующую можно открыть руками. */
-const SUB_A_APPROVED = id(32);
+/** Комплект А с согласованной ревизией: следующую можно открыть руками. */
+const WORK_A_APPROVED = id(32);
 const REV_A_APPROVED = id(33);
-/** Поставка А, ждущая решения проверяющего. */
-const SUB_A_PENDING = id(34);
+/** Комплект А, ждущий решения проверяющего. */
+const WORK_A_PENDING = id(34);
 const REV_A_PENDING = id(35);
-/** Поставка А с единственной возвращённой ревизией. */
-const SUB_A_RETURNED = id(36);
+/** Комплект А с единственной возвращённой ревизией. */
+const WORK_A_RETURNED = id(36);
 const REV_A_RETURNED = id(37);
-/** Поставка подрядчика Б на общем объекте. */
-const SUB_B = id(38);
+/** Комплект подрядчика Б на общем объекте: подан. */
+const WORK_B = id(38);
 const REV_B = id(39);
-/** Поставка подрядчика Б на чужом для А и для инженера объекте. */
-const SUB_B_FAR = id(40);
+/** Комплект подрядчика Б на чужом для А и для инженера объекте. */
+const WORK_B_FAR = id(40);
 const REV_B_FAR = id(41);
+
+/** Реестр-черновик объекта 1 за январь: его собирают тесты передачи. */
+const REGISTRY_1 = id(50);
+/** Реестр чужого объекта: его номер несёт маркер. */
+const REGISTRY_FAR = id(51);
 
 /**
  * Маркер чужих данных.
  *
- * Он лежит в названии тома чужого объекта и в заголовках обеих поставок
- * подрядчика Б. Проверка «в ответе нет маркера» имеет смысл только потому, что
- * он там ЕСТЬ у владельца: иначе она доказывала бы, что данных нет вовсе.
+ * Он лежит в заголовках обоих комплектов подрядчика Б. Проверка «в ответе нет
+ * маркера» имеет смысл только потому, что он там ЕСТЬ у владельца: иначе она
+ * доказывала бы, что данных нет вовсе.
  */
 const SECRET = 'СЕКРЕТНЫЙ-ФРАГМЕНТ-ЧУЖОЙ-РАБОТЫ';
 
 const KC = {
   a: 'kc-nav-a',
   b: 'kc-nav-b',
+  gc: 'kc-nav-gc',
   engineer: 'kc-nav-engineer',
   manager: 'kc-nav-manager',
   admin: 'kc-nav-admin',
@@ -120,28 +123,32 @@ const FIXTURE: readonly string[] = [
   `INSERT INTO counterparties (id, name, kind) VALUES ('${ORG_CUSTOMER}', 'ООО «Застройщик»', 'customer')`,
   `INSERT INTO counterparties (id, name, kind) VALUES ('${ORG_A}', 'ООО «Подрядчик А»', 'contractor')`,
   `INSERT INTO counterparties (id, name, kind) VALUES ('${ORG_B}', 'ООО «Подрядчик Б»', 'contractor')`,
+  `INSERT INTO counterparties (id, name, kind) VALUES ('${ORG_GC}', 'ООО «Генподрядчик»', 'general_contractor')`,
 
-  `INSERT INTO construction_objects (id, code, name, full_name)
-     VALUES ('${OBJECT_1}', 'TST01', 'Объект 1', 'ЖК «Тест», корпус 1')`,
+  // Область генподрядчика выводится ИЗ КАРТОЧКИ объекта, а не назначается
+  // отдельно: два источника одного факта разъехались бы при первой же правке.
+  `INSERT INTO construction_objects (id, code, name, full_name, general_contractor_id)
+     VALUES ('${OBJECT_1}', 'TST01', 'Объект 1', 'ЖК «Тест», корпус 1', '${ORG_GC}')`,
   `INSERT INTO construction_objects (id, code, name, full_name)
      VALUES ('${OBJECT_2}', 'TST02', 'Объект 2', 'ЖК «Тест», корпус 2')`,
-  `INSERT INTO section_kinds (code, name) VALUES ('roofing', 'Кровля автостоянки')`,
-  `INSERT INTO object_sections (id, object_id, code, name, section_kind_code)
-     VALUES ('${SECTION_1}', '${OBJECT_1}', '2.5.1', 'Кровля', 'roofing')`,
-  `INSERT INTO object_sections (id, object_id, code, name, section_kind_code)
-     VALUES ('${SECTION_2}', '${OBJECT_2}', '2.5.1', 'Кровля', 'roofing')`,
 
-  `INSERT INTO volumes (id, object_id, section_id, code, name)
-     VALUES ('${VOLUME_1}', '${OBJECT_1}', '${SECTION_1}', 'V-01', 'Том 1. Кровля')`,
-  `INSERT INTO volumes (id, object_id, section_id, code, name)
-     VALUES ('${VOLUME_2}', '${OBJECT_2}', '${SECTION_2}', 'V-02', '${SECRET}')`,
-  `INSERT INTO volumes (id, object_id, section_id, code, name, is_active)
-     VALUES ('${VOLUME_CLOSED}', '${OBJECT_1}', '${SECTION_1}', 'V-03', 'Том 3. Закрытый', false)`,
+  // Разделы `roofing` и `facade` есть в сиде 0029; здесь они только включаются
+  // на объектах.
+  `INSERT INTO object_sections (object_id, section_code) VALUES ('${OBJECT_1}', '${SECTION}')`,
+  `INSERT INTO object_sections (object_id, section_code) VALUES ('${OBJECT_1}', '${SECTION_OTHER}')`,
+  `INSERT INTO object_sections (object_id, section_code) VALUES ('${OBJECT_2}', '${SECTION}')`,
+
+  `INSERT INTO object_contractors (object_id, contractor_id) VALUES ('${OBJECT_1}', '${ORG_A}')`,
+  `INSERT INTO object_contractors (object_id, contractor_id) VALUES ('${OBJECT_1}', '${ORG_B}')`,
+  `INSERT INTO object_contractors (object_id, contractor_id) VALUES ('${OBJECT_1}', '${ORG_GC}')`,
+  `INSERT INTO object_contractors (object_id, contractor_id) VALUES ('${OBJECT_2}', '${ORG_B}')`,
 
   `INSERT INTO users (id, kc_sub, full_name, contractor_id)
      VALUES ('${USER_A}', '${KC.a}', 'Сотрудник А', '${ORG_A}')`,
   `INSERT INTO users (id, kc_sub, full_name, contractor_id)
      VALUES ('${USER_B}', '${KC.b}', 'Сотрудник Б', '${ORG_B}')`,
+  `INSERT INTO users (id, kc_sub, full_name, contractor_id)
+     VALUES ('${USER_GC}', '${KC.gc}', 'Инженер ПТО генподрядчика', '${ORG_GC}')`,
   `INSERT INTO users (id, kc_sub, full_name) VALUES ('${USER_ENGINEER}', '${KC.engineer}', 'Инженер')`,
   `INSERT INTO users (id, kc_sub, full_name) VALUES ('${USER_MANAGER}', '${KC.manager}', 'Руководитель')`,
   `INSERT INTO users (id, kc_sub, full_name) VALUES ('${USER_ADMIN}', '${KC.admin}', 'Администратор')`,
@@ -152,6 +159,7 @@ const FIXTURE: readonly string[] = [
 
   `INSERT INTO user_roles (user_id, role) VALUES ('${USER_A}', 'contractor')`,
   `INSERT INTO user_roles (user_id, role) VALUES ('${USER_B}', 'contractor')`,
+  `INSERT INTO user_roles (user_id, role) VALUES ('${USER_GC}', 'general_contractor')`,
   `INSERT INTO user_roles (user_id, role) VALUES ('${USER_ENGINEER}', 'engineer')`,
   `INSERT INTO user_roles (user_id, role) VALUES ('${USER_MANAGER}', 'manager')`,
   `INSERT INTO user_roles (user_id, role) VALUES ('${USER_ADMIN}', 'admin')`,
@@ -161,49 +169,56 @@ const FIXTURE: readonly string[] = [
   `INSERT INTO user_object_scopes (user_id, object_id) VALUES ('${USER_ENGINEER}', '${OBJECT_1}')`,
   `INSERT INTO user_object_scopes (user_id, object_id) VALUES ('${USER_MIXED}', '${OBJECT_1}')`,
 
-  // --- Поставки подрядчика А на объекте 1 -----------------------------------
-  `INSERT INTO submissions (id, volume_id, object_id, contractor_id, title, number, created_by)
-     VALUES ('${SUB_A_DRAFT}', '${VOLUME_1}', '${OBJECT_1}', '${ORG_A}', 'Поставка А. Черновик', '1', '${USER_A}')`,
-  `INSERT INTO submission_revisions (id, submission_id, object_id, contractor_id, revision_no, status)
-     VALUES ('${REV_A_DRAFT}', '${SUB_A_DRAFT}', '${OBJECT_1}', '${ORG_A}', 1, 'draft')`,
-  `UPDATE submissions SET current_revision_id = '${REV_A_DRAFT}' WHERE id = '${SUB_A_DRAFT}'`,
+  // --- Комплекты подрядчика А на объекте 1 ----------------------------------
+  `INSERT INTO works (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
+     VALUES ('${WORK_A_DRAFT}', '${OBJECT_1}', '${ORG_A}', '${ORG_A}', '${SECTION}', DATE '${PERIOD}', 'Комплект А. Черновик', '${USER_A}')`,
+  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
+     VALUES ('${REV_A_DRAFT}', '${WORK_A_DRAFT}', '${OBJECT_1}', '${ORG_A}', 1, 'draft')`,
+  `UPDATE works SET current_revision_id = '${REV_A_DRAFT}' WHERE id = '${WORK_A_DRAFT}'`,
 
-  `INSERT INTO submissions (id, volume_id, object_id, contractor_id, title, created_by)
-     VALUES ('${SUB_A_APPROVED}', '${VOLUME_1}', '${OBJECT_1}', '${ORG_A}', 'Поставка А. Согласована', '${USER_A}')`,
-  `INSERT INTO submission_revisions (id, submission_id, object_id, contractor_id, revision_no, status,
+  `INSERT INTO works (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
+     VALUES ('${WORK_A_APPROVED}', '${OBJECT_1}', '${ORG_A}', '${ORG_A}', '${SECTION}', DATE '${PERIOD}', 'Комплект А. Согласован', '${USER_A}')`,
+  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status,
                                      submitted_at, submitted_by, decided_at, decided_by)
-     VALUES ('${REV_A_APPROVED}', '${SUB_A_APPROVED}', '${OBJECT_1}', '${ORG_A}', 1, 'approved',
+     VALUES ('${REV_A_APPROVED}', '${WORK_A_APPROVED}', '${OBJECT_1}', '${ORG_A}', 1, 'approved',
              now(), '${USER_A}', now(), '${USER_ENGINEER}')`,
-  `UPDATE submissions SET current_revision_id = '${REV_A_APPROVED}' WHERE id = '${SUB_A_APPROVED}'`,
+  `UPDATE works SET current_revision_id = '${REV_A_APPROVED}' WHERE id = '${WORK_A_APPROVED}'`,
 
-  `INSERT INTO submissions (id, volume_id, object_id, contractor_id, title, created_by)
-     VALUES ('${SUB_A_PENDING}', '${VOLUME_1}', '${OBJECT_1}', '${ORG_A}', 'Поставка А. На согласовании', '${USER_A}')`,
-  `INSERT INTO submission_revisions (id, submission_id, object_id, contractor_id, revision_no, status,
+  `INSERT INTO works (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
+     VALUES ('${WORK_A_PENDING}', '${OBJECT_1}', '${ORG_A}', '${ORG_A}', '${SECTION}', DATE '${PERIOD}', 'Комплект А. На согласовании', '${USER_A}')`,
+  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status,
                                      submitted_at, submitted_by)
-     VALUES ('${REV_A_PENDING}', '${SUB_A_PENDING}', '${OBJECT_1}', '${ORG_A}', 1, 'submitted',
+     VALUES ('${REV_A_PENDING}', '${WORK_A_PENDING}', '${OBJECT_1}', '${ORG_A}', 1, 'submitted',
              now(), '${USER_A}')`,
-  `UPDATE submissions SET current_revision_id = '${REV_A_PENDING}' WHERE id = '${SUB_A_PENDING}'`,
+  `UPDATE works SET current_revision_id = '${REV_A_PENDING}' WHERE id = '${WORK_A_PENDING}'`,
 
-  `INSERT INTO submissions (id, volume_id, object_id, contractor_id, title, created_by)
-     VALUES ('${SUB_A_RETURNED}', '${VOLUME_1}', '${OBJECT_1}', '${ORG_A}', 'Поставка А. Возвращена', '${USER_A}')`,
-  `INSERT INTO submission_revisions (id, submission_id, object_id, contractor_id, revision_no, status,
+  `INSERT INTO works (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
+     VALUES ('${WORK_A_RETURNED}', '${OBJECT_1}', '${ORG_A}', '${ORG_A}', '${SECTION}', DATE '${PERIOD_NEXT}', 'Комплект А. Возвращён', '${USER_A}')`,
+  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status,
                                      submitted_at, submitted_by, decided_at, decided_by, return_reason)
-     VALUES ('${REV_A_RETURNED}', '${SUB_A_RETURNED}', '${OBJECT_1}', '${ORG_A}', 1, 'returned',
+     VALUES ('${REV_A_RETURNED}', '${WORK_A_RETURNED}', '${OBJECT_1}', '${ORG_A}', 1, 'returned',
              now(), '${USER_A}', now(), '${USER_ENGINEER}', 'нет протоколов испытаний')`,
-  `UPDATE submissions SET current_revision_id = '${REV_A_RETURNED}' WHERE id = '${SUB_A_RETURNED}'`,
+  `UPDATE works SET current_revision_id = '${REV_A_RETURNED}' WHERE id = '${WORK_A_RETURNED}'`,
 
-  // --- Поставки подрядчика Б -------------------------------------------------
-  `INSERT INTO submissions (id, volume_id, object_id, contractor_id, title, created_by)
-     VALUES ('${SUB_B}', '${VOLUME_1}', '${OBJECT_1}', '${ORG_B}', '${SECRET} на общем объекте', '${USER_B}')`,
-  `INSERT INTO submission_revisions (id, submission_id, object_id, contractor_id, revision_no, status)
-     VALUES ('${REV_B}', '${SUB_B}', '${OBJECT_1}', '${ORG_B}', 1, 'draft')`,
-  `UPDATE submissions SET current_revision_id = '${REV_B}' WHERE id = '${SUB_B}'`,
+  // --- Комплекты подрядчика Б ------------------------------------------------
+  `INSERT INTO works (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
+     VALUES ('${WORK_B}', '${OBJECT_1}', '${ORG_B}', '${ORG_B}', '${SECTION}', DATE '${PERIOD}', '${SECRET} на общем объекте', '${USER_B}')`,
+  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status,
+                                     submitted_at, submitted_by)
+     VALUES ('${REV_B}', '${WORK_B}', '${OBJECT_1}', '${ORG_B}', 1, 'submitted', now(), '${USER_B}')`,
+  `UPDATE works SET current_revision_id = '${REV_B}' WHERE id = '${WORK_B}'`,
 
-  `INSERT INTO submissions (id, volume_id, object_id, contractor_id, title, created_by)
-     VALUES ('${SUB_B_FAR}', '${VOLUME_2}', '${OBJECT_2}', '${ORG_B}', '${SECRET} на чужом объекте', '${USER_B}')`,
-  `INSERT INTO submission_revisions (id, submission_id, object_id, contractor_id, revision_no, status)
-     VALUES ('${REV_B_FAR}', '${SUB_B_FAR}', '${OBJECT_2}', '${ORG_B}', 1, 'draft')`,
-  `UPDATE submissions SET current_revision_id = '${REV_B_FAR}' WHERE id = '${SUB_B_FAR}'`,
+  `INSERT INTO works (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
+     VALUES ('${WORK_B_FAR}', '${OBJECT_2}', '${ORG_B}', '${ORG_B}', '${SECTION}', DATE '${PERIOD}', '${SECRET} на чужом объекте', '${USER_B}')`,
+  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
+     VALUES ('${REV_B_FAR}', '${WORK_B_FAR}', '${OBJECT_2}', '${ORG_B}', 1, 'draft')`,
+  `UPDATE works SET current_revision_id = '${REV_B_FAR}' WHERE id = '${WORK_B_FAR}'`,
+
+  // --- Реестры ---------------------------------------------------------------
+  `INSERT INTO registries (id, object_id, section_code, period, created_by)
+     VALUES ('${REGISTRY_1}', '${OBJECT_1}', '${SECTION}', DATE '${PERIOD}', '${USER_GC}')`,
+  `INSERT INTO registries (id, object_id, section_code, period, number, created_by)
+     VALUES ('${REGISTRY_FAR}', '${OBJECT_2}', '${SECTION}', DATE '${PERIOD}', '${SECRET}', '${USER_ADMIN}')`,
 ];
 
 const STORAGE_DIR = mkdtempSync(join(tmpdir(), 'id-navigation-routes-'));
@@ -246,7 +261,7 @@ afterAll(async () => {
   rmSync(STORAGE_DIR, { recursive: true, force: true });
 });
 
-type Method = 'GET' | 'POST';
+type Method = 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
 
 interface SignedIn {
   readonly cookie: string;
@@ -289,6 +304,7 @@ async function as(
   method: Method,
   url: string,
   body?: unknown,
+  headers: Record<string, string> = {},
 ): Promise<LightMyRequestResponse> {
   let session = signedIn.get(kcSub);
   if (session === undefined) {
@@ -298,9 +314,19 @@ async function as(
   return app.inject({
     method,
     url,
-    headers: { cookie: session.cookie, [CSRF_HEADER]: session.csrfToken },
+    headers: { cookie: session.cookie, [CSRF_HEADER]: session.csrfToken, ...headers },
     ...(body === undefined ? {} : { payload: body as object }),
   });
+}
+
+/** Версия реестра в `If-Match`: обязательна на каждом изменении состава. */
+function ifMatch(version: number): Record<string, string> {
+  return { 'if-match': `"${String(version)}"` };
+}
+
+async function registryVersion(kcSub: string, registryId: string): Promise<number> {
+  const response = await as(kcSub, 'GET', `/api/v1/registries/${registryId}`);
+  return response.json<{ registry: { version: number } }>().registry.version;
 }
 
 interface Identified {
@@ -329,283 +355,233 @@ function problemShape(response: LightMyRequestResponse): unknown {
 }
 
 // =====================================================================
-// Достижимость: каждый новый путь отвечает на собранном приложении
+// Достижимость
 // =====================================================================
 
 describe('регистрация маршрутов навигации', () => {
-  it('все семь путей достижимы и ни один не отвечает «маршрут не найден»', async () => {
+  it('пути комплектов и реестров достижимы и ни один не отвечает «маршрут не найден»', async () => {
     const probes: readonly (readonly [Method, string, number])[] = [
-      ['GET', '/api/v1/volumes', 200],
-      ['GET', `/api/v1/volumes/${VOLUME_1}`, 200],
-      ['GET', '/api/v1/submissions', 200],
-      ['GET', `/api/v1/submissions/${SUB_A_DRAFT}`, 200],
-      ['GET', `/api/v1/submissions/${SUB_A_DRAFT}/revisions`, 200],
-      // Руководителю право `submission.upload` не выдано: 403 доказывает, что
-      // маршрут существует и защищён, а не что его нет. Тело валидно намеренно —
-      // проверка схемы в Fastify идёт ДО preHandler, и на пустом теле пришёл бы
-      // 422, то есть проба измеряла бы валидацию, а не регистрацию маршрута.
-      ['POST', '/api/v1/submissions', 403],
-      ['POST', `/api/v1/submissions/${SUB_A_DRAFT}/revisions`, 403],
+      ['GET', '/api/v1/works', 200],
+      ['GET', `/api/v1/works/${WORK_A_DRAFT}`, 200],
+      ['GET', `/api/v1/works/${WORK_A_DRAFT}/revisions`, 200],
+      ['GET', '/api/v1/registries', 200],
+      ['GET', `/api/v1/registries/${REGISTRY_1}`, 200],
+      ['GET', `/api/v1/registries/${REGISTRY_1}/items`, 200],
+      // Руководителю права `submission.upload` и `registry.manage` не выданы:
+      // 403 доказывает, что маршрут существует и защищён, а не что его нет.
+      // Тело валидно намеренно — схема Fastify проверяется ДО preHandler, и на
+      // пустом теле пришёл бы 422, то есть проба измеряла бы валидацию.
+      ['POST', '/api/v1/works', 403],
+      ['POST', `/api/v1/works/${WORK_A_DRAFT}/revisions`, 403],
+      ['POST', '/api/v1/registries', 403],
+      ['PUT', `/api/v1/registries/${REGISTRY_1}/works/${WORK_A_DRAFT}`, 403],
+      ['DELETE', `/api/v1/registries/${REGISTRY_1}/works/${WORK_A_DRAFT}`, 403],
+      ['POST', `/api/v1/registries/${REGISTRY_1}/file`, 403],
+      ['POST', `/api/v1/registries/${REGISTRY_1}/issue`, 403],
     ];
 
+    const bodyFor = (method: Method, url: string): unknown => {
+      if (method === 'POST' && url === '/api/v1/works') {
+        return { objectId: OBJECT_1, sectionCode: SECTION, period: PERIOD, title: 'Проба' };
+      }
+      if (method === 'POST' && url === '/api/v1/registries') {
+        return { objectId: OBJECT_1, sectionCode: SECTION, period: PERIOD };
+      }
+      if (method === 'PUT') return {};
+      return undefined;
+    };
+
     for (const [method, url, expected] of probes) {
-      const response = await as(
-        KC.manager,
-        method,
-        url,
-        url === '/api/v1/submissions' && method === 'POST'
-          ? { volumeId: VOLUME_1, title: 'Проба достижимости' }
-          : undefined,
-      );
+      const response = await as(KC.manager, method, url, bodyFor(method, url), ifMatch(0));
       expect([method, url, response.statusCode]).toEqual([method, url, expected]);
     }
   });
 
   it('ошибка отдаётся как application/problem+json', async () => {
-    const response = await as(KC.a, 'GET', `/api/v1/volumes/${VOLUME_2}`);
+    const response = await as(KC.a, 'GET', `/api/v1/works/${WORK_B}`);
     expect(response.statusCode).toBe(404);
     expect(response.headers['content-type']).toContain('application/problem+json');
     expect(response.json<{ title: string }>().title).toBeTypeOf('string');
   });
-});
 
-// =====================================================================
-// Тома
-// =====================================================================
-
-describe('GET /volumes', () => {
-  it('руководитель видит все тома, включая закрытый и чужой', async () => {
-    const response = await as(KC.manager, 'GET', '/api/v1/volumes?limit=100');
-    expect(response.statusCode).toBe(200);
-    expect([...idsOf(response)].sort()).toEqual([VOLUME_1, VOLUME_2, VOLUME_CLOSED].sort());
-    // Положительный контроль к проверке изоляции ниже: маркер в базе ЕСТЬ.
-    expect(response.body).toContain(SECRET);
-  });
-
-  it('подрядчик видит тома только тех объектов, где у него есть поставки', async () => {
-    const response = await as(KC.a, 'GET', '/api/v1/volumes?limit=100');
-    expect(response.statusCode).toBe(200);
-    expect([...idsOf(response)].sort()).toEqual([VOLUME_1, VOLUME_CLOSED].sort());
-    expect(response.body).not.toContain(SECRET);
-  });
-
-  it('инженер видит тома назначенных объектов и не видит остальных', async () => {
-    const response = await as(KC.engineer, 'GET', '/api/v1/volumes?limit=100');
-    expect(response.statusCode).toBe(200);
-    expect([...idsOf(response)].sort()).toEqual([VOLUME_1, VOLUME_CLOSED].sort());
-    expect(response.body).not.toContain(SECRET);
-  });
-
-  it('инженер без назначенных объектов не видит ни одного тома', async () => {
-    const response = await as(KC.engineerNoScope, 'GET', '/api/v1/volumes?limit=100');
-    expect(response.statusCode).toBe(200);
-    expect(idsOf(response)).toEqual([]);
-  });
-
-  it('фильтр по объекту сужает выдачу и не расширяет её', async () => {
-    const own = await as(KC.a, 'GET', `/api/v1/volumes?objectId=${OBJECT_1}&limit=100`);
-    expect([...idsOf(own)].sort()).toEqual([VOLUME_1, VOLUME_CLOSED].sort());
-
-    // Тот же фильтр на чужой объект даёт пустую выдачу, а не чужие тома.
-    const foreign = await as(KC.a, 'GET', `/api/v1/volumes?objectId=${OBJECT_2}&limit=100`);
-    expect(idsOf(foreign)).toEqual([]);
-    // Положительный контроль: этот фильтр вообще работает — у руководителя он
-    // возвращает именно том чужого объекта.
-    const byManager = await as(KC.manager, 'GET', `/api/v1/volumes?objectId=${OBJECT_2}&limit=100`);
-    expect(idsOf(byManager)).toEqual([VOLUME_2]);
-  });
-
-  it('фильтр isActive=false отдаёт закрытый том, а isActive=true — нет', async () => {
-    const closed = await as(KC.a, 'GET', '/api/v1/volumes?isActive=false&limit=100');
-    expect(idsOf(closed)).toEqual([VOLUME_CLOSED]);
-    const open = await as(KC.a, 'GET', '/api/v1/volumes?isActive=true&limit=100');
-    expect(idsOf(open)).toEqual([VOLUME_1]);
-  });
-
-  it('листает курсором без повторов и без пропусков', async () => {
-    const first = await as(KC.manager, 'GET', '/api/v1/volumes?limit=2');
-    const firstBody = first.json<{ items: Identified[]; nextCursor: string | null }>();
-    expect(firstBody.items).toHaveLength(2);
-    expect(firstBody.nextCursor).not.toBeNull();
-
-    const second = await as(
-      KC.manager,
-      'GET',
-      `/api/v1/volumes?limit=2&cursor=${encodeURIComponent(firstBody.nextCursor ?? '')}`,
-    );
-    const secondBody = second.json<{ items: Identified[]; nextCursor: string | null }>();
-    expect(secondBody.nextCursor).toBeNull();
-
-    const seen = [...firstBody.items, ...secondBody.items].map((item) => item.id);
-    expect([...seen].sort()).toEqual([VOLUME_1, VOLUME_2, VOLUME_CLOSED].sort());
-    expect(new Set(seen).size).toBe(seen.length);
-  });
-
-  it('повреждённый курсор — 400, а не тихий возврат к первой странице', async () => {
-    const response = await as(KC.manager, 'GET', '/api/v1/volumes?cursor=%2A%2A%2A');
-    expect(response.statusCode).toBe(400);
-  });
-});
-
-describe('GET /volumes/{id}', () => {
-  it('свой том отдаётся, чужой неотличим от несуществующего', async () => {
-    const own = await as(KC.a, 'GET', `/api/v1/volumes/${VOLUME_1}`);
-    expect(own.statusCode).toBe(200);
-    expect(own.json<{ id: string }>().id).toBe(VOLUME_1);
-
-    const foreign = await as(KC.a, 'GET', `/api/v1/volumes/${VOLUME_2}`);
-    const missing = await as(KC.a, 'GET', `/api/v1/volumes/${id(999)}`);
-    expect(foreign.statusCode).toBe(404);
-    expect(missing.statusCode).toBe(404);
-    expect(problemShape(foreign)).toEqual(problemShape(missing));
-
-    // Положительный контроль: том с маркером существует и виден руководителю.
-    const byManager = await as(KC.manager, 'GET', `/api/v1/volumes/${VOLUME_2}`);
-    expect(byManager.statusCode).toBe(200);
-    expect(byManager.body).toContain(SECRET);
-  });
-
-  it('инженер без объектов не получает даже том, существующий у других', async () => {
-    const response = await as(KC.engineerNoScope, 'GET', `/api/v1/volumes/${VOLUME_1}`);
-    expect(response.statusCode).toBe(404);
+  it('приёмка отделена от ведения: генподрядчику её не выдали', async () => {
+    const response = await as(KC.gc, 'POST', `/api/v1/registries/${REGISTRY_1}/accept`, undefined, {
+      ...ifMatch(0),
+    });
+    expect(response.statusCode).toBe(403);
   });
 });
 
 // =====================================================================
-// Поставки
+// Комплекты
 // =====================================================================
 
-describe('GET /submissions', () => {
-  it('подрядчик видит только свои поставки', async () => {
-    const response = await as(KC.a, 'GET', '/api/v1/submissions?limit=100');
+describe('GET /works', () => {
+  it('подрядчик видит только свои комплекты', async () => {
+    const response = await as(KC.a, 'GET', '/api/v1/works?limit=100');
     expect(response.statusCode).toBe(200);
     expect([...idsOf(response)].sort()).toEqual(
-      [SUB_A_DRAFT, SUB_A_APPROVED, SUB_A_PENDING, SUB_A_RETURNED].sort(),
+      [WORK_A_DRAFT, WORK_A_APPROVED, WORK_A_PENDING, WORK_A_RETURNED].sort(),
     );
     expect(response.body).not.toContain(SECRET);
 
-    // Положительный контроль: владелец этих же поставок маркер ВИДИТ.
-    const owner = await as(KC.b, 'GET', '/api/v1/submissions?limit=100');
-    expect([...idsOf(owner)].sort()).toEqual([SUB_B, SUB_B_FAR].sort());
+    // Положительный контроль: владелец этих же комплектов маркер ВИДИТ.
+    const owner = await as(KC.b, 'GET', '/api/v1/works?limit=100');
+    expect([...idsOf(owner)].sort()).toEqual([WORK_B, WORK_B_FAR].sort());
     expect(owner.body).toContain(SECRET);
   });
 
-  it('инженер видит всех подрядчиков, но только на назначенных объектах', async () => {
-    const response = await as(KC.engineer, 'GET', '/api/v1/submissions?limit=100');
+  it('генподрядчик видит все комплекты своих объектов и только их', async () => {
+    const response = await as(KC.gc, 'GET', '/api/v1/works?limit=100');
     expect(response.statusCode).toBe(200);
     expect([...idsOf(response)].sort()).toEqual(
-      [SUB_A_DRAFT, SUB_A_APPROVED, SUB_A_PENDING, SUB_A_RETURNED, SUB_B].sort(),
+      [WORK_A_DRAFT, WORK_A_APPROVED, WORK_A_PENDING, WORK_A_RETURNED, WORK_B].sort(),
     );
-    // Поставка Б на объекте 1 видна (маркер в ответе есть), а её двойник на
-    // объекте 2 — нет.
+    // Комплект Б на общем объекте виден, его двойник на чужом — нет.
     expect(response.body).toContain(`${SECRET} на общем объекте`);
     expect(response.body).not.toContain(`${SECRET} на чужом объекте`);
   });
 
-  it('руководитель видит все поставки', async () => {
-    const response = await as(KC.manager, 'GET', '/api/v1/submissions?limit=100');
+  it('инженер видит всех подрядчиков, но только на назначенных объектах', async () => {
+    const response = await as(KC.engineer, 'GET', '/api/v1/works?limit=100');
     expect([...idsOf(response)].sort()).toEqual(
-      [SUB_A_DRAFT, SUB_A_APPROVED, SUB_A_PENDING, SUB_A_RETURNED, SUB_B, SUB_B_FAR].sort(),
+      [WORK_A_DRAFT, WORK_A_APPROVED, WORK_A_PENDING, WORK_A_RETURNED, WORK_B].sort(),
     );
   });
 
-  it('инженер без назначенных объектов не видит ни одной поставки', async () => {
-    const response = await as(KC.engineerNoScope, 'GET', '/api/v1/submissions?limit=100');
+  it('руководитель видит все комплекты', async () => {
+    const response = await as(KC.manager, 'GET', '/api/v1/works?limit=100');
+    expect([...idsOf(response)].sort()).toEqual(
+      [WORK_A_DRAFT, WORK_A_APPROVED, WORK_A_PENDING, WORK_A_RETURNED, WORK_B, WORK_B_FAR].sort(),
+    );
+  });
+
+  it('инженер без назначенных объектов не видит ни одного комплекта', async () => {
+    const response = await as(KC.engineerNoScope, 'GET', '/api/v1/works?limit=100');
     expect(idsOf(response)).toEqual([]);
   });
 
-  it('фильтр по тому не выводит из области видимости', async () => {
-    const foreign = await as(KC.a, 'GET', `/api/v1/submissions?volumeId=${VOLUME_2}&limit=100`);
-    expect(foreign.statusCode).toBe(200);
+  it('фильтр по объекту сужает выдачу и не расширяет её', async () => {
+    const own = await as(KC.a, 'GET', `/api/v1/works?objectId=${OBJECT_1}&limit=100`);
+    expect([...idsOf(own)].sort()).toEqual(
+      [WORK_A_DRAFT, WORK_A_APPROVED, WORK_A_PENDING, WORK_A_RETURNED].sort(),
+    );
+
+    const foreign = await as(KC.a, 'GET', `/api/v1/works?objectId=${OBJECT_2}&limit=100`);
     expect(idsOf(foreign)).toEqual([]);
 
     // Положительный контроль: фильтр рабочий — у руководителя он отдаёт ровно
-    // ту поставку, которую подрядчик А не увидел.
-    const byManager = await as(
-      KC.manager,
-      'GET',
-      `/api/v1/submissions?volumeId=${VOLUME_2}&limit=100`,
-    );
-    expect(idsOf(byManager)).toEqual([SUB_B_FAR]);
+    // тот комплект, которого подрядчик А не увидел.
+    const byManager = await as(KC.manager, 'GET', `/api/v1/works?objectId=${OBJECT_2}&limit=100`);
+    expect(idsOf(byManager)).toEqual([WORK_B_FAR]);
   });
 
-  it('фильтр по объекту работает вместе с областью', async () => {
-    const response = await as(KC.a, 'GET', `/api/v1/submissions?objectId=${OBJECT_1}&limit=100`);
-    expect([...idsOf(response)].sort()).toEqual(
-      [SUB_A_DRAFT, SUB_A_APPROVED, SUB_A_PENDING, SUB_A_RETURNED].sort(),
+  it('фильтры раздела и месяца работают вместе с областью', async () => {
+    const january = await as(
+      KC.a,
+      'GET',
+      `/api/v1/works?sectionCode=${SECTION}&period=${PERIOD}&limit=100`,
     );
+    expect([...idsOf(january)].sort()).toEqual(
+      [WORK_A_DRAFT, WORK_A_APPROVED, WORK_A_PENDING].sort(),
+    );
+
+    const february = await as(KC.a, 'GET', `/api/v1/works?period=${PERIOD_NEXT}&limit=100`);
+    expect(idsOf(february)).toEqual([WORK_A_RETURNED]);
+  });
+
+  it('признак unassigned отдаёт комплекты, не включённые ни в один реестр', async () => {
+    const response = await as(KC.gc, 'GET', '/api/v1/works?unassigned=true&limit=100');
+    expect(response.statusCode).toBe(200);
+    // Все комплекты фикстуры пока свободны: реестр их ещё не собирал.
+    expect(idsOf(response).length).toBeGreaterThan(0);
+
+    // `unassigned=false` — это именно «включённые», а не «любые»: строка
+    // «false» не должна прочитаться как истина.
+    const assigned = await as(KC.gc, 'GET', '/api/v1/works?unassigned=false&limit=100');
+    expect(idsOf(assigned)).toEqual([]);
+  });
+
+  it('повреждённый курсор — 400, а не тихий возврат к первой странице', async () => {
+    const response = await as(KC.manager, 'GET', '/api/v1/works?cursor=%2A%2A%2A');
+    expect(response.statusCode).toBe(400);
+  });
+
+  it('листает курсором без повторов и без пропусков', async () => {
+    const seen: string[] = [];
+    let cursor: string | null = null;
+    for (let page = 0; page < 10; page += 1) {
+      const url: string =
+        cursor === null
+          ? '/api/v1/works?limit=2'
+          : `/api/v1/works?limit=2&cursor=${encodeURIComponent(cursor)}`;
+      const response = await as(KC.manager, 'GET', url);
+      const body = response.json<{ items: Identified[]; nextCursor: string | null }>();
+      seen.push(...body.items.map((item) => item.id));
+      cursor = body.nextCursor;
+      if (cursor === null) break;
+    }
+    expect(cursor).toBeNull();
+    expect(new Set(seen).size).toBe(seen.length);
+    expect(seen.length).toBe(6);
   });
 });
 
-describe('GET /submissions/{id}', () => {
-  it('своя поставка отдаётся, чужая неотличима от несуществующей', async () => {
-    const own = await as(KC.a, 'GET', `/api/v1/submissions/${SUB_A_DRAFT}`);
+describe('GET /works/{id}', () => {
+  it('свой комплект отдаётся, чужой неотличим от несуществующего', async () => {
+    const own = await as(KC.a, 'GET', `/api/v1/works/${WORK_A_DRAFT}`);
     expect(own.statusCode).toBe(200);
     expect(own.json<{ currentRevisionId: string }>().currentRevisionId).toBe(REV_A_DRAFT);
 
-    const foreign = await as(KC.a, 'GET', `/api/v1/submissions/${SUB_B}`);
-    const missing = await as(KC.a, 'GET', `/api/v1/submissions/${id(998)}`);
+    const foreign = await as(KC.a, 'GET', `/api/v1/works/${WORK_B}`);
+    const missing = await as(KC.a, 'GET', `/api/v1/works/${id(998)}`);
     expect(foreign.statusCode).toBe(404);
     expect(missing.statusCode).toBe(404);
     expect(problemShape(foreign)).toEqual(problemShape(missing));
 
-    // Положительный контроль: та же поставка у её владельца — 200 с маркером.
-    const owner = await as(KC.b, 'GET', `/api/v1/submissions/${SUB_B}`);
+    // Положительный контроль: тот же комплект у владельца — 200 с маркером.
+    const owner = await as(KC.b, 'GET', `/api/v1/works/${WORK_B}`);
     expect(owner.statusCode).toBe(200);
     expect(owner.body).toContain(SECRET);
   });
 
-  it('инженер не получает поставку с объекта вне назначений', async () => {
-    const far = await as(KC.engineer, 'GET', `/api/v1/submissions/${SUB_B_FAR}`);
-    expect(far.statusCode).toBe(404);
-
-    // Положительный контроль: на назначенном объекте чужая поставка ему видна.
-    const near = await as(KC.engineer, 'GET', `/api/v1/submissions/${SUB_B}`);
-    expect(near.statusCode).toBe(200);
+  it('инженер не получает комплект с объекта вне назначений', async () => {
+    expect((await as(KC.engineer, 'GET', `/api/v1/works/${WORK_B_FAR}`)).statusCode).toBe(404);
+    // Положительный контроль: на назначенном объекте чужой комплект ему виден.
+    expect((await as(KC.engineer, 'GET', `/api/v1/works/${WORK_B}`)).statusCode).toBe(200);
   });
 });
 
-// =====================================================================
-// Ревизии поставки
-// =====================================================================
+describe('GET /works/{id}/revisions', () => {
+  it('отдаёт ревизии своего комплекта, чужой даёт 404, а не пустой список', async () => {
+    const own = await as(KC.a, 'GET', `/api/v1/works/${WORK_A_DRAFT}/revisions`);
+    expect(idsOf(own)).toEqual([REV_A_DRAFT]);
 
-describe('GET /submissions/{id}/revisions', () => {
-  it('отдаёт ревизии своей поставки', async () => {
-    const response = await as(KC.a, 'GET', `/api/v1/submissions/${SUB_A_DRAFT}/revisions`);
-    expect(response.statusCode).toBe(200);
-    expect(idsOf(response)).toEqual([REV_A_DRAFT]);
-  });
-
-  it('чужая поставка даёт 404, а не пустой список', async () => {
-    const foreign = await as(KC.a, 'GET', `/api/v1/submissions/${SUB_B}/revisions`);
+    const foreign = await as(KC.a, 'GET', `/api/v1/works/${WORK_B}/revisions`);
     expect(foreign.statusCode).toBe(404);
     expect(foreign.body).not.toContain(REV_B);
 
-    // Положительный контроль: у владельца тот же путь отдаёт ревизию.
-    const owner = await as(KC.b, 'GET', `/api/v1/submissions/${SUB_B}/revisions`);
-    expect(owner.statusCode).toBe(200);
+    const owner = await as(KC.b, 'GET', `/api/v1/works/${WORK_B}/revisions`);
     expect(idsOf(owner)).toEqual([REV_B]);
   });
 
-  it('инженер без объектов получает 404 на существующей поставке', async () => {
-    const response = await as(
-      KC.engineerNoScope,
-      'GET',
-      `/api/v1/submissions/${SUB_A_DRAFT}/revisions`,
-    );
+  it('инженер без объектов получает 404 на существующем комплекте', async () => {
+    const response = await as(KC.engineerNoScope, 'GET', `/api/v1/works/${WORK_A_DRAFT}/revisions`);
     expect(response.statusCode).toBe(404);
   });
 });
 
 // =====================================================================
-// Создание поставки
+// Заведение комплекта
 // =====================================================================
 
-describe('POST /submissions', () => {
+describe('POST /works', () => {
   it('инженеру, руководителю и администратору право не выдано', async () => {
     for (const kc of [KC.engineer, KC.manager, KC.admin]) {
-      const response = await as(kc, 'POST', '/api/v1/submissions', {
-        volumeId: VOLUME_1,
+      const response = await as(kc, 'POST', '/api/v1/works', {
+        objectId: OBJECT_1,
+        sectionCode: SECTION,
+        period: PERIOD,
         title: 'Попытка не подрядчика',
       });
       expect([kc, response.statusCode]).toEqual([kc, 403]);
@@ -613,172 +589,612 @@ describe('POST /submissions', () => {
   });
 
   it('пользователю с ролями contractor+engineer организация не придумывается', async () => {
-    const response = await as(KC.mixed, 'POST', '/api/v1/submissions', {
-      volumeId: VOLUME_1,
-      title: 'Поставка от совмещающего роли',
+    const response = await as(KC.mixed, 'POST', '/api/v1/works', {
+      objectId: OBJECT_1,
+      sectionCode: SECTION,
+      period: PERIOD,
+      title: 'Комплект от совмещающего роли',
     });
     expect(response.statusCode).toBe(403);
     expect(response.headers['content-type']).toContain('application/problem+json');
   });
 
-  it('создание в чужом томе неотличимо от создания в несуществующем', async () => {
-    const foreign = await as(KC.a, 'POST', '/api/v1/submissions', {
-      volumeId: VOLUME_2,
-      title: 'Поставка в чужом томе',
+  it('подрядчик, назвавший чужого исполнителя, получает 400, а не чужой комплект', async () => {
+    const response = await as(KC.a, 'POST', '/api/v1/works', {
+      objectId: OBJECT_1,
+      sectionCode: SECTION,
+      period: PERIOD,
+      title: 'Комплект от чужого имени',
+      contractorId: ORG_B,
     });
-    const missing = await as(KC.a, 'POST', '/api/v1/submissions', {
-      volumeId: id(997),
-      title: 'Поставка в несуществующем томе',
-    });
-    expect(foreign.statusCode).toBe(404);
-    expect(missing.statusCode).toBe(404);
-    expect(problemShape(foreign)).toEqual(problemShape(missing));
+    expect(response.statusCode).toBe(400);
 
-    const created = await db.query<{ n: string }>(
-      `SELECT count(*)::text AS n FROM submissions WHERE volume_id = '${VOLUME_2}'`,
+    const rows = await db.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM works WHERE title = 'Комплект от чужого имени'`,
     );
-    // В чужом томе по-прежнему только поставка подрядчика Б.
-    expect(created[0]?.n).toBe('1');
+    expect(rows[0]?.n).toBe('0');
   });
 
-  it('в закрытый том подать нельзя', async () => {
-    const response = await as(KC.a, 'POST', '/api/v1/submissions', {
-      volumeId: VOLUME_CLOSED,
-      title: 'Поставка в закрытый том',
-    });
-    expect(response.statusCode).toBe(409);
-  });
-
-  it('создаёт поставку вместе с первой ревизией и указателем на неё', async () => {
-    const response = await as(KC.a, 'POST', '/api/v1/submissions', {
-      volumeId: VOLUME_1,
-      title: 'Поставка А. Новая',
-      number: '7',
+  it('заводит комплект вместе с первой ревизией и указателем на неё', async () => {
+    const response = await as(KC.a, 'POST', '/api/v1/works', {
+      objectId: OBJECT_1,
+      sectionCode: SECTION,
+      period: PERIOD,
+      title: 'Комплект А. Новый',
     });
     expect(response.statusCode).toBe(201);
 
     const body = response.json<{
-      submission: {
+      work: {
         id: string;
         contractorId: string;
+        managedByContractorId: string;
         objectId: string;
         currentRevisionId: string;
-        number: string | null;
+        kind: string;
+        registryId: string | null;
       };
       revision: { id: string; revisionNo: number; parentRevisionId: string | null; status: string };
     }>();
 
     // Организация взята из области видимости, а не из тела запроса.
-    expect(body.submission.contractorId).toBe(ORG_A);
-    expect(body.submission.objectId).toBe(OBJECT_1);
-    expect(body.submission.number).toBe('7');
+    expect(body.work.contractorId).toBe(ORG_A);
+    expect(body.work.managedByContractorId).toBe(ORG_A);
+    expect(body.work.objectId).toBe(OBJECT_1);
+    expect(body.work.kind).toBe('complect');
+    expect(body.work.registryId).toBeNull();
     expect(body.revision.revisionNo).toBe(1);
     expect(body.revision.parentRevisionId).toBeNull();
     expect(body.revision.status).toBe('draft');
-    expect(body.submission.currentRevisionId).toBe(body.revision.id);
+    expect(body.work.currentRevisionId).toBe(body.revision.id);
 
     // Строки действительно записаны, а не только отрисованы в ответе.
     const rows = await db.query<{ status: string; current: string }>(
-      `SELECT r.status, s.current_revision_id::text AS current
-         FROM submissions s JOIN submission_revisions r ON r.submission_id = s.id
-        WHERE s.id = '${body.submission.id}'`,
+      `SELECT r.status, w.current_revision_id::text AS current
+         FROM works w JOIN submission_revisions r ON r.work_id = w.id
+        WHERE w.id = '${body.work.id}'`,
     );
     expect(rows).toEqual([{ status: 'draft', current: body.revision.id }]);
 
-    // Созданная поставка сразу видна её владельцу и не видна подрядчику Б.
-    const own = await as(KC.a, 'GET', `/api/v1/submissions/${body.submission.id}`);
-    expect(own.statusCode).toBe(200);
-    const other = await as(KC.b, 'GET', `/api/v1/submissions/${body.submission.id}`);
-    expect(other.statusCode).toBe(404);
+    expect((await as(KC.a, 'GET', `/api/v1/works/${body.work.id}`)).statusCode).toBe(200);
+    expect((await as(KC.b, 'GET', `/api/v1/works/${body.work.id}`)).statusCode).toBe(404);
+  });
+
+  it('раздел, не включённый на объекте, — 422 с указанием поля', async () => {
+    const response = await as(KC.a, 'POST', '/api/v1/works', {
+      objectId: OBJECT_1,
+      sectionCode: 'masonry',
+      period: PERIOD,
+      title: 'Комплект в невключённом разделе',
+    });
+    expect(response.statusCode).toBe(422);
+    const pointers = response
+      .json<{ errors?: { pointer: string | null }[] }>()
+      .errors?.map((issue) => issue.pointer);
+    expect(pointers).toContain('/sectionCode');
+  });
+
+  it('генподрядчик заводит комплект за субподрядчика, и это видно в журнале', async () => {
+    const response = await as(KC.gc, 'POST', '/api/v1/works', {
+      objectId: OBJECT_1,
+      sectionCode: SECTION,
+      period: PERIOD,
+      title: 'Комплект Б, собранный ПТО',
+      contractorId: ORG_B,
+    });
+    expect(response.statusCode).toBe(201);
+
+    const work = response.json<{
+      work: { id: string; contractorId: string; managedByContractorId: string };
+    }>().work;
+    // Исполнитель — субподрядчик, ведёт комплект генподрядчик. Именно это
+    // расхождение и разделяет «кто выполнил» и «кто правит состав».
+    expect(work.contractorId).toBe(ORG_B);
+    expect(work.managedByContractorId).toBe(ORG_GC);
+
+    const audit = await db.query<{ payload: { onBehalfOf: boolean } }>(
+      `SELECT payload FROM audit_log WHERE action = 'work.created' AND entity_id = '${work.id}'`,
+    );
+    expect(audit[0]?.payload.onBehalfOf).toBe(true);
+
+    // Субподрядчик видит собранный за него комплект: он его исполнитель.
+    expect((await as(KC.b, 'GET', `/api/v1/works/${work.id}`)).statusCode).toBe(200);
+
+    // …но состав ведёт не он: следующую ревизию ему открыть не дадут.
+    const foreignRevision = await as(KC.b, 'POST', `/api/v1/works/${work.id}/revisions`);
+    expect(foreignRevision.statusCode).toBe(403);
+  });
+
+  it('незакреплённый подрядчик — 422 с указанием поля, а не 500 по внешнему ключу', async () => {
+    const response = await as(KC.gc, 'POST', '/api/v1/works', {
+      objectId: OBJECT_1,
+      sectionCode: SECTION,
+      period: PERIOD,
+      title: 'Комплект незакреплённого',
+      contractorId: ORG_CUSTOMER,
+    });
+    expect(response.statusCode).toBe(422);
+    const pointers = response
+      .json<{ errors?: { pointer: string | null }[] }>()
+      .errors?.map((issue) => issue.pointer);
+    expect(pointers).toContain('/contractorId');
+  });
+
+  it('месяц задаётся первым числом: произвольный день — 422', async () => {
+    const response = await as(KC.a, 'POST', '/api/v1/works', {
+      objectId: OBJECT_1,
+      sectionCode: SECTION,
+      period: '2026-01-15',
+      title: 'Комплект середины месяца',
+    });
+    expect(response.statusCode).toBe(422);
   });
 });
 
 // =====================================================================
-// Создание ревизии
+// Ревизии комплекта
 // =====================================================================
 
-describe('POST /submissions/{id}/revisions', () => {
+describe('POST /works/{id}/revisions', () => {
   it('при открытом черновике отвечает 409 и не заводит вторую', async () => {
-    const response = await as(KC.a, 'POST', `/api/v1/submissions/${SUB_A_DRAFT}/revisions`);
+    const response = await as(KC.a, 'POST', `/api/v1/works/${WORK_A_DRAFT}/revisions`);
     expect(response.statusCode).toBe(409);
 
     const rows = await db.query<{ n: string }>(
-      `SELECT count(*)::text AS n FROM submission_revisions WHERE submission_id = '${SUB_A_DRAFT}'`,
+      `SELECT count(*)::text AS n FROM submission_revisions WHERE work_id = '${WORK_A_DRAFT}'`,
     );
     expect(rows[0]?.n).toBe('1');
   });
 
   it('пока ревизия ждёт решения, новую открыть нельзя', async () => {
-    const response = await as(KC.a, 'POST', `/api/v1/submissions/${SUB_A_PENDING}/revisions`);
+    const response = await as(KC.a, 'POST', `/api/v1/works/${WORK_A_PENDING}/revisions`);
     expect(response.statusCode).toBe(409);
   });
 
   it('после возврата новую ревизию создаёт возврат, а не этот маршрут', async () => {
-    const response = await as(KC.a, 'POST', `/api/v1/submissions/${SUB_A_RETURNED}/revisions`);
+    const response = await as(KC.a, 'POST', `/api/v1/works/${WORK_A_RETURNED}/revisions`);
     expect(response.statusCode).toBe(409);
     const rows = await db.query<{ n: string }>(
-      `SELECT count(*)::text AS n FROM submission_revisions WHERE submission_id = '${SUB_A_RETURNED}'`,
+      `SELECT count(*)::text AS n FROM submission_revisions WHERE work_id = '${WORK_A_RETURNED}'`,
     );
     expect(rows[0]?.n).toBe('1');
   });
 
   it('после согласования открывает следующую ревизию в форме возврата', async () => {
-    const response = await as(KC.a, 'POST', `/api/v1/submissions/${SUB_A_APPROVED}/revisions`);
+    const response = await as(KC.a, 'POST', `/api/v1/works/${WORK_A_APPROVED}/revisions`);
     expect(response.statusCode).toBe(201);
 
-    const revision = response.json<{
+    const created = response.json<{
       id: string;
       revisionNo: number;
       parentRevisionId: string | null;
       status: string;
     }>();
-    expect(revision.revisionNo).toBe(2);
-    // Та же форма, что создаёт returnRevision(): родитель проставлен, статус
-    // draft, указатель поставки переведён.
-    expect(revision.parentRevisionId).toBe(REV_A_APPROVED);
-    expect(revision.status).toBe('draft');
+    expect(created.revisionNo).toBe(2);
+    expect(created.parentRevisionId).toBe(REV_A_APPROVED);
+    expect(created.status).toBe('draft');
 
     const rows = await db.query<{ current: string; events: string }>(
-      `SELECT s.current_revision_id::text AS current,
-              (SELECT count(*)::text FROM revision_events e WHERE e.revision_id = '${revision.id}') AS events
-         FROM submissions s WHERE s.id = '${SUB_A_APPROVED}'`,
+      `SELECT w.current_revision_id::text AS current,
+              (SELECT count(*)::text FROM revision_events e WHERE e.revision_id = '${created.id}') AS events
+         FROM works w WHERE w.id = '${WORK_A_APPROVED}'`,
     );
-    expect(rows[0]?.current).toBe(revision.id);
-    // Лента новой ревизии начинается с события её появления (§3.8).
+    expect(rows[0]?.current).toBe(created.id);
     expect(rows[0]?.events).toBe('1');
 
-    // Согласованная ревизия осталась на месте и не переоткрыта.
     const previous = await db.query<{ status: string }>(
       `SELECT status FROM submission_revisions WHERE id = '${REV_A_APPROVED}'`,
     );
     expect(previous[0]?.status).toBe('approved');
 
-    // Повторное нажатие упирается в только что открытый черновик.
-    const again = await as(KC.a, 'POST', `/api/v1/submissions/${SUB_A_APPROVED}/revisions`);
+    const again = await as(KC.a, 'POST', `/api/v1/works/${WORK_A_APPROVED}/revisions`);
     expect(again.statusCode).toBe(409);
   });
 
-  it('в чужой поставке ревизию не создать, и она не появляется в базе', async () => {
+  it('в чужом комплекте ревизию не создать, и она не появляется в базе', async () => {
     const before = await db.query<{ n: string }>(
-      `SELECT count(*)::text AS n FROM submission_revisions WHERE submission_id = '${SUB_B}'`,
+      `SELECT count(*)::text AS n FROM submission_revisions WHERE work_id = '${WORK_B}'`,
     );
-    const response = await as(KC.a, 'POST', `/api/v1/submissions/${SUB_B}/revisions`);
-    expect(response.statusCode).toBe(404);
+    expect((await as(KC.a, 'POST', `/api/v1/works/${WORK_B}/revisions`)).statusCode).toBe(404);
     const after = await db.query<{ n: string }>(
-      `SELECT count(*)::text AS n FROM submission_revisions WHERE submission_id = '${SUB_B}'`,
+      `SELECT count(*)::text AS n FROM submission_revisions WHERE work_id = '${WORK_B}'`,
     );
     expect(after).toEqual(before);
-
-    // Положительный контроль: у владельца тот же путь работает — эта поставка
-    // существует, и отказ выше вызван областью, а не состоянием данных.
-    const owner = await as(KC.b, 'GET', `/api/v1/submissions/${SUB_B}/revisions`);
-    expect(owner.statusCode).toBe(200);
   });
 
-  it('инженеру и руководителю право создания ревизии не выдано', async () => {
-    for (const kc of [KC.engineer, KC.manager]) {
-      const response = await as(kc, 'POST', `/api/v1/submissions/${SUB_A_APPROVED}/revisions`);
-      expect([kc, response.statusCode]).toEqual([kc, 403]);
-    }
+  it('генподрядчик видит чужой комплект, но состав его не правит', async () => {
+    expect((await as(KC.gc, 'GET', `/api/v1/works/${WORK_B}`)).statusCode).toBe(200);
+    // 403, а не 404: скрывать существование того, что он и так видит в списке,
+    // бессмысленно — отказ обязан назвать причину.
+    const response = await as(KC.gc, 'POST', `/api/v1/works/${WORK_B}/revisions`);
+    expect(response.statusCode).toBe(403);
+  });
+});
+
+// =====================================================================
+// Реестры: видимость
+// =====================================================================
+
+describe('GET /registries', () => {
+  it('подрядчик видит реестры своих объектов и не видит чужих', async () => {
+    const response = await as(KC.a, 'GET', '/api/v1/registries?limit=100');
+    expect(response.statusCode).toBe(200);
+    expect(idsOf(response)).toEqual([REGISTRY_1]);
+    expect(response.body).not.toContain(SECRET);
+
+    // Положительный контроль: реестр чужого объекта существует и виден
+    // руководителю вместе с маркером в номере.
+    const byManager = await as(KC.manager, 'GET', '/api/v1/registries?limit=100');
+    expect([...idsOf(byManager)].sort()).toEqual([REGISTRY_1, REGISTRY_FAR].sort());
+    expect(byManager.body).toContain(SECRET);
+  });
+
+  it('карточка реестра подрядчику не раскрывает ни состава, ни блокеров', async () => {
+    const response = await as(KC.a, 'GET', `/api/v1/registries/${REGISTRY_1}`);
+    expect(response.statusCode).toBe(200);
+
+    const body = response.json<Record<string, unknown>>();
+    // Полей нет вовсе, а не «пустые»: ноль в счётчике — это тоже ответ на
+    // вопрос «сколько работ у соседей», только полученный арифметикой.
+    expect(body['works']).toBeUndefined();
+    expect(body['file']).toBeUndefined();
+    expect(body['blockers']).toBeUndefined();
+
+    const forGc = await as(KC.gc, 'GET', `/api/v1/registries/${REGISTRY_1}`);
+    expect(forGc.json<{ works: unknown[] }>().works).toBeDefined();
+    expect(forGc.json<{ blockers: unknown[] }>().blockers).toBeDefined();
+  });
+
+  it('реестр чужого объекта неотличим от несуществующего', async () => {
+    const foreign = await as(KC.a, 'GET', `/api/v1/registries/${REGISTRY_FAR}`);
+    const missing = await as(KC.a, 'GET', `/api/v1/registries/${id(997)}`);
+    expect(foreign.statusCode).toBe(404);
+    expect(missing.statusCode).toBe(404);
+    expect(problemShape(foreign)).toEqual(problemShape(missing));
+  });
+});
+
+// =====================================================================
+// Реестр: сбор состава
+// =====================================================================
+
+describe('состав реестра', () => {
+  it('комплект включается, получает порядковый номер и версию реестра', async () => {
+    const version = await registryVersion(KC.gc, REGISTRY_1);
+    const response = await as(
+      KC.gc,
+      'PUT',
+      `/api/v1/registries/${REGISTRY_1}/works/${WORK_A_PENDING}`,
+      {},
+      ifMatch(version),
+    );
+    expect(response.statusCode).toBe(200);
+    expect(response.json<{ version: number }>().version).toBe(version + 1);
+
+    const rows = await db.query<{ ordinal: number }>(
+      `SELECT ordinal FROM works WHERE id = '${WORK_A_PENDING}'`,
+    );
+    expect(rows[0]?.ordinal).toBe(1);
+  });
+
+  it('без If-Match — 400, с устаревшей версией — 412', async () => {
+    const noHeader = await as(KC.gc, 'PUT', `/api/v1/registries/${REGISTRY_1}/works/${WORK_B}`, {});
+    expect(noHeader.statusCode).toBe(400);
+
+    const stale = await as(
+      KC.gc,
+      'PUT',
+      `/api/v1/registries/${REGISTRY_1}/works/${WORK_B}`,
+      {},
+      ifMatch(0),
+    );
+    expect(stale.statusCode).toBe(412);
+  });
+
+  it('комплект другого месяца в реестр не входит', async () => {
+    const version = await registryVersion(KC.gc, REGISTRY_1);
+    const response = await as(
+      KC.gc,
+      'PUT',
+      `/api/v1/registries/${REGISTRY_1}/works/${WORK_A_RETURNED}`,
+      {},
+      ifMatch(version),
+    );
+    expect(response.statusCode).toBe(422);
+  });
+
+  it('исключение возвращает комплект в свободные', async () => {
+    const version = await registryVersion(KC.gc, REGISTRY_1);
+    const excluded = await as(
+      KC.gc,
+      'DELETE',
+      `/api/v1/registries/${REGISTRY_1}/works/${WORK_A_PENDING}`,
+      undefined,
+      ifMatch(version),
+    );
+    expect(excluded.statusCode).toBe(200);
+
+    const rows = await db.query<{ registry_id: string | null }>(
+      `SELECT registry_id FROM works WHERE id = '${WORK_A_PENDING}'`,
+    );
+    expect(rows[0]?.registry_id).toBeNull();
+
+    // И снова включается: исключение не делает комплект непригодным.
+    const back = await as(
+      KC.gc,
+      'PUT',
+      `/api/v1/registries/${REGISTRY_1}/works/${WORK_A_PENDING}`,
+      {},
+      ifMatch(await registryVersion(KC.gc, REGISTRY_1)),
+    );
+    expect(back.statusCode).toBe(200);
+  });
+});
+
+// =====================================================================
+// Передача и приёмка
+// =====================================================================
+
+describe('передача реестра', () => {
+  it('передача перечисляет ВСЕ препятствия, а не первое', async () => {
+    const view = await as(KC.gc, 'GET', `/api/v1/registries/${REGISTRY_1}`);
+    const codes = view
+      .json<{ blockers: { code: string }[] }>()
+      .blockers.map((blocker) => blocker.code);
+    expect(codes).toContain('number_missing');
+    expect(codes).toContain('file_missing');
+
+    const refused = await as(
+      KC.gc,
+      'POST',
+      `/api/v1/registries/${REGISTRY_1}/issue`,
+      undefined,
+      ifMatch(await registryVersion(KC.gc, REGISTRY_1)),
+    );
+    expect(refused.statusCode).toBe(422);
+  });
+
+  it('файл описи заводится комплектом того же конвейера, второй запрещён', async () => {
+    const created = await as(KC.gc, 'POST', `/api/v1/registries/${REGISTRY_1}/file`);
+    expect(created.statusCode).toBe(201);
+
+    const body = created.json<{
+      work: { id: string; kind: string; registryId: string; autoRunEnabled: boolean };
+      revision: { id: string; status: string };
+    }>();
+    expect(body.work.kind).toBe('registry');
+    expect(body.work.registryId).toBe(REGISTRY_1);
+    // Разметку описи человек не ведёт: она нужна целиком и сразу для сверки.
+    expect(body.work.autoRunEnabled).toBe(true);
+    expect(body.revision.status).toBe('draft');
+
+    const second = await as(KC.gc, 'POST', `/api/v1/registries/${REGISTRY_1}/file`);
+    expect(second.statusCode).toBe(409);
+
+    // Файл описи не включается в состав как обычный комплект.
+    const asComplect = await as(
+      KC.gc,
+      'PUT',
+      `/api/v1/registries/${REGISTRY_1}/works/${body.work.id}`,
+      {},
+      ifMatch(await registryVersion(KC.gc, REGISTRY_1)),
+    );
+    expect(asComplect.statusCode).toBe(409);
+
+    // Ревизию описи подаём напрямую: путь подачи проверяется в workflow-тестах,
+    // здесь нужен только её статус как предусловие передачи.
+    await db.query(
+      `UPDATE submission_revisions SET status = 'submitted', submitted_at = now(),
+              submitted_by = '${USER_GC}' WHERE id = '${body.revision.id}'`,
+    );
+  });
+
+  it('передача фиксирует снимок состава и переводит статус', async () => {
+    // Номер присваивается перед подписью, а не при заведении черновика.
+    const numbered = await as(
+      KC.gc,
+      'PATCH',
+      `/api/v1/registries/${REGISTRY_1}`,
+      { number: '8' },
+      ifMatch(await registryVersion(KC.gc, REGISTRY_1)),
+    );
+    expect(numbered.statusCode).toBe(200);
+
+    const blockers = (await as(KC.gc, 'GET', `/api/v1/registries/${REGISTRY_1}`)).json<{
+      blockers: { code: string }[];
+    }>().blockers;
+    expect(blockers).toEqual([]);
+
+    const version = await registryVersion(KC.gc, REGISTRY_1);
+
+    // Сначала — устаревшая версия на ещё-черновике: предусловия пройдены, и
+    // отказ приходит именно от сравнения-с-обменом. Так проверяется тот путь,
+    // по которому второй сотрудник ПТО не затирает состав, собранный первым.
+    const stale = await as(
+      KC.gc,
+      'POST',
+      `/api/v1/registries/${REGISTRY_1}/issue`,
+      undefined,
+      ifMatch(version - 1),
+    );
+    expect(stale.statusCode).toBe(412);
+    const noSnapshot = await db.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM registry_items WHERE registry_id = '${REGISTRY_1}'`,
+    );
+    expect(noSnapshot[0]?.n).toBe('0');
+
+    const issued = await as(
+      KC.gc,
+      'POST',
+      `/api/v1/registries/${REGISTRY_1}/issue`,
+      undefined,
+      ifMatch(version),
+    );
+    expect(issued.statusCode).toBe(200);
+    expect(issued.json<{ status: string }>().status).toBe('issued');
+    expect(
+      issued.json<{ issuedFileRevisionId: string | null }>().issuedFileRevisionId,
+    ).not.toBeNull();
+
+    const items = await as(KC.gc, 'GET', `/api/v1/registries/${REGISTRY_1}/items`);
+    expect(items.json<{ workId: string; title: string }[]>()).toEqual([
+      {
+        registryId: REGISTRY_1,
+        ordinal: 1,
+        workId: WORK_A_PENDING,
+        revisionId: REV_A_PENDING,
+        contractorId: ORG_A,
+        title: 'Комплект А. На согласовании',
+      },
+    ]);
+  });
+
+  it('повторная передача второго снимка не создаёт', async () => {
+    // Реестр уже передан, поэтому отказ приходит от предусловий (`not_draft`),
+    // а не от сравнения версий: до CAS дело не доходит. Проверка CAS стоит
+    // выше — она сделана на ещё-черновике с устаревшей версией, где отказ
+    // приходит именно из `bumpRegistryVersion`.
+    const response = await as(
+      KC.gc,
+      'POST',
+      `/api/v1/registries/${REGISTRY_1}/issue`,
+      undefined,
+      ifMatch(await registryVersion(KC.gc, REGISTRY_1)),
+    );
+    expect(response.statusCode).toBe(422);
+
+    const rows = await db.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM registry_items WHERE registry_id = '${REGISTRY_1}'`,
+    );
+    expect(rows[0]?.n).toBe('1');
+  });
+
+  it('переданный реестр неизменяем: состав, шапка и снимок заперты', async () => {
+    const version = await registryVersion(KC.gc, REGISTRY_1);
+
+    const patched = await as(
+      KC.gc,
+      'PATCH',
+      `/api/v1/registries/${REGISTRY_1}`,
+      { number: '9' },
+      ifMatch(version),
+    );
+    expect(patched.statusCode).toBe(409);
+
+    const excluded = await as(
+      KC.gc,
+      'DELETE',
+      `/api/v1/registries/${REGISTRY_1}/works/${WORK_A_PENDING}`,
+      undefined,
+      ifMatch(version),
+    );
+    expect(excluded.statusCode).toBe(409);
+
+    // Замок снимка — на уровне БД, а не маршрута: он держится и против прямого
+    // SQL, то есть против любой будущей ошибки в коде.
+    await expect(
+      db.query(`UPDATE registry_items SET title = 'подмена' WHERE registry_id = '${REGISTRY_1}'`),
+    ).rejects.toThrow();
+    await expect(
+      db.query(`DELETE FROM registry_items WHERE registry_id = '${REGISTRY_1}'`),
+    ).rejects.toThrow();
+    await expect(
+      db.query(`UPDATE registries SET period = DATE '2026-03-01' WHERE id = '${REGISTRY_1}'`),
+    ).rejects.toThrow();
+  });
+
+  it('снимок подрядчику показывает только его строки', async () => {
+    const own = await as(KC.a, 'GET', `/api/v1/registries/${REGISTRY_1}/items`);
+    expect(own.statusCode).toBe(200);
+    expect(own.json<{ workId: string }[]>().map((row) => row.workId)).toEqual([WORK_A_PENDING]);
+
+    const other = await as(KC.b, 'GET', `/api/v1/registries/${REGISTRY_1}/items`);
+    expect(other.json<unknown[]>()).toEqual([]);
+  });
+
+  it('принимает заказчик, а передавший — нет; повтор приёмки — 409', async () => {
+    const version = await registryVersion(KC.engineer, REGISTRY_1);
+
+    const accepted = await as(
+      KC.engineer,
+      'POST',
+      `/api/v1/registries/${REGISTRY_1}/accept`,
+      undefined,
+      ifMatch(version),
+    );
+    expect(accepted.statusCode).toBe(200);
+    expect(accepted.json<{ status: string }>().status).toBe('accepted');
+
+    const again = await as(
+      KC.manager,
+      'POST',
+      `/api/v1/registries/${REGISTRY_1}/accept`,
+      undefined,
+      ifMatch(await registryVersion(KC.manager, REGISTRY_1)),
+    );
+    expect(again.statusCode).toBe(409);
+  });
+});
+
+// =====================================================================
+// Заведение реестра
+// =====================================================================
+
+describe('POST /registries', () => {
+  it('генподрядчик заводит реестр без номера, повтор номера — 409', async () => {
+    const created = await as(KC.gc, 'POST', '/api/v1/registries', {
+      objectId: OBJECT_1,
+      sectionCode: SECTION_OTHER,
+      period: PERIOD,
+    });
+    expect(created.statusCode).toBe(201);
+    expect(created.json<{ status: string; number: string | null }>()).toMatchObject({
+      status: 'draft',
+      number: null,
+    });
+
+    const numbered = await as(KC.gc, 'POST', '/api/v1/registries', {
+      objectId: OBJECT_1,
+      sectionCode: SECTION_OTHER,
+      period: PERIOD_NEXT,
+      number: '8',
+    });
+    // Номер «8» уже занят реестром объекта 1: уникальность — по объекту.
+    expect(numbered.statusCode).toBe(409);
+  });
+
+  it('раздел, не включённый на объекте, — 422 с указанием поля', async () => {
+    const response = await as(KC.gc, 'POST', '/api/v1/registries', {
+      objectId: OBJECT_1,
+      sectionCode: 'masonry',
+      period: PERIOD,
+    });
+    expect(response.statusCode).toBe(422);
+  });
+
+  it('на чужом объекте ни реестр, ни комплект не заводятся', async () => {
+    // Раздел на объекте 2 включён, и подрядчик Б там закреплён: составные
+    // внешние ключи пропустили бы обе записи. Отказ даёт область видимости —
+    // 404, потому что «нет такого» и «не ваше» здесь неразличимы.
+    const registry = await as(KC.gc, 'POST', '/api/v1/registries', {
+      objectId: OBJECT_2,
+      sectionCode: SECTION,
+      period: PERIOD,
+    });
+    expect(registry.statusCode).toBe(404);
+
+    const work = await as(KC.gc, 'POST', '/api/v1/works', {
+      objectId: OBJECT_2,
+      sectionCode: SECTION,
+      period: PERIOD,
+      title: 'Комплект на чужом объекте',
+      contractorId: ORG_B,
+    });
+    expect(work.statusCode).toBe(404);
+
+    const rows = await db.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM works WHERE object_id = '${OBJECT_2}'`,
+    );
+    expect(rows[0]?.n).toBe('1');
   });
 });

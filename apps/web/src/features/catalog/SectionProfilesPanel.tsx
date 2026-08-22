@@ -61,16 +61,16 @@ function today(): string {
 
 export function SectionProfilesPanel(): ReactNode {
   const { can } = useSession();
-  const [kindCode, setKindCode] = useState<string | null>(null);
+  const [sectionCode, setSectionCode] = useState<string | null>(null);
   const [at, setAt] = useState<string>(today);
   const [creating, setCreating] = useState(false);
 
-  const kinds = useQuery({
-    queryKey: catalogKeys.sectionKinds(),
-    queryFn: () => catalog.sectionKinds(),
+  const sections = useQuery({
+    queryKey: catalogKeys.sectionCatalog(false),
+    queryFn: () => catalog.sections(),
   });
 
-  const selected = kindCode ?? kinds.data?.[0]?.code ?? null;
+  const selected = sectionCode ?? sections.data?.[0]?.code ?? null;
 
   const profiles = useQuery({
     queryKey: catalogKeys.sectionProfiles(selected ?? 'none'),
@@ -88,9 +88,9 @@ export function SectionProfilesPanel(): ReactNode {
       !(isApiError(error) && error.status === 404) && failureCount < 2,
   });
 
-  if (kinds.isPending) return <LoadingState label="Загрузка видов разделов…" />;
-  if (kinds.isError) return <ErrorState error={kinds.error} />;
-  if (kinds.data.length === 0) return <EmptyState label="Виды разделов не заведены" />;
+  if (sections.isPending) return <LoadingState label="Загрузка видов разделов…" />;
+  if (sections.isError) return <ErrorState error={sections.error} />;
+  if (sections.data.length === 0) return <EmptyState label="Разделы работ не заведены" />;
 
   const effectiveMissing =
     effective.isError && isApiError(effective.error) && effective.error.status === 404;
@@ -99,13 +99,20 @@ export function SectionProfilesPanel(): ReactNode {
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
       <Space wrap align="end">
         <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-          <span>Вид раздела</span>
+          <span>Раздел работ</span>
+          {/*
+            Поиск по списку включён намеренно: разделов двадцать четыре, и
+            прокрутка виртуального списка до «Электромонтажных работ» — это
+            работа, которую человек делает вместо ввода трёх букв.
+          */}
           <Select<string>
             style={{ minWidth: 280 }}
             value={selected}
-            onChange={setKindCode}
-            options={kinds.data.map((kind) => ({ value: kind.code, label: kind.name }))}
-            aria-label="Вид раздела"
+            onChange={setSectionCode}
+            showSearch
+            optionFilterProp="label"
+            options={sections.data.map((row) => ({ value: row.code, label: row.name }))}
+            aria-label="Раздел работ"
           />
         </div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
@@ -132,7 +139,7 @@ export function SectionProfilesPanel(): ReactNode {
       <Card size="small" title={`Действующий профиль на ${at}`}>
         {effective.isPending && <LoadingState />}
         {effectiveMissing && (
-          <ExplainedLimitation title="Профиль вида раздела не настроен" testId="profile-absent">
+          <ExplainedLimitation title="Профиль раздела не настроен" testId="profile-absent">
             На эту дату опубликованного профиля нет. Это не пустой список и не сбой: правила полноты
             обязаны отличать «раздел не настроен» от «комплект неполон» (§9.1) и в первом случае
             дают <Typography.Text code>n_a</Typography.Text>, а не замечание.
@@ -149,7 +156,7 @@ export function SectionProfilesPanel(): ReactNode {
           <ProfileVersions
             profiles={profiles.data}
             canPublish={can('settings.manage')}
-            sectionKindCode={selected ?? ''}
+            sectionCode={selected ?? ''}
           />
         )}
       </Card>
@@ -157,7 +164,7 @@ export function SectionProfilesPanel(): ReactNode {
       {selected !== null && (
         <NewProfileDialog
           open={creating}
-          sectionKindCode={selected}
+          sectionCode={selected}
           onClose={() => setCreating(false)}
         />
       )}
@@ -168,11 +175,11 @@ export function SectionProfilesPanel(): ReactNode {
 function ProfileVersions({
   profiles,
   canPublish,
-  sectionKindCode,
+  sectionCode,
 }: {
   profiles: readonly SectionProfile[];
   canPublish: boolean;
-  sectionKindCode: string;
+  sectionCode: string;
 }): ReactNode {
   const { message } = AntApp.useApp();
   const queryClient = useQueryClient();
@@ -192,7 +199,7 @@ function ProfileVersions({
       size="small"
       pagination={false}
       dataSource={[...profiles]}
-      locale={{ emptyText: 'Версий профиля у этого вида раздела нет' }}
+      locale={{ emptyText: 'Версий профиля у этого раздела нет' }}
       expandable={{ expandedRowRender: (row) => <ProfileCard profile={row} /> }}
       columns={[
         { title: 'Версия', dataIndex: 'version', key: 'version', width: 90 },
@@ -240,7 +247,7 @@ function ProfileVersions({
             ),
         },
       ]}
-      title={() => `Вид раздела: ${sectionKindCode}`}
+      title={() => `Раздел работ: ${sectionCode}`}
     />
   );
 }
@@ -338,11 +345,11 @@ const PROFILE_FIELDS: readonly FieldPath[] = [
 
 function NewProfileDialog({
   open,
-  sectionKindCode,
+  sectionCode,
   onClose,
 }: {
   open: boolean;
-  sectionKindCode: string;
+  sectionCode: string;
   onClose: () => void;
 }): ReactNode {
   const { message } = AntApp.useApp();
@@ -364,7 +371,7 @@ function NewProfileDialog({
   const create = useMutation({
     mutationFn: (values: ProfileFormValues) =>
       catalog.createSectionProfile({
-        sectionKindCode,
+        sectionCode,
         effectiveFrom: values.effectiveFrom,
         effectiveTo: values.effectiveTo === '' ? null : values.effectiveTo,
         expectedDocTypes: values.expectedDocTypes,
@@ -395,7 +402,7 @@ function NewProfileDialog({
   return (
     <Modal
       open={open}
-      title="Новая версия профиля вида раздела"
+      title="Новая версия профиля раздела"
       okText="Создать"
       cancelText="Отмена"
       confirmLoading={create.isPending}

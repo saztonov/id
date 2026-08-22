@@ -1,9 +1,9 @@
 /**
- * Справочники (§14): объекты, контрагенты, разделы и виды разделов, виды ИД.
+ * Справочники (§14): объекты, контрагенты, разделы работ, виды ИД.
  *
  * Разделение видимости, введённое на S4, здесь проявляется буквально: объекты,
- * контрагенты и шифры РД — коммерческие данные с областью видимости, а виды
- * разделов и виды ИД — конфигурация, читаемая всеми. Поэтому вкладки не
+ * контрагенты и шифры РД — коммерческие данные с областью видимости, а разделы
+ * работ и виды ИД — конфигурация, читаемая всеми. Поэтому вкладки не
  * скрываются по роли: сервер сам отдаёт подрядчику только то, что ему видно, и
  * пустой список у него — это правильный ответ, а не отказ.
  */
@@ -16,9 +16,8 @@ import type {
   ConstructionObject,
   Counterparty,
   DocType,
-  ObjectSection,
   RdDocument,
-  SectionKind,
+  Section,
 } from '../../api/types.js';
 import { EmptyState, ErrorState, LoadingState, ScreenHeading } from '../../shared/ui.js';
 import { Link, useNavigate, useQueryParam } from '../../app/router.js';
@@ -55,7 +54,7 @@ export function CatalogScreen(): ReactNode {
         items={[
           { key: 'objects', label: 'Объекты', children: <ObjectsTable /> },
           { key: 'counterparties', label: 'Контрагенты', children: <CounterpartiesTable /> },
-          { key: 'sections', label: 'Разделы и виды разделов', children: <SectionsTable /> },
+          { key: 'sections', label: 'Разделы работ', children: <SectionsTable /> },
           {
             key: 'section-profiles',
             label: 'Профили разделов',
@@ -359,66 +358,146 @@ function CounterpartiesTable(): ReactNode {
   );
 }
 
+/**
+ * Разделы работ — один плоский справочник на весь портал.
+ *
+ * До 0028 здесь было две таблицы: разделы, скопированные на каждый объект, и
+ * «разделы» — конфигурация, общая для всех. Различие существовало ровно
+ * из-за копии; разделы взяты из сметного деления и на всех стройках одни и те
+ * же, поэтому копия исчезла вместе с различием. Какие из них ведутся на
+ * конкретной стройке, решается на карточке объекта, а не здесь.
+ */
 function SectionsTable(): ReactNode {
-  const objects = useQuery({
-    queryKey: catalogKeys.objects(''),
-    queryFn: () => catalog.objects({}),
-  });
-  const kinds = useQuery({
-    queryKey: catalogKeys.sectionKinds(),
-    queryFn: () => catalog.sectionKinds(),
-  });
-  const [objectId, setObjectId] = useState<string | null>(null);
-  const selected = objectId ?? objects.data?.items[0]?.id ?? null;
+  const { can } = useSession();
+  const { message } = AntApp.useApp();
+  const queryClient = useQueryClient();
+  const [includeInactive, setIncludeInactive] = useState(true);
+  const manage = can('settings.manage');
+
   const sections = useQuery({
-    queryKey: catalogKeys.sections(selected ?? 'none'),
-    queryFn: () => catalog.sections(selected ?? ''),
-    enabled: selected !== null,
+    queryKey: catalogKeys.sectionCatalog(includeInactive),
+    queryFn: () => catalog.sections(includeInactive),
   });
 
-  if (objects.isPending) return <LoadingState />;
-  if (objects.isError) return <ErrorState error={objects.error} />;
+  const invalidate = async (): Promise<void> => {
+    await queryClient.invalidateQueries({ queryKey: ['catalog', 'sections'] });
+  };
+
+  const toggle = useMutation({
+    mutationFn: (row: Section) => catalog.updateSection(row.code, { isActive: !row.isActive }),
+    onSuccess: invalidate,
+    onError: (error: unknown) => {
+      void message.error(describeError(error));
+    },
+  });
+
+  if (sections.isPending) return <LoadingState />;
+  if (sections.isError) return <ErrorState error={sections.error} />;
 
   return (
     <Space direction="vertical" size={12} style={{ width: '100%' }}>
       <Space wrap>
-        {objects.data.items.map((object) => (
-          <Tag
-            key={object.id}
-            color={object.id === selected ? 'blue' : 'default'}
-            style={{ cursor: 'pointer' }}
-            onClick={() => setObjectId(object.id)}
-          >
-            {object.code}
-          </Tag>
-        ))}
+        {manage && <NewSectionForm onCreated={invalidate} />}
+        <Button
+          size="small"
+          onClick={() => setIncludeInactive((value) => !value)}
+          data-testid="toggle-inactive-sections"
+        >
+          {includeInactive ? 'Скрыть отключённые' : 'Показать отключённые'}
+        </Button>
       </Space>
 
-      <Table<ObjectSection>
-        rowKey="id"
-        size="small"
-        pagination={false}
-        dataSource={sections.data ?? []}
-        locale={{ emptyText: 'Разделы работ не заведены' }}
-        columns={[
-          { title: 'Код', dataIndex: 'code', key: 'code' },
-          { title: 'Наименование', dataIndex: 'name', key: 'name' },
-          { title: 'Вид раздела', dataIndex: 'sectionKindCode', key: 'sectionKindCode' },
-        ]}
-      />
-
-      <Table<SectionKind>
+      <Table<Section>
         rowKey="code"
         size="small"
         pagination={false}
-        dataSource={kinds.data ?? []}
-        title={() => 'Виды разделов (конфигурация, видна всем)'}
-        locale={{ emptyText: 'Виды разделов не заведены' }}
+        dataSource={sections.data}
+        locale={{ emptyText: 'Разделы работ не заведены' }}
         columns={[
+          { title: 'Порядок', dataIndex: 'sortOrder', key: 'sortOrder', width: 90 },
           { title: 'Код', dataIndex: 'code', key: 'code' },
           { title: 'Наименование', dataIndex: 'name', key: 'name' },
+          {
+            title: 'Состояние',
+            dataIndex: 'isActive',
+            key: 'isActive',
+            render: (isActive: boolean) => (
+              <ToneTag tone={isActive ? 'success' : 'neutral'}>
+                {isActive ? 'Действует' : 'Отключён'}
+              </ToneTag>
+            ),
+          },
+          ...(manage
+            ? [
+                {
+                  title: '',
+                  key: 'actions',
+                  width: 120,
+                  render: (_: unknown, row: Section) => (
+                    <Button size="small" onClick={() => toggle.mutate(row)}>
+                      {row.isActive ? 'Отключить' : 'Включить'}
+                    </Button>
+                  ),
+                },
+              ]
+            : []),
         ]}
       />
+    </Space>
+  );
+}
+
+/**
+ * Заведение раздела.
+ *
+ * Форма встроена в страницу, а не спрятана в модальное окно: полей три, и
+ * диалог ради них стоил бы пользователю лишнего нажатия на каждое добавление.
+ */
+function NewSectionForm({ onCreated }: { onCreated: () => Promise<void> }): ReactNode {
+  const { message } = AntApp.useApp();
+  const [code, setCode] = useState('');
+  const [name, setName] = useState('');
+
+  const create = useMutation({
+    mutationFn: () => catalog.createSection({ code, name }),
+    onSuccess: async () => {
+      setCode('');
+      setName('');
+      await onCreated();
+    },
+    onError: (error: unknown) => {
+      void message.error(describeError(error));
+    },
+  });
+
+  return (
+    <Space wrap>
+      <Input
+        placeholder="Код (латиницей)"
+        style={{ width: 200 }}
+        value={code}
+        onChange={(event) => setCode(event.target.value)}
+        data-testid="section-code"
+      />
+      <Input
+        placeholder="Наименование"
+        style={{ width: 320 }}
+        value={name}
+        onChange={(event) => setName(event.target.value)}
+        data-testid="section-name"
+      />
+      <Button
+        type="primary"
+        size="small"
+        disabled={code === '' || name === ''}
+        loading={create.isPending}
+        data-testid="create-section"
+        onClick={() => {
+          create.mutate();
+        }}
+      >
+        Завести раздел
+      </Button>
     </Space>
   );
 }

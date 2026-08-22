@@ -144,7 +144,7 @@ function auditActor(app: AppInstance, request: FastifyRequest): AuditActor {
 function toView(revision: RevisionWorkflowView) {
   return {
     id: revision.id,
-    submissionId: revision.submissionId,
+    workId: revision.workId,
     revisionNo: revision.revisionNo,
     status: revision.status,
     parentRevisionId: revision.parentRevisionId,

@@ -170,7 +170,7 @@ export async function findRevisionForFiles(
   const rows = await executor
     .select({
       id: submissionRevisions.id,
-      submissionId: submissionRevisions.submissionId,
+      submissionId: submissionRevisions.workId,
       objectId: submissionRevisions.objectId,
       contractorId: submissionRevisions.contractorId,
       revisionNo: submissionRevisions.revisionNo,

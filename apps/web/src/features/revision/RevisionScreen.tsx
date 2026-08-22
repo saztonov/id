@@ -1,5 +1,5 @@
 /**
- * Рабочее место ревизии поставки: шесть вкладок §14.
+ * Рабочее место ревизии комплекта: шесть вкладок §14.
  *
  * Активная вкладка живёт в адресе (`?tab=markup`), а не только в состоянии: без
  * этого ссылку на разметку конкретной ревизии нельзя ни отправить, ни открыть из
@@ -23,10 +23,12 @@ import { type ReactNode } from 'react';
 import { Alert, Tabs, Tag, Typography } from 'antd';
 import { useQuery } from '@tanstack/react-query';
 import { workflow } from '../../api/endpoints.js';
-import { revisionKeys } from '../../api/keys.js';
+import { navigationKeys, revisionKeys } from '../../api/keys.js';
+import { getWork } from '../../api/navigation.js';
 import { ErrorState, LoadingState, ScreenHeading } from '../../shared/ui.js';
-import { WORKFLOW_STATUS_LABELS, labelOf } from '../../shared/labels.js';
-import { useNavigate, useQueryParam } from '../../app/router.js';
+import { WORK_KIND_LABELS, WORKFLOW_STATUS_LABELS, labelOf } from '../../shared/labels.js';
+import { Link, useNavigate, useQueryParam } from '../../app/router.js';
+import { periodLabel } from '../ids/ObjectScreen.js';
 import { FilesTab } from '../files/FilesTab.js';
 import { MarkupScreen } from '../markup/MarkupScreen.js';
 import { DocumentsTab } from '../documents/DocumentsTab.js';
@@ -41,6 +43,49 @@ type TabKey = (typeof TABS)[number];
 
 /** Терминальные состояния: производное содержимое заперто (§3.9). */
 const TERMINAL = ['returned', 'approved', 'superseded'];
+
+/**
+ * Подзаголовок: чья это работа и куда она попадёт.
+ *
+ * Раньше здесь печатался идентификатор поставки — строка, ничего не говорящая
+ * человеку, который открыл ревизию по ссылке из замечания. Комплект называется
+ * работой, месяцем и папкой, потому что именно этими тремя словами его ищут.
+ * Отдельный запрос, а не поле рабочего процесса: рабочий процесс отвечает за
+ * статус ревизии, и подмешивать в него карточку комплекта значило бы связать
+ * два ответа, которые меняются по разным поводам.
+ */
+function WorkLine({ workId }: { workId: string }): ReactNode {
+  const work = useQuery({
+    queryKey: navigationKeys.work(workId),
+    queryFn: () => getWork(workId),
+  });
+
+  if (work.data === undefined || work.data.kind !== 'available') return null;
+  const data = work.data.data;
+
+  // Подчёркивание задано явно: ссылка внутри абзаца текста обязана отличаться
+  // от него не только цветом (WCAG 1.4.1, правило axe `link-in-text-block`).
+  const inline = { textDecoration: 'underline' } as const;
+
+  return (
+    <Typography.Paragraph type="secondary" style={{ marginTop: -8 }}>
+      {labelOf(WORK_KIND_LABELS, data.kind)}: {data.title} · {periodLabel(data.period)} ·{' '}
+      <Link to={`/ids/objects/${data.objectId}`} style={inline}>
+        объект
+      </Link>
+      {data.registryId === null ? (
+        ' · в реестр не включён'
+      ) : (
+        <>
+          {' · '}
+          <Link to={`/ids/registries/${data.registryId}`} style={inline}>
+            реестр
+          </Link>
+        </>
+      )}
+    </Typography.Paragraph>
+  );
+}
 
 export function RevisionScreen({ revisionId }: { revisionId: string }): ReactNode {
   return (
@@ -80,9 +125,7 @@ function RevisionWorkspace({ revisionId }: { revisionId: string }): ReactNode {
           </>
         }
       />
-      <Typography.Paragraph type="secondary" style={{ marginTop: -8 }}>
-        Поставка {revision.submissionId}
-      </Typography.Paragraph>
+      <WorkLine workId={revision.workId} />
 
       {!sourceEditable && (
         <Alert

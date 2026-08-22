@@ -26,6 +26,7 @@ import { TemporaryPasswordModal } from './TemporaryPasswordModal.js';
 
 const ROLE_OPTIONS: readonly { value: UserRole; label: string }[] = [
   { value: 'contractor', label: 'подрядчик' },
+  { value: 'general_contractor', label: 'генподрядчик (ПТО)' },
   { value: 'engineer', label: 'инженер' },
   { value: 'manager', label: 'руководитель' },
   { value: 'admin', label: 'администратор' },
@@ -199,7 +200,7 @@ function ApproveModal(props: {
     approve.mutate({ values, credential });
   }
 
-  const contractorSelected = roles.includes('contractor');
+  const contractorSelected = roles.includes('contractor') || roles.includes('general_contractor');
 
   return (
     <Modal
@@ -253,7 +254,7 @@ function ApproveModal(props: {
           label="Организация"
           extra={
             contractorSelected
-              ? 'Подрядчику организация обязательна: без неё он не увидит ни одной поставки.'
+              ? 'Без организации у него нет области видимости: он не увидит ни одного комплекта.'
               : undefined
           }
           rules={contractorSelected ? [{ required: true, message: 'Укажите организацию' }] : []}

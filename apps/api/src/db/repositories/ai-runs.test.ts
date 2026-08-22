@@ -55,10 +55,6 @@ const OBJECT_B = id(2);
 const ORG_CONTRACTOR_A = id(4);
 const ORG_CONTRACTOR_B = id(5);
 const USER = id(6);
-const SECTION_A = id(10);
-const SECTION_B = id(11);
-const VOLUME_A = id(12);
-const VOLUME_B = id(13);
 const SUBMISSION_A = id(14);
 const SUBMISSION_B = id(15);
 const REVISION_A = id(16);
@@ -85,22 +81,24 @@ const FIXTURE: readonly string[] = [
   `INSERT INTO construction_objects (id, code, name, full_name)
      VALUES ('${OBJECT_B}', 'OBJB1', 'Объект Б', 'ЖК «Б», корпус 2')`,
   `INSERT INTO users (id, kc_sub, full_name) VALUES ('${USER}', 'kc-ai-runs', 'Тестовый пользователь')`,
-  `INSERT INTO section_kinds (code, name) VALUES ('roofing', 'Кровля автостоянки')`,
-  `INSERT INTO object_sections (id, object_id, code, name, section_kind_code)
-     VALUES ('${SECTION_A}', '${OBJECT_A}', '2.5.1', 'Кровля', 'roofing')`,
-  `INSERT INTO object_sections (id, object_id, code, name, section_kind_code)
-     VALUES ('${SECTION_B}', '${OBJECT_B}', '2.5.1', 'Кровля', 'roofing')`,
-  `INSERT INTO volumes (id, object_id, section_id, code, name)
-     VALUES ('${VOLUME_A}', '${OBJECT_A}', '${SECTION_A}', 'V1', 'Том 1')`,
-  `INSERT INTO volumes (id, object_id, section_id, code, name)
-     VALUES ('${VOLUME_B}', '${OBJECT_B}', '${SECTION_B}', 'V1', 'Том 1')`,
-  `INSERT INTO submissions (id, volume_id, object_id, contractor_id, title, created_by)
-     VALUES ('${SUBMISSION_A}', '${VOLUME_A}', '${OBJECT_A}', '${ORG_CONTRACTOR_A}', 'Поставка А', '${USER}')`,
-  `INSERT INTO submissions (id, volume_id, object_id, contractor_id, title, created_by)
-     VALUES ('${SUBMISSION_B}', '${VOLUME_B}', '${OBJECT_B}', '${ORG_CONTRACTOR_B}', 'Поставка Б', '${USER}')`,
-  `INSERT INTO submission_revisions (id, submission_id, object_id, contractor_id, revision_no, status)
+  `INSERT INTO sections (code, name) VALUES ('roofing', 'Кровля автостоянки') ON CONFLICT (code) DO NOTHING`,
+  `INSERT INTO object_sections (object_id, section_code)
+       VALUES ('${OBJECT_A}', 'roofing') ON CONFLICT DO NOTHING`,
+  `INSERT INTO object_sections (object_id, section_code)
+       VALUES ('${OBJECT_B}', 'roofing') ON CONFLICT DO NOTHING`,
+  `INSERT INTO object_contractors (object_id, contractor_id)
+       VALUES ('${OBJECT_A}', '${ORG_CONTRACTOR_A}') ON CONFLICT DO NOTHING`,
+  `INSERT INTO works
+       (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
+     VALUES ('${SUBMISSION_A}', '${OBJECT_A}', '${ORG_CONTRACTOR_A}', '${ORG_CONTRACTOR_A}', 'roofing', DATE '2026-01-01', 'Поставка А', '${USER}')`,
+  `INSERT INTO object_contractors (object_id, contractor_id)
+       VALUES ('${OBJECT_B}', '${ORG_CONTRACTOR_B}') ON CONFLICT DO NOTHING`,
+  `INSERT INTO works
+       (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
+     VALUES ('${SUBMISSION_B}', '${OBJECT_B}', '${ORG_CONTRACTOR_B}', '${ORG_CONTRACTOR_B}', 'roofing', DATE '2026-01-01', 'Поставка Б', '${USER}')`,
+  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
      VALUES ('${REVISION_A}', '${SUBMISSION_A}', '${OBJECT_A}', '${ORG_CONTRACTOR_A}', 1, 'draft')`,
-  `INSERT INTO submission_revisions (id, submission_id, object_id, contractor_id, revision_no, status)
+  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
      VALUES ('${REVISION_B}', '${SUBMISSION_B}', '${OBJECT_B}', '${ORG_CONTRACTOR_B}', 1, 'draft')`,
 ];
 

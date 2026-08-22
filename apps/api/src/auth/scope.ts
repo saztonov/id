@@ -13,10 +13,30 @@
  * вариантом, который приходится выбрать осознанно.
  */
 
-/** Подрядчик: видит только поставки своей организации. */
+/** Подрядчик: видит только комплекты своей организации. */
 export interface ContractorScope {
   readonly kind: 'contractor';
   readonly userId: string;
+  readonly contractorId: string;
+}
+
+/**
+ * Генподрядчик: все комплекты на объектах, где он назван генподрядчиком.
+ *
+ * Единственная область с ДВУМЯ ограничивающими полями, и это не оплошность.
+ * `objectIds` задаёт, что он видит: работы всех субподрядчиков своих объектов —
+ * иначе собрать реестр из чужих комплектов было бы нечем. `contractorId` задаёт,
+ * от чьего имени он действует: файл реестра подаётся его организацией, и она же
+ * становится ведущей у комплектов, заведённых им за субподрядчика.
+ *
+ * Список объектов ВЫВОДИТСЯ из карточек (`construction_objects.general_contractor_id`),
+ * а не назначается вручную: второй источник той же истины разошёлся бы с первым
+ * молча — генподрядчика сменили в карточке, а область осталась прежней.
+ */
+export interface GeneralContractorScope {
+  readonly kind: 'general_contractor';
+  readonly userId: string;
+  readonly objectIds: readonly string[];
   readonly contractorId: string;
 }
 
@@ -45,7 +65,8 @@ export interface AdminScope {
   readonly userId: string;
 }
 
-export type AuthScope = ContractorScope | EngineerScope | ManagerScope | AdminScope;
+export type AuthScope =
+  ContractorScope | GeneralContractorScope | EngineerScope | ManagerScope | AdminScope;
 
 /**
  * Колонки области видимости, которые обязана иметь каждая таблица данных ИД.
@@ -60,14 +81,20 @@ export interface ScopedColumns {
 }
 
 /**
- * Инженер без назначенных объектов.
+ * Область без единого объекта.
  *
  * Значимый случай: пустой список объектов должен давать пустую выборку, а не
  * отсутствие ограничения. Наивная сборка `IN ()` из пустого массива в ряде
  * построителей запросов вырождается в `TRUE`, поэтому проверка вынесена явно.
+ *
+ * Для генподрядчика это состояние штатное и достижимое без ошибки настройки: он
+ * заведён, но ни на одном объекте генподрядчиком ещё не назван.
  */
 export function isEmptyScope(scope: AuthScope): boolean {
-  return scope.kind === 'engineer' && scope.objectIds.length === 0;
+  return (
+    (scope.kind === 'engineer' || scope.kind === 'general_contractor') &&
+    scope.objectIds.length === 0
+  );
 }
 
 /** Видит ли область все объекты без ограничения. */
@@ -92,7 +119,10 @@ export function allowsRow(
       return true;
     case 'contractor':
       return row.contractorId === scope.contractorId;
+    case 'general_contractor':
     case 'engineer':
+      // Генподрядчик ограничен объектом, а не организацией: он обязан видеть
+      // комплекты субподрядчиков, иначе собрать из них реестр нечем.
       return scope.objectIds.includes(row.objectId);
   }
 }

@@ -59,7 +59,7 @@ describe('закоммиченный эталон', () => {
     const pages = CORPUS.reduce((sum, pkg) => sum + pkg.pages.length, 0);
     expect(pages).toBe(142);
     expect(CORPUS.map((pkg) => pkg.pages.length)).toEqual([50, 9, 83]);
-    expect([...new Set(CORPUS.map((pkg) => pkg.sectionKindCode))].sort()).toEqual([
+    expect([...new Set(CORPUS.map((pkg) => pkg.sectionCode))].sort()).toEqual([
       'concrete_frame',
       'roofing',
     ]);
@@ -177,7 +177,7 @@ describe('барьер против персональных данных', () =
     // унести с собой номер акта или фамилию, если разметку делать «как есть».
     const meta = CORPUS.flatMap((pkg) => [
       pkg.packageKey,
-      pkg.sectionKindCode,
+      pkg.sectionCode,
       ...pkg.pages.flatMap((page) => [
         page.expected.documentKey ?? '',
         page.expected.docTypeCode ?? '',
@@ -352,7 +352,7 @@ describe('сборка эталона из разметки', () => {
     const pkg = buildReferencePackage(
       {
         packageKey: 'package-x',
-        sectionKindCode: 'roofing',
+        sectionCode: 'roofing',
         pageCount: 3,
         expectedRegistryRowCount: null,
         documents: [
@@ -377,7 +377,7 @@ describe('сборка эталона из разметки', () => {
     const pkg = buildReferencePackage(
       {
         packageKey: 'package-x',
-        sectionKindCode: 'roofing',
+        sectionCode: 'roofing',
         pageCount: 3,
         expectedRegistryRowCount: null,
         documents: [{ key: 'doc-01', docTypeCode: 'aosr', typeOutcome: 'known', pages: [1, 2] }],
@@ -401,7 +401,7 @@ describe('сборка эталона из разметки', () => {
       buildReferencePackage(
         {
           packageKey: 'package-x',
-          sectionKindCode: 'roofing',
+          sectionCode: 'roofing',
           pageCount: 3,
           expectedRegistryRowCount: null,
           documents: [

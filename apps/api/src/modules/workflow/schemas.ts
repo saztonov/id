@@ -36,7 +36,7 @@ export const workflowStatusSchema = z.enum([
 
 export const revisionWorkflowSchema = z.object({
   id: z.uuid(),
-  submissionId: z.uuid(),
+  workId: z.uuid(),
   revisionNo: z.int(),
   status: workflowStatusSchema,
   parentRevisionId: z.uuid().nullable(),

@@ -30,8 +30,7 @@ import {
   storedBlobs,
   submissionArchives,
   submissionRevisions,
-  submissions,
-  volumes,
+  works,
 } from '@id/db';
 import type { AuthScope } from '../../auth/scope.js';
 import { conflict, notFound } from '../../lib/problem.js';
@@ -336,9 +335,9 @@ export interface ArchivePlan {
   readonly status: string;
   readonly objectId: string;
   readonly contractorId: string;
-  readonly submissionId: string;
-  readonly submissionTitle: string;
-  readonly volumeCode: string;
+  readonly workId: string;
+  readonly workTitle: string;
+  readonly sectionCode: string;
   readonly aggregateManifestHash: string | null;
   readonly decidedAt: string | null;
   readonly documents: readonly ArchiveDocumentEntry[];
@@ -363,9 +362,9 @@ export async function loadArchivePlan(
       status: submissionRevisions.status,
       objectId: submissionRevisions.objectId,
       contractorId: submissionRevisions.contractorId,
-      submissionId: submissionRevisions.submissionId,
-      submissionTitle: submissions.title,
-      volumeCode: volumes.code,
+      workId: submissionRevisions.workId,
+      workTitle: works.title,
+      sectionCode: works.sectionCode,
       aggregateManifestHash: submissionRevisions.aggregateManifestHash,
       decidedAt: sql<
         string | null
@@ -374,8 +373,7 @@ export async function loadArchivePlan(
       ),
     })
     .from(submissionRevisions)
-    .innerJoin(submissions, eq(submissions.id, submissionRevisions.submissionId))
-    .innerJoin(volumes, eq(volumes.id, submissions.volumeId))
+    .innerJoin(works, eq(works.id, submissionRevisions.workId))
     .where(withScope(scope, REVISION_SCOPE, eq(submissionRevisions.id, revisionId)))
     .limit(1);
 

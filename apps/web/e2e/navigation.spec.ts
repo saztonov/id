@@ -1,29 +1,30 @@
 /**
- * Навигация «объект → том → поставка → ревизия» через интерфейс (§3, §14).
+ * Навигация «объект → комплект → ревизия» и сборка реестра через интерфейс
+ * (§3, §14).
  *
  * ## Зачем этот файл
  *
- * Экраны навигации писались раньше маршрутов и обращались к УГАДАННЫМ путям
- * (`/objects/{id}/volumes`, `/volumes/{id}/submissions`). Фактические маршруты
- * оказались другой формы — плоские коллекции с фильтром в строке запроса, — и
- * ни один существующий тест этого не ловил: экран на 404 показывал состояние
- * «раздел недоступен», то есть выглядел объяснимо. Поэтому здесь проверяется не
- * только то, что данные видны, но и то, ЧЕМ они получены: адрес фактического
- * запроса снимается с сети.
+ * Экраны навигации писались раньше маршрутов и обращались к УГАДАННЫМ путям.
+ * Фактические маршруты оказались другой формы — плоские коллекции с фильтром в
+ * строке запроса, — и ни один существующий тест этого не ловил: экран на 404
+ * показывал состояние «раздел недоступен», то есть выглядел объяснимо. Поэтому
+ * здесь проверяется не только то, что данные видны, но и то, ЧЕМ они получены:
+ * адрес фактического запроса снимается с сети.
  *
  * ## Что доказывается
  *
- * 1. Дерево навигации проходится целиком настоящими маршрутами.
- * 2. Создание поставки заводит и её первую ревизию — одной операцией.
- * 3. Два ограничения модели объяснены в интерфейсе ДО нажатия и подтверждены
- *    сервером после: подрядчик не заводит первую поставку на объекте, а
- *    пользователь с ролями подрядчика и инженера получает отказ, потому что
- *    организация берётся из области видимости.
- * 4. Недоступное отличимо от пустого: несуществующий том даёт отказ на экране,
- *    а не пустую таблицу, и неотличим от чужого (§1.6).
+ * 1. Дерево навигации проходится целиком настоящими маршрутами (`/works`,
+ *    `/registries`), а не вложенными путями, которых в API нет.
+ * 2. Подрядчик заводит комплект сам: объект, раздел, месяц — и вместе с ним
+ *    открывается первая ревизия.
+ * 3. Генподрядчик собирает реестр из комплектов, заводит файл описи и передаёт
+ *    папку; после передачи состав виден снимком и больше не правится.
+ * 4. Отказы объяснены на экране: у пользователя с ролями подрядчика и инженера
+ *    организация не берётся из тела запроса, а не существующий реестр даёт
+ *    отказ, а не пустую таблицу.
  *
- * Порядок последовательный: сценарии меняют состояние тома (появляется новая
- * поставка), и параллельный прогон делил бы одну базу.
+ * Порядок последовательный: сценарии меняют состояние объекта и реестра, и
+ * параллельный прогон делил бы одну базу.
  */
 import { expect, test, type Page } from '@playwright/test';
 import { IDS, KC, apiPost, signIn } from './support/session.js';
@@ -44,60 +45,62 @@ test('дерево навигации проходится настоящими 
   const calls = recordApiCalls(page);
   await signIn(page, KC.engineer, `/ids/objects/${IDS.object}`);
 
-  // Тома объекта видны, и это не пустая таблица-заглушка.
-  await expect(page.getByRole('cell', { name: 'V-1' })).toBeVisible();
-  await expect(page.getByText('Тома объекта: раздел недоступен')).toHaveCount(0);
+  // Комплекты объекта видны, и это не пустая таблица-заглушка.
+  await expect(page.getByRole('link', { name: 'Комплект с разметкой' })).toBeVisible();
+  await expect(page.getByText('Комплекты объекта: раздел недоступен')).toHaveCount(0);
 
   // Фильтр объекта ушёл в строку запроса плоской коллекции, а не во вложенный
   // путь: ровно то расхождение, из-за которого экран показывал «недоступно».
-  expect(calls.some((call) => call.startsWith(`/api/v1/volumes?`))).toBe(true);
+  expect(calls.some((call) => call.startsWith('/api/v1/works?'))).toBe(true);
   expect(calls.some((call) => call.includes(`objectId=${IDS.object}`))).toBe(true);
-  expect(calls.some((call) => call.includes(`/objects/${IDS.object}/volumes`))).toBe(false);
+  expect(calls.some((call) => call.includes(`/objects/${IDS.object}/works`))).toBe(false);
 
-  await page.getByRole('link', { name: 'V-1' }).click();
+  // Реестры объекта читаются той же плоской коллекцией.
+  expect(calls.some((call) => call.startsWith('/api/v1/registries?'))).toBe(true);
 
-  // Поставки тома: три из фикстуры, и все три подрядчика видны инженеру,
-  // потому что объект ему назначен.
-  await expect(page.getByRole('cell', { name: 'Поставка без файлов' })).toBeVisible();
-  await expect(page.getByRole('cell', { name: 'Поставка с разметкой' })).toBeVisible();
-  expect(calls.some((call) => call.includes(`/api/v1/submissions?`))).toBe(true);
-  expect(calls.some((call) => call.includes(`volumeId=${IDS.volume}`))).toBe(true);
-
-  // Ревизии поставки — вложенная коллекция, и она тоже настоящая.
-  await expect(page.getByText('Ревизии: Поставка без файлов')).toBeVisible();
-  await expect
-    .poll(() => calls.some((call) => /\/api\/v1\/submissions\/[0-9a-f-]+\/revisions/u.test(call)))
-    .toBe(true);
-
-  // Из ревизии открывается рабочее место — конец пути.
-  await page.getByRole('link', { name: '1', exact: true }).first().click();
+  // Из комплекта открывается рабочее место ревизии — конец пути.
+  await page.getByRole('link', { name: 'Комплект с разметкой' }).click();
   await expect(page).toHaveURL(/\/ids\/revisions\//u);
+  await expect(page.getByText('Комплект работы: Комплект с разметкой')).toBeVisible();
 });
 
-test('подрядчик создаёт поставку, и вместе с ней открывается первая ревизия', async ({ page }) => {
-  await signIn(page, KC.contractor, `/ids/volumes/${IDS.volume}`);
+test('подрядчик заводит комплект, и вместе с ним открывается первая ревизия', async ({ page }) => {
+  await signIn(page, KC.contractor, `/ids/objects/${IDS.object}`);
 
-  await page.getByTestId('new-submission-title').fill('Поставка из интерфейса');
-  await page.getByTestId('new-submission-number').fill('7');
-  await page.getByTestId('create-submission').click();
+  await page.getByTestId('work-section').click();
+  await page.locator('.ant-select-dropdown:visible').getByTitle('Кровля').click();
+  await page.getByTestId('work-period').fill(IDS.period);
+  await page.getByTestId('work-title').fill('Комплект из интерфейса');
+  await page.getByTestId('create-work').click();
 
-  // Экран уходит на рабочее место новой ревизии: поставка без ревизии — это
+  // Экран уходит на рабочее место новой ревизии: комплект без ревизии — это
   // карточка, в которую некуда загружать файлы.
   await expect(page).toHaveURL(/\/ids\/revisions\/[0-9a-f-]{36}/u);
 
-  // Последствие в базе, а не надпись: поставка в списке тома и ровно одна
+  // Последствие в базе, а не надпись: комплект в списке объекта и ровно одна
   // ревизия — первая, черновик, без родителя.
-  const list = await page.request.get(`/api/v1/submissions?volumeId=${IDS.volume}&limit=50`);
+  const list = await page.request.get(`/api/v1/works?objectId=${IDS.object}&limit=50`);
   expect(list.status()).toBe(200);
-  const submissions = (await list.json()) as {
-    items: { id: string; title: string; number: string | null; currentRevisionId: string | null }[];
+  const works = (await list.json()) as {
+    items: {
+      id: string;
+      title: string;
+      contractorId: string;
+      managedByContractorId: string;
+      currentRevisionId: string | null;
+      registryId: string | null;
+    }[];
   };
-  const created = submissions.items.find((item) => item.title === 'Поставка из интерфейса');
-  expect(created, 'созданная поставка обязана быть в списке тома').toBeDefined();
-  expect(created?.number).toBe('7');
+  const created = works.items.find((item) => item.title === 'Комплект из интерфейса');
+  expect(created, 'заведённый комплект обязан быть в списке объекта').toBeDefined();
+  // Организация взята из области видимости, а не из формы: поля исполнителя у
+  // подрядчика нет вовсе.
+  expect(created?.contractorId).toBe(IDS.orgContractor);
+  expect(created?.managedByContractorId).toBe(IDS.orgContractor);
+  expect(created?.registryId).toBeNull();
   expect(created?.currentRevisionId).not.toBeNull();
 
-  const revisions = await page.request.get(`/api/v1/submissions/${created?.id ?? ''}/revisions`);
+  const revisions = await page.request.get(`/api/v1/works/${created?.id ?? ''}/revisions`);
   const body = (await revisions.json()) as {
     items: { revisionNo: number; status: string; parentRevisionId: string | null }[];
   };
@@ -107,34 +110,116 @@ test('подрядчик создаёт поставку, и вместе с н�
   expect(body.items[0]?.parentRevisionId).toBeNull();
 });
 
-test('подрядчику названо ограничение: первую поставку на объекте он не заводит', async ({
-  page,
-}) => {
-  await signIn(page, KC.contractor, `/ids/volumes/${IDS.volume}`);
+test('у подрядчика нет поля исполнителя, у генподрядчика — есть', async ({ page }) => {
+  await signIn(page, KC.contractor, `/ids/objects/${IDS.object}`);
+  await expect(page.getByTestId('work-title')).toBeVisible();
+  await expect(page.getByTestId('work-contractor')).toHaveCount(0);
 
-  const limitation = page.getByTestId('first-submission-limit');
-  await expect(limitation).toBeVisible();
-  await expect(limitation).toContainText('связи «подрядчик закреплён за томом»');
-
-  // Ограничение — свойство модели, а не поломка: том, который виден, работает.
-  await expect(page.getByTestId('create-submission')).toBeEnabled();
+  await signIn(page, KC.general, `/ids/objects/${IDS.object}`);
+  await expect(page.getByTestId('work-contractor')).toBeVisible();
 });
 
-test('роли подрядчика и инженера вместе: отказ объяснён до нажатия и подтверждён сервером', async ({
-  page,
-}) => {
-  await signIn(page, KC.mixed, `/ids/volumes/${IDS.volume}`);
+test('генподрядчик собирает реестр: номер, состав, файл описи', async ({ page }) => {
+  await signIn(page, KC.general, `/ids/registries/${IDS.registry}`);
 
-  // Право есть — карточка создания показана, — но область видимости построена
-  // по старшей роли, и это сказано прямо.
-  const explained = page.getByTestId('create-blocked-scope');
-  await expect(explained).toBeVisible();
-  await expect(explained).toContainText('организация');
-  await expect(explained).toContainText('engineer');
+  // Пока нет ни номера, ни состава, ни файла — препятствия названы списком, а
+  // не по одному за попытку.
+  const blockers = page.getByTestId('issue-blockers');
+  await expect(blockers).toBeVisible();
+  await expect(blockers).toContainText('Не присвоен номер реестра.');
+  await expect(blockers).toContainText('В реестр не включён ни один комплект.');
+  await expect(blockers).toContainText('Не загружен подписанный файл реестра.');
+  await expect(page.getByTestId('issue-registry')).toBeDisabled();
 
-  // И это не догадка интерфейса: сервер отвечает 403 на прямой запрос.
-  const refused = await apiPost(page, '/api/v1/submissions', {
-    data: { volumeId: IDS.volume, title: 'Поставка от совмещающего роли' },
+  await page.getByTestId('header-number').fill('8');
+  await page.getByTestId('save-header').click();
+  await expect(page.getByText('Реквизиты сохранены')).toBeVisible();
+
+  // Комплект на проверке подан — он и войдёт в опись.
+  await page.getByTestId('add-work').click();
+  await page.locator('.ant-select-dropdown:visible').getByTitle('Комплект на проверке').click();
+  await page.getByRole('button', { name: 'Включить' }).click();
+  await expect(page.getByRole('link', { name: 'Комплект на проверке' })).toBeVisible();
+
+  // Файл описи — обычный комплект того же конвейера: заводится здесь, грузится
+  // на своей ревизии.
+  await page.getByTestId('attach-file').click();
+  await expect(page.getByText('Открыть ревизию файла')).toBeVisible();
+
+  // Препятствие сменилось, а не исчезло: файл заведён, но не подан. Разница
+  // существенна — «нет файла» чинит ПТО, «файл не подан» чинит тот же ПТО, но
+  // другим действием.
+  await expect(blockers).not.toContainText('Не присвоен номер реестра.');
+  await expect(blockers).toContainText('Файл реестра загружен, но не подан');
+  await expect(page.getByTestId('issue-registry')).toBeDisabled();
+
+  // Состав записан в базу, а не только отрисован.
+  const view = await page.request.get(`/api/v1/registries/${IDS.registry}`);
+  const body = (await view.json()) as {
+    registry: { number: string | null };
+    works: { id: string }[];
+    file: { kind: string; autoRunEnabled: boolean } | null;
+  };
+  expect(body.registry.number).toBe('8');
+  expect(body.works.map((work) => work.id)).toContain(IDS.workReview);
+  expect(body.file?.kind).toBe('registry');
+  // Разметку описи человек не ведёт: она нужна целиком и сразу для сверки.
+  expect(body.file?.autoRunEnabled).toBe(true);
+});
+
+test('передача фиксирует опись, приёмку делает инженер', async ({ page }) => {
+  // Реестр готов заранее: подача ревизии описи требует собранного рабочего
+  // документа, а стенд поднимается без воркера.
+  await signIn(page, KC.general, `/ids/registries/${IDS.registryReady}`);
+
+  await expect(page.getByTestId('issue-blockers')).toHaveCount(0);
+  await page.getByTestId('issue-registry').click();
+
+  await expect(page.getByText('Папка передана')).toBeVisible();
+  await expect(page.getByText('Опись на момент передачи')).toBeVisible();
+  await expect(page.getByTestId('issue-registry')).toHaveCount(0);
+
+  // Снимок записан: строка описи ссылается на ту ревизию, что была подана.
+  const items = await page.request.get(`/api/v1/registries/${IDS.registryReady}/items`);
+  const snapshot = (await items.json()) as { workId: string; revisionId: string }[];
+  expect(snapshot).toHaveLength(1);
+  expect(snapshot[0]?.workId).toBe(IDS.workIssued);
+  expect(snapshot[0]?.revisionId).toBe(IDS.revisionIssued);
+
+  // Форма шапки после передачи не показывается вовсе: заполненные поля с
+  // отказом при сохранении читались бы как поломка, а не как свойство.
+  await expect(page.getByTestId('header-number')).toHaveCount(0);
+  await expect(page.getByTestId('add-work')).toHaveCount(0);
+
+  // Принимает сторона заказчика: тот, кто передал, не принимает сам у себя.
+  await signIn(page, KC.engineer, `/ids/registries/${IDS.registryReady}`);
+  await page.getByTestId('accept-registry').click();
+  await expect(page.getByText('Папка принята')).toBeVisible();
+});
+
+test('подрядчик видит реестр, но не состав чужой папки', async ({ page }) => {
+  await signIn(page, KC.contractor, `/ids/registries/${IDS.registryReady}`);
+
+  await expect(page.getByTestId('registry-hidden')).toBeVisible();
+  await expect(page.getByText('Состав', { exact: true })).toHaveCount(0);
+
+  // Снимок ему отдаётся, но только собственными строками.
+  const items = await page.request.get(`/api/v1/registries/${IDS.registryReady}/items`);
+  expect(items.status()).toBe(200);
+  const snapshot = (await items.json()) as { contractorId: string }[];
+  for (const row of snapshot) expect(row.contractorId).toBe(IDS.orgContractor);
+});
+
+test('роли подрядчика и инженера вместе: отказ подтверждён сервером', async ({ page }) => {
+  await signIn(page, KC.mixed, `/ids/objects/${IDS.object}`);
+
+  const refused = await apiPost(page, '/api/v1/works', {
+    data: {
+      objectId: IDS.object,
+      sectionCode: IDS.sectionCode,
+      period: IDS.period,
+      title: 'Комплект от совмещающего роли',
+    },
   });
   expect(refused.status).toBe(403);
   const problem = refused.body as { type?: string; detail?: string };
@@ -142,36 +227,17 @@ test('роли подрядчика и инженера вместе: отказ
   expect(problem.detail).toContain('организации');
 });
 
-test('закрытый том: создание выключено и причина названа', async ({ page }) => {
-  await signIn(page, KC.contractor, `/ids/volumes/${IDS.volumeClosed}`);
-
-  await expect(page.getByTestId('volume-state')).toHaveText('Закрыт');
-  await expect(page.getByTestId('volume-closed')).toBeVisible();
-  await expect(page.getByTestId('create-submission')).toBeDisabled();
-});
-
-test('ручное открытие ревизии при живом черновике отклоняется с объяснением', async ({ page }) => {
-  await signIn(page, KC.contractor, `/ids/volumes/${IDS.volume}`);
-
-  await page.getByTestId(`open-revision-${IDS.submissionEmpty}`).click();
-
-  // 409 сервера показывается дословно, а не прячется: следующая ревизия не
-  // открывается, пока у поставки есть незакрытая.
-  await expect(page.getByTestId(`revision-conflict-${IDS.submissionEmpty}`)).toBeVisible();
-  await expect(page.getByTestId(`revision-conflict-${IDS.submissionEmpty}`)).toContainText(
-    'У поставки уже открыта черновая ревизия',
-  );
-});
-
-test('несуществующий том неотличим от чужого и не выглядит пустой таблицей', async ({ page }) => {
+test('несуществующий реестр неотличим от чужого и не выглядит пустой таблицей', async ({
+  page,
+}) => {
   const absent = '00000000-0000-4000-8000-0000000009ff';
-  await signIn(page, KC.contractor, `/ids/volumes/${absent}`);
+  await signIn(page, KC.contractor, `/ids/registries/${absent}`);
 
-  // Экран говорит об отказе. Пустая таблица поставок здесь была бы худшим из
+  // Экран говорит об отказе. Пустая таблица состава здесь была бы худшим из
   // возможных ответов: она выглядит рабочей.
-  await expect(page.getByText('Том недоступен')).toBeVisible();
+  await expect(page.getByText('Реестр недоступен')).toBeVisible();
 
-  const direct = await page.request.get(`/api/v1/volumes/${absent}`);
+  const direct = await page.request.get(`/api/v1/registries/${absent}`);
   expect(direct.status()).toBe(404);
   expect(direct.headers()['content-type']).toContain('application/problem+json');
 });

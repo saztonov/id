@@ -87,8 +87,6 @@ function id(n: number): string {
 const ORG_CUSTOMER = id(1);
 const ORG_CONTRACTOR = id(2);
 const OBJECT = id(4);
-const SECTION = id(5);
-const VOLUME = id(6);
 const SUBMISSION = id(10);
 const REVISION = id(11);
 const USER_CONTRACTOR = id(20);
@@ -121,17 +119,18 @@ async function fixtureStatements(sha256: string, sizeBytes: number): Promise<rea
     `INSERT INTO counterparties (id, name, kind) VALUES ('${ORG_CONTRACTOR}', 'ООО «Подрядчик»', 'contractor')`,
     `INSERT INTO construction_objects (id, code, name, full_name)
        VALUES ('${OBJECT}', 'TST02', 'Объект 2', 'ЖК «Тест», корпус 2')`,
-    `INSERT INTO section_kinds (code, name) VALUES ('roofing2', 'Кровля 2')`,
-    `INSERT INTO object_sections (id, object_id, code, name, section_kind_code)
-       VALUES ('${SECTION}', '${OBJECT}', '2.5.2', 'Кровля 2', 'roofing2')`,
-    `INSERT INTO volumes (id, object_id, section_id, code, name)
-       VALUES ('${VOLUME}', '${OBJECT}', '${SECTION}', 'V-1', 'Том 1')`,
+    `INSERT INTO sections (code, name) VALUES ('roofing2', 'Кровля 2') ON CONFLICT (code) DO NOTHING`,
+    `INSERT INTO object_sections (object_id, section_code)
+       VALUES ('${OBJECT}', 'roofing2') ON CONFLICT DO NOTHING`,
     `INSERT INTO users (id, kc_sub, full_name, contractor_id)
        VALUES ('${USER_CONTRACTOR}', 'kc-detect-local-contractor', 'Сотрудник подрядчика', '${ORG_CONTRACTOR}')`,
     `INSERT INTO user_roles (user_id, role) VALUES ('${USER_CONTRACTOR}', 'contractor')`,
-    `INSERT INTO submissions (id, volume_id, object_id, contractor_id, title, created_by)
-       VALUES ('${SUBMISSION}', '${VOLUME}', '${OBJECT}', '${ORG_CONTRACTOR}', 'Поставка 1', '${USER_CONTRACTOR}')`,
-    `INSERT INTO submission_revisions (id, submission_id, object_id, contractor_id, revision_no, status)
+    `INSERT INTO object_contractors (object_id, contractor_id)
+       VALUES ('${OBJECT}', '${ORG_CONTRACTOR}') ON CONFLICT DO NOTHING`,
+    `INSERT INTO works
+       (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
+     VALUES ('${SUBMISSION}', '${OBJECT}', '${ORG_CONTRACTOR}', '${ORG_CONTRACTOR}', 'roofing2', DATE '2026-01-01', 'Поставка 1', '${USER_CONTRACTOR}')`,
+    `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
        VALUES ('${REVISION}', '${SUBMISSION}', '${OBJECT}', '${ORG_CONTRACTOR}', 1, 'draft')`,
     `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
        VALUES ('${sha256}', 'blobs/${sha256.slice(0, 2)}/${sha256.slice(2, 4)}/${sha256}', ${sizeBytes}, 'application/pdf')`,
@@ -156,14 +155,18 @@ class FakeRasterizer implements PageRasterizer {
 class QueueSession implements OnnxSessionPort {
   #queue: { readonly dets: OnnxTensorLike; readonly labels: OnnxTensorLike }[];
   calls = 0;
-  constructor(queue: readonly { readonly dets: OnnxTensorLike; readonly labels: OnnxTensorLike }[]) {
+  constructor(
+    queue: readonly { readonly dets: OnnxTensorLike; readonly labels: OnnxTensorLike }[],
+  ) {
     this.#queue = [...queue];
   }
   async run(): Promise<{ readonly dets: OnnxTensorLike; readonly labels: OnnxTensorLike }> {
     this.calls += 1;
     const next = this.#queue.shift();
     if (next === undefined) {
-      throw new Error('QueueSession: очередь фикстур исчерпана — вызвано больше раз, чем ожидалось');
+      throw new Error(
+        'QueueSession: очередь фикстур исчерпана — вызвано больше раз, чем ожидалось',
+      );
     }
     return next;
   }
@@ -335,7 +338,10 @@ async function runJob(
   const metrics = createMetrics({ enabled: false, service: 'detect-local-e2e' });
 
   const registry = createMaintenanceRegistry();
-  registry.register('layout.detect_local', createLocalDetectionHandler(localDetectionDeps(session)));
+  registry.register(
+    'layout.detect_local',
+    createLocalDetectionHandler(localDetectionDeps(session)),
+  );
 
   const runner = new JobRunner({
     db,
@@ -394,7 +400,12 @@ beforeAll(async () => {
   toolkit = createPdfLibToolkit(await loadPdfLibModule((specifier) => import(specifier)));
 
   rgbPagePng = await sharp({
-    create: { width: RENDERED_SIZE, height: RENDERED_SIZE, channels: 3, background: { r: 40, g: 60, b: 80 } },
+    create: {
+      width: RENDERED_SIZE,
+      height: RENDERED_SIZE,
+      channels: 3,
+      background: { r: 40, g: 60, b: 80 },
+    },
   })
     .png()
     .toBuffer();
@@ -474,7 +485,10 @@ describe('layout.detect_local без сконфигурированной мод
     // настроек (SETTINGS_REGISTRY): readDetectionSettings возвращает ''.
     const registry = createMaintenanceRegistry();
     const session = new QueueSession([]);
-    registry.register('layout.detect_local', createLocalDetectionHandler(localDetectionDeps(session)));
+    registry.register(
+      'layout.detect_local',
+      createLocalDetectionHandler(localDetectionDeps(session)),
+    );
 
     const logger = createLogger({ service: 'detect-local-e2e', level: 'silent', env: 'test' });
     const metrics = createMetrics({ enabled: false, service: 'detect-local-e2e' });
@@ -515,7 +529,10 @@ describe('layout.detect_local с моделью', () => {
 
     const weights = Buffer.from('fake-onnx-weights-for-integration-test');
     const sha256 = createHash('sha256').update(weights).digest('hex');
-    const manifestBytes = Buffer.from(JSON.stringify({ ...manifestJson(), onnx_sha256: sha256 }), 'utf8');
+    const manifestBytes = Buffer.from(
+      JSON.stringify({ ...manifestJson(), onnx_sha256: sha256 }),
+      'utf8',
+    );
     await storage.putObject({
       key: detectionManifestKey(MODEL_VERSION),
       body: manifestBytes,

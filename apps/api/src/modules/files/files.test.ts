@@ -68,8 +68,6 @@ const ORG_DEVELOPER = id(1);
 const ORG_CONTRACTOR = id(2);
 const ORG_OTHER = id(3);
 const OBJECT = id(4);
-const SECTION = id(5);
-const VOLUME = id(6);
 
 const SUBMISSION = id(10);
 const REVISION_DRAFT = id(11);
@@ -100,11 +98,9 @@ const FIXTURE: readonly string[] = [
   `INSERT INTO counterparties (id, name, kind) VALUES ('${ORG_OTHER}', 'ООО «Подрядчик Б»', 'contractor')`,
   `INSERT INTO construction_objects (id, code, name, full_name)
      VALUES ('${OBJECT}', 'TST01', 'Объект 1', 'ЖК «Тест», корпус 1')`,
-  `INSERT INTO section_kinds (code, name) VALUES ('roofing', 'Кровля автостоянки')`,
-  `INSERT INTO object_sections (id, object_id, code, name, section_kind_code)
-     VALUES ('${SECTION}', '${OBJECT}', '2.5.1', 'Кровля автостоянки', 'roofing')`,
-  `INSERT INTO volumes (id, object_id, section_id, code, name)
-     VALUES ('${VOLUME}', '${OBJECT}', '${SECTION}', 'V-1', 'Том 1')`,
+  `INSERT INTO sections (code, name) VALUES ('roofing', 'Кровля автостоянки') ON CONFLICT (code) DO NOTHING`,
+  `INSERT INTO object_sections (object_id, section_code)
+       VALUES ('${OBJECT}', 'roofing') ON CONFLICT DO NOTHING`,
 
   `INSERT INTO users (id, kc_sub, full_name, contractor_id)
      VALUES ('${USER_CONTRACTOR}', '${KC.contractor}', 'Сотрудник подрядчика А', '${ORG_CONTRACTOR}')`,
@@ -119,33 +115,48 @@ const FIXTURE: readonly string[] = [
   `INSERT INTO user_roles (user_id, role) VALUES ('${USER_ENGINEER_BLANK}', 'engineer')`,
   `INSERT INTO user_object_scopes (user_id, object_id) VALUES ('${USER_ENGINEER}', '${OBJECT}')`,
 
-  `INSERT INTO submissions (id, volume_id, object_id, contractor_id, title, created_by)
-     VALUES ('${SUBMISSION}', '${VOLUME}', '${OBJECT}', '${ORG_CONTRACTOR}', 'Поставка 1', '${USER_CONTRACTOR}')`,
-  `INSERT INTO submission_revisions (id, submission_id, object_id, contractor_id, revision_no, status)
+  `INSERT INTO object_contractors (object_id, contractor_id)
+       VALUES ('${OBJECT}', '${ORG_CONTRACTOR}') ON CONFLICT DO NOTHING`,
+  `INSERT INTO works
+       (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
+     VALUES ('${SUBMISSION}', '${OBJECT}', '${ORG_CONTRACTOR}', '${ORG_CONTRACTOR}', 'roofing', DATE '2026-01-01', 'Поставка 1', '${USER_CONTRACTOR}')`,
+  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
      VALUES ('${REVISION_DRAFT}', '${SUBMISSION}', '${OBJECT}', '${ORG_CONTRACTOR}', 1, 'draft')`,
 
-  `INSERT INTO submissions (id, volume_id, object_id, contractor_id, title, created_by)
-     VALUES ('${SUBMISSION_SUBMITTED}', '${VOLUME}', '${OBJECT}', '${ORG_CONTRACTOR}', 'Поставка 2', '${USER_CONTRACTOR}')`,
-  `INSERT INTO submission_revisions (id, submission_id, object_id, contractor_id, revision_no, status)
+  `INSERT INTO object_contractors (object_id, contractor_id)
+       VALUES ('${OBJECT}', '${ORG_CONTRACTOR}') ON CONFLICT DO NOTHING`,
+  `INSERT INTO works
+       (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
+     VALUES ('${SUBMISSION_SUBMITTED}', '${OBJECT}', '${ORG_CONTRACTOR}', '${ORG_CONTRACTOR}', 'roofing', DATE '2026-01-01', 'Поставка 2', '${USER_CONTRACTOR}')`,
+  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
      VALUES ('${REVISION_SUBMITTED}', '${SUBMISSION_SUBMITTED}', '${OBJECT}', '${ORG_CONTRACTOR}', 1, 'submitted')`,
 
-  `INSERT INTO submissions (id, volume_id, object_id, contractor_id, title, created_by)
-     VALUES ('${SUBMISSION_OTHER}', '${VOLUME}', '${OBJECT}', '${ORG_OTHER}', 'Поставка чужая', '${USER_OTHER_CONTRACTOR}')`,
-  `INSERT INTO submission_revisions (id, submission_id, object_id, contractor_id, revision_no, status)
+  `INSERT INTO object_contractors (object_id, contractor_id)
+       VALUES ('${OBJECT}', '${ORG_OTHER}') ON CONFLICT DO NOTHING`,
+  `INSERT INTO works
+       (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
+     VALUES ('${SUBMISSION_OTHER}', '${OBJECT}', '${ORG_OTHER}', '${ORG_OTHER}', 'roofing', DATE '2026-01-01', 'Поставка чужая', '${USER_OTHER_CONTRACTOR}')`,
+  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
      VALUES ('${REVISION_OTHER}', '${SUBMISSION_OTHER}', '${OBJECT}', '${ORG_OTHER}', 1, 'draft')`,
 
   // Отдельная поставка для проверки «порядок меняется до подачи и не меняется
   // после»: она проводится по статусам, поэтому не должна мешать остальным.
-  `INSERT INTO submissions (id, volume_id, object_id, contractor_id, title, created_by)
-     VALUES ('${SUBMISSION_ORDER}', '${VOLUME}', '${OBJECT}', '${ORG_CONTRACTOR}', 'Поставка 3', '${USER_CONTRACTOR}')`,
-  `INSERT INTO submission_revisions (id, submission_id, object_id, contractor_id, revision_no, status)
+  `INSERT INTO object_contractors (object_id, contractor_id)
+       VALUES ('${OBJECT}', '${ORG_CONTRACTOR}') ON CONFLICT DO NOTHING`,
+  `INSERT INTO works
+       (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
+     VALUES ('${SUBMISSION_ORDER}', '${OBJECT}', '${ORG_CONTRACTOR}', '${ORG_CONTRACTOR}', 'roofing', DATE '2026-01-01', 'Поставка 3', '${USER_CONTRACTOR}')`,
+  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
      VALUES ('${REVISION_ORDER}', '${SUBMISSION_ORDER}', '${OBJECT}', '${ORG_CONTRACTOR}', 1, 'draft')`,
 
   // Поставка для проверки постановки задач конвейера: очередь по ней считается
   // целиком, поэтому чужие загрузки в неё попадать не должны.
-  `INSERT INTO submissions (id, volume_id, object_id, contractor_id, title, created_by)
-     VALUES ('${SUBMISSION_PIPELINE}', '${VOLUME}', '${OBJECT}', '${ORG_CONTRACTOR}', 'Поставка 4', '${USER_CONTRACTOR}')`,
-  `INSERT INTO submission_revisions (id, submission_id, object_id, contractor_id, revision_no, status)
+  `INSERT INTO object_contractors (object_id, contractor_id)
+       VALUES ('${OBJECT}', '${ORG_CONTRACTOR}') ON CONFLICT DO NOTHING`,
+  `INSERT INTO works
+       (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
+     VALUES ('${SUBMISSION_PIPELINE}', '${OBJECT}', '${ORG_CONTRACTOR}', '${ORG_CONTRACTOR}', 'roofing', DATE '2026-01-01', 'Поставка 4', '${USER_CONTRACTOR}')`,
+  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
      VALUES ('${REVISION_PIPELINE}', '${SUBMISSION_PIPELINE}', '${OBJECT}', '${ORG_CONTRACTOR}', 1, 'draft')`,
 ];
 

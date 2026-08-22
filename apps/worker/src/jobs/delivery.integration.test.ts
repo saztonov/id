@@ -76,8 +76,6 @@ function id(n: number): string {
 const ORG_CUSTOMER = id(1);
 const ORG_CONTRACTOR = id(2);
 const OBJECT = id(4);
-const SECTION = id(5);
-const VOLUME = id(6);
 const USER_CONTRACTOR = id(20);
 const USER_ENGINEER = id(21);
 
@@ -121,11 +119,9 @@ function catalogStatements(): readonly string[] {
     `INSERT INTO counterparties (id, name, kind) VALUES ('${ORG_CONTRACTOR}', 'ООО «Подрядчик»', 'contractor')`,
     `INSERT INTO construction_objects (id, code, name, full_name)
        VALUES ('${OBJECT}', 'TST01', 'Объект 1', 'ЖК «Тест», корпус 1')`,
-    `INSERT INTO section_kinds (code, name) VALUES ('roofing', 'Кровля')`,
-    `INSERT INTO object_sections (id, object_id, code, name, section_kind_code)
-       VALUES ('${SECTION}', '${OBJECT}', '2.5.1', 'Кровля', 'roofing')`,
-    `INSERT INTO volumes (id, object_id, section_id, code, name)
-       VALUES ('${VOLUME}', '${OBJECT}', '${SECTION}', 'V-1', 'Том 1')`,
+    `INSERT INTO sections (code, name) VALUES ('roofing', 'Кровля') ON CONFLICT (code) DO NOTHING`,
+    `INSERT INTO object_sections (object_id, section_code)
+       VALUES ('${OBJECT}', 'roofing') ON CONFLICT DO NOTHING`,
     `INSERT INTO users (id, kc_sub, full_name, contractor_id)
        VALUES ('${USER_CONTRACTOR}', 'kc-delivery-contractor', 'Сотрудник подрядчика', '${ORG_CONTRACTOR}')`,
     `INSERT INTO users (id, kc_sub, full_name)
@@ -152,14 +148,17 @@ function submissionStatements(input: {
 }): readonly string[] {
   const pages = Array.from({ length: WORKING_PAGES }, (_, index) => PAGE(input.revisionKey, index));
   return [
-    `INSERT INTO submissions (id, volume_id, object_id, contractor_id, title, created_by)
-       VALUES ('${input.submissionId}', '${VOLUME}', '${OBJECT}', '${ORG_CONTRACTOR}', 'Поставка', '${USER_CONTRACTOR}')`,
+    `INSERT INTO object_contractors (object_id, contractor_id)
+       VALUES ('${OBJECT}', '${ORG_CONTRACTOR}') ON CONFLICT DO NOTHING`,
+    `INSERT INTO works
+       (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
+     VALUES ('${input.submissionId}', '${OBJECT}', '${ORG_CONTRACTOR}', '${ORG_CONTRACTOR}', 'roofing', DATE '2026-01-01', 'Поставка', '${USER_CONTRACTOR}')`,
     // Ревизия заводится ЧЕРНОВИКОМ и переводится в `in_review` последним
     // оператором фикстуры. Иначе состав вставить нельзя, и это правильно:
     // именно так триггеры класса `source` и работают с момента подачи.
-    `INSERT INTO submission_revisions (id, submission_id, object_id, contractor_id, revision_no, status, aggregate_manifest_hash)
+    `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status, aggregate_manifest_hash)
        VALUES ('${input.revisionId}', '${input.submissionId}', '${OBJECT}', '${ORG_CONTRACTOR}', 1, 'draft', '${'a'.repeat(64)}')`,
-    `UPDATE submissions SET current_revision_id = '${input.revisionId}' WHERE id = '${input.submissionId}'`,
+    `UPDATE works SET current_revision_id = '${input.revisionId}' WHERE id = '${input.submissionId}'`,
     `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order, verify_state)
        VALUES ('${input.fileId}', '${input.revisionId}', '${workingSha}', 'комплект.pdf', 0, 'ok')`,
     ...pages.map(

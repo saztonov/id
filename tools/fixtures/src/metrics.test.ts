@@ -39,7 +39,7 @@ function pkg(key: string, documents: readonly [string, number][]): ReferencePack
       pageNo += 1;
     }
   }
-  return { packageKey: key, sectionKindCode: 'roofing', pages, expectedRegistryRowCount: null };
+  return { packageKey: key, sectionCode: 'roofing', pages, expectedRegistryRowCount: null };
 }
 
 /** Идеальное предсказание: повторяет эталон. Требует НЕзаслеплённого доступа. */

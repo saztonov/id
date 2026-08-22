@@ -284,14 +284,14 @@ export interface RevisionNode {
   readonly id: string;
   readonly objectId: string;
   readonly contractorId: string;
-  readonly sectionId: string;
-  readonly sectionKindCode: string;
-  readonly volumeCode: string;
+  readonly sectionCode: string;
+  /** Наименование работы: им подписывается комплект в реестре. */
+  readonly workTitle: string;
   readonly status: string;
 }
 
 /**
- * Действующая конфигурация проверки: профиль вида раздела с наложениями
+ * Действующая конфигурация проверки: профиль раздела с наложениями
  * объекта (`resolveEffectiveRules`, S4).
  */
 export interface ProfileNode {
