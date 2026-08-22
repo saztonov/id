@@ -57,7 +57,7 @@
  * построению сервера, и клиент не пытается их разделить.
  */
 import { isApiError } from './problem.js';
-import { get, request } from './http.js';
+import { get, newIdempotencyKey, request } from './http.js';
 
 /** Дословно из `app.setNotFoundHandler` в `apps/api/src/app.ts`. */
 const ROUTE_MISSING_DETAIL = 'Маршрут не найден.';
@@ -166,6 +166,11 @@ export const NAVIGATION_ROUTES = {
   registryIssue: (registryId: string) => `${V1}/registries/${registryId}/issue`,
   registryAccept: (registryId: string) => `${V1}/registries/${registryId}/accept`,
   registryItems: (registryId: string) => `${V1}/registries/${registryId}/items`,
+  registryReconcile: (registryId: string) => `${V1}/registries/${registryId}/reconcile`,
+  registryReconciliation: (registryId: string) => `${V1}/registries/${registryId}/reconciliation`,
+  registryReconciliationReview: (registryId: string) =>
+    `${V1}/registries/${registryId}/reconciliation/review`,
+  revisionReconciliation: (revisionId: string) => `${V1}/revisions/${revisionId}/reconciliation`,
 } as const;
 
 export type UnavailableReason = 'route-missing' | 'forbidden';
@@ -398,6 +403,12 @@ export interface RegistryView {
   works?: Work[];
   file?: Work | null;
   blockers?: RegistryBlocker[];
+  /**
+   * Сводка сверки описи. Того же класса, что `works`: подрядчику не отдаётся
+   * вовсе, потому что относится к папке целиком. Свои расхождения он читает на
+   * экране СВОЕГО комплекта.
+   */
+  reconciliation?: RegistryReconciliation | null;
 }
 
 export async function getRegistry(registryId: string): Promise<NavigationResult<RegistryView>> {
@@ -509,4 +520,172 @@ export async function acceptRegistry(registryId: string, version: number): Promi
  */
 export async function listRegistryItems(registryId: string): Promise<RegistryItem[]> {
   return get<RegistryItem[]>(NAVIGATION_ROUTES.registryItems(registryId));
+}
+
+// =====================================================================
+// Сверка описи передачи (S20)
+// =====================================================================
+
+export type ReconciliationVerdict = 'unparsed' | 'mismatch' | 'clean';
+export type ReconciliationMatchState = 'matched' | 'missing' | 'ambiguous';
+
+/** Комплект папки со своим вердиктом: единица выдачи подрядчику и инженеру. */
+export interface ReconciliationWork {
+  workId: string;
+  matchedRevisionId: string | null;
+  contractorId: string;
+  title: string;
+  contractorName: string | null;
+  state: 'matched' | 'extra';
+  verdict: ReconciliationVerdict;
+  rowsTotal: number;
+  rowsMatched: number;
+  rowsMissing: number;
+  rowsAmbiguous: number;
+  rowsFieldMismatch: number;
+  extraDocuments: number;
+}
+
+export interface ReconciliationGroup {
+  ordinal: number;
+  groupNo: string | null;
+  titleRaw: string;
+  actNoRaw: string | null;
+  actNoNorm: string | null;
+  contractorRaw: string | null;
+  matchedWorkId: string | null;
+  matchedRevisionId: string | null;
+  matchedContractorId: string | null;
+  matchState: ReconciliationMatchState;
+  matchScore: number | null;
+  reason: string;
+}
+
+export interface ReconciliationRow {
+  ordinal: number;
+  groupOrdinal: number;
+  workId: string | null;
+  contractorId: string | null;
+  rowNo: string | null;
+  docNameRaw: string;
+  docNoRaw: string | null;
+  docNoNorm: string | null;
+  orgRaw: string | null;
+  issuedAt: string | null;
+  validFrom: string | null;
+  validTo: string | null;
+  sheets: number | null;
+  copies: number | null;
+  pagesRaw: string | null;
+  matchedDocumentId: string | null;
+  matchState: ReconciliationMatchState;
+  matchScore: number | null;
+  fieldMismatches: string[];
+  reason: string;
+}
+
+export interface ReconciliationExtraDocument {
+  documentId: string;
+  workId: string;
+  revisionId: string;
+  contractorId: string;
+  docNoRaw: string | null;
+  docNameRaw: string | null;
+  docTypeCode: string | null;
+}
+
+export interface RegistryReconciliation {
+  id: string;
+  registryId: string;
+  revisionId: string;
+  verdict: ReconciliationVerdict;
+  version: number;
+  headerRegistryNo: string | null;
+  headerFolderNo: string | null;
+  headerMismatch: boolean;
+  parserVersion: string;
+  matcherVersion: string;
+  finishedAt: string;
+  groupsTotal: number;
+  groupsMatched: number;
+  groupsMissing: number;
+  groupsAmbiguous: number;
+  rowsTotal: number;
+  rowsMatched: number;
+  rowsMissing: number;
+  rowsAmbiguous: number;
+  rowsFieldMismatch: number;
+  worksTotal: number;
+  worksExtra: number;
+  extraDocuments: number;
+  warnings: string[];
+  reviewedBy: string | null;
+  reviewedAt: string | null;
+  reviewedNote: string | null;
+}
+
+/** Сводка по ПАПКЕ: отдаётся только тому, кто её ведёт. */
+export interface RegistryReconciliationView {
+  reconciliation: RegistryReconciliation | null;
+  works?: ReconciliationWork[];
+  groups?: ReconciliationGroup[];
+  rows?: ReconciliationRow[];
+  extraDocuments?: ReconciliationExtraDocument[];
+}
+
+/**
+ * Результат по ОДНОМУ комплекту.
+ *
+ * Полей о папке в этом типе нет — ни шапки описи, ни групп, ни чужих
+ * комплектов, ни общих счётчиков. Их нет и в ответе сервера: разделение
+ * выражено типом, а не условием на экране.
+ */
+export interface WorkReconciliationView {
+  work: ReconciliationWork | null;
+  rows: ReconciliationRow[];
+  extraDocuments: ReconciliationExtraDocument[];
+  parserVersion: string | null;
+  finishedAt: string | null;
+}
+
+/**
+ * Постановка сверки.
+ *
+ * `Idempotency-Key` обязателен: сверка читает документы всей папки. В ключ
+ * дедупликации очереди он не входит — второе нажатие получает уже стоящую
+ * задачу, а не заводит вторую по той же папке.
+ */
+export async function reconcileRegistry(
+  registryId: string,
+): Promise<{ jobId: string; created: boolean }> {
+  const response = await request<{ jobId: string; created: boolean }>(
+    'POST',
+    NAVIGATION_ROUTES.registryReconcile(registryId),
+    { idempotencyKey: newIdempotencyKey('reconcile') },
+  );
+  return response.data;
+}
+
+export async function getRegistryReconciliation(
+  registryId: string,
+): Promise<NavigationResult<RegistryReconciliationView>> {
+  const route = NAVIGATION_ROUTES.registryReconciliation(registryId);
+  return loadNavigation(route, () => get<RegistryReconciliationView>(route));
+}
+
+export async function getWorkReconciliation(revisionId: string): Promise<WorkReconciliationView> {
+  return get<WorkReconciliationView>(NAVIGATION_ROUTES.revisionReconciliation(revisionId));
+}
+
+export async function reviewReconciliation(
+  registryId: string,
+  version: number,
+  note: string,
+): Promise<RegistryReconciliation> {
+  const response = await request<RegistryReconciliation>(
+    'POST',
+    NAVIGATION_ROUTES.registryReconciliationReview(registryId),
+    { headers: ifMatch(version), body: { note } },
+  );
+  return response.data;
 }

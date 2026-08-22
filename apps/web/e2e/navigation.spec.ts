@@ -210,6 +210,34 @@ test('подрядчик видит реестр, но не состав чуж�
   for (const row of snapshot) expect(row.contractorId).toBe(IDS.orgContractor);
 });
 
+/**
+ * Сверка описи: карточка папки принадлежит ведущему её, и только ему.
+ *
+ * Проверяются обе стороны разделения выдач: генподрядчик видит карточку и
+ * запускает сверку, подрядчик не видит её вовсе и получает 403 на маршруте
+ * сводки по папке. Свои расхождения он читает на экране своего комплекта — там
+ * в ответе сервера нет ни одного поля о папке.
+ */
+test('сверка описи: карточка папки — только ведущему её', async ({ page }) => {
+  await signIn(page, KC.general, `/ids/registries/${IDS.registryReady}`);
+
+  const run = page.getByTestId('reconcile-run');
+  await expect(run).toBeVisible();
+  // Сверки ещё не было: вместо чисел — объяснение, что скан надо провести по
+  // конвейеру. Пустая карточка читалась бы как «всё сошлось».
+  await expect(page.getByTestId('reconciliation-empty')).toBeVisible();
+
+  await run.click();
+  await expect(page.getByText(/Сверка (поставлена|этой папки уже идёт)/u)).toBeVisible();
+
+  // У подрядчика карточки нет вовсе, а не пустая.
+  await signIn(page, KC.contractor, `/ids/registries/${IDS.registryReady}`);
+  await expect(page.getByTestId('reconcile-run')).toHaveCount(0);
+
+  const summary = await page.request.get(`/api/v1/registries/${IDS.registryReady}/reconciliation`);
+  expect(summary.status()).toBe(403);
+});
+
 test('роли подрядчика и инженера вместе: отказ подтверждён сервером', async ({ page }) => {
   await signIn(page, KC.mixed, `/ids/objects/${IDS.object}`);
 

@@ -78,6 +78,14 @@ test('экран проверки и согласования проходит a
   await analyze(page);
 });
 
+test('карточка реестра со сверкой описи проходит axe', async ({ page }) => {
+  // Именно новый UI даёт настоящие дефекты доступности: на S16 и S18 axe ловил
+  // их ровно там, а не в давно написанных экранах.
+  await signIn(page, KC.general, `/ids/registries/${IDS.registryReady}`);
+  await expect(page.getByTestId('reconcile-run')).toBeVisible();
+  await analyze(page);
+});
+
 test('администрирование проходит axe', async ({ page }) => {
   await signIn(page, KC.admin, '/admin?tab=diagnostics');
   await expect(page.getByText('Глубина очереди')).toBeVisible();

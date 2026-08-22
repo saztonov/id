@@ -45,14 +45,24 @@ import {
   attachRegistryFile,
   excludeWork,
   getRegistry,
+  getRegistryReconciliation,
   includeWork,
   issueRegistry,
   listRegistryItems,
   listWorks,
   pagesItems,
+  reconcileRegistry,
+  reviewReconciliation,
   updateRegistry,
+  type ReconciliationExtraDocument,
+  type ReconciliationGroup,
+  type ReconciliationRow,
+  type ReconciliationVerdict,
+  type ReconciliationWork,
   type Registry,
   type RegistryItem,
+  type RegistryReconciliation,
+  type RegistryReconciliationView,
   type RegistryView,
   type Work,
 } from '../../api/navigation.js';
@@ -184,6 +194,8 @@ function RegistryBody({
           <FileCard registry={registry} file={data.file ?? null} manages={manages} />
         </>
       )}
+
+      {manages && <ReconciliationCard registry={registry} summary={data.reconciliation ?? null} />}
 
       {!draft && <SnapshotCard registryId={registryId} contractors={contractors.data ?? []} />}
 
@@ -427,6 +439,10 @@ function AddWorkControl({
       <Select<string>
         style={{ minWidth: 280 }}
         placeholder="Добавить комплект"
+        // Подсказка внутри поля скринридером не читается: axe (§17) считает
+        // такое поле безымянным, и это критическое нарушение. Дефект достался
+        // от S19 и найден первым же прогоном axe по этому экрану.
+        aria-label="Добавить комплект в реестр"
         showSearch
         optionFilterProp="label"
         value={workId}
@@ -518,6 +534,343 @@ function FileCard({
         </Space>
       )}
     </Card>
+  );
+}
+
+// =====================================================================
+// Сверка описи
+// =====================================================================
+
+const VERDICT_LABELS: Record<ReconciliationVerdict, string> = {
+  clean: 'расхождений нет',
+  mismatch: 'есть расхождения',
+  unparsed: 'опись не разобрана',
+};
+
+const VERDICT_COLORS: Record<ReconciliationVerdict, string> = {
+  clean: 'green',
+  mismatch: 'red',
+  unparsed: 'orange',
+};
+
+const MATCH_LABELS: Record<string, string> = {
+  matched: 'сопоставлено',
+  missing: 'не найдено',
+  ambiguous: 'неоднозначно',
+};
+
+/** Коды расхождений реквизитов — словами: `issued_at` человек не читает. */
+const FIELD_LABELS: Record<string, string> = {
+  issued_at: 'дата',
+  organization: 'организация',
+  sheets: 'число листов',
+};
+
+export function fieldMismatchLabel(codes: readonly string[]): string {
+  return codes.map((code) => FIELD_LABELS[code] ?? code).join(', ');
+}
+
+/**
+ * Сверка описи с комплектами папки — карточка ВЕДУЩЕГО папку.
+ *
+ * Показывается только под `registry.manage`: здесь шапка описи, группы без
+ * комплекта и комплекты, которых опись не назвала, — сведения о папке целиком.
+ * Подрядчик читает свои расхождения на экране своего комплекта, где ничего
+ * этого нет ни на экране, ни в ответе сервера.
+ *
+ * Сверка ничего не блокирует: вердикт `mismatch` не мешает ни передаче, ни
+ * приёмке. Она отвечает на вопрос «что здесь не так», а решение принимает
+ * человек.
+ */
+function ReconciliationCard({
+  registry,
+  summary,
+}: {
+  registry: Registry;
+  summary: RegistryReconciliation | null;
+}): ReactNode {
+  const { message } = AntApp.useApp();
+  const queryClient = useQueryClient();
+  const [open, setOpen] = useState(false);
+
+  const details = useQuery({
+    queryKey: navigationKeys.registryReconciliation(registry.id),
+    queryFn: () => getRegistryReconciliation(registry.id),
+    enabled: open,
+  });
+
+  const reconcile = useMutation({
+    mutationFn: () => reconcileRegistry(registry.id),
+    onSuccess: async (result) => {
+      await queryClient.invalidateQueries({ queryKey: ['nav'] });
+      void message.success(
+        result.created
+          ? 'Сверка поставлена в очередь: обновите страницу через несколько секунд'
+          : 'Сверка этой папки уже идёт',
+      );
+    },
+    onError: (error: unknown) => {
+      void message.error(describeError(error));
+    },
+  });
+
+  const view = details.data?.kind === 'available' ? details.data.data : null;
+
+  return (
+    <Card
+      size="small"
+      title="Сверка описи"
+      style={{ marginBottom: 16 }}
+      extra={
+        <Space size={8}>
+          <Button
+            size="small"
+            loading={reconcile.isPending}
+            data-testid="reconcile-run"
+            onClick={() => {
+              reconcile.mutate();
+            }}
+          >
+            Сверить
+          </Button>
+          {summary !== null && (
+            <Button
+              size="small"
+              type="link"
+              onClick={() => {
+                setOpen((value) => !value);
+              }}
+            >
+              {open ? 'Свернуть' : 'Расхождения'}
+            </Button>
+          )}
+        </Space>
+      }
+    >
+      {summary === null ? (
+        <Typography.Text type="secondary" data-testid="reconciliation-empty">
+          Опись ещё не сверялась. Скан описи нужно провести по конвейеру — загрузить, разметить и
+          распознать на его ревизии, — после чего нажать «Сверить».
+        </Typography.Text>
+      ) : (
+        <Space direction="vertical" size={8} style={{ width: '100%' }}>
+          <Space size={8} wrap>
+            <Tag color={VERDICT_COLORS[summary.verdict]} data-testid="reconciliation-verdict">
+              {VERDICT_LABELS[summary.verdict]}
+            </Tag>
+            <Typography.Text>
+              групп {summary.groupsTotal} (без комплекта {summary.groupsMissing}), строк{' '}
+              {summary.rowsTotal} (не найдено {summary.rowsMissing}, расходятся реквизиты{' '}
+              {summary.rowsFieldMismatch}), комплектов вне описи {summary.worksExtra}, документов
+              вне описи {summary.extraDocuments}
+            </Typography.Text>
+          </Space>
+
+          {summary.headerMismatch && (
+            <Typography.Text type="danger">
+              Шапка описи расходится с карточкой реестра: в бумаге №{' '}
+              {summary.headerRegistryNo ?? '—'}, папка {summary.headerFolderNo ?? '—'}.
+            </Typography.Text>
+          )}
+
+          {summary.warnings.length > 0 && (
+            <Typography.Text type="warning">
+              Разбор описи: {summary.warnings.join('; ')}
+            </Typography.Text>
+          )}
+
+          {/* Версия разбора и время прогона объясняют, почему вчерашняя сверка
+              расходится с сегодняшней на том же скане. */}
+          <Typography.Text type="secondary">
+            {new Date(summary.finishedAt).toLocaleString('ru-RU')}, разбор {summary.parserVersion}
+            {summary.reviewedNote === null ? '' : ` · разобрано: ${summary.reviewedNote}`}
+          </Typography.Text>
+
+          {open && details.isPending && <LoadingState label="Загрузка расхождений…" />}
+          {open && view !== null && <ReconciliationDetails view={view} />}
+
+          <ReviewControl registry={registry} summary={summary} />
+        </Space>
+      )}
+    </Card>
+  );
+}
+
+/** Четыре списка расхождений; каждый ведёт на экран, где его чинят. */
+function ReconciliationDetails({ view }: { view: RegistryReconciliationView }): ReactNode {
+  const works = view.works ?? [];
+  const groups = view.groups ?? [];
+  const rows = view.rows ?? [];
+  const extra = view.extraDocuments ?? [];
+
+  return (
+    <Space direction="vertical" size={12} style={{ width: '100%' }}>
+      <Table<ReconciliationWork>
+        size="small"
+        rowKey={(row) => row.workId}
+        dataSource={works}
+        pagination={false}
+        title={() => 'Комплекты папки'}
+        columns={[
+          { title: 'Работа', dataIndex: 'title' },
+          {
+            title: 'Исполнитель',
+            dataIndex: 'contractorName',
+            render: (v: string | null) => v ?? '—',
+          },
+          {
+            title: 'Вердикт',
+            dataIndex: 'verdict',
+            render: (verdict: ReconciliationVerdict, row) => (
+              <Tag color={VERDICT_COLORS[verdict]}>
+                {row.state === 'extra' ? 'не названа описью' : VERDICT_LABELS[verdict]}
+              </Tag>
+            ),
+          },
+          {
+            title: 'Строки',
+            render: (_: unknown, row) =>
+              `${row.rowsMatched}/${row.rowsTotal}, реквизиты ${row.rowsFieldMismatch}`,
+          },
+          {
+            title: '',
+            render: (_: unknown, row) =>
+              row.matchedRevisionId === null ? null : (
+                <Link to={`/ids/revisions/${row.matchedRevisionId}`}>открыть</Link>
+              ),
+          },
+        ]}
+      />
+
+      <Table<ReconciliationGroup>
+        size="small"
+        rowKey={(row) => row.ordinal}
+        dataSource={groups.filter((group) => group.matchState !== 'matched')}
+        pagination={false}
+        title={() => 'Группы описи без комплекта'}
+        locale={{ emptyText: 'Все группы описи нашли свой комплект' }}
+        columns={[
+          { title: '№', dataIndex: 'groupNo', render: (v: string | null) => v ?? '—' },
+          { title: 'Работа по описи', dataIndex: 'titleRaw' },
+          { title: '№ АОСР', dataIndex: 'actNoRaw', render: (v: string | null) => v ?? '—' },
+          {
+            title: 'Исполнитель',
+            dataIndex: 'contractorRaw',
+            render: (v: string | null) => v ?? '—',
+          },
+          { title: 'Причина', dataIndex: 'reason' },
+        ]}
+      />
+
+      <Table<ReconciliationRow>
+        size="small"
+        rowKey={(row) => row.ordinal}
+        dataSource={rows.filter(
+          (row) => row.matchState !== 'matched' || row.fieldMismatches.length > 0,
+        )}
+        pagination={{ pageSize: 20, hideOnSinglePage: true }}
+        title={() => 'Строки описи с расхождениями'}
+        locale={{ emptyText: 'Каждая строка описи нашла свой документ' }}
+        columns={[
+          { title: '№ п/п', dataIndex: 'rowNo', render: (v: string | null) => v ?? '—' },
+          { title: 'Документ по описи', dataIndex: 'docNameRaw' },
+          { title: '№', dataIndex: 'docNoRaw', render: (v: string | null) => v ?? '—' },
+          {
+            title: 'Что не так',
+            render: (_: unknown, row) =>
+              row.fieldMismatches.length > 0
+                ? `расходятся: ${fieldMismatchLabel(row.fieldMismatches)}`
+                : (MATCH_LABELS[row.matchState] ?? row.matchState),
+          },
+          {
+            title: '',
+            render: (_: unknown, row) =>
+              row.matchedDocumentId === null ? null : (
+                <Link to={`/ids/documents/${row.matchedDocumentId}`}>документ</Link>
+              ),
+          },
+        ]}
+      />
+
+      <Table<ReconciliationExtraDocument>
+        size="small"
+        rowKey={(row) => row.documentId}
+        dataSource={extra}
+        pagination={{ pageSize: 20, hideOnSinglePage: true }}
+        title={() => 'Есть в портале, но опись их не называет'}
+        locale={{ emptyText: 'Каждый документ комплектов назван описью' }}
+        columns={[
+          { title: 'Документ', dataIndex: 'docNameRaw', render: (v: string | null) => v ?? '—' },
+          { title: '№', dataIndex: 'docNoRaw', render: (v: string | null) => v ?? '—' },
+          { title: 'Вид', dataIndex: 'docTypeCode', render: (v: string | null) => v ?? '—' },
+          {
+            title: '',
+            render: (_: unknown, row) => (
+              <Link to={`/ids/revisions/${row.revisionId}`}>комплект</Link>
+            ),
+          },
+        ]}
+      />
+    </Space>
+  );
+}
+
+/**
+ * Отметка «разобрано»: суждение принимающей стороны, а не наблюдение портала.
+ *
+ * Пояснение обязательно и не короче десяти символов — отметка без объяснения
+ * неотличима от «закрыл, чтобы не мозолило», и следующий человек не поймёт,
+ * разобрано расхождение или спрятано.
+ */
+function ReviewControl({
+  registry,
+  summary,
+}: {
+  registry: Registry;
+  summary: RegistryReconciliation;
+}): ReactNode {
+  const { can } = useSession();
+  const { message } = AntApp.useApp();
+  const queryClient = useQueryClient();
+  const [note, setNote] = useState('');
+
+  const review = useMutation({
+    mutationFn: () => reviewReconciliation(registry.id, summary.version, note),
+    onSuccess: async () => {
+      setNote('');
+      await queryClient.invalidateQueries({ queryKey: ['nav'] });
+      void message.success('Отметка «разобрано» сохранена');
+    },
+    onError: (error: unknown) => {
+      void message.error(describeError(error));
+    },
+  });
+
+  if (!can('registry.accept') || summary.verdict === 'clean') return null;
+
+  return (
+    <Space.Compact style={{ width: '100%' }}>
+      <Input
+        placeholder="Чем объясняется расхождение (не короче 10 символов)"
+        aria-label="Пояснение к отметке «разобрано»"
+        value={note}
+        maxLength={1000}
+        data-testid="review-note"
+        onChange={(event) => {
+          setNote(event.target.value);
+        }}
+      />
+      <Button
+        disabled={note.trim().length < 10}
+        loading={review.isPending}
+        data-testid="review-submit"
+        onClick={() => {
+          review.mutate();
+        }}
+      >
+        Разобрано
+      </Button>
+    </Space.Compact>
   );
 }
 

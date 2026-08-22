@@ -477,7 +477,10 @@ export const DOC_TYPES = [
     kind: 'registry',
     hasAnnexes: false,
     isFallback: false,
-    observedInCorpus: false,
+    // Наблюдён в корпусе двумя формами: пятиграфной (группа — строка с «№ п/п»)
+    // и восьмиграфной (группа — слитый баннер «работа (исполнитель)»). Обе
+    // разбирает `transfer-registry.ts` начиная с S20.
+    observedInCorpus: true,
     matchHints: {
       anchors: ['Реестр\\s+(?:передачи\\s+)?исполнительной\\s+документации'],
       bodyHints: [

@@ -30,7 +30,12 @@ import { useState, type ReactNode } from 'react';
 import { App as AntApp, Button, Segmented, Space, Table, Tag, Typography } from 'antd';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { bundles, checks, workflow } from '../../api/endpoints.js';
-import { revisionKeys } from '../../api/keys.js';
+import { navigationKeys, revisionKeys } from '../../api/keys.js';
+import {
+  getWorkReconciliation,
+  type ReconciliationExtraDocument,
+  type ReconciliationRow,
+} from '../../api/navigation.js';
 import { describeError } from '../../api/problem.js';
 import type { Finding } from '../../api/types.js';
 import { useSession } from '../../app/session.js';
@@ -135,6 +140,8 @@ export function ChecksTab({ revisionId }: { revisionId: string }): ReactNode {
 
   return (
     <>
+      <TransferReconciliationCard revisionId={revisionId} />
+
       <Space wrap style={{ marginBottom: 12 }}>
         <Button
           type="primary"
@@ -312,6 +319,131 @@ function EvidenceLinks({
   return (
     <Space size={8} wrap data-testid={`evidence-${finding.ruleCode}`}>
       {links}
+    </Space>
+  );
+}
+
+// =====================================================================
+// Сверка с описью папки (S20)
+// =====================================================================
+
+const RECONCILE_VERDICT_LABELS: Record<string, string> = {
+  clean: 'расхождений нет',
+  mismatch: 'есть расхождения',
+  unparsed: 'опись не разобрана',
+};
+
+const RECONCILE_MATCH_LABELS: Record<string, string> = {
+  matched: 'сопоставлено',
+  missing: 'не найдено',
+  ambiguous: 'неоднозначно',
+};
+
+const RECONCILE_FIELD_LABELS: Record<string, string> = {
+  issued_at: 'дата',
+  organization: 'организация',
+  sheets: 'число листов',
+};
+
+/**
+ * Расхождения ЭТОГО комплекта с описью папки.
+ *
+ * Живёт на вкладке «Проверка», а не отдельной седьмой вкладкой: вопрос здесь
+ * тот же самый — есть ли ошибки в моих документах, — и ради одной карточки
+ * платить навигацией незачем.
+ *
+ * Ответ сервера не содержит ни одного поля о папке: ни шапки описи, ни групп
+ * без комплекта, ни чужих комплектов, ни общих счётчиков. Поэтому здесь нечего
+ * прятать по роли — этот экран одинаков для подрядчика, инженера и
+ * руководителя, и различие делает область видимости, а не условие в разметке.
+ */
+function TransferReconciliationCard({ revisionId }: { revisionId: string }): ReactNode {
+  const view = useQuery({
+    queryKey: navigationKeys.workReconciliation(revisionId),
+    queryFn: () => getWorkReconciliation(revisionId),
+  });
+
+  if (view.isPending || view.isError) return null;
+
+  const work = view.data.work;
+  if (work === null) {
+    // Комплект не включён ни в одну папку либо сверки ещё не было. Пустая
+    // карточка читалась бы как «всё сошлось», поэтому её нет вовсе.
+    return null;
+  }
+
+  const rows = view.data.rows.filter(
+    (row) => row.matchState !== 'matched' || row.fieldMismatches.length > 0,
+  );
+
+  return (
+    <Space
+      direction="vertical"
+      size={8}
+      style={{ width: '100%', marginBottom: 16 }}
+      data-testid="work-reconciliation"
+    >
+      <Space size={8} wrap>
+        <Typography.Text strong>Сверка с описью папки</Typography.Text>
+        <Tag
+          color={
+            work.verdict === 'clean' ? 'green' : work.verdict === 'unparsed' ? 'orange' : 'red'
+          }
+        >
+          {work.state === 'extra'
+            ? 'опись не называет этот комплект'
+            : (RECONCILE_VERDICT_LABELS[work.verdict] ?? work.verdict)}
+        </Tag>
+        <Typography.Text type="secondary">
+          строк описи {work.rowsTotal}, сопоставлено {work.rowsMatched}, не найдено{' '}
+          {work.rowsMissing}, расходятся реквизиты {work.rowsFieldMismatch}, документов вне описи{' '}
+          {work.extraDocuments}
+        </Typography.Text>
+        {view.data.finishedAt !== null && (
+          <Typography.Text type="secondary">
+            {new Date(view.data.finishedAt).toLocaleString('ru-RU')}, разбор{' '}
+            {view.data.parserVersion ?? '—'}
+          </Typography.Text>
+        )}
+      </Space>
+
+      {rows.length > 0 && (
+        <Table<ReconciliationRow>
+          size="small"
+          rowKey={(row) => row.ordinal}
+          dataSource={rows}
+          pagination={{ pageSize: 10, hideOnSinglePage: true }}
+          columns={[
+            { title: '№ п/п', dataIndex: 'rowNo', render: (v: string | null) => v ?? '—' },
+            { title: 'Документ по описи', dataIndex: 'docNameRaw' },
+            { title: '№', dataIndex: 'docNoRaw', render: (v: string | null) => v ?? '—' },
+            {
+              title: 'Что не так',
+              render: (_: unknown, row) =>
+                row.fieldMismatches.length > 0
+                  ? `расходятся: ${row.fieldMismatches
+                      .map((code) => RECONCILE_FIELD_LABELS[code] ?? code)
+                      .join(', ')}`
+                  : (RECONCILE_MATCH_LABELS[row.matchState] ?? row.matchState),
+            },
+          ]}
+        />
+      )}
+
+      {view.data.extraDocuments.length > 0 && (
+        <Table<ReconciliationExtraDocument>
+          size="small"
+          rowKey={(row) => row.documentId}
+          dataSource={view.data.extraDocuments}
+          pagination={{ pageSize: 10, hideOnSinglePage: true }}
+          title={() => 'Есть в комплекте, но опись их не называет'}
+          columns={[
+            { title: 'Документ', dataIndex: 'docNameRaw', render: (v: string | null) => v ?? '—' },
+            { title: '№', dataIndex: 'docNoRaw', render: (v: string | null) => v ?? '—' },
+            { title: 'Вид', dataIndex: 'docTypeCode', render: (v: string | null) => v ?? '—' },
+          ]}
+        />
+      )}
     </Space>
   );
 }

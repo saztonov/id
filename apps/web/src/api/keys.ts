@@ -62,6 +62,10 @@ export const navigationKeys = {
   registries: (filter: string) => ['nav', 'registries', filter] as const,
   registry: (registryId: string) => ['nav', 'registries', 'one', registryId] as const,
   registryItems: (registryId: string) => ['nav', 'registries', 'one', registryId, 'items'] as const,
+  registryReconciliation: (registryId: string) =>
+    ['nav', 'registries', 'one', registryId, 'reconciliation'] as const,
+  workReconciliation: (revisionId: string) =>
+    ['nav', 'revisions', revisionId, 'reconciliation'] as const,
   revisions: (workId: string) => ['nav', 'revisions', workId] as const,
 };
 
