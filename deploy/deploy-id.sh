@@ -50,7 +50,27 @@ ID_TAG="$(git -C "$PORTAL_DIR" rev-parse --short HEAD)"
 export ID_TAG
 
 echo "==> [2/6] build (тег $ID_TAG)"
-"${COMPOSE[@]}" build
+# Образы собираются ПО ОЧЕРЕДИ, а не одной командой `compose build`.
+#
+# Одна команда отдаёт сборку buildx bake, и тот запускает обе цели параллельно.
+# На VPS с 8 ГБ, где уже работают два десятка контейнеров, два одновременных
+# `pnpm install` (каждый со своим node_modules монорепо) съедали память до
+# устойчивого memory pressure: BuildKit падал с «only one connection allowed»,
+# journald двенадцать раз сбрасывал кэши, а SSH и HTTPS переставали отвечать —
+# машину пришлось перезагружать, оставив деплой на половине.
+#
+# `COMPOSE_PARALLEL_LIMIT` здесь не помогает: он ограничивает собственную
+# многопоточность Compose (up, pull, stop), а сборкой в этой версии управляет
+# bake, для которого эта переменная ничего не значит. Раздельные вызовы —
+# единственный способ, не зависящий от того, какую ручку уважает конкретная
+# версия Compose.
+#
+# Собираются только службы с секцией `build`: id-worker и migrate делят образ
+# с id-api и собственной сборки не имеют.
+for service in id-api id-web; do
+  echo "    -> $service"
+  "${COMPOSE[@]}" build "$service"
+done
 
 MIGRATE_STATUS="нет"
 if [ "$MIGRATE" = 1 ]; then
