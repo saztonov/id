@@ -59,9 +59,10 @@ import { PageTypePanel } from './PageTypePanel.js';
 import { ThumbnailStrip, type PageTypeBadge } from './ThumbnailStrip.js';
 import { VersionConflictModal } from './VersionConflictModal.js';
 import { applyFilter, coverageOf, readingRanks, sortedForReading, BLOCK_STYLES } from './blocks.js';
-import { framesAgree, fitInto } from './geometry.js';
+import { framesAgree, fitInto, type RenderedSize } from './geometry.js';
 import { closeDocuments } from './pdf/pdfjs.js';
-import { usePdfPage } from './pdf/usePdfPage.js';
+import { renderWidthFor } from './pdf/render-width.js';
+import { clearPageCache, prefetchPage, usePdfPage } from './pdf/usePdfPage.js';
 import { useLayoutEditing } from './useLayoutEditing.js';
 import { useMarkupStore, ZOOM_STEPS } from './store.js';
 
@@ -267,8 +268,15 @@ function LayoutWorkspace(props: WorkspaceProps): ReactNode {
         'Разметку ведут подрядчик, генподрядчик, инженер и администратор.';
 
   const pageList = pages.data ?? [];
-  const currentPage =
-    pageList.find((page) => page.workingPageIndex === store.workingPageIndex) ?? pageList[0];
+  const currentIndex = Math.max(
+    0,
+    pageList.findIndex((page) => page.workingPageIndex === store.workingPageIndex),
+  );
+  const currentPage = pageList[currentIndex];
+  // Соседняя страница по ленте — для предзагрузки. Порядок берётся из списка,
+  // а не из `workingPageIndex + 1`: индексы рабочего документа плотные, но
+  // список — единственный источник соответствия «страница → файл и лист».
+  const nextPage = pageList[currentIndex + 1];
 
   const flagsByPage = new Map<number, readonly AttentionFlag[]>(
     layoutDetail.pages.map((entry) => [entry.workingPageIndex, entry.flags]),
@@ -394,6 +402,7 @@ function LayoutWorkspace(props: WorkspaceProps): ReactNode {
               />
               <CanvasArea
                 page={currentPage}
+                nextPage={nextPage}
                 blocks={pageBlocks}
                 ranks={ranks}
                 selection={store.selection}
@@ -466,15 +475,20 @@ function LayoutWorkspace(props: WorkspaceProps): ReactNode {
 // Область канвы: измерение доступного места и сверка фреймов
 // =====================================================================
 
+/** Страница рабочего документа в том виде, в каком её знает канва. */
+interface CanvasPage {
+  readonly workingPageIndex: number;
+  readonly sourceFileId: string;
+  readonly filePageIndex: number;
+  readonly widthPx: number;
+  readonly heightPx: number;
+  readonly rotation: number;
+}
+
 interface CanvasAreaProps {
-  readonly page: {
-    workingPageIndex: number;
-    sourceFileId: string;
-    filePageIndex: number;
-    widthPx: number;
-    heightPx: number;
-    rotation: number;
-  };
+  readonly page: CanvasPage;
+  /** Следующая страница ленты — только для предзагрузки; `undefined` на последней. */
+  readonly nextPage: CanvasPage | undefined;
   readonly blocks: readonly LayoutBlock[];
   readonly ranks: ReadonlyMap<string, number>;
   readonly selection: ReadonlySet<string>;
@@ -489,9 +503,17 @@ interface CanvasAreaProps {
 }
 
 function CanvasArea(props: CanvasAreaProps): ReactNode {
-  const { page, zoom } = props;
+  const { page, zoom, nextPage } = props;
   const holder = useRef<HTMLDivElement | null>(null);
-  const [available, setAvailable] = useState({ width: 800, height: 1000 });
+  /**
+   * `null`, пока область не измерена.
+   *
+   * Раньше здесь стояло `{800, 1000}`, и это давало ДВА рендера каждой
+   * страницы: один по выдуманному размеру, второй — по настоящему, как только
+   * сработает `ResizeObserver`. Первый всегда выбрасывался, но занимал воркер
+   * pdf.js ровно тогда, когда от него ждали вторую отрисовку.
+   */
+  const [available, setAvailable] = useState<RenderedSize | null>(null);
 
   useEffect(() => {
     const element = holder.current;
@@ -509,22 +531,61 @@ function CanvasArea(props: CanvasAreaProps): ReactNode {
   }, []);
 
   const fitted = useMemo(
-    () => fitInto({ width: page.widthPx, height: page.heightPx }, available),
+    () =>
+      available === null
+        ? null
+        : fitInto({ width: page.widthPx, height: page.heightPx }, available),
     [page.widthPx, page.heightPx, available],
   );
-  const targetWidth = Math.max(80, Math.round(fitted.width * zoom));
 
-  const rendered = usePdfPage({
-    fileId: page.sourceFileId,
-    contentUrl: filesApi.contentUrl(page.sourceFileId),
-    filePageIndex: page.filePageIndex,
-    targetWidth,
-  });
+  /**
+   * Размер показа. Считается из карты страниц, а не из результата рендера:
+   * иначе рамки прыгали бы в момент, когда канва доезжает, — а карта страниц
+   * известна сразу и является той же системой координат, в которой заданы
+   * блоки.
+   */
+  const size: RenderedSize =
+    fitted === null
+      ? { width: 0, height: 0 }
+      : { width: Math.max(80, fitted.width * zoom), height: Math.max(80, fitted.height * zoom) };
 
-  const size = rendered.page?.size ?? {
-    width: targetWidth,
-    height: (targetWidth * page.heightPx) / Math.max(1, page.widthPx),
-  };
+  const contentUrl = filesApi.contentUrl(page.sourceFileId);
+  const rendered = usePdfPage(
+    fitted === null
+      ? null
+      : {
+          fileId: page.sourceFileId,
+          contentUrl,
+          filePageIndex: page.filePageIndex,
+          displayWidth: size.width,
+        },
+  );
+
+  /**
+   * Предзагрузка следующей страницы — после того, как текущая показана.
+   *
+   * Условие `rendered.page !== null` существенно: запущенная раньше,
+   * предзагрузка встала бы в очередь к тому же воркеру ПЕРЕД страницей,
+   * которую человек уже ждёт, и сделала бы переключение медленнее, а не
+   * быстрее.
+   */
+  useEffect(() => {
+    if (nextPage === undefined || rendered.page === null || available === null) return;
+    // Соседняя страница вписывается в область СВОИМИ размерами: у альбомной
+    // A3 после портретной A4 ширина показа другая, и предзагрузка по ширине
+    // текущей страницы легла бы мимо ключа кэша — то есть отрисовала бы
+    // страницу, которую потом никто не возьмёт.
+    const nextFitted = fitInto(
+      { width: nextPage.widthPx, height: nextPage.heightPx },
+      available,
+    );
+    prefetchPage({
+      fileId: nextPage.sourceFileId,
+      contentUrl: filesApi.contentUrl(nextPage.sourceFileId),
+      filePageIndex: nextPage.filePageIndex,
+      renderWidth: renderWidthFor(Math.max(80, nextFitted.width * zoom)),
+    });
+  }, [nextPage, rendered.page, available, zoom]);
 
   // Сверка фреймов, а не поворот координат: расхождение означает, что одна из
   // сторон применила /Rotate дважды или не применила вовсе, и рамки лягут мимо —
@@ -848,13 +909,13 @@ function useEvidenceTarget(): void {
 }
 
 /**
- * Освобождение кэша документов pdf.js при уходе с экрана.
+ * Освобождение памяти pdf.js при уходе с экрана: документы и отрисованные страницы.
  *
- * Кэш держит открытый `PDFDocumentProxy` на каждый файл комплекта вместе с его
- * воркером и распакованными объектами. Без освобождения вкладка, в которой
- * инженер посмотрел десять поставок, удерживает страницы всех десяти: это
- * настоящая утечка, а не теоретическая — на сканах A3 счёт идёт на сотни
- * мегабайт.
+ * Кэш документов держит открытый `PDFDocumentProxy` на каждый файл комплекта
+ * вместе с его воркером и распакованными объектами; кэш страниц —
+ * отрисованные канвы. Без освобождения вкладка, в которой инженер посмотрел
+ * десять поставок, удерживает страницы всех десяти: это настоящая утечка, а не
+ * теоретическая — на сканах A3 счёт идёт на сотни мегабайт.
  *
  * Содержимое файла неизменяемо (§3.3), поэтому повторное открытие того же файла
  * стоит только чтения xref заново — цена, которую платят один раз за возврат на
@@ -863,6 +924,7 @@ function useEvidenceTarget(): void {
 function usePdfCacheCleanup(): void {
   useEffect(
     () => () => {
+      clearPageCache();
       void closeDocuments();
     },
     [],

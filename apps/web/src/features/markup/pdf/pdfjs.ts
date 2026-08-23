@@ -132,14 +132,24 @@ export const SAFE_ANNOTATION_MODE: number = AnnotationMode.DISABLE;
  * на каждый переход означало бы заново читать таблицу xref по сети. Ключ —
  * идентификатор файла: содержимое неизменяемо (§3.3), поэтому кэш не может
  * устареть.
+ *
+ * Хранится ПАРА «задача загрузки + её промис», а не один промис. Освобождение
+ * (`destroy`) объявлено у задачи загрузки, а не у `PDFDocumentProxy`, и без
+ * ссылки на задачу закрыть воркер было бы нечем — именно поэтому раньше здесь
+ * звался `cleanup()`, который воркер не трогает вовсе.
  */
-const documents = new Map<string, Promise<PDFDocumentProxy>>();
+interface OpenedDocument {
+  readonly task: { destroy: () => Promise<void> };
+  readonly promise: Promise<PDFDocumentProxy>;
+}
+
+const documents = new Map<string, OpenedDocument>();
 
 export function openDocument(fileId: string, contentUrl: string): Promise<PDFDocumentProxy> {
   const cached = documents.get(fileId);
-  if (cached !== undefined) return cached;
+  if (cached !== undefined) return cached.promise;
 
-  const task = getDocument({
+  const loading = getDocument({
     url: contentUrl,
     // Форма XFA не рендерится: см. заголовок модуля.
     enableXfa: false,
@@ -160,26 +170,37 @@ export function openDocument(fileId: string, contentUrl: string): Promise<PDFDoc
     iccUrl: `${ASSET_BASE}iccs/`,
     // `docBaseUrl` не задаётся намеренно: без него относительная ссылка внутри
     // документа не восстанавливается в абсолютную.
-  }).promise;
+  });
 
-  documents.set(fileId, task);
+  const promise = loading.promise;
+  documents.set(fileId, { task: loading, promise });
   // Неудачное открытие не должно застревать в кэше: следующий заход обязан
   // попробовать снова, иначе один сетевой сбой закрывает файл до перезагрузки.
-  task.catch(() => documents.delete(fileId));
-  return task;
+  promise.catch(() => documents.delete(fileId));
+  return promise;
 }
 
-/** Освобождение документов: вызывается при уходе с экрана разметки. */
+/**
+ * Освобождение документов: вызывается при уходе с экрана разметки.
+ *
+ * `destroy()`, а не `cleanup()`. Второй сбрасывает лишь промежуточные данные
+ * отрисовки, оставляя жить и `PDFDocumentProxy`, и его воркер, — то есть кэш
+ * очищался, а память нет, и следующий заход на экран поднимал ВТОРОЙ комплект
+ * поверх первого. Это ровно та утечка, о которой говорит вызывающий
+ * (`usePdfCacheCleanup`), и до сих пор она не закрывалась.
+ */
 export async function closeDocuments(): Promise<void> {
   const opened = [...documents.values()];
   documents.clear();
   await Promise.all(
-    opened.map(async (task) => {
+    opened.map(async (entry) => {
       try {
-        const document = await task;
-        await document.cleanup();
+        // Отклонение самого промиса гасится здесь же: `destroy()` его отвергает,
+        // если документ ещё не открылся, и это штатный исход ухода с экрана.
+        entry.promise.catch(() => undefined);
+        await entry.task.destroy();
       } catch {
-        // Документ не открылся — освобождать нечего.
+        // Документ не открылся либо уже освобождён — освобождать нечего.
       }
     }),
   );
