@@ -20,6 +20,7 @@ import {
   llmFieldsFor,
   type ExtractPage,
 } from './llm-extract.js';
+import { clipDocumentText } from './prompts.js';
 
 const PAGE: ExtractPage = {
   pageTextVersionId: '00000000-0000-4000-8000-000000000001',
@@ -179,5 +180,29 @@ describe('extractFieldsWithLlm', () => {
         PROMPT,
       ),
     ).rejects.toBeInstanceOf(LlmError);
+  });
+});
+
+describe('clipDocumentText', () => {
+  it('короткий документ не трогает', () => {
+    expect(clipDocumentText('шапка и подвал', 100)).toBe('шапка и подвал');
+  });
+
+  it('режет СЕРЕДИНУ, оставляя шапку и подвал', () => {
+    // Реквизиты живут по краям: «Изготовитель» в начале сертификата, подписи и
+    // дата в конце. Обрезка хвостом отняла бы ровно половину нужного.
+    const text = `ШАПКА${'x'.repeat(500)}ПОДВАЛ`;
+    const clipped = clipDocumentText(text, 100);
+
+    expect(clipped.startsWith('ШАПКА')).toBe(true);
+    expect(clipped.endsWith('ПОДВАЛ')).toBe(true);
+    expect(clipped).toContain('середина документа пропущена');
+  });
+
+  it('пропуск отмечен явно, а не молчаливым стыком', () => {
+    // Молчаливый разрыв читается моделью как соседство несоседних строк, и она
+    // честно сообщит о противоречии, которого в бумаге нет.
+    const clipped = clipDocumentText('A'.repeat(400), 50);
+    expect(clipped).toContain('[середина документа пропущена]');
   });
 });
