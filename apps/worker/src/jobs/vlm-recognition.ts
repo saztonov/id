@@ -208,6 +208,16 @@ export interface VlmRecognizeBlockInput {
   readonly cropPng: Uint8Array;
   readonly pageNumber: number;
   readonly downscale?: ((png: Uint8Array) => Promise<Uint8Array>) | undefined;
+  /**
+   * Выдача участка страницы по запросу модели (ADR-0013, S21).
+   *
+   * Зеркалит `RecognizeBlockInput.requestCrop` из `@id/api`: тип объявлен
+   * здесь по тому же принципу, что и остальные поля этого интерфейса —
+   * структурная копия, а не импорт, чтобы обработчик проверялся без пакета
+   * api. Отсутствие означает, что инструмент модели не объявляется вовсе.
+   */
+  readonly requestCrop?:
+    ((rect: readonly [number, number, number, number]) => Promise<Uint8Array | null>) | undefined;
 }
 
 export type VlmRecognizeBlockOutcome =
@@ -879,9 +889,15 @@ export function createVlmStartHandler(
         dedupeKey: `vlm.recognize_page:${run.runId}:${page.workingPageIndex}`,
       });
     }
+    // Признак сквозного прогона доезжает до финализации: именно она решает,
+    // ставить ли анализ. Страницам он не нужен — они ничего дальше не ставят.
     await ctx.enqueue({
       type: 'vlm.finalize_run',
-      payload: { revisionId: run.revisionId, recognitionRunId: run.runId },
+      payload: {
+        revisionId: run.revisionId,
+        recognitionRunId: run.runId,
+        ...(ctx.payload.autoContinue === true ? { autoContinue: true } : {}),
+      },
       dedupeKey: `vlm.finalize_run:${run.runId}`,
     });
 
@@ -1217,6 +1233,28 @@ export function createVlmRecognizePageHandler(
               cropPng: cropResult.png,
               pageNumber: pageIndex + 1,
               downscale: deps.downscale,
+              /**
+               * Кроп по запросу модели (ADR-0013, S21).
+               *
+               * Режется из ТОЙ ЖЕ страницы, что и основной кроп: `outPath` —
+               * уже отрендеренный растр, и второй рендер ради дозапроса стоил
+               * бы столько же, сколько первый. Полигон не передаётся — модель
+               * просит прямоугольник, и маскировать в нём нечего.
+               *
+               * Вырожденный участок отдаётся как `null`: `recognizeBlock`
+               * превратит его во внятный отказ инструмента, а не в исключение,
+               * — модель обязана узнать, что кропа не будет.
+               */
+              requestCrop: async (rect) => {
+                const extra = await deps.crop({
+                  pagePngPath: outPath,
+                  pageWidthPx: rendered.widthPx,
+                  pageHeightPx: rendered.heightPx,
+                  coordsNorm: rect,
+                  polygon: null,
+                });
+                return 'degenerate' in extra ? null : extra.png;
+              },
             });
           } catch (error) {
             await recordFailureAiRun(
@@ -1607,5 +1645,30 @@ export function createVlmFinalizeHandler(deps: VlmRecognitionDeps): JobHandler<'
       'результат VLM-распознавания собран, провалидирован и опубликован',
     );
     await ctx.emit('recognition.export_stored', { recognitionRunId: run.runId, ...finalCounts });
+
+    await continueWithAnalysis(ctx);
+  });
+}
+
+/**
+ * Переход «распознавание → анализ» при сквозном прогоне (S21).
+ *
+ * До S21 здесь стояло только `ctx.emit`, и это было тихой ловушкой: событие
+ * доставляется ЭКРАНУ, задачу оно не ставит. Цепочка обрывалась, а выглядело
+ * так, будто «сообщили дальше по конвейеру» — экран показывал «распознано», и
+ * дальше не происходило ничего, пока человек не нажимал «Собрать документы».
+ *
+ * Ставится ПОСЛЕ публикации и только после неё: `doc.classify_pages` читает
+ * `page_text_versions`, и запуск до транзакции публикации дал бы отказ
+ * «завершённого прогона распознавания нет» на прогоне, который вот-вот
+ * завершится. Dry-run (`ai.dry_run_only`) сюда не доходит вовсе — он выходит
+ * раньше, ничего не опубликовав, и анализировать ему нечего.
+ */
+async function continueWithAnalysis(ctx: JobContext<'vlm.finalize_run'>): Promise<void> {
+  if (ctx.payload.autoContinue !== true) return;
+  await ctx.enqueue({
+    type: 'doc.classify_pages',
+    payload: { revisionId: ctx.payload.revisionId, autoContinue: true },
+    dedupeKey: `doc.classify_pages:${ctx.payload.revisionId}`,
   });
 }

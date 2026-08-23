@@ -781,14 +781,29 @@ describe('изоляция подрядчиков', () => {
     expect(blank.statusCode).toBe(404);
   });
 
-  it('инженер не загружает файлы: состав поставки формирует подрядчик', async () => {
+  // До S21 инженер получал здесь 403: состав поставки формировал только тот,
+  // кто её подаёт. Заказчик посылку снял — исправленную версию вправе загрузить
+  // и проверяющий. Рубежом остаётся область видимости, и следующий сценарий
+  // проверяет, что она не ослабла.
+  it('инженер объекта загружает файлы в ревизию', async () => {
     const response = await as(
       KC.engineer,
       'POST',
       `/api/v1/revisions/${REVISION_DRAFT}/files/upload/init`,
       { fileName: 'Правка инженера.pdf', sizeBytes: 1024 },
     );
-    expect(response.statusCode).toBe(403);
+    expect(response.statusCode).toBe(201);
+  });
+
+  it('инженер без назначенных объектов файлы не загружает', async () => {
+    const response = await as(
+      KC.engineerBlank,
+      'POST',
+      `/api/v1/revisions/${REVISION_DRAFT}/files/upload/init`,
+      { fileName: 'Чужая правка.pdf', sizeBytes: 1024 },
+    );
+    // 404, а не 403: ревизии вне области видимости для него не существует.
+    expect(response.statusCode).toBe(404);
   });
 
   it('талон одного пользователя не работает у другого', async () => {

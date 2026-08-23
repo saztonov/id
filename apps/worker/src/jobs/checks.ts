@@ -264,10 +264,15 @@ export function createChecksRunHandler(deps: ChecksDeps): JobHandler<'checks.run
       findings: saved.written,
     });
 
+    // Между прогоном правил и сводкой встаёт ИИ-проверка заполнения (S21):
+    // её замечания принадлежат ЭТОМУ же прогону, и сводка обязана считаться
+    // уже с ними. Сводку ставит она сама — в том числе когда пропускает себя
+    // (нет промта, нет провайдера), иначе конвейер обрывался бы ровно там, где
+    // внешняя модель не настроена.
     await ctx.enqueue({
-      type: 'checks.summarize',
+      type: 'checks.llm_review',
       payload: { revisionId, validationRunId: run.id },
-      dedupeKey: `checks.summarize:${run.id}`,
+      dedupeKey: `checks.llm_review:${run.id}`,
     });
   };
 }

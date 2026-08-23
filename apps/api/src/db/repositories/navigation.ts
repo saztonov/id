@@ -26,13 +26,17 @@
  *
  * Из различия следует граница правки, и она та же, что держат триггеры 0008:
  *
- * * СОСТАВ (файлы, их порядок, подача, следующая ревизия) правит только ведущая
- *   организация — `requireManagedByActor`;
+ * * СОСТАВ (файлы, их порядок, подача, следующая ревизия) правит ведущая
+ *   организация — либо проверяющий за неё, с пометкой в аудите
+ *   (`requireManagedByActor`);
  * * ПРОИЗВОДНОЕ (разметка, распознавание, документы, реквизиты) правит любой,
  *   у кого есть право и область.
  *
  * Без этого различия генподрядчик, видящий все комплекты объекта, мог бы
- * дозагрузить файл в чужой черновик — то есть подать от чужого имени.
+ * дозагрузить файл в чужой черновик — то есть подать от чужого имени. Именно
+ * ЭТО различие и осталось; закрытость состава для проверяющих снята на S21
+ * (заказчик: загрузить исправленную версию вправе все пять ролей), и их рубежом
+ * служит область видимости.
  *
  * ## Видимость реестра шире видимости его состава
  *
@@ -257,11 +261,23 @@ export function resolveActingContractor(
     };
   }
 
-  throw forbidden(
-    'Комплект заводится от имени организации-подрядчика. У текущей области видимости ' +
-      'организации нет.',
-    { logDetail: `создание комплекта при области ${scope.kind}` },
-  );
+  // Проверяющий (инженер, руководитель, администратор) организации не имеет, и
+  // придумать её здесь нечем: `managed_by_contractor_id` ссылается на
+  // `counterparties`, а область видимости у него объектная. Поэтому исполнитель
+  // ОБЯЗАН быть назван, и он же становится ведущей организацией — иначе
+  // подрядчик не смог бы потом дозагрузить в этот комплект исправленную версию,
+  // то есть портал завёл бы ему комплект, в который он не может писать.
+  if (requested === undefined || requested === null) {
+    throw badRequest(
+      'Укажите организацию-исполнителя: у вашей области видимости своей организации нет.',
+      { logDetail: `создание комплекта без contractorId при области ${scope.kind}` },
+    );
+  }
+  return {
+    contractorId: requested,
+    managedByContractorId: requested,
+    onBehalfOf: true,
+  };
 }
 
 /**
@@ -284,18 +300,28 @@ async function requireVisibleObject(
 }
 
 /**
- * Правка СОСТАВА комплекта разрешена только ведущей организации.
+ * Правка СОСТАВА комплекта: своя организация — или проверяющий за неё.
  *
- * Отделено от области видимости намеренно: генподрядчик видит все комплекты
- * своих объектов и обязан их видеть — иначе собрать реестр не из чего. Но
- * видеть и дозагружать файл в чужой черновик — разные права. Проверяющие
- * (инженер, руководитель, администратор) состав не правят вовсе, у них своё
- * право на производное.
+ * Граница между организациями осталась ровно та же, что задал ADR-0011:
+ * генподрядчик видит все комплекты своих объектов и обязан их видеть (иначе
+ * собрать реестр не из чего), но дозагрузить файл в черновик СОСЕДНЕЙ
+ * организации не может — это значило бы подать за него работу, которую он не
+ * выполнял.
+ *
+ * Изменилось другое: проверяющим (инженер, руководитель, администратор) правка
+ * состава открыта. ADR-0011 §3 закрывал её им наглухо, исходя из «подаёт тот,
+ * кто выполнил»; заказчик эту посылку снял — загрузить исправленную версию
+ * вправе все пять ролей. Область видимости при этом остаётся единственным
+ * рубежом для них, и она уже узкая: у инженера — назначенные объекты.
+ *
+ * Возвращает `onBehalfOf`, а не `void`: подача за другую организацию обязана
+ * быть видна в журнале — это единственный путь, которым в портале появляется
+ * работа, поданная не тем, кто её выполнил. Вызывающий кладёт флаг в аудит.
  */
 export function requireManagedByActor(
   scope: AuthScope,
   work: { readonly managedByContractorId: string; readonly contractorId: string },
-): void {
+): { readonly onBehalfOf: boolean } {
   if (scope.kind === 'contractor' || scope.kind === 'general_contractor') {
     if (work.managedByContractorId !== scope.contractorId) {
       throw forbidden(
@@ -304,11 +330,11 @@ export function requireManagedByActor(
         { logDetail: 'правка состава комплекта чужой организацией' },
       );
     }
-    return;
+    return { onBehalfOf: work.contractorId !== scope.contractorId };
   }
-  throw forbidden('Состав комплекта правит организация, которая его ведёт.', {
-    logDetail: `правка состава при области ${scope.kind}`,
-  });
+  // Проверяющий организации не имеет вовсе, поэтому его правка состава — всегда
+  // действие за исполнителя, и всегда помеченное.
+  return { onBehalfOf: true };
 }
 
 // =====================================================================
@@ -533,7 +559,7 @@ export async function updateWork(
 ): Promise<Work | null> {
   const work = await findWork(db, scope, workId);
   if (work === null) return null;
-  requireManagedByActor(scope, work);
+  const { onBehalfOf } = requireManagedByActor(scope, work);
 
   const fields = {
     ...(patch.title === undefined ? {} : { title: patch.title }),
@@ -556,7 +582,7 @@ export async function updateWork(
         entityType: 'work',
         entityId: workId,
         objectId: work.objectId,
-        payload: fields,
+        payload: { ...fields, onBehalfOf },
       });
     }),
   );
@@ -693,7 +719,7 @@ export async function createDraftRevision(
 ): Promise<SubmissionRevision> {
   const work = await findWork(db, scope, workId);
   if (work === null) throw notFound('Комплект не найден.');
-  requireManagedByActor(scope, work);
+  const { onBehalfOf } = requireManagedByActor(scope, work);
 
   const latest = await db
     .select({
@@ -759,6 +785,7 @@ export async function createDraftRevision(
           workId: work.id,
           revisionNo: revision.revisionNo,
           parentRevisionId: revision.parentRevisionId,
+          onBehalfOf,
         },
       });
 

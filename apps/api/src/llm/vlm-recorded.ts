@@ -99,6 +99,10 @@ export class RecordedVlmProvider implements VlmPort {
 
     return {
       text: recorded.text,
+      // Офлайн-двойник инструментов не воспроизводит: записанный ответ — это
+      // окончательный ответ, а круг «модель попросила кроп» без живого шлюза
+      // воспроизвести нечем. Пустой список честнее выдуманного вызова.
+      toolCalls: [],
       model: recorded.model ?? model,
       requestedModel: model,
       provider: PROVIDER,

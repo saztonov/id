@@ -75,6 +75,14 @@ export interface RevisionWorkflowView {
   readonly aggregateManifestHash: string | null;
   readonly version: number;
   readonly submittedAt: string | null;
+  /**
+   * Кто подал ревизию на проверку.
+   *
+   * Нужен согласованию: с S21 подать вправе все пять ролей, и без этого поля
+   * инженер, загрузивший исправление за подрядчика, согласовал бы собственную
+   * подачу (см. `approveRevision`).
+   */
+  readonly submittedBy: string | null;
   readonly decidedAt: string | null;
   readonly returnReason: string | null;
 }
@@ -95,6 +103,7 @@ const REVISION_SELECTION = {
   aggregateManifestHash: submissionRevisions.aggregateManifestHash,
   version: submissionRevisions.version,
   submittedAt: iso(submissionRevisions.submittedAt, 'submitted_at_iso'),
+  submittedBy: submissionRevisions.submittedBy,
   decidedAt: iso(submissionRevisions.decidedAt, 'decided_at_iso'),
   returnReason: submissionRevisions.returnReason,
 };
@@ -642,6 +651,33 @@ export async function approveRevision(
   input: WorkflowActionInput,
 ): Promise<WorkflowResult> {
   const revision = await requireRevision(db, scope, input.revisionId);
+
+  /**
+   * Подавший не согласует собственную подачу.
+   *
+   * До S21 запрет держался сам собой: подавать могли только подрядчик и
+   * генподрядчик, согласовывать — только инженер и руководитель, и пересечься
+   * ролям было негде. Заказчик разрешил подавать всем пяти ролям, и пересечение
+   * появилось: инженер, загрузивший исправление за подрядчика без учётной
+   * записи, оказался бы и подающим, и согласующим.
+   *
+   * Проверка по ПОЛЬЗОВАТЕЛЮ, а не по роли: второй инженер того же объекта
+   * согласует такую ревизию свободно, и это верно — разделение требуется между
+   * людьми, а не между должностями (§4.1, тот же принцип, по которому
+   * администратор не согласует без роли `manager`, а генподрядчик не принимает
+   * папку, которую сам передал).
+   */
+  if (revision.submittedBy !== null && revision.submittedBy === input.actorUserId) {
+    throw conflict(
+      'Согласовать ревизию, поданную вами же, нельзя: решение принимает другой ' +
+        'проверяющий. Это разделение обязанностей, а не ограничение прав.',
+    );
+  }
+
+  // Предусловия — ПОСЛЕ проверки актора и списком, а не первым отказом.
+  // Порядок именно такой: «поданную вами же» не изменится от того, что
+  // подрядчик устранит замечания, и сообщать о ней после списка блокеров
+  // значило бы отправить человека чинить то, что не откроет ему это действие.
   const readiness = await loadRevisionReadiness(db, scope, input.revisionId);
   const blockers = approveBlockers(revision, readiness);
   if (blockers.length > 0) {

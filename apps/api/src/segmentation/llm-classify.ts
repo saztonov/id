@@ -195,7 +195,14 @@ function normalizeQuote(quote: string): string {
  * одинаковых нельзя, а отказываться от подтверждённой цитаты из-за её
  * повторяемости — значит терять верные ответы на страницах с таблицами.
  */
-export function locateQuote(page: PageInput, quote: string): TextEvidence | null {
+export function locateQuote(
+  // Структурный минимум, а не `PageInput`: отображению цитаты нужны ровно текст
+  // и версия, в которой измеряется span. Извлечение реквизитов (§8.4) работает
+  // со страницами документа, у которых остальных полей `PageInput` нет вовсе, а
+  // выдумывать их ради вызова значило бы подсунуть сюда неправду.
+  page: { readonly pageTextVersionId: string | null; readonly text: string },
+  quote: string,
+): TextEvidence | null {
   if (page.pageTextVersionId === null) return null;
   const needle = normalizeQuote(quote);
   if (needle.length === 0) return null;

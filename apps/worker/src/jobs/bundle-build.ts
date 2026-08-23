@@ -175,6 +175,24 @@ export class BundleBuildError extends Error {
   }
 }
 
+/**
+ * Продолжение разметкой, если сборку заказала кнопка «Разметить» (S21).
+ *
+ * Ставится звено `layout.start`, а не детекция напрямую: черновик разметки
+ * создаётся от `bundleId`, и до этой минуты его не существовало. Ключ
+ * идемпотентности — по ревизии: три выхода обработчика (переиспользование,
+ * переиспользование из прошлой ревизии, свежая сборка) ведут сюда, и все три
+ * обязаны дать одну задачу, а не три.
+ */
+async function continueWithMarkup(ctx: JobContext<'bundle.build'>): Promise<void> {
+  if (ctx.payload.startMarkup !== true) return;
+  await ctx.enqueue({
+    type: 'layout.start',
+    payload: { revisionId: ctx.payload.revisionId },
+    dedupeKey: `layout.start:${ctx.payload.revisionId}`,
+  });
+}
+
 export function createBundleBuildHandler(deps: BundleBuildDeps): JobHandler<'bundle.build'> {
   return async (ctx: JobContext<'bundle.build'>): Promise<void> => {
     const { revisionId } = ctx.payload;
@@ -216,6 +234,7 @@ export function createBundleBuildHandler(deps: BundleBuildDeps): JobHandler<'bun
         pageCount: existing.pageCount,
         reused: true,
       });
+      await continueWithMarkup(ctx);
       return;
     }
 
@@ -274,6 +293,7 @@ export function createBundleBuildHandler(deps: BundleBuildDeps): JobHandler<'bun
           reused: true,
           reusedFromRevisionId: reusable.revisionId,
         });
+        await continueWithMarkup(ctx);
         return;
       }
 
@@ -349,6 +369,7 @@ export function createBundleBuildHandler(deps: BundleBuildDeps): JobHandler<'bun
         fileCount: files.length,
         reused: !created,
       });
+      await continueWithMarkup(ctx);
     } finally {
       // Временные копии удаляются всегда: на 86 МБ комплектах оставленный
       // каталог кончается заполненным диском воркера, а не предупреждением.

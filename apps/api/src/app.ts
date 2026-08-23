@@ -107,6 +107,7 @@ import { registerNavigationRoutes } from './modules/navigation/routes.js';
 import { registerFileRoutes } from './modules/files/routes.js';
 import { registerBundleRoutes } from './modules/bundles/routes.js';
 import { registerCheckRoutes } from './modules/checks/routes.js';
+import { registerPipelineRoutes } from './modules/pipeline/routes.js';
 import { registerLayoutRoutes } from './modules/layout/routes.js';
 import { registerRecognitionRoutes } from './modules/recognition/routes.js';
 import { registerDocumentRoutes } from './modules/documents/routes.js';
@@ -679,6 +680,10 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppInstan
   // Рабочий документ ревизии: сборка (§6.1, подстадия 1) и карта страниц (§3.3).
   registerBundleRoutes(app);
   registerCheckRoutes(app);
+  // Две кнопки S21 «Разметить» и «Проверить»: сквозной прогон конвейера вместо
+  // шести остановок. Регистрируется рядом с гранулярными маршрутами, которые
+  // никуда не делись, — ручной путь инженера остался как был.
+  registerPipelineRoutes(app);
   // Разметка: кнопка «Разметить файл», ревизии разметки, правка блоков и
   // заморозка (§6.1, §7). Маршрут, не зарегистрированный здесь, недостижим —
   // это ровно тот отказ, которым закончились S3 и S5.

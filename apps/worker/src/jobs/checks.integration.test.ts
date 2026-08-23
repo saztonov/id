@@ -797,11 +797,18 @@ describe('задачи 20–21 действительно исполняются
     expect(runs[0]?.finished_at).toBeNull();
   });
 
-  it('задача 20 сама поставила задачу 21, и та тоже исполняется', async () => {
+  it('задача 20 сама поставила ИИ-проверку, а та — сводку, и обе исполняются', async () => {
+    // С S21 между прогоном правил и сводкой стоит `checks.llm_review`: её
+    // замечания принадлежат тому же прогону, и сводка обязана считаться уже с
+    // ними. Провайдера модели в тесте нет, поэтому стадия честно пропускает
+    // себя — и ВСЁ РАВНО ставит сводку. Именно это здесь и проверяется: обрыв
+    // цепочки на ненастроенной модели был бы конвейером, который «работает,
+    // пока модель настроена».
     const queued = await testDb.query<{ type: string; status: string }>(
-      `SELECT type, status FROM jobs WHERE type = 'checks.summarize'`,
+      `SELECT type, status FROM jobs WHERE type IN ('checks.llm_review', 'checks.summarize')
+        ORDER BY type`,
     );
-    expect(queued).toHaveLength(1);
+    expect(queued.map((row) => row.type)).toEqual(['checks.llm_review']);
     expect(queued[0]?.status).toBe('queued');
 
     await drainQueue();
@@ -809,6 +816,7 @@ describe('задачи 20–21 действительно исполняются
     const types = await testDb.query<{ job_type: string; outcome: string | null }>(
       `SELECT job_type, outcome FROM job_runs ORDER BY job_type`,
     );
+    expect(types.map((row) => row.job_type)).toContain('checks.llm_review');
     expect(types.map((row) => row.job_type)).toContain('checks.summarize');
     expect(types.every((row) => row.outcome === 'succeeded')).toBe(true);
 

@@ -35,6 +35,7 @@ import { DocumentsTab } from '../documents/DocumentsTab.js';
 import { FieldsTab } from '../fields/FieldsTab.js';
 import { ChecksTab } from '../checks/ChecksTab.js';
 import { HistoryTab } from '../history/HistoryTab.js';
+import { PipelineBar } from './PipelineBar.js';
 import { RevisionStreamProvider } from './stream.js';
 import { StreamIndicator } from './StreamIndicator.js';
 
@@ -126,6 +127,13 @@ function RevisionWorkspace({ revisionId }: { revisionId: string }): ReactNode {
         }
       />
       <WorkLine workId={revision.workId} />
+
+      {/*
+        Две кнопки конвейера стоят НАД вкладками: они относятся к ревизии
+        целиком, и «Проверить» с вкладки «Файлы» делает ровно то же, что с
+        вкладки «Проверка». Внутри вкладки их пришлось бы искать.
+      */}
+      <PipelineBar revisionId={revisionId} editable={derivedEditable} />
 
       {!sourceEditable && (
         <Alert

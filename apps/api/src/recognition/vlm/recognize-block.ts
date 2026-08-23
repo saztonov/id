@@ -38,9 +38,20 @@ import type { RecognitionBlock } from '@id/recognition';
 import type { ZodError } from 'zod';
 
 import { LlmPayloadTooLargeError } from '../../llm/port.js';
-import type { VlmJsonSchemaFormat, VlmPort, VlmRequest, VlmResponse } from '../../llm/vlm-port.js';
+import type {
+  VlmJsonSchemaFormat,
+  VlmPort,
+  VlmRequest,
+  VlmResponse,
+  VlmToolExchange,
+} from '../../llm/vlm-port.js';
 
-import { mapImageResponse, mapStampResponse, mapTextResponse, type VlmBlockContext } from './map.js';
+import {
+  mapImageResponse,
+  mapStampResponse,
+  mapTextResponse,
+  type VlmBlockContext,
+} from './map.js';
 import {
   CORRECTIVE_INSTRUCTION,
   classifyFailure,
@@ -98,6 +109,91 @@ export interface RecognizeBlockInput {
   readonly pageNumber: number;
   /** Инъекция воркера (там sharp); отсутствие = downscale-повтора не будет. */
   readonly downscale?: ((png: Uint8Array) => Promise<Uint8Array>) | undefined;
+  /**
+   * Выдача участка ТОЙ ЖЕ страницы по запросу модели (ADR-0013, S21).
+   *
+   * Инъекция, а не импорт: резать умеет sharp, живущий в воркере. Отсутствие
+   * означает, что инструмент модели вообще не объявляется — она о нём не
+   * узнает и попросить не сможет.
+   *
+   * Координаты нормированы к странице (0..1), как `coordsNorm` блока. Отказ
+   * (`null`) — законный ответ: участок вне листа или вырожден. Он доезжает до
+   * модели текстом, а не молчанием, иначе она будет ждать кроп, которого нет.
+   */
+  readonly requestCrop?:
+    ((rect: readonly [number, number, number, number]) => Promise<Uint8Array | null>) | undefined;
+}
+
+/**
+ * Потолок дозапросов на один блок.
+ *
+ * Два — не «на всякий случай», а граница платности: каждый круг это полный
+ * повторный вызов со всем диалогом в теле, то есть растущая цена. Модель,
+ * которой двух взглядов на соседний участок не хватило, третьим не
+ * воспользуется — она зациклилась, и платить за это должен потолок, а не
+ * заказчик.
+ */
+export const MAX_CROP_REQUESTS = 2;
+
+/** Имя инструмента: на него смотрит разбор ответа и промт. */
+export const REQUEST_CROP_TOOL = 'request_crop';
+
+/**
+ * Объявление инструмента.
+ *
+ * Границы участка нормированы к странице, как координаты блоков, — модель уже
+ * видит их в этой системе и не обязана знать про пиксели растра, DPI и поворот.
+ */
+export const REQUEST_CROP_TOOL_SPEC = {
+  name: REQUEST_CROP_TOOL,
+  description:
+    'Показать другой участок ТОЙ ЖЕ страницы. Пользуйся, только если содержимое ' +
+    'присланного кропа обрезано или неразборчиво и соседний участок нужен, чтобы ' +
+    'прочитать его дословно. Не пользуйся, чтобы восстановить смысл по контексту.',
+  parameters: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['x0', 'y0', 'x1', 'y1'],
+    properties: {
+      x0: { type: 'number', minimum: 0, maximum: 1, description: 'Левая граница, доля ширины' },
+      y0: { type: 'number', minimum: 0, maximum: 1, description: 'Верхняя граница, доля высоты' },
+      x1: { type: 'number', minimum: 0, maximum: 1, description: 'Правая граница, доля ширины' },
+      y1: { type: 'number', minimum: 0, maximum: 1, description: 'Нижняя граница, доля высоты' },
+    },
+  },
+} as const;
+
+/** Разбор аргументов инструмента: всё, что не прямоугольник, — отказ с причиной. */
+export function parseCropRect(
+  argumentsJson: string,
+): { rect: readonly [number, number, number, number] } | { error: string } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(argumentsJson);
+  } catch {
+    return { error: 'аргументы инструмента не являются JSON' };
+  }
+  if (parsed === null || typeof parsed !== 'object') {
+    return { error: 'аргументы инструмента не являются объектом' };
+  }
+  const record = parsed as Record<string, unknown>;
+  const read = (key: string): number | null => {
+    const value = record[key];
+    return typeof value === 'number' && Number.isFinite(value) ? value : null;
+  };
+  const x0 = read('x0');
+  const y0 = read('y0');
+  const x1 = read('x1');
+  const y1 = read('y1');
+  if (x0 === null || y0 === null || x1 === null || y1 === null) {
+    return { error: 'нужны четыре числа: x0, y0, x1, y1' };
+  }
+  // Границы листа и вырожденность проверяются здесь, а не в резчике: отказ
+  // обязан быть внятным для модели, а не «sharp не смог».
+  const inRange = [x0, y0, x1, y1].every((value) => value >= 0 && value <= 1);
+  if (!inRange) return { error: 'координаты выходят за пределы листа (допустимо 0..1)' };
+  if (x1 <= x0 || y1 <= y0) return { error: 'участок вырожден: x1>x0 и y1>y0 обязательны' };
+  return { rect: [x0, y0, x1, y1] };
 }
 
 /**
@@ -130,8 +226,21 @@ export async function recognizeBlock(input: RecognizeBlockInput): Promise<VlmBlo
   // корректирующего повтора: раз тело не влезло один раз, не влезет и второй.
   let png = input.cropPng;
   let downscaleUsed = false;
+  /** Сколько кругов дозапроса состоялось: уходит в предупреждения исхода. */
+  let cropRequests = 0;
 
-  const call = async (systemPrompt: string): Promise<VlmResponse> => {
+  /**
+   * Один вызов модели с уже состоявшимися кругами дозапроса.
+   *
+   * Диалог передаётся целиком: у шлюза нет состояния, а `X-Idempotency-Key`
+   * считается по каноническому входу — круги обязаны в него входить, иначе
+   * второй вызов склеится с первым и вернёт тот же запрос кропа (см.
+   * `vlm-prompt.ts`, версия канонизации 2).
+   */
+  const callOnce = async (
+    systemPrompt: string,
+    exchanges: readonly VlmToolExchange[],
+  ): Promise<VlmResponse> => {
     const request = (): VlmRequest => ({
       stage: 'recognize',
       promptCode: input.prompt.code,
@@ -145,6 +254,10 @@ export async function recognizeBlock(input: RecognizeBlockInput): Promise<VlmBlo
       temperature: input.prompt.temperature,
       maxTokens: input.prompt.maxTokens,
       topK: input.prompt.topK,
+      // Инструмент объявляется, только если его есть чем исполнить: модель,
+      // которой пообещали кроп и не дали, застрянет на запросе.
+      ...(input.requestCrop !== undefined ? { tools: [REQUEST_CROP_TOOL_SPEC] } : {}),
+      ...(exchanges.length > 0 ? { exchanges } : {}),
     });
     try {
       return await input.vlm.complete(request());
@@ -158,6 +271,52 @@ export async function recognizeBlock(input: RecognizeBlockInput): Promise<VlmBlo
     }
   };
 
+  /**
+   * Вызов с отработкой дозапросов кропов до окончательного ответа.
+   *
+   * Возвращает ПОСЛЕДНИЙ ответ. Если потолок кругов исчерпан, а модель всё ещё
+   * просит кроп, ответ отдаётся как есть: его `toolCalls` непусты, и это
+   * различает `interpret` — «просила и не дождалась» не то же самое, что
+   * «ответила пусто».
+   */
+  const call = async (systemPrompt: string): Promise<VlmResponse> => {
+    const exchanges: VlmToolExchange[] = [];
+    let response = await callOnce(systemPrompt, exchanges);
+
+    while (response.toolCalls.length > 0 && input.requestCrop !== undefined) {
+      if (exchanges.length >= MAX_CROP_REQUESTS) break;
+      cropRequests += 1;
+
+      const results: VlmToolExchange['results'][number][] = [];
+      for (const toolCall of response.toolCalls) {
+        if (toolCall.name !== REQUEST_CROP_TOOL) {
+          results.push({
+            toolCallId: toolCall.id,
+            text: `Инструмент «${toolCall.name}» не существует.`,
+            images: [],
+          });
+          continue;
+        }
+        const parsedRect = parseCropRect(toolCall.argumentsJson);
+        if ('error' in parsedRect) {
+          results.push({ toolCallId: toolCall.id, text: parsedRect.error, images: [] });
+          continue;
+        }
+        const cropped = await input.requestCrop(parsedRect.rect);
+        results.push(
+          cropped === null
+            ? { toolCallId: toolCall.id, text: 'Участок вырезать не удалось.', images: [] }
+            : { toolCallId: toolCall.id, text: 'Участок приложен.', images: [{ png: cropped }] },
+        );
+      }
+
+      exchanges.push({ calls: response.toolCalls, results });
+      response = await callOnce(systemPrompt, exchanges);
+    }
+
+    return response;
+  };
+
   /** `null` — жанровая ошибка, разрешён корректирующий повтор. */
   const interpret = (response: VlmResponse, allowGenreRetry: boolean): VlmBlockOutcome | null => {
     const finish = response.finishReason;
@@ -167,6 +326,17 @@ export async function recognizeBlock(input: RecognizeBlockInput): Promise<VlmBlo
       return {
         kind: 'model_refusal',
         reason: `finish_reason=${finish}: модель не завершила ответ`,
+        response,
+      };
+    }
+    if (response.toolCalls.length > 0) {
+      // Модель всё ещё просит кроп, а круги исчерпаны (либо инструмент не
+      // подключён). Это НЕ пустой ответ: текста нет потому, что она ещё не
+      // говорила по существу, и путать эти два случая нельзя — чинятся они
+      // разным (потолок кругов против промта и схемы).
+      return {
+        kind: 'model_refusal',
+        reason: `модель запрашивает дополнительный кроп после ${String(cropRequests)} кругов: потолок исчерпан`,
         response,
       };
     }
@@ -208,7 +378,12 @@ export async function recognizeBlock(input: RecognizeBlockInput): Promise<VlmBlo
       validation: BlockValidation,
     ): VlmBlockOutcome | null => {
       if (validation.invalid !== null) return finishInvalid(validation.invalid);
-      return { kind: 'ok', block, raw, response, warnings: [...validation.warnings] };
+      const warnings = [...validation.warnings];
+      // Дозапрос кропа — не дефект, но факт, влияющий на цену и на доверие к
+      // результату: он обязан быть виден в предупреждениях прогона, а не
+      // только в счётчиках шлюза.
+      if (cropRequests > 0) warnings.push(`crop_requests=${String(cropRequests)}`);
+      return { kind: 'ok', block, raw, response, warnings };
     };
 
     const schemaFailure = (error: ZodError): VlmBlockOutcome | null => {
@@ -221,7 +396,11 @@ export async function recognizeBlock(input: RecognizeBlockInput): Promise<VlmBlo
       case 'text': {
         const result = vlmTextResponseSchema.safeParse(parsed);
         if (!result.success) return schemaFailure(result.error);
-        return complete(mapTextResponse(result.data, context), result.data, validateText(result.data));
+        return complete(
+          mapTextResponse(result.data, context),
+          result.data,
+          validateText(result.data),
+        );
       }
       case 'image': {
         const result = vlmImageResponseSchema.safeParse(parsed);

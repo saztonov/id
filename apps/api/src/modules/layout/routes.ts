@@ -25,20 +25,19 @@
  * видимости применяется в репозитории на КАЖДОМ пути: подрядчик не видит чужую
  * разметку ни списком, ни по прямому идентификатору.
  */
-import type { FastifyReply, FastifyRequest } from 'fastify';
+import type { FastifyReply } from 'fastify';
+import type { Logger } from 'pino';
 import type { AppInstance } from '../../app.js';
-import type { AuthScope } from '../../auth/scope.js';
 import { conflict, notFound } from '../../lib/problem.js';
 import { requireIfMatch } from '../../lib/http-headers.js';
 import { currentAuth } from '../../middleware/require-auth.js';
 import { requirePermission } from '../../middleware/require-permission.js';
-import { tracePayload, updateContext } from '../../observability/context.js';
+import { updateContext } from '../../observability/context.js';
 import { listBundlePages, listBundles } from '../../db/repositories/bundles.js';
 import {
   applyFullPageTextProfile,
   createLayoutBlock,
   deleteLayoutBlock,
-  ensureDraftLayout,
   findLayoutRevision,
   freezeLayout,
   listLayoutBlocks,
@@ -48,10 +47,8 @@ import {
   updateLayoutBlock,
   type LayoutRevisionView,
 } from '../../db/repositories/layout.js';
-import { enqueueJob } from '../../db/repositories/jobs.js';
-import { dedupeKeyFor } from '../../jobs/types.js';
-import { DETECT_BATCH_LIMIT } from '../../integrations/rdweb/legacy-adapter.js';
 import { readDetectionSettings } from '../../config/portal-settings.js';
+import { enqueueDetectBatches, enqueueLocalDetectBatches, startMarkupOnBundle } from './start.js';
 import {
   blockCreateSchema,
   blockMutationResponseSchema,
@@ -132,6 +129,11 @@ function registerStartRoute(app: AppInstance): void {
       // а не на исходные файлы. Отсутствие bundle — это ответ пользователю
       // сейчас («сначала соберите рабочий документ»), а не задача, которая
       // упадёт через минуту с тем же текстом.
+      //
+      // Кнопка S21 «Разметить» (`POST /revisions/{id}/markup`) этого отказа не
+      // видит: она сама ставит сборку и продолжает разметкой. Здесь он остаётся
+      // потому, что это ГРАНУЛЯРНЫЙ маршрут ручного пути — он делает ровно то,
+      // что назвали, и молча делать за пользователя ещё и сборку не должен.
       const bundles = await listBundles(app.db, scope, revisionId);
       const bundle = bundles[bundles.length - 1];
       if (bundle === undefined) {
@@ -142,82 +144,24 @@ function registerStartRoute(app: AppInstance): void {
       }
       updateContext({ revisionId });
 
-      const { layout, created } = await ensureDraftLayout(app.db, scope, {
+      const started = await startMarkupOnBundle(app.db, scope, {
         revisionId,
         bundleId: bundle.id,
+        previewCached: app.env.PREVIEW_MODE === 'cached',
+        logger: request.log as unknown as Logger,
       });
 
-      // Ветвление детекции (ADR-0008): локальный RF-DETR не создаёт RD-документ
-      // и не ходит в RD WEB вовсе. Настройка читается на постановке; идущие
-      // задачи её смену не видят — у них цель уже в payload.
-      const detection = await readDetectionSettings(app.db);
-      if (detection.provider === 'local') {
-        if (app.env.PREVIEW_MODE === 'cached') {
-          // Кэш превью брал картинки у RD WEB; при локальной детекции его
-          // взять неоткуда — экран работает через pdf.js (ADR-0008).
-          request.log.warn(
-            { event: 'preview_cached_unavailable_local_detection' },
-            'PREVIEW_MODE=cached недоступен при локальной детекции: превью рендерит браузер',
-          );
-        }
-        const pages = (await listBundlePages(app.db, scope, bundle.id)).map(
-          (page) => page.workingPageIndex,
-        );
-        if (pages.length === 0) throw conflict('У рабочего документа нет карты страниц.');
-        const jobIds = await enqueueLocalDetectBatches(
-          app,
-          request,
-          scope,
-          { id: layout.id, revisionId },
-          pages,
-          false,
-        );
-        return withVersion(reply, layout.version)
-          .code(202)
-          .send({
-            layoutRevisionId: layout.id,
-            bundleId: bundle.id,
-            created,
-            // Схема ответа отдаёт одну задачу; у локальной ветки их страница к
-            // странице — наружу уходит первая, остальные видны в консоли задач.
-            jobId: jobIds[0] ?? '',
-            jobCreated: true,
-          });
-      }
-
-      // Постановка первой задачи цепочки §12 (задача 4). Ключ идемпотентности —
-      // по ревизии разметки: повторное нажатие кнопки не должно порождать
-      // второй RD-документ.
-      const { jobId, created: jobCreated } = await enqueueJob(app.db, scope, {
-        type: 'rd.create_run_document',
-        // Ревизия разметки — в payload, а не «найдётся по bundle»: пока задача
-        // ждёт в очереди, черновик может смениться (заморозка №1 → создание №2),
-        // и задача отработала бы по чужой цели.
-        payload: tracePayload({
-          revisionId,
-          bundleId: bundle.id,
-          layoutRevisionId: layout.id,
-        }),
-        dedupeKey: dedupeKeyFor('rd.create_run_document', layout.id),
-      });
-
-      request.log.info(
-        {
-          event: 'job_enqueued',
-          job_type: 'rd.create_run_document',
-          job_id: jobId,
-          created: jobCreated,
-        },
-        'цепочка разметки поставлена в очередь',
-      );
-
-      return withVersion(reply, layout.version).code(202).send({
-        layoutRevisionId: layout.id,
-        bundleId: bundle.id,
-        created,
-        jobId,
-        jobCreated,
-      });
+      return withVersion(reply, started.version)
+        .code(202)
+        .send({
+          layoutRevisionId: started.layoutRevisionId,
+          bundleId: started.bundleId,
+          created: started.created,
+          // Схема ответа отдаёт одну задачу; у локальной ветки их страница к
+          // странице — наружу уходит первая, остальные видны в консоли задач.
+          jobId: started.jobIds[0] ?? '',
+          jobCreated: started.jobsCreated,
+        });
     },
   );
 }
@@ -500,10 +444,17 @@ function registerPageRoutes(app: AppInstance): void {
       if (pages.length === 0) throw conflict('У рабочего документа нет карты страниц.');
 
       const detection = await readDetectionSettings(app.db);
+      const batch = {
+        layoutRevisionId: layout.id,
+        revisionId: layout.revisionId,
+        pages,
+        logger: request.log as unknown as Logger,
+      };
       const jobIds =
         detection.provider === 'local'
-          ? await enqueueLocalDetectBatches(app, request, scope, layout, pages, true)
-          : await enqueueDetectBatches(app, request, scope, layout, pages);
+          ? (await enqueueLocalDetectBatches(app.db, scope, { ...batch, overwriteExisting: true }))
+              .jobIds
+          : await enqueueDetectBatches(app.db, scope, batch);
       return reply.code(202).send({
         layoutRevisionId: layout.id,
         batches: jobIds.length,
@@ -511,92 +462,6 @@ function registerPageRoutes(app: AppInstance): void {
       });
     },
   );
-}
-
-/**
- * Разбиение комплекта на пачки детекции.
- *
- * Одна задача = одна пачка: у их синхронного вызова есть потолок страниц, а
- * задача, обходящая весь комплект в цикле, держала бы аренду минутами и при
- * падении переигрывала бы уже сделанное. Ключ идемпотентности включает границы
- * пачки, поэтому повторное нажатие не удваивает очередь.
- */
-async function enqueueDetectBatches(
-  app: AppInstance,
-  request: FastifyRequest,
-  scope: AuthScope,
-  layout: LayoutRevisionView,
-  pages: readonly number[],
-): Promise<string[]> {
-  const jobIds: string[] = [];
-  for (let offset = 0; offset < pages.length; offset += DETECT_BATCH_LIMIT) {
-    const batch = pages.slice(offset, offset + DETECT_BATCH_LIMIT);
-    const { jobId } = await enqueueJob(app.db, scope, {
-      type: 'layout.detect_pages',
-      payload: tracePayload({
-        revisionId: layout.revisionId,
-        layoutRevisionId: layout.id,
-        pageIndices: batch,
-        overwriteExisting: true,
-      }),
-      // Метка `overwrite` входит в ключ: без неё нажатие кнопки склеилось бы с
-      // уже стоящей в очереди пачкой первичной цепочки, и флаг потерялся бы.
-      dedupeKey: dedupeKeyFor(
-        'layout.detect_pages',
-        layout.id,
-        `${String(batch[0])}-${String(batch[batch.length - 1])}`,
-        'overwrite',
-      ),
-    });
-    jobIds.push(jobId);
-  }
-  request.log.info(
-    { event: 'job_enqueued', job_type: 'layout.detect_pages', batches: jobIds.length },
-    'детекция поставлена пачками',
-  );
-  return jobIds;
-}
-
-/**
- * Пачки ЛОКАЛЬНОЙ детекции (ADR-0008) — ветка `detection.provider='local'`.
- *
- * Одна страница = одна задача: рендер 300 DPI и ONNX-инференс держат ядро и
- * сотни мегабайт, а checkpoint по уже размеченным страницам делает повтор
- * упавшей задачи дешёвым ровно тогда, когда задача маленькая. Потолок пачки
- * RD WEB здесь ни при чём — он был свойством их синхронного API.
- */
-async function enqueueLocalDetectBatches(
-  app: AppInstance,
-  request: FastifyRequest,
-  scope: AuthScope,
-  layout: { readonly id: string; readonly revisionId: string },
-  pages: readonly number[],
-  overwriteExisting: boolean,
-): Promise<string[]> {
-  const jobIds: string[] = [];
-  for (const pageIndex of pages) {
-    const { jobId } = await enqueueJob(app.db, scope, {
-      type: 'layout.detect_local',
-      payload: tracePayload({
-        revisionId: layout.revisionId,
-        layoutRevisionId: layout.id,
-        pageIndices: [pageIndex],
-        ...(overwriteExisting ? { overwriteExisting: true } : {}),
-      }),
-      dedupeKey: dedupeKeyFor(
-        'layout.detect_local',
-        layout.id,
-        String(pageIndex),
-        ...(overwriteExisting ? ['overwrite'] : []),
-      ),
-    });
-    jobIds.push(jobId);
-  }
-  request.log.info(
-    { event: 'job_enqueued', job_type: 'layout.detect_local', batches: jobIds.length },
-    'локальная детекция поставлена постранично',
-  );
-  return jobIds;
 }
 
 // =====================================================================

@@ -1,0 +1,504 @@
+/**
+ * Две кнопки конвейера через HTTP на собранном приложении (S21).
+ *
+ * Поднимается штатный `buildApp()`; ни одна функция репозитория не вызывается
+ * напрямую. Проверяется не «эндпоинт отвечает 202», а последствия — по ТАБЛИЦАМ,
+ * потому что весь смысл этих кнопок в том, что за одним нажатием встаёт
+ * несколько задач:
+ *
+ * 1. **«Разметить» без рабочего документа ставит сборку с признаком
+ *    продолжения.** Прежний гранулярный маршрут в этом месте отвечал 409, и
+ *    именно этот отказ кнопка обязана убрать — иначе кнопок снова две.
+ * 2. **«Разметить» при готовом рабочем документе размечает сразу**, не гоняя
+ *    сборку второй раз.
+ * 3. **«Проверить» замораживает черновую разметку сама** и ставит распознавание
+ *    с признаком сквозного прогона: без признака цепочка оборвалась бы после
+ *    распознавания, и «Проверить» не проверяла бы.
+ * 4. **«Проверить» без разметки отказывает внятно**, называя первую кнопку.
+ * 5. **Повторное нажатие при идущем распознавании не плодит второй прогон.**
+ * 6. **Изоляция** (§1.6, non-degradable): чужая ревизия недостижима обеими
+ *    кнопками.
+ * 7. **Право `pipeline.run` выдано всем пяти ролям** — проверяется на инженере,
+ *    которому до S21 состав ревизии был закрыт наглухо.
+ */
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+import type { LightMyRequestResponse } from 'fastify';
+import type { Pool } from 'pg';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+
+import { createPgliteDatabase, createTestPool, type TestDatabase } from '@id/db-harness';
+import { loadMigrations } from '@id/migrator';
+
+import { buildApp, type AppInstance } from '../../app.js';
+import { CSRF_COOKIE, CSRF_HEADER, LOGIN_COOKIE, SESSION_COOKIE } from '../../auth/session.js';
+import { loadEnv } from '../../config/env.js';
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..', '..');
+const MIGRATIONS_DIR = join(ROOT, 'migrations');
+
+// =====================================================================
+// Фикстура
+// =====================================================================
+
+function id(n: number): string {
+  return `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
+}
+
+const ORG_CUSTOMER = id(1);
+const ORG_A = id(2);
+const ORG_B = id(3);
+const OBJECT = id(4);
+
+/** Комплект с готовым рабочим документом: «Проверить» идёт по нему. */
+const WORK_READY = id(10);
+const REVISION_READY = id(11);
+/** Комплект с файлами, но без рабочего документа: «Разметить» ставит сборку. */
+const WORK_BARE = id(12);
+const REVISION_BARE = id(13);
+/** Чужой комплект: недостижим обеими кнопками. */
+const WORK_OTHER = id(14);
+const REVISION_OTHER = id(15);
+
+const USER_A = id(20);
+const USER_B = id(21);
+const USER_ENGINEER = id(22);
+
+const FILE_READY = id(30);
+const FILE_BARE = id(31);
+const FILE_OTHER = id(32);
+const PAGE_READY = id(40);
+const PAGE_BARE = id(41);
+const PAGE_OTHER = id(42);
+const BUNDLE_READY = id(50);
+const LAYOUT_READY = id(51);
+const BLOCK_READY = id(52);
+
+const SHA_READY = 'a'.repeat(64);
+const SHA_WORKING = 'b'.repeat(64);
+const SHA_BARE = 'c'.repeat(64);
+const SHA_OTHER = 'd'.repeat(64);
+
+const VLM_MODEL = 'qwen/qwen3-vl-235b';
+
+const KC = {
+  a: 'kc-pipeline-a',
+  b: 'kc-pipeline-b',
+  engineer: 'kc-pipeline-engineer',
+} as const;
+
+/**
+ * Хэш манифеста считается тем же кодом, что и в бою.
+ *
+ * Захардкоженное значение разошлось бы с `computeAggregateManifestHash()`
+ * молча, и маршрут «Разметить» счёл бы готовый рабочий документ чужим
+ * составом — то есть проверял бы не ту ветку, ради которой написан.
+ */
+let manifestHash: (sha: string) => string;
+
+const STORAGE_DIR = mkdtempSync(join(tmpdir(), 'id-pipeline-tests-'));
+
+const TEST_ENV = loadEnv({
+  NODE_ENV: 'test',
+  PUBLIC_URL: 'http://localhost:3000',
+  DATABASE_URL: 'postgresql://pglite/id-portal-tests',
+  AUTH_MODE: 'dev-stub',
+  CSRF_SECRET: 'csrf-secret-of-pipeline-tests-0123456',
+  STORAGE_DRIVER: 'local',
+  LOCAL_STORAGE_DIR: STORAGE_DIR,
+  AUDIT_HMAC_KEY: 'audit-hmac-key-of-pipeline-tests',
+  RATE_LIMIT_MAX: '100000',
+  LLM_MODEL_ALLOWLIST: VLM_MODEL,
+});
+
+let db: TestDatabase;
+let app: AppInstance;
+
+beforeAll(async () => {
+  const { computeAggregateManifestHash } = await import('../../db/repositories/bundles.js');
+  manifestHash = (sha: string) => computeAggregateManifestHash([{ blobSha256: sha, sortOrder: 0 }]);
+
+  db = await createPgliteDatabase();
+  for (const migration of loadMigrations(MIGRATIONS_DIR)) {
+    await db.exec(migration.sql);
+  }
+
+  const fixture: readonly string[] = [
+    `INSERT INTO counterparties (id, name, kind) VALUES ('${ORG_CUSTOMER}', 'ООО «Застройщик»', 'customer')`,
+    `INSERT INTO counterparties (id, name, kind) VALUES ('${ORG_A}', 'ООО «Подрядчик А»', 'contractor')`,
+    `INSERT INTO counterparties (id, name, kind) VALUES ('${ORG_B}', 'ООО «Подрядчик Б»', 'contractor')`,
+    `INSERT INTO construction_objects (id, code, name, full_name)
+       VALUES ('${OBJECT}', 'TST01', 'Объект 1', 'ЖК «Тест», корпус 1')`,
+    `INSERT INTO sections (code, name) VALUES ('roofing', 'Кровля') ON CONFLICT (code) DO NOTHING`,
+    `INSERT INTO object_sections (object_id, section_code)
+       VALUES ('${OBJECT}', 'roofing') ON CONFLICT DO NOTHING`,
+
+    `INSERT INTO users (id, kc_sub, full_name, contractor_id)
+       VALUES ('${USER_A}', '${KC.a}', 'Сотрудник А', '${ORG_A}')`,
+    `INSERT INTO users (id, kc_sub, full_name, contractor_id)
+       VALUES ('${USER_B}', '${KC.b}', 'Сотрудник Б', '${ORG_B}')`,
+    `INSERT INTO users (id, kc_sub, full_name) VALUES ('${USER_ENGINEER}', '${KC.engineer}', 'Инженер')`,
+    `INSERT INTO user_roles (user_id, role) VALUES ('${USER_A}', 'contractor')`,
+    `INSERT INTO user_roles (user_id, role) VALUES ('${USER_B}', 'contractor')`,
+    `INSERT INTO user_roles (user_id, role) VALUES ('${USER_ENGINEER}', 'engineer')`,
+    `INSERT INTO user_object_scopes (user_id, object_id) VALUES ('${USER_ENGINEER}', '${OBJECT}')`,
+
+    `INSERT INTO object_contractors (object_id, contractor_id)
+       VALUES ('${OBJECT}', '${ORG_A}') ON CONFLICT DO NOTHING`,
+    `INSERT INTO object_contractors (object_id, contractor_id)
+       VALUES ('${OBJECT}', '${ORG_B}') ON CONFLICT DO NOTHING`,
+
+    // --- Комплект с готовым рабочим документом и черновой разметкой ---
+    `INSERT INTO works
+       (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
+       VALUES ('${WORK_READY}', '${OBJECT}', '${ORG_A}', '${ORG_A}', 'roofing', DATE '2026-01-01', 'Готовый комплект', '${USER_A}')`,
+    `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
+       VALUES ('${REVISION_READY}', '${WORK_READY}', '${OBJECT}', '${ORG_A}', 1, 'draft')`,
+    `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
+       VALUES ('${SHA_READY}', 'blobs/${SHA_READY}', 2048, 'application/pdf')`,
+    `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
+       VALUES ('${SHA_WORKING}', 'blobs/${SHA_WORKING}', 4096, 'application/pdf')`,
+    `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order, verify_state)
+       VALUES ('${FILE_READY}', '${REVISION_READY}', '${SHA_READY}', 'АОСР.pdf', 0, 'ok')`,
+    `INSERT INTO source_pages (id, revision_id, source_file_id, file_page_index, revision_ordinal, width_px, height_px, rotation)
+       VALUES ('${PAGE_READY}', '${REVISION_READY}', '${FILE_READY}', 0, 0, 1654, 2339, 0)`,
+
+    // --- Комплект без рабочего документа ---
+    `INSERT INTO works
+       (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
+       VALUES ('${WORK_BARE}', '${OBJECT}', '${ORG_A}', '${ORG_A}', 'roofing', DATE '2026-01-01', 'Комплект без сборки', '${USER_A}')`,
+    `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
+       VALUES ('${REVISION_BARE}', '${WORK_BARE}', '${OBJECT}', '${ORG_A}', 1, 'draft')`,
+    `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
+       VALUES ('${SHA_BARE}', 'blobs/${SHA_BARE}', 1024, 'application/pdf')`,
+    `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order, verify_state)
+       VALUES ('${FILE_BARE}', '${REVISION_BARE}', '${SHA_BARE}', 'Без сборки.pdf', 0, 'ok')`,
+    `INSERT INTO source_pages (id, revision_id, source_file_id, file_page_index, revision_ordinal, width_px, height_px, rotation)
+       VALUES ('${PAGE_BARE}', '${REVISION_BARE}', '${FILE_BARE}', 0, 0, 1654, 2339, 0)`,
+
+    // --- Чужой комплект ---
+    `INSERT INTO works
+       (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
+       VALUES ('${WORK_OTHER}', '${OBJECT}', '${ORG_B}', '${ORG_B}', 'roofing', DATE '2026-01-01', 'Чужой комплект', '${USER_B}')`,
+    `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
+       VALUES ('${REVISION_OTHER}', '${WORK_OTHER}', '${OBJECT}', '${ORG_B}', 1, 'draft')`,
+    `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
+       VALUES ('${SHA_OTHER}', 'blobs/${SHA_OTHER}', 512, 'application/pdf')`,
+    `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order, verify_state)
+       VALUES ('${FILE_OTHER}', '${REVISION_OTHER}', '${SHA_OTHER}', 'Чужой.pdf', 0, 'ok')`,
+    `INSERT INTO source_pages (id, revision_id, source_file_id, file_page_index, revision_ordinal, width_px, height_px, rotation)
+       VALUES ('${PAGE_OTHER}', '${REVISION_OTHER}', '${FILE_OTHER}', 0, 0, 1654, 2339, 0)`,
+
+    // Распознавание — через VLM: у ветки RD WEB нет RD-документа, и прогон
+    // отказал бы по причине, к этим маршрутам отношения не имеющей.
+    `INSERT INTO app_settings (key, value) VALUES ('recognition.provider', '"openrouter_vlm"')`,
+    `INSERT INTO app_settings (key, value) VALUES ('recognition.vlm_model', '"${VLM_MODEL}"')`,
+  ];
+
+  for (const statement of fixture) {
+    await db.query(statement);
+  }
+
+  // Рабочий документ готового комплекта — с НАСТОЯЩИМ хэшем манифеста.
+  await db.query(
+    `INSERT INTO processing_bundles (id, revision_id, aggregate_manifest_hash, working_pdf_blob_sha256, builder_version)
+       VALUES ('${BUNDLE_READY}', '${REVISION_READY}', '${manifestHash(SHA_READY)}', '${SHA_WORKING}', 'bundle/1+pdf-lib')`,
+  );
+  await db.query(
+    `INSERT INTO processing_bundle_pages (bundle_id, revision_id, working_page_index, source_page_id)
+       VALUES ('${BUNDLE_READY}', '${REVISION_READY}', 0, '${PAGE_READY}')`,
+  );
+  await db.query(
+    `INSERT INTO layout_revisions (id, revision_id, object_id, bundle_id, revision_no, state)
+       VALUES ('${LAYOUT_READY}', '${REVISION_READY}', '${OBJECT}', '${BUNDLE_READY}', 1, 'draft')`,
+  );
+  await db.query(
+    `INSERT INTO layout_blocks
+       (id, layout_revision_id, revision_id, bundle_id, source_page_id, working_page_index, object_id,
+        block_type, shape_type, x0, y0, x1, y1, sort_order, source, detector_provenance)
+       VALUES ('${BLOCK_READY}', '${LAYOUT_READY}', '${REVISION_READY}', '${BUNDLE_READY}', '${PAGE_READY}', 0,
+               '${OBJECT}', 'text', 'rectangle', 0.1, 0.1, 0.9, 0.4, 0, 'auto', 'rf_detr')`,
+  );
+
+  app = await buildApp({ env: TEST_ENV, pool: createTestPool(db) as unknown as Pool });
+  await app.ready();
+}, 180_000);
+
+afterAll(async () => {
+  await app.close();
+  await db.close();
+  rmSync(STORAGE_DIR, { recursive: true, force: true });
+});
+
+// =====================================================================
+// Вход и запросы
+// =====================================================================
+
+type Method = 'GET' | 'POST';
+
+interface SignedIn {
+  readonly cookie: string;
+  readonly csrfToken: string;
+}
+
+function cookieOf(response: LightMyRequestResponse, name: string): string {
+  const found = response.cookies.filter((cookie) => cookie.name === name).at(-1);
+  if (found === undefined || found.value === '') throw new Error(`В ответе нет cookie ${name}`);
+  return found.value;
+}
+
+function cookieHeader(response: LightMyRequestResponse, name: string): string {
+  return `${name}=${encodeURIComponent(cookieOf(response, name))}`;
+}
+
+function locationOf(response: LightMyRequestResponse): string {
+  const value = response.headers['location'];
+  if (typeof value !== 'string') throw new Error('В ответе нет заголовка location');
+  return value;
+}
+
+async function signIn(kcSub: string): Promise<SignedIn> {
+  const started = await app.inject({
+    method: 'GET',
+    url: `/auth/login?devSub=${encodeURIComponent(kcSub)}`,
+  });
+  const authorizationUrl = new URL(locationOf(started));
+  const completed = await app.inject({
+    method: 'GET',
+    url: `${authorizationUrl.pathname}${authorizationUrl.search}`,
+    headers: { cookie: cookieHeader(started, LOGIN_COOKIE) },
+  });
+  return {
+    cookie: cookieHeader(completed, SESSION_COOKIE),
+    csrfToken: cookieOf(completed, CSRF_COOKIE),
+  };
+}
+
+const signedIn = new Map<string, SignedIn>();
+
+async function as(
+  kcSub: string,
+  method: Method,
+  url: string,
+  options: { readonly idempotencyKey?: string } = {},
+): Promise<LightMyRequestResponse> {
+  let session = signedIn.get(kcSub);
+  if (session === undefined) {
+    session = await signIn(kcSub);
+    signedIn.set(kcSub, session);
+  }
+  return app.inject({
+    method,
+    url,
+    headers: {
+      cookie: session.cookie,
+      [CSRF_HEADER]: session.csrfToken,
+      ...(options.idempotencyKey === undefined
+        ? {}
+        : { 'idempotency-key': options.idempotencyKey }),
+    },
+  });
+}
+
+interface JobRow {
+  readonly type: string;
+  readonly payload: { readonly autoContinue?: boolean; readonly startMarkup?: boolean };
+}
+
+async function jobsOf(revisionId: string): Promise<readonly JobRow[]> {
+  return db.query<JobRow>(
+    `SELECT type, payload FROM jobs WHERE payload->>'revisionId' = '${revisionId}' ORDER BY type`,
+  );
+}
+
+async function layoutStateOf(layoutId: string): Promise<string> {
+  const rows = await db.query<{ state: string }>(
+    `SELECT state FROM layout_revisions WHERE id = '${layoutId}'`,
+  );
+  return rows[0]?.state ?? 'нет строки';
+}
+
+// =====================================================================
+// Кнопка «Разметить»
+// =====================================================================
+
+describe('POST /revisions/{id}/markup', () => {
+  it('без рабочего документа ставит сборку с признаком продолжения разметкой', async () => {
+    const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_BARE}/markup`);
+    expect(response.statusCode).toBe(202);
+
+    const body = response.json<{ bundleReady: boolean; layoutRevisionId: string | null }>();
+    expect(body.bundleReady).toBe(false);
+    expect(body.layoutRevisionId).toBeNull();
+
+    // Признак в payload — единственное, что отличает эту сборку от нажатия
+    // «Собрать рабочий документ»: по нему обработчик поставит `layout.start`.
+    const jobs = await jobsOf(REVISION_BARE);
+    const build = jobs.find((job) => job.type === 'bundle.build');
+    expect(build).toBeDefined();
+    expect(build?.payload.startMarkup).toBe(true);
+  });
+
+  it('при готовом рабочем документе размечает сразу, без второй сборки', async () => {
+    const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_READY}/markup`);
+    expect(response.statusCode).toBe(202);
+
+    const body = response.json<{ bundleReady: boolean; layoutRevisionId: string | null }>();
+    expect(body.bundleReady).toBe(true);
+    // Черновик разметки у ревизии уже есть — берётся он, а не создаётся второй.
+    expect(body.layoutRevisionId).toBe(LAYOUT_READY);
+
+    const jobs = await jobsOf(REVISION_READY);
+    expect(jobs.some((job) => job.type === 'bundle.build')).toBe(false);
+    expect(jobs.some((job) => job.type.startsWith('rd.') || job.type.startsWith('layout.'))).toBe(
+      true,
+    );
+  });
+
+  it('чужая ревизия недостижима', async () => {
+    const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_OTHER}/markup`);
+    expect(response.statusCode).toBe(404);
+  });
+});
+
+// =====================================================================
+// Кнопка «Проверить»
+// =====================================================================
+
+describe('POST /revisions/{id}/check', () => {
+  it('без разметки отказывает и называет первую кнопку', async () => {
+    const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_BARE}/check`, {
+      idempotencyKey: 'check-bare-1',
+    });
+    expect(response.statusCode).toBe(409);
+    expect(response.json<{ detail: string }>().detail).toContain('Разметить');
+  });
+
+  it('замораживает черновую разметку и ставит распознавание со сквозным признаком', async () => {
+    expect(await layoutStateOf(LAYOUT_READY)).toBe('draft');
+
+    const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_READY}/check`, {
+      idempotencyKey: 'check-ready-1',
+    });
+    expect(response.statusCode).toBe(202);
+
+    const body = response.json<{
+      stage: string;
+      frozen: boolean;
+      recognitionRunId: string | null;
+    }>();
+    expect(body.stage).toBe('recognition');
+    expect(body.frozen).toBe(true);
+    expect(body.recognitionRunId).not.toBeNull();
+
+    // Заморозка — не обещание в ответе, а факт в таблице.
+    expect(await layoutStateOf(LAYOUT_READY)).toBe('frozen');
+
+    // Признак сквозного прогона — то, ради чего кнопка существует: без него
+    // цепочка встала бы после распознавания, и «Проверить» не проверяла бы.
+    const jobs = await jobsOf(REVISION_READY);
+    const head = jobs.find((job) => job.type === 'vlm.start_recognition');
+    expect(head).toBeDefined();
+    expect(head?.payload.autoContinue).toBe(true);
+  });
+
+  it('повторное нажатие при идущем распознавании не плодит второй прогон', async () => {
+    const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_READY}/check`, {
+      idempotencyKey: 'check-ready-2',
+    });
+    expect(response.statusCode).toBe(409);
+
+    const runs = await db.query<{ count: string | number }>(
+      `SELECT count(*) AS count FROM recognition_runs WHERE revision_id = '${REVISION_READY}'`,
+    );
+    expect(Number(runs[0]?.count ?? 0)).toBe(1);
+  });
+
+  it('заголовок идемпотентности обязателен', async () => {
+    const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_READY}/check`);
+    expect(response.statusCode).toBe(400);
+  });
+
+  it('чужая ревизия недостижима', async () => {
+    const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_OTHER}/check`, {
+      idempotencyKey: 'check-other-1',
+    });
+    // 409 «разметки нет» тоже был бы утечкой: он отличал бы существующую чужую
+    // ревизию от несуществующей. Область отсекает раньше.
+    expect(response.statusCode).toBe(404);
+  });
+});
+
+// =====================================================================
+// Права
+// =====================================================================
+
+describe('право pipeline.run', () => {
+  it('инженеру объекта обе кнопки доступны', async () => {
+    // До S21 инженер получал 403 на любой правке состава. Кнопки конвейера
+    // правят производное и открыты ему наравне с подрядчиком.
+    const markup = await as(KC.engineer, 'POST', `/api/v1/revisions/${REVISION_BARE}/markup`);
+    expect(markup.statusCode).toBe(202);
+
+    const check = await as(KC.engineer, 'POST', `/api/v1/revisions/${REVISION_BARE}/check`, {
+      idempotencyKey: 'check-engineer-1',
+    });
+    // 409 «разметки нет», а не 403: право есть, не хватает разметки.
+    expect(check.statusCode).toBe(409);
+  });
+});
+
+// =====================================================================
+// Прогресс распознавания
+// =====================================================================
+
+describe('GET /recognition-runs/{id}/progress', () => {
+  it('отдаёт постраничные счётчики прогона', async () => {
+    const runs = await db.query<{ id: string }>(
+      `SELECT id FROM recognition_runs WHERE revision_id = '${REVISION_READY}' LIMIT 1`,
+    );
+    const runId = runs[0]?.id ?? '';
+    expect(runId).not.toBe('');
+
+    // Страницы сидирует `vlm.start_recognition`; здесь она вписывается прямо,
+    // потому что проверяется ВЫДАЧА, а не то, кто её заполнил.
+    await db.query(
+      `INSERT INTO recognition_run_pages
+         (recognition_run_id, working_page_index, status, blocks_total, blocks_recognized, blocks_invalid, blocks_refused)
+         VALUES ('${runId}', 0, 'done', 4, 3, 1, 0)`,
+    );
+    await db.query(
+      `INSERT INTO recognition_run_pages
+         (recognition_run_id, working_page_index, status, blocks_total, blocks_recognized, blocks_invalid, blocks_refused)
+         VALUES ('${runId}', 1, 'pending', 2, 0, 0, 0)`,
+    );
+
+    const response = await as(KC.a, 'GET', `/api/v1/recognition-runs/${runId}/progress`);
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      recognitionRunId: runId,
+      pagesTotal: 2,
+      pagesDone: 1,
+      pagesPending: 1,
+      pagesFailed: 0,
+      blocksTotal: 6,
+      blocksRecognized: 3,
+      blocksInvalid: 1,
+    });
+  });
+
+  it('чужой прогон недостижим', async () => {
+    const runs = await db.query<{ id: string }>(
+      `SELECT id FROM recognition_runs WHERE revision_id = '${REVISION_READY}' LIMIT 1`,
+    );
+    const response = await as(
+      KC.b,
+      'GET',
+      `/api/v1/recognition-runs/${runs[0]?.id ?? ''}/progress`,
+    );
+    expect(response.statusCode).toBe(404);
+  });
+});

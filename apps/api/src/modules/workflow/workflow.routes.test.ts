@@ -397,12 +397,20 @@ describe('права на действия согласования (§4.1)', ()
     expect(response.statusCode).toBe(403);
   });
 
-  it('инженер не подаёт комплект за подрядчика', async () => {
+  // До S21 здесь стоял 403: «состав формирует тот, кто подаёт». Заказчик
+  // посылку снял, и подача за подрядчика инженеру открыта — с пометкой
+  // `onBehalfOf` в аудите.
+  //
+  // Версия заведомо устаревшая, и это не небрежность: 412 доказывает, что
+  // запрос ПРОШЁЛ рубеж права (иначе `requirePermission` в `preHandler` ответил
+  // бы 403 раньше сверки версии), и при этом не переводит REVISION_A в
+  // `submitted` — её состояние проверяют следующие сценарии файла.
+  it('инженер подаёт комплект за подрядчика: право есть, спор идёт о версии', async () => {
     const response = await as(KC.engineer, 'POST', `/api/v1/revisions/${REVISION_A}/submit`, {
       body: {},
-      ifMatch: await versionOf(REVISION_A),
+      ifMatch: '99',
     });
-    expect(response.statusCode).toBe(403);
+    expect(response.statusCode).toBe(412);
   });
 });
 
@@ -606,6 +614,44 @@ describe('POST /revisions/{id}/approve', () => {
       `SELECT action FROM audit_log WHERE entity_id = '${REVISION_C}' AND action = 'revision.override'`,
     );
     expect(audit).toHaveLength(1);
+  });
+
+  it('подавший не согласует собственную подачу', async () => {
+    // С S21 подавать вправе все пять ролей, и пересечение «подал и согласовал»
+    // стало возможным впервые. Ревизия заводится ОТДЕЛЬНАЯ и сразу поданной
+    // инженером: `submitted_by` неизменяем на поданной ревизии (триггеры 0008),
+    // и подменить его у REVISION_C нельзя — что само по себе верно.
+    const work = id(80);
+    const revision = id(81);
+    await db.query(
+      `INSERT INTO works
+         (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
+       VALUES ('${work}', '${OBJECT}', '${ORG_A}', '${ORG_A}', 'roofing', DATE '2026-01-01',
+               'Комплект, поданный инженером', '${USER_ENGINEER}')`,
+    );
+    await db.query(
+      `INSERT INTO submission_revisions
+         (id, work_id, object_id, contractor_id, revision_no, status, submitted_at, submitted_by)
+       VALUES ('${revision}', '${work}', '${OBJECT}', '${ORG_A}', 1, 'submitted', now(), '${USER_ENGINEER}')`,
+    );
+
+    const response = await as(KC.engineer, 'POST', `/api/v1/revisions/${revision}/approve`, {
+      body: {},
+      ifMatch: await versionOf(revision),
+    });
+    expect(response.statusCode).toBe(409);
+    expect((response.json() as { detail: string }).detail).toContain('поданную вами же');
+    expect(await statusOf(revision)).toBe('submitted');
+
+    // Руководителю та же ревизия отказывает уже ПРЕДУСЛОВИЯМИ, а не актором:
+    // разделение требуется между людьми, а не между должностями, и запрет по
+    // подавшему на него не распространяется.
+    const byManager = await as(KC.manager, 'POST', `/api/v1/revisions/${revision}/approve`, {
+      body: {},
+      ifMatch: await versionOf(revision),
+    });
+    expect(byManager.statusCode).toBe(409);
+    expect((byManager.json() as { detail: string }).detail).not.toContain('поданную вами же');
   });
 
   it('согласование ставит сборку архива строкой в jobs (проверено по таблице)', async () => {

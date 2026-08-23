@@ -48,10 +48,13 @@ import {
   classifyPageWithLlm,
   decodeSegmentation,
   extractFields,
+  extractFieldsWithLlm,
+  llmFieldsFor,
   LlmError,
   matchRegistryRows,
   pagesNeedingLlm,
   parseAnnexRegistry,
+  renderExtractUserPrompt,
   renderUserPrompt,
   promptDocTypeCodes,
   type DocumentRelationInput,
@@ -91,6 +94,30 @@ export const SEGMENTATION_VERSION = 's8.1';
  * дали бы «опубликованного промта стадии нет» при заведённом промте.
  */
 export const PAGE_CLASSIFY_STAGE = 'page_classify';
+
+/**
+ * Стадия и код промта извлечения реквизитов моделью (§8.4, S21).
+ *
+ * Имя совпадает со стадией `ai_runs.stage`, у которой CHECK заведён ещё в 0004:
+ * `extract` там объявлен с самого начала, а кода за ним не стояло — поля с
+ * `extractor: 'llm'` не извлекал никто. Теперь стоит.
+ */
+export const FIELD_EXTRACT_STAGE = 'extract';
+
+/**
+ * Стадии, на которых портал обращается к ТЕКСТОВОЙ модели.
+ *
+ * Одно перечисление на все три, а не по одному на модуль: порт модели, запись
+ * `ai_runs` и чтение опубликованного промта у них общие, и разные типы стадии
+ * заставили бы приводить строку в месте связывания — то есть терять проверку
+ * ровно там, где она нужна. `check` принадлежит ИИ-проверке заполнения
+ * (`checks-llm-review.ts`), но объявлен здесь, потому что здесь объявлен порт.
+ */
+export type LlmTextStage =
+  typeof PAGE_CLASSIFY_STAGE | typeof FIELD_EXTRACT_STAGE | typeof LLM_REVIEW_STAGE;
+
+/** Стадия и код промта ИИ-проверки заполнения (§9.1, S21). */
+export const LLM_REVIEW_STAGE = 'check';
 
 /**
  * Опубликованный промт стадии.
@@ -180,8 +207,8 @@ export interface SegmentationDeps {
     readonly sourcePageId: string;
   }): Promise<{ readonly created: boolean; readonly occurrences: number }>;
 
-  /** Опубликованный промт стадии; `null` — фаза 2 пропускается. */
-  publishedPrompt(stage: 'page_classify'): Promise<PublishedPrompt | null>;
+  /** Опубликованный промт стадии; `null` — стадия модели пропускается. */
+  publishedPrompt(stage: LlmTextStage): Promise<PublishedPrompt | null>;
 
   /**
    * Вызов модели. `null` — провайдер не подключён.
@@ -192,7 +219,7 @@ export interface SegmentationDeps {
    */
   callLlm:
     | ((input: {
-        readonly stage: 'page_classify';
+        readonly stage: LlmTextStage;
         readonly promptCode: string;
         readonly promptVersion: number;
         readonly systemPrompt: string;
@@ -206,7 +233,7 @@ export interface SegmentationDeps {
   /** Строка `ai_runs`: только хэши и структурированный результат (§3.5). */
   recordAiRun(input: {
     readonly revisionId: string;
-    readonly stage: 'page_classify';
+    readonly stage: LlmTextStage;
     readonly provider: LlmProviderName;
     readonly model: string;
     readonly promptCode: string;
@@ -299,6 +326,34 @@ function toClassification(row: PageClassificationView): PageClassification {
           }
         : null,
   };
+}
+
+// =====================================================================
+// Сквозной прогон
+// =====================================================================
+
+/**
+ * Передача признака «доведи до конца» следующему звену цепочки (S21).
+ *
+ * Цепочка `classify → segment → extract → parse_registry → match_registry →
+ * graph.build` ставит себя сама, а решение «идти ли дальше в проверки»
+ * принимает человек ОДИН раз — нажатием «Проверить». Значит, признак обязан
+ * доехать от головы цепочки до её хвоста, и единственный способ сделать это
+ * честно — нести его в payload.
+ *
+ * Читать настройку заново на каждом звене нельзя: между первым звеном и
+ * шестым проходят минуты, настройку успевают сменить, и половина цепочки
+ * прошла бы по одному решению, а половина — по другому. Тем же соображением
+ * ADR-0007 пиннит провайдера и модель в снимке прогона.
+ *
+ * Поле опускается, когда его нет, а не пишется `false`: пошаговый путь
+ * инженера не должен отличаться от прежнего ни одним байтом payload — иначе
+ * ключи идемпотентности разъедутся с уже стоящими в очереди задачами.
+ */
+function forwardAutoContinue(ctx: {
+  readonly payload: { readonly autoContinue?: boolean | undefined };
+}): { autoContinue?: true } {
+  return ctx.payload.autoContinue === true ? { autoContinue: true } : {};
 }
 
 // =====================================================================
@@ -434,7 +489,7 @@ export function createClassifyPagesHandler(
 
     await ctx.enqueue({
       type: 'doc.segment',
-      payload: { revisionId },
+      payload: { revisionId, ...forwardAutoContinue(ctx) },
       dedupeKey: `doc.segment:${revisionId}`,
     });
   };
@@ -726,7 +781,7 @@ export function createSegmentHandler(deps: SegmentationDeps): JobHandler<'doc.se
 
     await ctx.enqueue({
       type: 'doc.extract_fields',
-      payload: { revisionId },
+      payload: { revisionId, ...forwardAutoContinue(ctx) },
       dedupeKey: `doc.extract_fields:${revisionId}`,
     });
   };
@@ -789,8 +844,16 @@ export function createExtractFieldsHandler(
       pagesOfDocument.set(assignment.documentId, list);
     }
 
+    // Промт стадии читается ОДИН раз на прогон, а не на документ: он один и тот
+    // же, а `publishedPrompt` ходит в базу. `null` — опубликованного промта нет,
+    // и LLM-ступень пропускается целиком; детерминированная работает как всегда.
+    const llmPrompt = await deps.publishedPrompt(FIELD_EXTRACT_STAGE);
+    let llmStop: string | null = null;
+
     let written = 0;
     let baseOnly = 0;
+    let llmFields = 0;
+    let llmProblems = 0;
     for (const document of targets) {
       const pageIds = pagesOfDocument.get(document.id) ?? [];
       const pages = pageIds
@@ -807,11 +870,40 @@ export function createExtractFieldsHandler(
         (document.typeConfidence ?? 0) >= TYPE_CONFIDENT_THRESHOLD;
       if (!typeConfident) baseOnly += 1;
 
-      const fields = extractFields({
-        docTypeCode: document.docTypeCode,
-        typeConfident,
-        pages,
-      });
+      const fields = [
+        ...extractFields({
+          docTypeCode: document.docTypeCode,
+          typeConfident,
+          pages,
+        }),
+      ];
+
+      // Вторая ступень: поля, у которых `extractor: 'llm'`. Она НЕ трогает уже
+      // извлечённое правилами — `llmFieldsFor` отбирает только свои коды, — и
+      // не роняет задачу: документ без ответа модели остаётся с базовыми
+      // реквизитами, ровно как до S21.
+      if (llmPrompt !== null && deps.callLlm !== null && llmStop === null) {
+        const outcome = await runLlmExtraction(deps, ctx, {
+          revisionId,
+          document,
+          typeConfident,
+          pages,
+          prompt: llmPrompt,
+        });
+        fields.push(...outcome.fields);
+        llmFields += outcome.fields.length;
+        llmProblems += outcome.problems.length;
+        // Отказ провайдера относится ко ВСЕМ последующим документам: исчерпанный
+        // бюджет или упавший шлюз не починятся к следующему из тридцати.
+        llmStop = outcome.stop;
+        if (outcome.problems.length > 0) {
+          ctx.logger.warn(
+            { documentId: document.id, problems: outcome.problems },
+            'часть значений модели не принята',
+          );
+        }
+      }
+
       const outcome = await deps.saveFieldValues({
         revisionId,
         documentId: document.id,
@@ -821,18 +913,165 @@ export function createExtractFieldsHandler(
       written += outcome.written;
     }
 
-    const counts = { documents: targets.length, fields: written, baseSchemaOnly: baseOnly };
+    if (llmStop !== null) {
+      ctx.logger.warn({ reason: llmStop }, 'ступень модели прервана: обход документов остановлен');
+    }
+
+    const counts = {
+      documents: targets.length,
+      fields: written,
+      baseSchemaOnly: baseOnly,
+      llm: {
+        used: llmPrompt !== null && deps.callLlm !== null,
+        fields: llmFields,
+        problems: llmProblems,
+        stopped: llmStop,
+      },
+    };
     ctx.logger.info({ counts }, 'реквизиты извлечены');
     await ctx.emit('documents.fields_extracted', counts);
 
     if (documentId === undefined) {
       await ctx.enqueue({
         type: 'doc.parse_registry',
-        payload: { revisionId },
+        payload: { revisionId, ...forwardAutoContinue(ctx) },
         dedupeKey: `doc.parse_registry:${revisionId}`,
       });
     }
   };
+}
+
+interface LlmExtractionResult {
+  readonly fields: readonly ExtractedFieldOfDocument[];
+  readonly problems: readonly string[];
+  /** Причина, по которой обход остальных документов бессмыслен, либо `null`. */
+  readonly stop: string | null;
+}
+
+/** Значение реквизита в форме, которую принимает `saveFieldValues`. */
+type ExtractedFieldOfDocument = ReturnType<typeof extractFields>[number];
+
+/**
+ * Ступень модели для одного документа.
+ *
+ * Отказ ОТВЕТА и отказ ПРОВАЙДЕРА разведены так же, как на фазе 2 сегментации,
+ * и по той же причине. Непригодный ответ — это пустой результат с названной
+ * причиной: документ остаётся с базовыми реквизитами, и остальные документы
+ * обрабатываются дальше. `LlmError` — это `stop`: исчерпанный бюджет или
+ * упавший шлюз не починятся к следующему документу из тридцати, а тридцать
+ * бесполезных вызовов будут оплачены заказчиком.
+ */
+async function runLlmExtraction(
+  deps: SegmentationDeps,
+  ctx: JobContext<'doc.extract_fields'>,
+  input: {
+    readonly revisionId: string;
+    readonly document: LogicalDocumentView;
+    readonly typeConfident: boolean;
+    readonly pages: readonly { readonly pageTextVersionId: string | null; readonly text: string }[];
+    readonly prompt: PublishedPrompt;
+  },
+): Promise<LlmExtractionResult> {
+  const call = deps.callLlm;
+  if (call === null) return { fields: [], problems: [], stop: null };
+
+  const wanted = llmFieldsFor({
+    docTypeCode: input.document.docTypeCode,
+    typeConfident: input.typeConfident,
+  });
+  if (wanted.length === 0) return { fields: [], problems: [], stop: null };
+
+  const userPrompt = renderExtractUserPrompt(
+    {
+      docTypeLabel: input.document.docTypeCode ?? 'не определён',
+      fields: wanted,
+      pages: input.pages,
+    },
+    input.prompt.userTemplate,
+  );
+
+  let recorded: LlmCallResult | null = null;
+  try {
+    const outcome = await extractFieldsWithLlm(
+      {
+        docTypeCode: input.document.docTypeCode,
+        typeConfident: input.typeConfident,
+        documentId: input.document.id,
+        pages: input.pages,
+      },
+      {
+        complete: async (request) => {
+          const response = await call({
+            stage: FIELD_EXTRACT_STAGE,
+            promptCode: input.prompt.code,
+            promptVersion: input.prompt.version,
+            systemPrompt: request.systemPrompt,
+            userPrompt: request.userPrompt,
+            schemaVersion: request.schemaVersion,
+            cacheContext: request.cacheContext,
+            model: input.prompt.modelOverride ?? undefined,
+          });
+          recorded = response;
+          return { text: response.text };
+        },
+      },
+      { system: input.prompt.systemPrompt, user: userPrompt },
+    );
+
+    await writeExtractAiRun(deps, ctx, input, recorded, {
+      documentId: input.document.id,
+      accepted: outcome.fields.length,
+      problems: outcome.problems,
+    });
+    return { fields: outcome.fields, problems: outcome.problems, stop: null };
+  } catch (error) {
+    if (error instanceof LlmError) {
+      await writeExtractAiRun(deps, ctx, input, recorded, {
+        documentId: input.document.id,
+        accepted: 0,
+        problems: [error.message],
+      });
+      return { fields: [], problems: [error.message], stop: error.message };
+    }
+    throw error;
+  }
+}
+
+/**
+ * Строка `ai_runs` стадии `extract`.
+ *
+ * Только хэши и структурированный итог: ни промта, ни ответа модели дословно
+ * (§3.5, требование D). Отдельная функция, а не общая с `page_classify`: у той
+ * структурированный итог описывает СТРАНИЦУ, и склеивать две формы в одну ради
+ * экономии двадцати строк значило бы делать оба журнала нечитаемыми.
+ */
+async function writeExtractAiRun(
+  deps: SegmentationDeps,
+  ctx: JobContext<'doc.extract_fields'>,
+  input: { readonly revisionId: string; readonly prompt: PublishedPrompt },
+  call: LlmCallResult | null,
+  structured: { documentId: string; accepted: number; problems: readonly string[] },
+): Promise<void> {
+  // Отказ до состоявшегося вызова: хэшей нет, и строка без них нарушила бы
+  // собственные CHECK'и `ai_runs`.
+  if (call === null) return;
+
+  await deps.recordAiRun({
+    revisionId: input.revisionId,
+    stage: FIELD_EXTRACT_STAGE,
+    provider: call.provider,
+    model: call.model,
+    promptCode: input.prompt.code,
+    promptVersion: input.prompt.version,
+    inputHash: call.inputHash,
+    outputHash: call.outputHash,
+    tokensIn: call.tokensIn,
+    tokensOut: call.tokensOut,
+    cost: call.cost,
+    latencyMs: call.latencyMs,
+    structuredResult: structured,
+    requestId: ctx.payload.request_id ?? null,
+  });
 }
 
 // =====================================================================
@@ -898,7 +1137,7 @@ export function createParseRegistryHandler(
 
     await ctx.enqueue({
       type: 'doc.match_registry',
-      payload: { revisionId },
+      payload: { revisionId, ...forwardAutoContinue(ctx) },
       dedupeKey: `doc.match_registry:${revisionId}`,
     });
   };
@@ -940,7 +1179,7 @@ export function createMatchRegistryHandler(
       await ctx.emit('documents.registry_matched', counts);
       await ctx.enqueue({
         type: 'graph.build',
-        payload: { revisionId },
+        payload: { revisionId, ...forwardAutoContinue(ctx) },
         dedupeKey: `graph.build:${revisionId}`,
       });
       return;
@@ -1023,7 +1262,7 @@ export function createMatchRegistryHandler(
 
     await ctx.enqueue({
       type: 'graph.build',
-      payload: { revisionId },
+      payload: { revisionId, ...forwardAutoContinue(ctx) },
       dedupeKey: `graph.build:${revisionId}`,
     });
   };
@@ -1149,5 +1388,17 @@ export function createGraphBuildHandler(deps: SegmentationDeps): JobHandler<'gra
     };
     ctx.logger.info({ counts }, 'граф документов построен');
     await ctx.emit('documents.graph_built', counts);
+
+    // Хвост цепочки анализа. До S21 он был терминальным, и прогон правил
+    // человек запускал шестой кнопкой; теперь при сквозном прогоне он идёт
+    // сам. Ключ идемпотентности — по ревизии: пересобранная нарезка не должна
+    // порождать второй прогон правил, пока первый ещё в очереди.
+    if (ctx.payload.autoContinue === true) {
+      await ctx.enqueue({
+        type: 'checks.run',
+        payload: { revisionId },
+        dedupeKey: `checks.run:${revisionId}`,
+      });
+    }
   };
 }

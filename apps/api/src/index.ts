@@ -156,6 +156,19 @@ export type {
   SaveFlagsOutcome,
 } from './db/repositories/layout.js';
 
+/**
+ * Запуск разметки поверх готового рабочего документа.
+ *
+ * Наружу выведен ради задачи `layout.start` (S21): звено «сборка → разметка»
+ * обязано делать ровно то же, что маршрут, и делать это ТЕМ ЖЕ кодом.
+ */
+export {
+  enqueueDetectBatches,
+  enqueueLocalDetectBatches,
+  startMarkupOnBundle,
+} from './modules/layout/start.js';
+export type { StartMarkupResult } from './modules/layout/start.js';
+
 export { analyzePages, unionArea } from './layout/attention.js';
 export type { AnalyzedBlock, AnalyzedPage, PageAnalysis } from './layout/attention.js';
 
@@ -411,15 +424,33 @@ export {
   SCHEMA_VERSION as SEGMENTATION_SCHEMA_VERSION,
 } from './segmentation/llm-classify.js';
 export type { LlmClassifyDeps, LlmClassifyOutcome } from './segmentation/llm-classify.js';
+/** ИИ-проверка заполнения (S21): разбор ответа модели и её промт. */
+export {
+  LLM_REVIEW_SCHEMA_VERSION,
+  REVIEW_QUOTE_NOT_MAPPED,
+  reviewDocumentWithLlm,
+} from './checks/llm-review.js';
+export type { LlmReviewDeps, LlmReviewOutcome, ReviewDocument } from './checks/llm-review.js';
+export { LLM_REVIEW_PROMPT, renderReviewUserPrompt } from './checks/llm-review-prompt.js';
+
+export {
+  EXTRACT_QUOTE_NOT_MAPPED,
+  EXTRACT_SCHEMA_VERSION,
+  extractFieldsWithLlm,
+  llmFieldsFor,
+} from './segmentation/llm-extract.js';
+export type { ExtractPage, LlmExtractDeps, LlmExtractOutcome } from './segmentation/llm-extract.js';
 export {
   BOUNDARY_CONFIDENCE_CEILING,
   CONFIDENT_BOUNDARY,
   decodeSegmentation,
 } from './segmentation/decoder.js';
 export {
+  FIELD_EXTRACT_PROMPT,
   findSectionMarkers,
   PAGE_CLASSIFY_PROMPT,
   promptDocTypeCodes,
+  renderExtractUserPrompt,
   renderUserPrompt,
   SECTION_MARKERS,
 } from './segmentation/prompts.js';
@@ -573,6 +604,7 @@ export {
   loadRunJournal,
   saveDerivedMaterials,
   saveFindings,
+  saveLlmFindings,
   saveRunJournal,
   startValidationRun,
 } from './db/repositories/checks.js';

@@ -26,22 +26,64 @@
 import { DATE_RULES, SIGNATURE_RULES } from './dates.js';
 import { AOSR_RULES, CROSSCHECK_RULES, EXTERNAL_RULES } from './aosr.js';
 import { EVIDENCE_RULES } from './evidence.js';
+import { LLM_REVIEW_RULES } from './llm-review.js';
 import type { RuleSpec } from './types.js';
 
 /**
- * Полный каталог.
+ * Партии сида: какая миграция заводит какие правила.
  *
- * Порядок групп не влияет на прогон (движок сортирует по коду), но задаёт
- * порядок сида и читаемость diff'а.
+ * ## Зачем это, если каталог один
+ *
+ * Миграция применена — значит заморожена: раннер сверяет контрольную сумму
+ * каждого применённого файла и объявляет правку `modified`. Поэтому правило,
+ * добавленное после 0017, обязано приезжать СВОЕЙ миграцией, а не переписыванием
+ * уже применённой.
+ *
+ * Пока партия была одна, это выражалось соглашением «0017 = весь каталог», и
+ * сверка на дрейф сравнивала файл с генерацией по всему `RULE_CATALOG`. Первое
+ * же добавление кода (S21) сломало бы либо сверку, либо контрольную сумму. Здесь
+ * соглашение стало данными: каталог СОБИРАЕТСЯ из партий, у каждой партии свой
+ * файл миграции, и сверка проверяет каждую пару по отдельности.
+ *
+ * Порядок партий задаёт порядок каталога; внутри файла правила всё равно
+ * сортируются по коду.
  */
-export const RULE_CATALOG: readonly RuleSpec[] = [
-  ...DATE_RULES,
-  ...SIGNATURE_RULES,
-  ...AOSR_RULES,
-  ...CROSSCHECK_RULES,
-  ...EXTERNAL_RULES,
-  ...EVIDENCE_RULES,
+export interface RuleSeedBatch {
+  /** Имя файла миграции без расширения — по нему сверка находит файл. */
+  readonly migration: string;
+  readonly rules: readonly RuleSpec[];
+}
+
+export const RULE_SEED_BATCHES: readonly RuleSeedBatch[] = [
+  {
+    migration: '0017_seed_rule_definitions',
+    rules: [
+      ...DATE_RULES,
+      ...SIGNATURE_RULES,
+      ...AOSR_RULES,
+      ...CROSSCHECK_RULES,
+      ...EXTERNAL_RULES,
+      ...EVIDENCE_RULES,
+    ],
+  },
+  {
+    // ИИ-проверка заполнения (S21). Коды объявлены в каталоге, потому что
+    // `findings.rule_code` — внешний ключ на `rule_definitions`, а сверка при
+    // старте сравнивает таблицу с каталогом в обе стороны. Исполняет их задача
+    // `checks.llm_review`, движок отвечает `n_a` с названной причиной.
+    migration: '0031_seed_llm_review_rules',
+    rules: LLM_REVIEW_RULES,
+  },
 ];
+
+/**
+ * Полный каталог — объединение партий.
+ *
+ * Собирается, а не выписывается вторым списком: два списка разъезжаются молча,
+ * и разъехавшись, дали бы правило, которое движок исполняет, а БД по внешнему
+ * ключу не знает.
+ */
+export const RULE_CATALOG: readonly RuleSpec[] = RULE_SEED_BATCHES.flatMap((batch) => batch.rules);
 
 export const RULE_CODES: readonly string[] = RULE_CATALOG.map((spec) => spec.code);
 

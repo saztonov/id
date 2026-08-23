@@ -28,6 +28,10 @@ export const revisionKeys = {
   archive: (revisionId: string) => ['revisions', revisionId, 'archive'] as const,
 };
 
+export const pipelineKeys = {
+  recognitionProgress: (runId: string) => ['recognition-runs', runId, 'progress'] as const,
+};
+
 export const documentKeys = {
   detail: (documentId: string) => ['documents', documentId] as const,
   fields: (documentId: string) => ['documents', documentId, 'fields'] as const,

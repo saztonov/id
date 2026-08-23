@@ -416,7 +416,7 @@ export function createReconcileHandler(deps: RecognitionDeps): JobHandler<'layou
       });
       await ctx.enqueue({
         type: 'rd.start_recognition',
-        payload: { revisionId: run.revisionId, recognitionRunId: run.runId },
+        payload: { revisionId: run.revisionId, recognitionRunId: run.runId, ...carry(ctx) },
         dedupeKey: `rd.start_recognition:${run.runId}`,
       });
       return;
@@ -525,7 +525,7 @@ export function createStartRecognitionHandler(
 async function enqueuePoll(ctx: JobContext<'rd.start_recognition'>, run: RunTarget): Promise<void> {
   await ctx.enqueue({
     type: 'rd.poll_recognition',
-    payload: { revisionId: run.revisionId, recognitionRunId: run.runId },
+    payload: { revisionId: run.revisionId, recognitionRunId: run.runId, ...carry(ctx) },
     dedupeKey: `rd.poll_recognition:${run.runId}`,
   });
 }
@@ -634,7 +634,7 @@ export function createPollRecognitionHandler(
       });
       await ctx.enqueue({
         type: 'rd.fetch_export_once',
-        payload: { revisionId: run.revisionId, recognitionRunId: run.runId },
+        payload: { revisionId: run.revisionId, recognitionRunId: run.runId, ...carry(ctx) },
         dedupeKey: `rd.fetch_export_once:${run.runId}`,
       });
       return;
@@ -920,7 +920,32 @@ export function createFetchExportHandler(
       recognitionRunId: run.runId,
       ...counts,
     });
+
+    // Переход «распознавание → анализ» при сквозном прогоне (S21). До S21 здесь
+    // стояло только `ctx.emit`, а оно доставляется ЭКРАНУ и задачу не ставит:
+    // цепочка обрывалась молча, и выглядело это как «распознали, а дальше
+    // ничего». Ветка RD WEB получает переход наравне с VLM — иначе поведение
+    // кнопки зависело бы от настройки провайдера, которую пользователь не видит.
+    if (ctx.payload.autoContinue === true) {
+      await ctx.enqueue({
+        type: 'doc.classify_pages',
+        payload: { revisionId: run.revisionId, autoContinue: true },
+        dedupeKey: `doc.classify_pages:${run.revisionId}`,
+      });
+    }
   });
+}
+
+/**
+ * Передача признака сквозного прогона следующему звену цепочки `rd.*`.
+ *
+ * Опускается, когда его нет, а не пишется `false`: пошаговый путь инженера не
+ * должен отличаться от прежнего ни одним байтом payload.
+ */
+function carry(ctx: { readonly payload: { readonly autoContinue?: boolean | undefined } }): {
+  autoContinue?: true;
+} {
+  return ctx.payload.autoContinue === true ? { autoContinue: true } : {};
 }
 
 /**

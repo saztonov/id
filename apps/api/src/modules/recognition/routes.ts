@@ -42,18 +42,13 @@
  * доступным как раньше: ссылок он не содержит.
  */
 import type { AppInstance } from '../../app.js';
-import { conflict, forbidden, internal, notFound } from '../../lib/problem.js';
+import { forbidden, internal, notFound } from '../../lib/problem.js';
 import { requireIdempotencyKey } from '../../lib/http-headers.js';
 import { currentAuth } from '../../middleware/require-auth.js';
 import { hasPermission, requirePermission } from '../../middleware/require-permission.js';
-import {
-  parseModelAllowlist,
-  readAiDryRunOnly,
-  readRecognitionSettings,
-} from '../../config/portal-settings.js';
 import { sha256Hex } from '../../pdf/probe.js';
 import { isRedactableArtifactKind, redactArtifactContent } from '../../recognition/redaction.js';
-import { tracePayload, updateContext } from '../../observability/context.js';
+import { updateContext } from '../../observability/context.js';
 import {
   findArtifact,
   findRecognitionRun,
@@ -61,12 +56,9 @@ import {
   listBlockResults,
   listPageTexts,
   listRecognitionRuns,
-  startRecognitionRun,
   type RecognitionRunView,
 } from '../../db/repositories/recognition.js';
-import { enqueueJob } from '../../db/repositories/jobs.js';
-import { dedupeKeyFor } from '../../jobs/types.js';
-import { recognitionSelections } from '../../integrations/rdweb/index.js';
+import { startRecognition } from './start.js';
 import {
   artifactListSchema,
   artifactParamSchema,
@@ -82,7 +74,7 @@ import {
 
 const PREFIX = '/api/v1';
 
-const startRecognition = requirePermission('recognition.start');
+const requireRecognitionStart = requirePermission('recognition.start');
 const readRecognition = requirePermission('markup.read');
 
 /** MIME артефактов: их вид закрыт перечислением, поэтому и таблица закрыта. */
@@ -129,7 +121,7 @@ function registerStartRoute(app: AppInstance): void {
   app.post(
     `${PREFIX}/revisions/:revisionId/recognize`,
     {
-      preHandler: startRecognition,
+      preHandler: requireRecognitionStart,
       schema: {
         params: revisionIdParamSchema,
         body: recognizeRequestSchema,
@@ -142,95 +134,28 @@ function registerStartRoute(app: AppInstance): void {
       const idempotencyKey = requireIdempotencyKey(request);
       updateContext({ revisionId });
 
-      /**
-       * Ветвление провайдера (ADR-0007): настройка читается ЗДЕСЬ, на
-       * постановке, и фиксируется снимком — выполняющийся прогон смену
-       * настройки не видит. Снимок настроек — REDACTED по построению (§3.9, B):
-       * только провайдер, модель и режимы; ни секретов, ни адресов, ни
-       * подписанных ссылок — их здесь просто нет, а не «вырезаны фильтром».
-       */
-      const recognition = await readRecognitionSettings(app.db);
-      let settingsSnapshot: Record<string, unknown>;
-      let firstJobType: 'layout.reconcile' | 'vlm.start_recognition';
-      if (recognition.provider === 'openrouter_vlm') {
-        if (recognition.vlmModel === '') {
-          throw conflict(
-            'Модель распознавания не выбрана: задайте recognition.vlm_model ' +
-              'в настройках портала.',
-          );
-        }
-        const allowlist = parseModelAllowlist(app.env.LLM_MODEL_ALLOWLIST);
-        if (allowlist !== null && !allowlist.includes(recognition.vlmModel)) {
-          // Отказ до создания прогона: политика провайдера отвергла бы модель
-          // на первом же вызове, и прогон умер бы, не сделав ничего.
-          throw conflict(
-            `Модель «${recognition.vlmModel}» не входит в LLM_MODEL_ALLOWLIST: ` +
-              'согласуйте слаг с эксплуатацией.',
-          );
-        }
-        settingsSnapshot = {
-          version: 2,
-          provider: 'openrouter_vlm',
-          model: recognition.vlmModel,
-          // Промпты, растеризатор и crop policy дополняет vlm.start_recognition:
-          // они известны воркеру, а не роуту.
-          dryRun: await readAiDryRunOnly(app.db),
-        };
-        firstJobType = 'vlm.start_recognition';
-      } else {
-        const selections = recognitionSelections(app.env);
-        settingsSnapshot = {
-          version: 1,
-          documentMode: false,
-          blockTypes: selections.map((selection) => selection.blockType),
-          provider: selections[0]?.providerType ?? null,
-          model: selections[0]?.modelId ?? null,
-          promptProfiles: Object.fromEntries(
-            selections
-              .filter((selection) => selection.promptProfileId !== undefined)
-              .map((selection) => [selection.blockType, selection.promptProfileId]),
-          ),
-        };
-        firstJobType = 'layout.reconcile';
-      }
-
-      const { run, created } = await startRecognitionRun(app.db, scope, {
-        layoutRevisionId: request.body.frozenLayoutId,
-        settingsSnapshot,
-        // Ветке RD WEB без RD-документа OCR запускать негде; у VLM-прогона
-        // его нет по построению (ADR-0007).
-        requireRdDocument: recognition.provider !== 'openrouter_vlm',
-      });
-      if (run.revisionId !== revisionId) {
-        // Разметка чужой ревизии в теле запроса. Область её бы пропустила, если
-        // ревизии принадлежат одному подрядчику, поэтому сверка явная.
-        throw notFound('Ревизия разметки не относится к указанной ревизии поставки.');
-      }
-
-      const { jobId, created: jobCreated } = await enqueueJob(app.db, scope, {
-        type: firstJobType,
-        payload: tracePayload({ revisionId, recognitionRunId: run.id }),
-        dedupeKey: dedupeKeyFor(firstJobType, run.id, idempotencyKey),
+      // Гранулярный маршрут ручного пути: он ставит РАСПОЗНАВАНИЕ и ничего
+      // больше. Анализ дальше не идёт — его инженер запускает своей кнопкой,
+      // как и до S21. Сквозной прогон живёт в `POST /revisions/{id}/check`.
+      const started = await startRecognition(app.db, app.env, scope, {
+        revisionId,
+        frozenLayoutId: request.body.frozenLayoutId,
+        idempotencyKey,
+        autoContinue: false,
       });
 
       request.log.info(
         {
           event: 'job_enqueued',
-          job_type: firstJobType,
-          job_id: jobId,
-          created: jobCreated,
-          recognition_run_id: run.id,
-          run_created: created,
+          job_id: started.jobId,
+          created: started.jobCreated,
+          recognition_run_id: started.recognitionRunId,
+          run_created: started.created,
         },
         'цепочка распознавания поставлена в очередь',
       );
 
-      return reply.code(202).send({
-        recognitionRunId: run.id,
-        created,
-        jobId,
-        jobCreated,
-      });
+      return reply.code(202).send(started);
     },
   );
 }

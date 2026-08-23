@@ -1,10 +1,16 @@
 /**
- * Перегенерация seed-миграции реестра правил.
+ * Перегенерация seed-миграций реестра правил.
  *
- * Источник правды — `RULE_CATALOG` в packages/rules; в БД он попадает миграцией
- * 0017. Два представления одного каталога обязаны расходиться заметно, а не
- * молча: файл пишется байт-в-байт выводом `generateRuleSeedSql()`, поэтому тест
- * на дрейф сравнивает содержимое строгим равенством.
+ * Источник правды — `RULE_CATALOG` в packages/rules. В БД он попадает НЕ одним
+ * файлом, а партиями (`RULE_SEED_BATCHES`): миграция, однажды применённая,
+ * заморожена контрольной суммой раннера, поэтому правило, добавленное после
+ * 0017, приезжает своей миграцией. Каждая партия пишется байт-в-байт выводом
+ * `generateRuleSeedSql(batch.rules)`, и тест на дрейф сравнивает пары строгим
+ * равенством.
+ *
+ * Скрипт перезаписывает ТОЛЬКО расходящиеся файлы. Если он собрался переписать
+ * давно применённую миграцию — значит правило добавили в старую партию вместо
+ * новой, и это ошибка правки каталога, а не скрипта.
  *
  *   pnpm rules:seed:generate
  */
@@ -16,7 +22,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const RULES_DIR = join(ROOT, 'packages', 'rules');
-const TARGET = join(ROOT, 'migrations', '0017_seed_rule_definitions.sql');
+const MIGRATIONS_DIR = join(ROOT, 'migrations');
 
 // tsc запускается своим JS-энтрипоинтом: на Windows `npx` — это .cmd, который
 // execFileSync без shell запустить не может. Резолв через require вдобавок
@@ -27,29 +33,32 @@ execFileSync(process.execPath, [tsc, '-p', join(RULES_DIR, 'tsconfig.build.json'
 });
 
 const dist = pathToFileURL(join(RULES_DIR, 'dist', 'index.js')).href;
-const { RULE_CATALOG, generateRuleSeedSql } = await import(dist);
+const { RULE_SEED_BATCHES, generateRuleSeedSql } = await import(dist);
 
-const sql = generateRuleSeedSql();
+for (const batch of RULE_SEED_BATCHES) {
+  const target = join(MIGRATIONS_DIR, `${batch.migration}.sql`);
+  const sql = generateRuleSeedSql(batch.rules);
 
-if (!sql.startsWith('--') || !/сгенерирован/iu.test(sql.slice(0, 1000))) {
-  console.error('generateRuleSeedSql() вернул SQL без шапки о том, что файл сгенерирован.');
-  process.exit(1);
-}
+  if (!sql.startsWith('--') || !/сгенерирован/iu.test(sql.slice(0, 1000))) {
+    console.error('generateRuleSeedSql() вернул SQL без шапки о том, что файл сгенерирован.');
+    process.exit(1);
+  }
 
-const shortPath = relative(ROOT, TARGET).replaceAll('\\', '/');
+  const shortPath = relative(ROOT, target).replaceAll('\\', '/');
 
-let previous = null;
-try {
-  previous = readFileSync(TARGET, 'utf8');
-} catch {
-  // Файла ещё нет — первая генерация.
-}
+  let previous = null;
+  try {
+    previous = readFileSync(target, 'utf8');
+  } catch {
+    // Файла ещё нет — первая генерация партии.
+  }
 
-if (previous === sql) {
-  console.log(`${shortPath}: без изменений (${RULE_CATALOG.length} правил).`);
-} else {
-  writeFileSync(TARGET, sql, 'utf8');
-  console.log(
-    `${shortPath}: ${previous === null ? 'создан' : 'обновлён'} (${RULE_CATALOG.length} правил).`,
-  );
+  if (previous === sql) {
+    console.log(`${shortPath}: без изменений (${batch.rules.length} правил).`);
+  } else {
+    writeFileSync(target, sql, 'utf8');
+    console.log(
+      `${shortPath}: ${previous === null ? 'создан' : 'обновлён'} (${batch.rules.length} правил).`,
+    );
+  }
 }

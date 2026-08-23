@@ -54,6 +54,7 @@ function reply(text: string, patch: Partial<VlmResponse> = {}): VlmResponse {
     model: 'actual/model-slug',
     requestedModel: 'requested/model-slug',
     provider: 'recorded',
+    toolCalls: [],
     tokensIn: 100,
     tokensOut: 50,
     cost: null,
@@ -219,9 +220,7 @@ describe('recognizeBlock: корректирующий повтор', () => {
     expect(vlm.requests).toHaveLength(2);
     const [first, second] = vlm.requests;
     expect(first?.systemPrompt).not.toContain('CRITICAL — ');
-    expect(second?.systemPrompt).toBe(
-      `${first?.systemPrompt}\n\n${CORRECTIVE_INSTRUCTION.text}`,
-    );
+    expect(second?.systemPrompt).toBe(`${first?.systemPrompt}\n\n${CORRECTIVE_INSTRUCTION.text}`);
     expect(second?.userPrompt).toBe(first?.userPrompt);
   });
 

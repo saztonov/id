@@ -85,6 +85,27 @@ const uuid = z.uuid();
 /** Задача, работающая над ревизией поставки. Таких — большинство. */
 const revisionPayload = basePayload.extend({ revisionId: uuid });
 
+/**
+ * Сквозной прогон: «доведи до конца, не спрашивая» (S21).
+ *
+ * До S21 конвейер стоял на пяти остановках, и каждую снимал человек отдельной
+ * кнопкой. Заказчик потребовал двух: «Разметить» и «Проверить». Признак несёт
+ * ИМЕННО ЭТО решение и передаётся по цепочке от звена к звену.
+ *
+ * Почему в payload, а не чтением настройки в момент стыка: настройку к тому
+ * времени успевают сменить, и половина цепочки прошла бы по одному решению, а
+ * половина — по другому. Ровно этим соображением ADR-0007 пиннит провайдера и
+ * модель в снимке прогона, и здесь оно то же: задача обязана считать заказанным
+ * то, что названо в payload.
+ *
+ * Отсутствие поля равно `false` — старый пошаговый путь инженера («Собрать
+ * документы» отдельной кнопкой) не меняется вовсе и остаётся доступен.
+ */
+const autoContinue = z.boolean().optional();
+
+/** Звено цепочки анализа: сквозной прогон протягивается через все шесть. */
+const analysisPayload = revisionPayload.extend({ autoContinue });
+
 const filePayload = revisionPayload.extend({ sourceFileId: uuid });
 
 /**
@@ -120,7 +141,7 @@ const layoutPayload = revisionPayload.extend({
   overwriteExisting: z.boolean().optional(),
 });
 
-const recognitionPayload = revisionPayload.extend({ recognitionRunId: uuid });
+const recognitionPayload = revisionPayload.extend({ recognitionRunId: uuid, autoContinue });
 
 /** Обслуживание: ревизии у такой задачи нет, и это не упущение payload. */
 const maintenancePayload = basePayload.extend({
@@ -188,7 +209,18 @@ export const JOB_DEFINITIONS = {
   },
   'bundle.build': {
     queue: 'cpu',
-    payload: revisionPayload,
+    payload: revisionPayload.extend({
+      /**
+       * Продолжить разметкой сразу после сборки (кнопка S21 «Разметить»).
+       *
+       * Разметка ложится на страницы рабочего документа, поэтому в момент
+       * нажатия ставить её нечем — bundle ещё не существует. Признак несёт
+       * заказ «за сборкой идёт детекция», и обработчик выполняет его сам.
+       * Прежняя кнопка «Собрать рабочий документ» его не ставит и работает
+       * ровно как раньше.
+       */
+      startMarkup: z.boolean().optional(),
+    }),
     stage: 'uploaded',
     maxAttempts: 3,
     leaseMs: 600_000,
@@ -218,6 +250,28 @@ export const JOB_DEFINITIONS = {
     stage: 'layout',
     maxAttempts: 30,
     leaseMs: EXTERNAL_LEASE_MS,
+    priority: DEFAULT_PRIORITY,
+  },
+  /**
+   * Звено «сборка → разметка» кнопки S21 «Разметить».
+   *
+   * Существует ровно потому, что разметка ложится на страницы РАБОЧЕГО
+   * документа: в момент нажатия его ещё нет, и поставить детекцию нечем —
+   * `layout.detect_local` требует `layoutRevisionId`, а черновик разметки
+   * создаётся от `bundleId`. Задача выполняет то, что при готовом bundle делает
+   * маршрут: черновик разметки, чтение `detection.provider`, постановка пачек
+   * (`startMarkupOnBundle`, общий с маршрутом код).
+   *
+   * Очередь `io`: время уходит на чтение карты страниц и постановку задач.
+   * Собственной стадии не заводит — она принадлежит разметке, как и всё, что
+   * ставит.
+   */
+  'layout.start': {
+    queue: 'io',
+    payload: revisionPayload,
+    stage: 'layout',
+    maxAttempts: 3,
+    leaseMs: DEFAULT_LEASE_MS,
     priority: DEFAULT_PRIORITY,
   },
   'layout.detect_pages': {
@@ -345,7 +399,7 @@ export const JOB_DEFINITIONS = {
   // 14–19. Сегментация и извлечение (§8).
   'doc.classify_pages': {
     queue: 'llm',
-    payload: revisionPayload,
+    payload: analysisPayload,
     stage: 'analysis',
     maxAttempts: 3,
     leaseMs: 600_000,
@@ -353,7 +407,7 @@ export const JOB_DEFINITIONS = {
   },
   'doc.segment': {
     queue: 'llm',
-    payload: revisionPayload,
+    payload: analysisPayload,
     stage: 'analysis',
     maxAttempts: 3,
     leaseMs: 600_000,
@@ -361,7 +415,7 @@ export const JOB_DEFINITIONS = {
   },
   'doc.extract_fields': {
     queue: 'llm',
-    payload: revisionPayload.extend({ documentId: uuid.optional() }),
+    payload: analysisPayload.extend({ documentId: uuid.optional() }),
     stage: 'analysis',
     maxAttempts: 3,
     leaseMs: 600_000,
@@ -369,7 +423,7 @@ export const JOB_DEFINITIONS = {
   },
   'doc.parse_registry': {
     queue: 'io',
-    payload: revisionPayload.extend({ documentId: uuid.optional() }),
+    payload: analysisPayload.extend({ documentId: uuid.optional() }),
     stage: 'analysis',
     maxAttempts: 3,
     leaseMs: DEFAULT_LEASE_MS,
@@ -377,7 +431,7 @@ export const JOB_DEFINITIONS = {
   },
   'doc.match_registry': {
     queue: 'io',
-    payload: revisionPayload,
+    payload: analysisPayload,
     stage: 'analysis',
     maxAttempts: 3,
     leaseMs: DEFAULT_LEASE_MS,
@@ -385,7 +439,7 @@ export const JOB_DEFINITIONS = {
   },
   'graph.build': {
     queue: 'io',
-    payload: revisionPayload,
+    payload: analysisPayload,
     stage: 'analysis',
     maxAttempts: 3,
     leaseMs: DEFAULT_LEASE_MS,
@@ -434,6 +488,24 @@ export const JOB_DEFINITIONS = {
     stage: 'checks',
     maxAttempts: 3,
     leaseMs: 600_000,
+    priority: DEFAULT_PRIORITY,
+  },
+  /**
+   * ИИ-проверка заполнения (§9.1, S21) — второй этап проверки.
+   *
+   * Пишет в ТОТ ЖЕ `validation_run`, что и `checks.run`, поэтому его
+   * идентификатор обязателен в payload: собственный прогон означал бы две
+   * строки «проверка от 12:31» на один вопрос. Ставится между `checks.run` и
+   * `checks.summarize` — сводка обязана считаться уже с её замечаниями.
+   *
+   * Очередь `llm`: время уходит на вызовы модели, по одному на документ.
+   */
+  'checks.llm_review': {
+    queue: 'llm',
+    payload: revisionPayload.extend({ validationRunId: uuid }),
+    stage: 'checks',
+    maxAttempts: 3,
+    leaseMs: 900_000,
     priority: DEFAULT_PRIORITY,
   },
   'checks.summarize': {

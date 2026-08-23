@@ -20,6 +20,13 @@ export * from './testing.js';
 export { DATE_RULES, SIGNATURE_RULES } from './dates.js';
 export { AOSR_RULES, CROSSCHECK_RULES, EXTERNAL_RULES } from './aosr.js';
 export { EVIDENCE_RULES } from './evidence.js';
+export {
+  isLlmReviewCode,
+  LLM_REVIEW_CODES,
+  LLM_REVIEW_NOT_APPLICABLE,
+  LLM_REVIEW_RULES,
+} from './llm-review.js';
+export type { LlmReviewCode } from './llm-review.js';
 
 import { RULE_CATALOG } from './catalog.js';
 import { reconcileRuleRegistry } from './engine.js';

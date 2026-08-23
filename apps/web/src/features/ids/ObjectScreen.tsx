@@ -488,6 +488,15 @@ function NewWorkCard({
   const [failure, setFailure] = useState<unknown>(null);
 
   const isGeneralContractor = me.scope?.kind === 'general_contractor';
+  /**
+   * Кто обязан назвать исполнителя.
+   *
+   * Подрядчик заводит комплект только за себя, и поле для него — отказ сервера,
+   * а не пожелание. У всех остальных исполнитель берётся из формы: у
+   * генподрядчика необязательно (пусто = он сам), у проверяющего обязательно —
+   * своей организации у него нет.
+   */
+  const namesExecutor = me.scope !== null && me.scope.kind !== 'contractor';
 
   const create = useMutation({
     mutationFn: (values: WorkFormValues) =>
@@ -558,14 +567,22 @@ function NewWorkCard({
           >
             <Input style={{ width: 300 }} data-testid="work-title" />
           </Form.Item>
-          {isGeneralContractor && (
+          {namesExecutor && (
             <Form.Item
               name="contractorId"
               label="Исполнитель"
-              extra="Пусто — работу выполнила ваша организация"
+              // Для генподрядчика поле необязательно: пусто — работу выполнил он
+              // сам. У проверяющего своей организации нет вовсе, поэтому там же
+              // поле обязательно, и сервер отвечает 400 без него.
+              rules={[{ required: !isGeneralContractor, message: 'Исполнитель обязателен' }]}
+              extra={
+                isGeneralContractor
+                  ? 'Пусто — работу выполнила ваша организация'
+                  : 'Комплект заводится за подрядчика; это будет видно в журнале'
+              }
             >
               <Select
-                allowClear
+                allowClear={isGeneralContractor}
                 style={{ width: 260 }}
                 options={contractors.map((row) => ({
                   value: row.contractorId,

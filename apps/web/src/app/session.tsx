@@ -30,14 +30,15 @@ import type { Me } from '../api/types.js';
  */
 export const PERMISSIONS = {
   'submission.read': ['contractor', 'general_contractor', 'engineer', 'manager', 'admin'],
-  'submission.upload': ['contractor', 'general_contractor'],
-  'submission.submit': ['contractor', 'general_contractor'],
+  'submission.upload': ['contractor', 'general_contractor', 'engineer', 'manager', 'admin'],
+  'submission.submit': ['contractor', 'general_contractor', 'engineer', 'manager', 'admin'],
   'markup.read': ['contractor', 'general_contractor', 'engineer', 'manager', 'admin'],
   'markup.edit': ['contractor', 'general_contractor', 'engineer'],
   'markup.freeze': ['contractor', 'general_contractor', 'engineer'],
   'recognition.start': ['contractor', 'general_contractor', 'engineer'],
   'document.edit': ['engineer', 'manager'],
   'checks.run': ['engineer', 'manager'],
+  'pipeline.run': ['contractor', 'general_contractor', 'engineer', 'manager', 'admin'],
   'registry.manage': ['general_contractor', 'admin'],
   'registry.accept': ['engineer', 'manager'],
   'revision.approve': ['engineer', 'manager'],

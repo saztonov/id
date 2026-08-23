@@ -705,6 +705,97 @@ export async function saveFindings(
 }
 
 /**
+ * Замечания ИИ-проверки заполнения (S21) — в ТОТ ЖЕ прогон, что и правила.
+ *
+ * ## Почему не отдельный `validation_run`
+ *
+ * `validation_runs.ruleset_version_id` объявлен `NOT NULL`: прогон без
+ * опубликованного набора правил невозможен по построению. Заводить второй
+ * прогон с тем же набором значило бы показывать инженеру две строки «проверка
+ * от 12:31» и «проверка от 12:31», отвечающие на один вопрос, и заставлять его
+ * догадываться, какая из них полная.
+ *
+ * ## Почему собственный метод, а не `saveFindings`
+ *
+ * Тот удаляет ВСЕ замечания прогона перед вставкой — он единственный писатель
+ * и вправе так делать. ИИ-стадия приходит вторым писателем в тот же прогон, и
+ * та же семантика стёрла бы результат движка правил. Здесь удаляются только
+ * собственные строки (`origin = 'llm'`), поэтому повтор задачи заменяет свой
+ * выход целиком и не трогает чужой — то же правило «задача заменяет свой выход»,
+ * что и у остальных стадий (§12).
+ *
+ * Инвариант БД `findings_llm_blocking_chk` (никакого `is_blocking` без
+ * подтверждения человеком) здесь не дублируется проверкой: он в схеме, и
+ * попытка его обойти обязана кончиться отказом транзакции, а не тихим
+ * приведением значения.
+ */
+export async function saveLlmFindings(
+  db: Database,
+  scope: AuthScope,
+  input: {
+    readonly validationRunId: string;
+    readonly revisionId: string;
+    readonly findings: readonly PreparedFinding[];
+  },
+): Promise<SaveFindingsOutcome> {
+  const revision = await loadRevisionContext(db, scope, input.revisionId);
+
+  return db.transaction(async (tx) => {
+    const removed = await tx
+      .delete(findings)
+      .where(and(eq(findings.validationRunId, input.validationRunId), eq(findings.origin, 'llm')))
+      .returning({ id: findings.id });
+
+    let written = 0;
+    let evidenceCount = 0;
+
+    for (const finding of input.findings) {
+      const rows = await tx
+        .insert(findings)
+        .values({
+          validationRunId: input.validationRunId,
+          revisionId: input.revisionId,
+          objectId: revision.objectId,
+          contractorId: revision.contractorId,
+          ruleCode: finding.ruleCode,
+          severity: finding.severity,
+          state: finding.state,
+          origin: 'llm',
+          // См. шапку: `false` здесь — не умолчание, а единственное значение,
+          // которое пропустит CHECK при `confirmed_by IS NULL`.
+          isBlocking: false,
+          targetType: finding.targetType,
+          targetId: finding.targetId,
+          sourcePageId: finding.sourcePageId ?? null,
+          blockId: finding.blockId ?? null,
+          message: finding.message,
+          hint: finding.hint ?? null,
+        })
+        .returning({ id: findings.id });
+
+      const findingId = rows[0]?.id;
+      if (findingId === undefined) throw internal({ logDetail: 'замечание модели не записано' });
+      written += 1;
+
+      for (const evidence of finding.evidence ?? []) {
+        await tx
+          .insert(findingEvidence)
+          .values({
+            findingId,
+            pageTextVersionId: evidence.pageTextVersionId,
+            charSpan: { start: evidence.charStart, end: evidence.charEnd },
+            quote: evidence.quote,
+          })
+          .onConflictDoNothing();
+        evidenceCount += 1;
+      }
+    }
+
+    return { removed: removed.length, written, evidence: evidenceCount };
+  });
+}
+
+/**
  * Журнал исполнения правил (§9.6).
  *
  * Пишется задачей 20 сразу после прогона и читается задачей 21. Хранится в

@@ -46,6 +46,53 @@ export interface VlmJsonSchemaFormat {
   readonly strict: true;
 }
 
+/**
+ * Инструмент, который модель вправе позвать (ADR-0013, S21).
+ *
+ * До S21 порт инструментов не знал вовсе, и это было верно для контракта
+ * ADR-0007: блок = ровно один вызов с одним кропом. Заказчик потребовал
+ * «предусмотреть отправку кропов по запросу модели» — то есть разрешить модели
+ * сказать «покажи мне соседний участок листа», прежде чем отвечать.
+ *
+ * Инструмент один и узкий: он возвращает КАРТИНКУ участка ТОЙ ЖЕ страницы, а
+ * не произвольные данные. Широкий набор инструментов у стадии транскрипции
+ * означал бы, что модель может добрать контекст откуда угодно, — а ADR-0007
+ * прямо запрещает восстанавливать содержимое кропа по соседям и по домену.
+ */
+export interface VlmTool {
+  readonly name: string;
+  readonly description: string;
+  /** JSON Schema параметров. */
+  readonly parameters: unknown;
+}
+
+/** Вызов инструмента, пришедший в ответе модели. */
+export interface VlmToolCall {
+  readonly id: string;
+  readonly name: string;
+  /** Аргументы как есть, строкой: разбор и проверка — обязанность вызывающего. */
+  readonly argumentsJson: string;
+}
+
+/**
+ * Один круг «модель попросила — портал дал».
+ *
+ * Диалог передаётся целиком на каждом вызове: у шлюза нет состояния, а
+ * `X-Idempotency-Key` считается по каноническому входу — значит вход обязан
+ * содержать всё, что модель уже видела, иначе второй круг склеился бы с первым
+ * по ключу и вернул бы прежний ответ.
+ */
+export interface VlmToolExchange {
+  readonly calls: readonly VlmToolCall[];
+  readonly results: readonly {
+    readonly toolCallId: string;
+    /** Что портал отвечает текстом: «кроп приложен» либо причина отказа. */
+    readonly text: string;
+    /** Запрошенный участок. Пусто — инструмент отказал (вне листа, потолок). */
+    readonly images: readonly VlmImage[];
+  }[];
+}
+
 export interface VlmRequest {
   readonly stage: VlmStage;
   readonly promptCode: string;
@@ -54,6 +101,10 @@ export interface VlmRequest {
   readonly userPrompt: string;
   /** Кропы блока. Фактически всегда один: мультикартиночные батчи отвергнуты (ADR-0007). */
   readonly images: readonly VlmImage[];
+  /** Инструменты стадии; пусто/отсутствие — модель их не увидит вовсе. */
+  readonly tools?: readonly VlmTool[] | undefined;
+  /** Уже состоявшиеся круги «запрос кропа → кроп». Порядок значим. */
+  readonly exchanges?: readonly VlmToolExchange[] | undefined;
   /** Обязателен для всех типов блоков — строгий JSON, не свободный текст (v3). */
   readonly responseFormat: VlmJsonSchemaFormat;
   /** Версия схемы ответа — входит в ключ кэша и в идемпотентный ключ шлюза. */
@@ -99,6 +150,14 @@ export interface VlmResponse {
    * а не тихий успех).
    */
   readonly finishReason: string | null;
+  /**
+   * Инструменты, которые модель попросила выполнить. Пусто — ответ окончательный.
+   *
+   * Непустой список означает, что `text` ответом НЕ является: модель ещё не
+   * говорила по существу. Вызывающий обязан различать эти два случая — иначе
+   * пустой `content` при `tool_calls` будет прочитан как отказ модели.
+   */
+  readonly toolCalls: readonly VlmToolCall[];
 }
 
 export interface VlmPort {

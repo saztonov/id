@@ -24,6 +24,7 @@
     "seed:generate": "node tools/scripts/generate-seed-migration.mjs",
     "rules:seed:generate": "node tools/scripts/generate-rules-seed-migration.mjs",
     "prompts:seed:generate": "node tools/scripts/generate-recognition-prompts-seed-migration.mjs",
+    "analysis-prompts:seed:generate": "node tools/scripts/generate-analysis-prompts-seed-migration.mjs",
     "test:e2e": "pnpm --filter @id/web test:e2e",
     "test:e2e:local": "pnpm --filter @id/web test:e2e:local",
     "local-admin": "pnpm --filter @id/api local-admin",

@@ -50,7 +50,7 @@ import {
   scrubToken,
   UPSTREAM_RESPONSE_TOO_LARGE,
 } from './proxy.js';
-import type { VlmPort, VlmRequest, VlmResponse } from './vlm-port.js';
+import type { VlmPort, VlmRequest, VlmResponse, VlmToolCall } from './vlm-port.js';
 import { vlmInputHash } from './vlm-prompt.js';
 
 const PROVIDER = 'proxy_llm' as const;
@@ -89,7 +89,10 @@ export interface ProxyVlmProviderOptions {
 
 interface VlmCompletionPayload {
   readonly choices?: readonly {
-    readonly message?: { readonly content?: unknown };
+    readonly message?: {
+      readonly content?: unknown;
+      readonly tool_calls?: unknown;
+    };
     readonly finish_reason?: unknown;
   }[];
   readonly usage?: {
@@ -156,10 +159,12 @@ export class ProxyVlmProvider implements VlmPort {
     if (choice === undefined) {
       // Ответ без choices не разобрать даже как «пустой» — это протокольный
       // дефект. Попытка прикладывается: вызов состоялся и мог быть оплачен.
-      throw withAttempt(
-        new LlmProtocolError('В ответе шлюза LLM нет choices: разбирать нечего.'),
-        { provider: PROVIDER, model, inputHash, latencyMs: this.#now() - startedAt },
-      );
+      throw withAttempt(new LlmProtocolError('В ответе шлюза LLM нет choices: разбирать нечего.'), {
+        provider: PROVIDER,
+        model,
+        inputHash,
+        latencyMs: this.#now() - startedAt,
+      });
     }
 
     const finishReason = typeof choice.finish_reason === 'string' ? choice.finish_reason : null;
@@ -167,9 +172,11 @@ export class ProxyVlmProvider implements VlmPort {
     // исход блока классифицирует recognize-block, провайдер отдаёт факт.
     const content = choice.message?.content;
     const text = typeof content === 'string' ? content : '';
+    const toolCalls = parseToolCalls(choice.message?.tool_calls);
 
     const completion: CachedVlmCompletion = {
       text,
+      toolCalls,
       // Роутинг шлюза вправе подменить слаг: в аудит идёт пара requested/actual,
       // а не жёсткая сверка (vlm-port.ts).
       model: typeof payload.model === 'string' && payload.model.length > 0 ? payload.model : model,
@@ -210,21 +217,19 @@ export class ProxyVlmProvider implements VlmPort {
      */
     const body = {
       model,
-      messages: [
-        { role: 'system', content: request.systemPrompt },
-        {
-          role: 'user',
-          content: [
-            { type: 'text', text: request.userPrompt },
-            ...request.images.map((image) => ({
-              type: 'image_url',
-              image_url: {
-                url: `data:image/png;base64,${Buffer.from(image.png).toString('base64')}`,
+      messages: buildMessages(request),
+      ...(request.tools !== undefined && request.tools.length > 0
+        ? {
+            tools: request.tools.map((tool) => ({
+              type: 'function',
+              function: {
+                name: tool.name,
+                description: tool.description,
+                parameters: tool.parameters,
               },
             })),
-          ],
-        },
-      ],
+          }
+        : {}),
       temperature: request.temperature,
       max_tokens: request.maxTokens,
       ...(request.topK !== undefined && { top_k: request.topK }),
@@ -334,4 +339,89 @@ export function scrubDataPayload(value: string): string {
   return value
     .replace(/data:[a-z0-9.+-]+\/[a-z0-9.+-]+;base64,[A-Za-z0-9+/=]*/gi, 'data:***')
     .replace(/[A-Za-z0-9+/]{64,}={0,2}/g, '***');
+}
+
+/**
+ * Сообщения запроса, включая уже состоявшиеся круги «модель попросила — дали».
+ *
+ * ## Почему кроп приезжает отдельным сообщением пользователя
+ *
+ * Роль `tool` в chat/completions несёт ТОЛЬКО текст: приложить к её содержимому
+ * картинку нельзя ни у одного провайдера, через который ходит шлюз. Поэтому
+ * круг разворачивается в три сообщения: `assistant` с вызовами, `tool` с
+ * коротким текстовым ответом на каждый вызов (иначе провайдер отвергнет
+ * незакрытый `tool_call_id`) и `user` с самими кропами. Порядок обязателен и
+ * именно такой — иначе картинка окажется до ответа на вызов, и часть моделей
+ * прочитает её как новый вопрос.
+ *
+ * Отказ инструмента (участок вне листа, исчерпан потолок) приезжает тем же
+ * путём: текст в `tool`, картинок нет. Молчание вместо отказа оставило бы
+ * модель ждать кроп, которого не будет.
+ */
+function buildMessages(request: VlmRequest): readonly unknown[] {
+  const dataUrl = (image: { readonly png: Uint8Array }): unknown => ({
+    type: 'image_url',
+    image_url: { url: `data:image/png;base64,${Buffer.from(image.png).toString('base64')}` },
+  });
+
+  const messages: unknown[] = [
+    { role: 'system', content: request.systemPrompt },
+    {
+      role: 'user',
+      content: [{ type: 'text', text: request.userPrompt }, ...request.images.map(dataUrl)],
+    },
+  ];
+
+  for (const exchange of request.exchanges ?? []) {
+    messages.push({
+      role: 'assistant',
+      content: null,
+      tool_calls: exchange.calls.map((call) => ({
+        id: call.id,
+        type: 'function',
+        function: { name: call.name, arguments: call.argumentsJson },
+      })),
+    });
+    for (const result of exchange.results) {
+      messages.push({ role: 'tool', tool_call_id: result.toolCallId, content: result.text });
+    }
+    const images = exchange.results.flatMap((result) => [...result.images]);
+    if (images.length > 0) {
+      messages.push({
+        role: 'user',
+        content: [{ type: 'text', text: 'Запрошенный участок листа:' }, ...images.map(dataUrl)],
+      });
+    }
+  }
+
+  return messages;
+}
+
+/**
+ * Разбор `tool_calls` ответа.
+ *
+ * Недоверчиво: поле приходит от провайдера, а не от нас. Вызов без `id` или без
+ * имени функции пропускается — закрыть его нечем (`tool_call_id` обязателен в
+ * ответном сообщении), и попытка это сделать кончилась бы отказом шлюза на
+ * следующем круге. Отсутствующие аргументы читаются как `{}`: у инструмента
+ * бывают значения по умолчанию, и это не повод отбрасывать вызов.
+ */
+export function parseToolCalls(value: unknown): readonly VlmToolCall[] {
+  if (!Array.isArray(value)) return [];
+  const calls: VlmToolCall[] = [];
+  for (const item of value) {
+    if (item === null || typeof item !== 'object') continue;
+    const record = item as { id?: unknown; function?: unknown };
+    const fn = record.function;
+    if (fn === null || typeof fn !== 'object') continue;
+    const call = fn as { name?: unknown; arguments?: unknown };
+    if (typeof record.id !== 'string' || record.id === '') continue;
+    if (typeof call.name !== 'string' || call.name === '') continue;
+    calls.push({
+      id: record.id,
+      name: call.name,
+      argumentsJson: typeof call.arguments === 'string' ? call.arguments : '{}',
+    });
+  }
+  return calls;
 }

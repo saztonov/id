@@ -367,12 +367,17 @@ describe('регистрация маршрутов навигации', () => {
       ['GET', '/api/v1/registries', 200],
       ['GET', `/api/v1/registries/${REGISTRY_1}`, 200],
       ['GET', `/api/v1/registries/${REGISTRY_1}/items`, 200],
-      // Руководителю права `submission.upload` и `registry.manage` не выданы:
-      // 403 доказывает, что маршрут существует и защищён, а не что его нет.
+      // Проба измеряет ОДНО: маршрут существует. Код при этом обязан быть
+      // точным, иначе «не 404» пройдёт и на случайно сломанном обработчике.
+      //
+      // Руководителю с S21 выдано `submission.upload`, поэтому здесь уже не
+      // 403: заведение упирается в неназванного исполнителя (400 — своей
+      // организации у него нет), а новая ревизия — в уже открытый черновик
+      // (409). `registry.manage` ему по-прежнему не выдано, и там остался 403.
       // Тело валидно намеренно — схема Fastify проверяется ДО preHandler, и на
       // пустом теле пришёл бы 422, то есть проба измеряла бы валидацию.
-      ['POST', '/api/v1/works', 403],
-      ['POST', `/api/v1/works/${WORK_A_DRAFT}/revisions`, 403],
+      ['POST', '/api/v1/works', 400],
+      ['POST', `/api/v1/works/${WORK_A_DRAFT}/revisions`, 409],
       ['POST', '/api/v1/registries', 403],
       ['PUT', `/api/v1/registries/${REGISTRY_1}/works/${WORK_A_DRAFT}`, 403],
       ['DELETE', `/api/v1/registries/${REGISTRY_1}/works/${WORK_A_DRAFT}`, 403],
@@ -576,27 +581,71 @@ describe('GET /works/{id}/revisions', () => {
 // =====================================================================
 
 describe('POST /works', () => {
-  it('инженеру, руководителю и администратору право не выдано', async () => {
+  // До S21 всем троим отвечали 403: комплект заводит тот, кто его выполнил.
+  // Заказчик посылку снял — заводить и загружать вправе все пять ролей. Но
+  // ПРИДУМАТЬ организацию за проверяющего портал по-прежнему не может, поэтому
+  // исполнитель обязателен, и без него отказ теперь 400, а не 403: это разные
+  // ответы на разные вопросы («вам нельзя» против «не хватает поля»).
+  it('проверяющий обязан назвать исполнителя: без него 400', async () => {
     for (const kc of [KC.engineer, KC.manager, KC.admin]) {
       const response = await as(kc, 'POST', '/api/v1/works', {
         objectId: OBJECT_1,
         sectionCode: SECTION,
         period: PERIOD,
-        title: 'Попытка не подрядчика',
+        title: 'Комплект без исполнителя',
       });
-      expect([kc, response.statusCode]).toEqual([kc, 403]);
+      expect([kc, response.statusCode]).toEqual([kc, 400]);
+      expect(response.headers['content-type']).toContain('application/problem+json');
     }
+
+    const rows = await db.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM works WHERE title = 'Комплект без исполнителя'`,
+    );
+    expect(rows[0]?.n).toBe('0');
+  });
+
+  it('инженер заводит комплект за подрядчика, и это помечено в аудите', async () => {
+    const response = await as(KC.engineer, 'POST', '/api/v1/works', {
+      objectId: OBJECT_1,
+      sectionCode: SECTION,
+      period: PERIOD,
+      title: 'Комплект, заведённый инженером',
+      contractorId: ORG_A,
+    });
+    expect(response.statusCode).toBe(201);
+
+    // Ведущая организация — исполнитель, а не автор записи: иначе подрядчик не
+    // смог бы дозагрузить в этот комплект собственную исправленную версию.
+    const rows = await db.query<{ contractor: string; managed: string }>(
+      `SELECT contractor_id AS contractor, managed_by_contractor_id AS managed
+         FROM works WHERE title = 'Комплект, заведённый инженером'`,
+    );
+    expect(rows[0]).toEqual({ contractor: ORG_A, managed: ORG_A });
+
+    const audit = await db.query<{ flag: string | null }>(
+      `SELECT payload ->> 'onBehalfOf' AS flag FROM audit_log
+        WHERE action = 'work.created' ORDER BY id DESC LIMIT 1`,
+    );
+    expect(audit[0]?.flag).toBe('true');
   });
 
   it('пользователю с ролями contractor+engineer организация не придумывается', async () => {
+    // Область строится по СТАРШЕЙ роли, то есть инженерская, и организации не
+    // содержит. Отказ по-прежнему есть, и он всё так же не подставляет чужую
+    // организацию — изменился только код: не хватает поля, а не права.
     const response = await as(KC.mixed, 'POST', '/api/v1/works', {
       objectId: OBJECT_1,
       sectionCode: SECTION,
       period: PERIOD,
       title: 'Комплект от совмещающего роли',
     });
-    expect(response.statusCode).toBe(403);
+    expect(response.statusCode).toBe(400);
     expect(response.headers['content-type']).toContain('application/problem+json');
+
+    const rows = await db.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM works WHERE title = 'Комплект от совмещающего роли'`,
+    );
+    expect(rows[0]?.n).toBe('0');
   });
 
   it('подрядчик, назвавший чужого исполнителя, получает 400, а не чужой комплект', async () => {

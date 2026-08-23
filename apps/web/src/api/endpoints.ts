@@ -171,6 +171,63 @@ export const files = {
 };
 
 // =====================================================================
+// Две кнопки конвейера (S21)
+// =====================================================================
+
+export interface StartMarkupPipelineResult {
+  readonly bundleReady: boolean;
+  readonly bundleId: string | null;
+  readonly layoutRevisionId: string | null;
+  readonly jobId: string;
+  readonly jobCreated: boolean;
+}
+
+export interface CheckPipelineResult {
+  readonly stage: 'recognition' | 'analysis' | 'checks';
+  readonly frozen: boolean;
+  readonly recognitionRunId: string | null;
+  readonly jobId: string;
+  readonly jobCreated: boolean;
+}
+
+export interface RecognitionProgress {
+  readonly recognitionRunId: string;
+  readonly status: string;
+  readonly pagesTotal: number;
+  readonly pagesDone: number;
+  readonly pagesFailed: number;
+  readonly pagesPending: number;
+  readonly blocksTotal: number;
+  readonly blocksRecognized: number;
+  readonly blocksInvalid: number;
+  readonly blocksRefused: number;
+}
+
+/**
+ * Сквозной конвейер: «Разметить» и «Проверить».
+ *
+ * Отдельный объект, а не методы в `layout`/`checks`: это не ещё одна стадия, а
+ * ДРУГОЙ способ вести ту же ревизию — одним нажатием вместо шести. Гранулярные
+ * вызовы остались там же, где были, и экран разметки продолжает звать их.
+ */
+export const pipeline = {
+  /** Сборка рабочего документа и детекция блоков одним нажатием. */
+  markup: (revisionId: string) =>
+    request<StartMarkupPipelineResult>('POST', `${V1}/revisions/${revisionId}/markup`, {
+      idempotencyKey: newIdempotencyKey('pipeline-markup'),
+    }).then((r) => r.data),
+
+  /** Заморозка, распознавание, анализ и проверки одним нажатием. */
+  check: (revisionId: string) =>
+    request<CheckPipelineResult>('POST', `${V1}/revisions/${revisionId}/check`, {
+      idempotencyKey: newIdempotencyKey('pipeline-check'),
+    }).then((r) => r.data),
+
+  /** Постраничный прогресс распознавания: «идёт» без числа страниц бесполезно. */
+  progress: (runId: string) => get<RecognitionProgress>(`${V1}/recognition-runs/${runId}/progress`),
+};
+
+// =====================================================================
 // Рабочий документ (§3.3)
 // =====================================================================
 

@@ -77,9 +77,11 @@ import {
   finishRecognitionRun,
   importDetectedBlocks,
   listBundlePages,
+  listBundles,
   listLayoutBlocks,
   loadBundlePlan,
   loadProfileForLayout,
+  startMarkupOnBundle,
   previewPageKey,
   probePdf,
   readDetectionSettings,
@@ -129,6 +131,7 @@ import {
   type PdfToolkit,
   type RdWebPort,
   type RecognitionSelection,
+  type ReviewDocument,
   type StorageProvider,
   finishValidationRun,
   listFindings,
@@ -138,6 +141,7 @@ import {
   loadRunJournal,
   saveDerivedMaterials,
   saveFindings,
+  saveLlmFindings,
   saveRunJournal,
   startValidationRun,
 } from '@id/api';
@@ -204,6 +208,8 @@ import {
   type WaitPagesOptions,
 } from './markup.js';
 import { createLocalDetectionHandler, type LocalDetectionDeps } from './local-detection.js';
+import { createLayoutStartHandler, type LayoutStartDeps } from './layout-start.js';
+import { createChecksLlmReviewHandler, type ChecksLlmReviewDeps } from './checks-llm-review.js';
 import { createModelStore } from '../detection/model-store.js';
 import {
   DEFAULT_INTER_OP_THREADS,
@@ -764,6 +770,45 @@ function markupDeps(options: PipelineJobsOptions): MarkupDeps {
  * тот же паттерн, что у `llm` в `segmentationDeps` — окружение опционально,
  * функциональность деградирует к безопасным значениям, а не падает.
  */
+/**
+ * Звено «сборка → разметка» (S21).
+ *
+ * Область — закреплённая за подрядчиком ревизии (`pinScope`), как у всей
+ * разметки: задача правит ПРОИЗВОДНОЕ этой поставки и ничего за её пределами не
+ * читает. Расширять её до объектной, как это сделано у сверки описи, здесь не
+ * нужно и вредно — вход у задачи ровно один, и он свой.
+ */
+function layoutStartDeps(options: PipelineJobsOptions): LayoutStartDeps {
+  const { db } = options;
+
+  return {
+    start: async ({ revisionId, logger }) => {
+      const scope = await pinScope(db, revisionId);
+      if (scope === null) return null;
+
+      // Последний рабочий документ, а не «тот, что собрала породившая задача»:
+      // между сборкой и этой задачей состав мог смениться, и размечать надо то,
+      // что в ревизии сейчас. Пустой список означает, что bundle успели убрать.
+      const bundles = await listBundles(db, scope, revisionId);
+      const bundle = bundles[bundles.length - 1];
+      if (bundle === undefined) return null;
+
+      const started = await startMarkupOnBundle(db, scope, {
+        revisionId,
+        bundleId: bundle.id,
+        previewCached: options.previewCached ?? false,
+        logger,
+      });
+      return {
+        layoutRevisionId: started.layoutRevisionId,
+        bundleId: started.bundleId,
+        provider: started.provider,
+        jobsEnqueued: started.jobIds.length,
+      };
+    },
+  };
+}
+
 function localDetectionDeps(options: PipelineJobsOptions): LocalDetectionDeps {
   const { db, storage } = options;
 
@@ -1708,6 +1753,82 @@ function segmentationDeps(options: PipelineJobsOptions): SegmentationDeps {
 }
 
 /**
+ * ИИ-проверка заполнения (S21).
+ *
+ * Переиспользует ПОРТ МОДЕЛИ сегментации целиком: провайдер, промты и запись
+ * `ai_runs` у стадий разные по смыслу, но одинаковые по устройству, и второй
+ * экземпляр `createLlmProvider` означал бы второй кэш, второй счётчик бюджета и
+ * второй лимит частоты — то есть потолок портала, умноженный на число стадий.
+ *
+ * Документы читаются областью ревизии: `loadCheckGraph` уже собирает то же
+ * самое для движка правил, но с внешними реестрами и материалами, которых этой
+ * стадии не нужно, — а нужен ей текст страниц, которого нет в графе.
+ */
+function checksLlmReviewDeps(options: PipelineJobsOptions): ChecksLlmReviewDeps {
+  const db = options.db;
+  const segmentation = segmentationDeps(options);
+
+  const scopeOf = async (revisionId: string): Promise<AuthScope> => {
+    const scope = await pinScope(db, revisionId);
+    if (scope === null) {
+      throw new PipelineScopeError(`Ревизия ${revisionId} не найдена: задача адресована в никуда.`);
+    }
+    return scope;
+  };
+
+  return {
+    loadReviewDocuments: async (revisionId) => {
+      const scope = await scopeOf(revisionId);
+      const [documents, assignments, pages] = await Promise.all([
+        listLogicalDocuments(db, scope, revisionId),
+        listPageAssignments(db, scope, revisionId),
+        loadSegmentationPages(db, scope, revisionId),
+      ]);
+
+      const textOf = new Map(pages.pages.map((page) => [page.sourcePageId, page]));
+      const pagesOfDocument = new Map<string, string[]>();
+      for (const assignment of [...assignments].sort(
+        (a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0),
+      )) {
+        if (assignment.documentId === null) continue;
+        const list = pagesOfDocument.get(assignment.documentId) ?? [];
+        list.push(assignment.sourcePageId);
+        pagesOfDocument.set(assignment.documentId, list);
+      }
+
+      const result: ReviewDocument[] = [];
+      for (const document of documents) {
+        const fields = await listFieldValues(db, scope, document.id);
+        result.push({
+          documentId: document.id,
+          docTypeCode: document.docTypeCode,
+          pages: (pagesOfDocument.get(document.id) ?? [])
+            .map((id) => textOf.get(id))
+            .filter((page) => page !== undefined)
+            .map((page) => ({
+              sourcePageId: page.sourcePageId,
+              pageTextVersionId: page.pageTextVersionId,
+              text: page.text,
+            })),
+          fields: fields.map((field) => ({
+            fieldCode: field.fieldCode,
+            valueText: field.valueText,
+            valueDate: field.valueDate,
+          })),
+        });
+      }
+      return result;
+    },
+
+    saveLlmFindings: async (input) => saveLlmFindings(db, await scopeOf(input.revisionId), input),
+
+    publishedPrompt: segmentation.publishedPrompt,
+    callLlm: segmentation.callLlm,
+    recordAiRun: segmentation.recordAiRun,
+  };
+}
+
+/**
  * Потолок чтения артефакта в память.
  *
  * Экспорт — это md/html/qa по нескольким сотням блоков, а не рабочий PDF:
@@ -1753,6 +1874,10 @@ export function registerPipelineJobs(
   // постраничная детекция, флаги внимания и кэш превью. Регистрируются здесь и
   // безусловно: обработчик без регистрации — это задача, которая вечно ждёт в
   // очереди воркера, который её «умеет», и выглядит как зависший конвейер.
+  // Звено «сборка → разметка» (S21): им кнопка «Разметить» доводит ревизию от
+  // загруженных файлов до размеченных страниц одним нажатием.
+  registry.register('layout.start', createLayoutStartHandler(layoutStartDeps(options)));
+
   const markup = markupDeps(options);
   registry.register('rd.create_run_document', createRunDocumentHandler(markup));
   registry.register('rd.upload_working_pdf', createUploadWorkingPdfHandler(markup));
@@ -1816,6 +1941,13 @@ export function registerPipelineJobs(
   // регистрации выглядит зависшим конвейером, а не отсутствующей возможностью.
   const checks = checksDeps(options);
   registry.register('checks.run', createChecksRunHandler(checks));
+  // Второй этап проверки (S21): ИИ-разбор заполнения поверх того же прогона.
+  // Регистрируется безусловно — отсутствие промта или провайдера это пропуск
+  // стадии с названной причиной, а не отсутствующий обработчик.
+  registry.register(
+    'checks.llm_review',
+    createChecksLlmReviewHandler(checksLlmReviewDeps(options)),
+  );
   registry.register('checks.summarize', createChecksSummarizeHandler(checks));
 
   // Задачи 22–23 (§12): нарезка логических документов после подтверждения
