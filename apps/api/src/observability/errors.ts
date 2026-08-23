@@ -143,9 +143,23 @@ const MAX_LOGGED_FRAMES = 5;
 /** Глубина цепочки `cause`: `HttpProblem` → ошибка драйвера. Дальше — шум. */
 const MAX_CAUSE_DEPTH = 2;
 
+/**
+ * Класс отказа.
+ *
+ * `name` предпочитается имени конструктора, но НЕ когда он родовой. Обёртка
+ * Drizzle (`DrizzleQueryError`) собственный `name` не выставляет вовсе, и
+ * унаследованный `Error` попадал в журнал классом КАЖДОЙ ошибки запроса к БД:
+ * отличить нарушение уникальности от отвалившегося соединения по нему было
+ * нельзя, а отпечатки таких отказов склеивались в одну строку журнала.
+ */
 export function errorClassOf(error: unknown): string {
   if (error instanceof Error) {
-    return error.name || error.constructor.name || 'Error';
+    const constructorName = error.constructor?.name;
+    const generic = error.name === '' || error.name === 'Error';
+    if (generic && typeof constructorName === 'string' && constructorName.length > 0) {
+      return constructorName;
+    }
+    return error.name || constructorName || 'Error';
   }
   if (typeof error === 'object' && error !== null) {
     const name = (error as { name?: unknown }).name;
@@ -164,6 +178,64 @@ function messageOf(error: unknown): string {
     if (typeof message === 'string') return message;
   }
   return String(error);
+}
+
+/**
+ * Цепочка `cause` от внешней ошибки к корневой.
+ *
+ * Порядок — как у вложенности: первым идёт то, что бросили, последним — то, что
+ * на самом деле отказало.
+ */
+function chainOf(error: unknown): readonly unknown[] {
+  const chain: unknown[] = [error];
+  let current: unknown = error;
+  for (let depth = 0; depth < MAX_CAUSE_DEPTH; depth += 1) {
+    const cause = causeOf(current);
+    if (cause === undefined || cause === null) break;
+    chain.push(cause);
+    current = cause;
+  }
+  return chain;
+}
+
+/**
+ * Сообщение об отказе: ПРИЧИНА первой, обёртки следом.
+ *
+ * Читать только верхний `message` было нельзя, и это не мелочь диагностики.
+ * Drizzle оборачивает любую ошибку драйвера в `DrizzleQueryError`, у которого
+ * `message` — это дамп SQL и параметров (`Failed query: insert into …`), а
+ * настоящий отказ базы лежит в `cause`. Сообщение при этом усекается по
+ * `MAX_MESSAGE_LENGTH`, и весь лимит съедал текст запроса: в журнале и в
+ * `jobs.last_error` оставалось «упал вот такой INSERT» — без единого слова о
+ * том, ПОЧЕМУ он упал. Различить нарушение уникальности, отказ CHECK и обрыв
+ * соединения было нечем.
+ *
+ * Порядок обратный вложенности намеренно: усечение режет ХВОСТ, поэтому первой
+ * обязана стоять причина, а контекст — тем, чем можно пожертвовать. Сообщения,
+ * уже содержащиеся в другом звене, отбрасываются: обёртка часто пересказывает
+ * причину целиком, и повтор занял бы место, которого и так мало.
+ */
+export function messageOfChain(error: unknown): string {
+  const links = [...chainOf(error)]
+    .reverse()
+    .map((link) => messageOf(link).trim())
+    .filter((message) => message !== '');
+
+  const kept: string[] = [];
+  for (const message of links) {
+    if (kept.some((existing) => existing.includes(message))) continue;
+    kept.push(message);
+  }
+  return kept.join(' ← ');
+}
+
+/** Поле, взятое с первого звена цепочки, где оно есть: у обёртки его нет. */
+function fieldInChain(error: unknown, field: string): string | undefined {
+  for (const link of chainOf(error)) {
+    const value = stringField(link, field);
+    if (value !== undefined) return value;
+  }
+  return undefined;
 }
 
 /**
@@ -371,7 +443,7 @@ export function errorDigest(error: unknown): ErrorDigest {
 
 export function fingerprintError(error: unknown): ErrorFingerprint {
   const errorClass = errorClassOf(error);
-  const messageTemplate = normalizeErrorMessage(messageOf(error));
+  const messageTemplate = normalizeErrorMessage(messageOfChain(error));
   const frame = topOwnFrame(error instanceof Error ? error.stack : undefined);
   const fingerprint = hash('sha1', `${errorClass}\n${messageTemplate}\n${frame?.normalized ?? ''}`);
 
@@ -449,7 +521,9 @@ export function prepareJournalEvent(
 ): JournalEvent {
   const fingerprint = fingerprintError(error);
   const merged = mergeWithContext(context);
-  const code = stringField(error, 'code');
+  // Код ищется по цепочке: у обёртки Drizzle его нет, а SQLSTATE — это то,
+  // по чему отказы разделяются на оси `error_code` в журнале.
+  const code = fieldInChain(error, 'code');
 
   const axes: ErrorAxes = {
     source: merged.source ?? options.defaultSource,

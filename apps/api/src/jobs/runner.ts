@@ -43,6 +43,7 @@ import {
   classifyErrorDomain,
   errorClassOf,
   errorDigest,
+  messageOfChain,
   normalizeErrorMessage,
   type ErrorReporter,
 } from '../observability/errors.js';
@@ -688,7 +689,12 @@ export class JobRunner {
           const { errorClass, permanent } = classifyFailure(error);
           await this.#finishFailed(job, startedAt, logger, {
             errorClass,
-            message: normalizeErrorMessage(error instanceof Error ? error.message : String(error)),
+            // Сообщение собирается по цепочке `cause`, а не берётся с верхнего
+            // уровня: обёртка Drizzle несёт только текст запроса, а причина
+            // отказа лежит под ней. Верхний `message` оставлял в
+            // `jobs.last_error` дамп SQL без единого слова о том, что именно
+            // отвергла база.
+            message: normalizeErrorMessage(messageOfChain(error)),
             permanent,
             error,
           });

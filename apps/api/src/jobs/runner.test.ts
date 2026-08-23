@@ -504,6 +504,63 @@ describe('повторы упавшей задачи', () => {
   });
 
   /**
+   * Причина отказа базы обязана дойти до журнала, а не остаться под обёрткой.
+   *
+   * Drizzle заворачивает любую ошибку драйвера в `DrizzleQueryError`, у которого
+   * `message` — дамп SQL и параметров, а настоящий отказ лежит в `cause`. Пока
+   * читался только верхний уровень, вся длина `normalizeErrorMessage()` уходила
+   * на текст запроса, и в `jobs.last_error` оставалось «упал вот такой INSERT»
+   * без слова о том, что именно отвергла база. Проверяется поэтому не наличие
+   * поля, а то, что имя нарушенного ограничения ЧИТАЕТСЯ после усечения.
+   */
+  it('причина ошибки БД доходит до журнала из-под обёртки Drizzle', async () => {
+    const failing = await enqueueSystemJob(app.db, {
+      type: 'checks.run',
+      payload: { revisionId: REVISION_A },
+      maxAttempts: 1,
+    });
+
+    // Форма ровно как у настоящей обёртки: длинный запрос сверху, отказ снизу.
+    const query = `insert into "source_pages" (${'"col", '.repeat(40)}"last")`;
+    const driverError = Object.assign(
+      new Error(
+        'duplicate key value violates unique constraint "source_pages_revision_ordinal_uq"',
+      ),
+      { code: '23505', constraint: 'source_pages_revision_ordinal_uq' },
+    );
+    const wrapper = new Error(
+      `Failed query: ${query}
+params: 1,2,3`,
+      { cause: driverError },
+    );
+
+    behaviours.set(failing.jobId, () => Promise.reject(wrapper));
+
+    await runner.runOnce();
+
+    const dead = await rawJob(failing.jobId);
+    expect(dead['status']).toBe('failed');
+
+    const recorded = String(dead['last_error']);
+    // Имя ограничения сохраняется целиком: `normalizeErrorMessage()` бережёт
+    // идентификатор схемы после слова `constraint`, и это тот случай, ради
+    // которого исключение и заведено.
+    expect(recorded).toContain('source_pages_revision_ordinal_uq');
+    expect(recorded).toContain('unique constraint');
+    // Причина стоит ПЕРВОЙ: усечение режет хвост, и порядок здесь — не вкус.
+    expect(recorded.indexOf('unique constraint')).toBeLessThan(
+      recorded.indexOf('Failed query') === -1
+        ? Number.MAX_SAFE_INTEGER
+        : recorded.indexOf('Failed query'),
+    );
+
+    const runs = await runsOf(failing.jobId);
+    expect(String(runs[0]?.['error_message'])).toContain('source_pages_revision_ordinal_uq');
+
+    await drainQueue();
+  });
+
+  /**
    * Отказ по существу запроса повторять нечем: пять попыток на 401 — это пять
    * одинаковых входов служебного аккаунта при отозванном доступе. Решение о
    * повторе теперь принимает `RdWebError.retriable`, а не «повторяем всё».
