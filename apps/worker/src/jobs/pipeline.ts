@@ -835,6 +835,9 @@ function localDetectionDeps(options: PipelineJobsOptions): LocalDetectionDeps {
     rasterizer: options.rasterizer ?? null,
     modelStore,
     ...(options.workDirBase !== undefined ? { workDirBase: options.workDirBase } : {}),
+    // Тот же приёмник, что у распознавания: страница без блоков — сигнал о
+    // качестве обработки (поток C, ADR-0010), а не отказ задачи.
+    feedback: options.feedback ?? new NoopProcessingFeedbackSink(),
 
     loadTargetByLayout: async ({ revisionId, layoutRevisionId }) => {
       const scope = await pinScope(db, revisionId);

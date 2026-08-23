@@ -62,6 +62,27 @@ export interface DetectPageStats {
   afterMerge: number | null;
   afterThreshold: number;
   finalByType: Partial<Record<DetectionBlockType, number>>;
+  /**
+   * Лучшая уверенность среди кандидатов, ОТБРОШЕННЫХ порогом принятия, по типам.
+   *
+   * Единственное число, отвечающее на вопрос «поможет ли снизить порог». Без
+   * него «страница не обведена» остаётся утверждением без величины за ним:
+   * пустой результат одинаково выглядит и когда модель не увидела ничего
+   * (лучший отброшенный ~0), и когда она увидела блок с уверенностью 0.49 при
+   * пороге 0.5. Решения оператора в этих двух случаях противоположны.
+   *
+   * Собирается из ДВУХ мест, потому что порог режет дважды. Первый рез — на
+   * плитке (`scoreFloor` в `decodeTileOutputs`): туда кандидат ниже порога не
+   * доживает вовсе, и страничный фильтр его уже не увидит. Второй — на
+   * странице (`filterByClassThreshold`), где отсекается то, что прошло общий
+   * порог, но не прошло порог своего типа. Учитывать только второй значило бы
+   * отвечать «модель не видела ничего» в самом частом случае.
+   *
+   * Вырожденные боксы и отбракованные full-tile guard'ом сюда не попадают:
+   * «лучший непринятый» обязан быть боксом, который приняли бы, будь порог
+   * ниже, иначе число вводило бы в заблуждение.
+   */
+  bestRejectedScore: Partial<Record<DetectionBlockType, number>>;
 }
 
 /** Минимум плиток с ~full-tile боксами одного типа для предупреждения о рассинхроне. */
@@ -158,6 +179,7 @@ export function detectPageFromTiles(input: DetectPageInput): DetectPageResult {
     afterMerge: null,
     afterThreshold: 0,
     finalByType: {},
+    bestRejectedScore: {},
   };
   if (pageWidth <= 0 || pageHeight <= 0) {
     return { candidates: [], stats };
@@ -192,6 +214,15 @@ export function detectPageFromTiles(input: DetectPageInput): DetectPageResult {
       bump(stats.rejectedFullTile, bt as DetectionBlockType, count ?? 0);
     }
     stats.rejectedMinBox += tileStats.rejectedMinBox;
+    // Лучший непринятый по плиткам — максимум: страница отвечает за весь лист,
+    // а плитка знает только свой кусок.
+    for (const [bt, score] of Object.entries(tileStats.bestBelowFloor)) {
+      const type = bt as DetectionBlockType;
+      const best = stats.bestRejectedScore[type];
+      if (score !== undefined && (best === undefined || score > best)) {
+        stats.bestRejectedScore[type] = score;
+      }
+    }
 
     const tw = tile.width;
     const th = tile.height;
@@ -221,8 +252,21 @@ export function detectPageFromTiles(input: DetectPageInput): DetectPageResult {
     final = mergeSplitTextBoxes(final);
     stats.afterMerge = final.length;
   }
+  const beforeThreshold = final;
   final = filterByClassThreshold(final, params.thresholds, params.defaultThreshold);
   stats.afterThreshold = final.length;
+  // Лучший отброшенный порогом — по разнице множеств, а не по повторному
+  // проходу с другим порогом: второй прогон фильтра ответил бы на вопрос «что
+  // прошло бы при пороге X», а нужен ответ «насколько близко было то, что не
+  // прошло», и он не зависит от гипотетического X.
+  const accepted = new Set(final);
+  for (const det of beforeThreshold) {
+    if (accepted.has(det)) continue;
+    const best = stats.bestRejectedScore[det.blockType];
+    if (best === undefined || det.score > best) {
+      stats.bestRejectedScore[det.blockType] = det.score;
+    }
+  }
   final = capDetections(final, params.maxDetections);
 
   const candidates: Candidate[] = [];

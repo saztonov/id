@@ -45,6 +45,7 @@ import {
   createMetrics,
   createPdfLibToolkit,
   createStorage,
+  DbProcessingFeedbackSink,
   dedupeKeyFor,
   detectionManifestKey,
   detectionModelKey,
@@ -291,6 +292,17 @@ function localDetectionDeps(session: OnnxSessionPort): LocalDetectionDeps {
   return {
     rasterizer: new FakeRasterizer(rgbPagePng),
     modelStore,
+    // Настоящий приёмник обратной связи на тестовой БД: проверять запись
+    // двойником значило бы проверять двойник. `TestDatabase.query` отдаёт
+    // строки, а `SqlExecutor` ждёт `{ rows }` — обёртка ровно в одну строку.
+    feedback: new DbProcessingFeedbackSink({
+      sql: {
+        query: async (text: string, values?: readonly unknown[]) => ({
+          rows: await testDb.query(text, values as unknown[] | undefined),
+        }),
+      },
+      logger: createLogger({ service: 'detect-local-e2e', level: 'silent', env: 'test' }),
+    }),
 
     loadTargetByLayout: async ({ revisionId, layoutRevisionId: lrId }) =>
       buildTestMarkupTarget(revisionId, lrId),
@@ -508,6 +520,26 @@ async function blockRows(): Promise<
             detection_score, detection_model_version
        FROM layout_blocks WHERE layout_revision_id = '${layoutRevisionId}'
       ORDER BY working_page_index`,
+  );
+}
+
+/** Записи обратной связи конвейера по этой ревизии, свежие сверху. */
+async function feedbackRows(): Promise<
+  {
+    reason_code: string;
+    feedback_type: string;
+    pipeline_stage: string | null;
+    working_page_index: number | null;
+    detector_model_version: string | null;
+    score: number | null;
+  }[]
+> {
+  return testDb.query(
+    `SELECT reason_code, feedback_type, pipeline_stage, working_page_index,
+            detector_model_version, score
+       FROM processing_feedback
+      WHERE revision_id = '${REVISION}'
+      ORDER BY at DESC`,
   );
 }
 
@@ -767,12 +799,46 @@ describe('layout.detect_local с моделью', () => {
  */
 describe('переопределения параметров детекции настройками портала', () => {
   it('порог по умолчанию отбрасывает слабую детекцию: страница остаётся пустой', async () => {
+    await testDb.query(`DELETE FROM processing_feedback`);
     const session = new QueueSession([weakTextDetection()]);
     await runJob(session, { pageIndices: [1], overwriteExisting: true });
     expect(session.calls).toBe(1);
 
     const page1 = (await blockRows()).filter((row) => row.working_page_index === 1);
     expect(page1).toHaveLength(0);
+
+    // Пустая страница объяснена, а не просто пуста: код причины отличает
+    // «порог виноват» от «модель не увидела ничего», а `score` называет,
+    // насколько близко подошёл лучший непринятый кандидат.
+    const feedback = await feedbackRows();
+    expect(feedback).toHaveLength(1);
+    expect(feedback[0]?.reason_code).toBe('detect.low_score');
+    expect(feedback[0]?.pipeline_stage).toBe('detect');
+    expect(feedback[0]?.working_page_index).toBe(1);
+    expect(feedback[0]?.detector_model_version).toBe(MODEL_VERSION);
+    expect(Number(feedback[0]?.score)).toBeCloseTo(WEAK_TEXT_SCORE, 4);
+  });
+
+  it('модель не увидела ничего — причина названа иначе, чем «не дотянул до порога»', async () => {
+    // Тот же внешний признак «блоков нет», но следствие для оператора другое:
+    // снижать порог бессмысленно. Один код на оба случая сделал бы годовой ряд
+    // по причинам бесполезным.
+    await testDb.query(`DELETE FROM processing_feedback`);
+    const session = new QueueSession([noDetection()]);
+    await runJob(session, { pageIndices: [1], overwriteExisting: true });
+
+    const feedback = await feedbackRows();
+    expect(feedback).toHaveLength(1);
+    expect(feedback[0]?.reason_code).toBe('detect.no_blocks');
+  });
+
+  it('страница с блоками записи об отказе не порождает', async () => {
+    await testDb.query(`DELETE FROM processing_feedback`);
+    const session = new QueueSession([oneTextDetection()]);
+    await runJob(session, { pageIndices: [1], overwriteExisting: true });
+
+    expect((await blockRows()).filter((row) => row.working_page_index === 1)).toHaveLength(1);
+    expect(await feedbackRows()).toHaveLength(0);
   });
 
   it('сниженный detection.score_threshold доводит ту же детекцию до блока', async () => {

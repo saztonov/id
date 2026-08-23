@@ -23,6 +23,7 @@ function block(overrides: Partial<LayoutBlock> & { id: string }): LayoutBlock {
     sortOrder: 0,
     source: 'auto',
     detectorProvenance: 'rf_detr',
+    detectionScore: null,
     ...overrides,
   };
 }

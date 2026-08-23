@@ -180,6 +180,12 @@ export interface LayoutBlock {
   sortOrder: number;
   source: BlockSource;
   detectorProvenance: DetectorProvenance;
+  /**
+   * Уверенность детектора, 0..1, либо `null` — у ручных блоков и у блоков от
+   * легаси-API RD WEB, чей ответ её не несёт. `null` означает «неизвестно», а
+   * не «ноль», и показывается отдельно от числа.
+   */
+  detectionScore: number | null;
 }
 
 export interface LayoutBlockList {

@@ -118,6 +118,14 @@ export function BlockList(props: BlockListProps): ReactNode {
                   </Checkbox>
                   <div style={{ fontSize: 12, color: '#595959', paddingLeft: 24 }}>
                     {PROVENANCE_LABELS[block.detectorProvenance]}
+                    {/*
+                      Уверенность показывается только когда она есть. У ручных
+                      блоков и у блоков от легаси-API RD WEB её нет, и рисовать
+                      там ноль значило бы утверждать «детектор не был уверен»
+                      про блок, который детектор вообще не создавал.
+                    */}
+                    {block.detectionScore !== null &&
+                      `, уверенность ${block.detectionScore.toFixed(2)}`}
                     {block.shapeType === 'polygon' && ', полигон'}
                   </div>
                 </li>

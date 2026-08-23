@@ -240,6 +240,7 @@ describe('modeMismatchWarning', () => {
     afterMerge: null,
     afterThreshold: 0,
     finalByType: {},
+    bestRejectedScore: {},
   });
 
   it('срабатывает только в настоящем тайловом режиме и от minTiles плиток', () => {
@@ -249,5 +250,119 @@ describe('modeMismatchWarning', () => {
     expect(warning).toContain('Страница 0');
     expect(warning).toContain('text: 3/6 плиток');
     expect(warning).toContain('рассинхрон');
+  });
+});
+
+/**
+ * Лучшая уверенность среди отброшенных порогом.
+ *
+ * Это не статистика ради статистики: пустой результат страницы выглядит
+ * одинаково и когда модель не увидела ничего, и когда она увидела блок с
+ * уверенностью 0.49 при пороге 0.5, — а решения оператора в этих двух случаях
+ * противоположны. Число отвечает ровно на вопрос «поможет ли снизить порог».
+ */
+describe('bestRejectedScore', () => {
+  /** Одна плитка на весь лист с заданными логитами класса text. */
+  const pageWithTextLogit = (
+    logit: number,
+    params: InferenceParams = baseParams,
+  ): ReturnType<typeof detectPageFromTiles> =>
+    detectPageFromTiles({
+      pageWidth: 200,
+      pageHeight: 100,
+      plannedTileCount: 1,
+      tiles: [
+        {
+          tile: wholePageTile(200, 100),
+          dets: [[0.5, 0.5, 0.96, 0.96]],
+          labels: [[logit, -20, -20, -20]],
+        },
+      ],
+      params,
+    });
+
+  it('детекция чуть ниже порога названа своим числом', () => {
+    // sigmoid(-1) ≈ 0.269 при пороге 0.5: блока нет, но модель видела почти то,
+    // что нужно. Именно этот случай на боевом комплекте выглядел как
+    // «страница не обведена вовсе» и не имел объяснения.
+    const { candidates, stats } = pageWithTextLogit(-1);
+    expect(candidates).toHaveLength(0);
+    expect(stats.afterThreshold).toBe(0);
+    expect(stats.bestRejectedScore.text).toBeCloseTo(sigmoid(-1), 12);
+  });
+
+  it('принятая детекция в отброшенные не попадает', () => {
+    const { candidates, stats } = pageWithTextLogit(3);
+    expect(candidates).toHaveLength(1);
+    expect(stats.bestRejectedScore.text).toBeUndefined();
+  });
+
+  it('снижение порога переводит ту же детекцию в принятые', () => {
+    // Прямая проверка того, ради чего число и считается: оператор, увидевший
+    // 0.269, снижает порог до 0.2 и получает блок.
+    const { candidates, stats } = pageWithTextLogit(-1, { ...baseParams, defaultThreshold: 0.2 });
+    expect(candidates).toHaveLength(1);
+    expect(stats.bestRejectedScore.text).toBeUndefined();
+  });
+
+  it('берётся максимум по типу, а не последний встреченный', () => {
+    const { stats } = detectPageFromTiles({
+      pageWidth: 200,
+      pageHeight: 100,
+      plannedTileCount: 1,
+      tiles: [
+        {
+          tile: wholePageTile(200, 100),
+          // Два непересекающихся бокса (NMS их не схлопнет), оба ниже порога.
+          dets: [
+            [0.25, 0.25, 0.4, 0.4],
+            [0.75, 0.75, 0.4, 0.4],
+          ],
+          labels: [
+            [-3, -20, -20, -20],
+            [-1, -20, -20, -20],
+          ],
+        },
+      ],
+      params: baseParams,
+    });
+    expect(stats.bestRejectedScore.text).toBeCloseTo(sigmoid(-1), 12);
+  });
+
+  it('типы не смешиваются: у каждого свой лучший отброшенный', () => {
+    const { stats } = detectPageFromTiles({
+      pageWidth: 200,
+      pageHeight: 100,
+      plannedTileCount: 1,
+      tiles: [
+        {
+          tile: wholePageTile(200, 100),
+          dets: [
+            [0.25, 0.25, 0.4, 0.4],
+            [0.75, 0.75, 0.4, 0.4],
+          ],
+          labels: [
+            [-1, -20, -20, -20],
+            [-20, -20, -2, -20],
+          ],
+        },
+      ],
+      params: baseParams,
+    });
+    expect(stats.bestRejectedScore.text).toBeCloseTo(sigmoid(-1), 12);
+    expect(stats.bestRejectedScore.stamp).toBeCloseTo(sigmoid(-2), 12);
+    // У изображения своего кандидата в этой плитке нет — только логит -20 в
+    // тех же запросах, то есть исчезающе малая уверенность. Записи это не
+    // лишает: «лучшее, что видели по этому типу» ноль-с-хвостиком — такой же
+    // честный ответ, как и 0.27, и читается он однозначно.
+    expect(stats.bestRejectedScore.image ?? 1).toBeLessThan(1e-6);
+  });
+
+  it('модель не увидела ничего — число исчезающе мало, и это тоже ответ', () => {
+    // Отличается от «увидела слабо» не наличием записи, а её величиной:
+    // sigmoid(-20) ≈ 2e-9 против 0.27. Первое означает «снижать порог
+    // бессмысленно», второе — «снизить и получить блок».
+    const { stats } = pageWithTextLogit(-20);
+    expect(stats.bestRejectedScore.text ?? 1).toBeLessThan(1e-6);
   });
 });

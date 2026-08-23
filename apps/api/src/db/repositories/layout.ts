@@ -574,6 +574,14 @@ export interface LayoutBlockView {
   readonly sortOrder: number;
   readonly source: 'auto' | 'user';
   readonly detectorProvenance: DetectorProvenance;
+  /**
+   * Уверенность детектора, 0..1, либо `null`.
+   *
+   * `null` у ручных блоков и у блоков от легаси-API RD WEB: их `BlockOut`
+   * уверенности не несёт (ADR-0004). Отсутствие значения — это «неизвестно», а
+   * не «ноль», и на экране оно так и показывается.
+   */
+  readonly detectionScore: number | null;
   readonly points: readonly { readonly pointNo: number; readonly x: number; readonly y: number }[];
 }
 
@@ -591,6 +599,7 @@ const BLOCK_SELECTION = {
   sortOrder: layoutBlocks.sortOrder,
   source: layoutBlocks.source,
   detectorProvenance: layoutBlocks.detectorProvenance,
+  detectionScore: layoutBlocks.detectionScore,
 };
 
 /**

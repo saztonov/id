@@ -75,6 +75,13 @@ export const layoutBlockViewSchema = z.object({
   sortOrder: z.int().nonnegative(),
   source: blockSourceSchema,
   detectorProvenance: detectorProvenanceSchema,
+  /**
+   * Уверенность детектора: `null` у ручных блоков и у блоков от легаси-API
+   * RD WEB, чей `BlockOut` её не несёт. Экран разметки показывает её рядом с
+   * блоком — оператору, решающему, снижать ли порог, нужно видеть, с какой
+   * уверенностью нашлось то, что нашлось.
+   */
+  detectionScore: z.number().min(0).max(1).nullable(),
 });
 
 export const layoutBlockListSchema = z.object({

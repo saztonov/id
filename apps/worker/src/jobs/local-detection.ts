@@ -57,12 +57,15 @@ import {
   type JobContext,
   type JobHandler,
   type PageRasterizer,
+  type ProcessingFeedbackSink,
 } from '@id/api';
 import {
   applyParamOverrides,
   describeAppliedOverrides,
+  DETECTION_BLOCK_TYPES,
   INFERENCE_MODE_AUTO,
   type Candidate,
+  type DetectPageStats,
   type InferenceMode,
   type InferenceParamOverrides,
 } from '@id/detection';
@@ -78,6 +81,11 @@ export interface LocalDetectionDeps {
   readonly modelStore: ModelStore;
   /** Каталог временных копий; по умолчанию системный (паттерн `bundle-build.ts`). */
   readonly workDirBase?: string | undefined;
+  /**
+   * Обратная связь конвейера (поток C, ADR-0010): почему страница осталась без
+   * блоков. Необязательна — без неё задача работает как раньше, только молча.
+   */
+  readonly feedback?: ProcessingFeedbackSink | undefined;
 
   /**
    * Цель задачи по ЯВНОМУ `layoutRevisionId` — как у `layout.detect_pages`
@@ -130,6 +138,87 @@ export interface LocalDetectionDeps {
     readonly workingPageIndices: readonly number[];
     readonly blocks: readonly DetectedBlockInput[];
   }): Promise<{ readonly imported: number; readonly skippedPages: readonly number[] }>;
+}
+
+/**
+ * Доля порога, ниже которой снижать порог уже бессмысленно.
+ *
+ * Разделяет два разных сообщения на одном и том же внешнем признаке «блоков
+ * нет». Лучший непринятый кандидат на 0.45 при пороге 0.5 означает «порог
+ * виноват, снизьте его»; на 0.000002 — «модель не увидела ничего, порог ни при
+ * чём». Половина порога выбрана как заведомо консервативная граница: она не
+ * обещает, что снижение поможет, а только отделяет случай, где его стоит
+ * попробовать.
+ */
+const LOW_SCORE_HINT_RATIO = 0.5;
+
+/** Лучшая уверенность среди непринятых по всем типам, либо `null`. */
+function bestRejected(stats: DetectPageStats): number | null {
+  let best: number | null = null;
+  for (const type of DETECTION_BLOCK_TYPES) {
+    const score = stats.bestRejectedScore[type];
+    if (score !== undefined && (best === null || score > best)) best = score;
+  }
+  return best;
+}
+
+/**
+ * Записать в обратную связь конвейера, почему страница осталась без блоков.
+ *
+ * Коды `detect.no_blocks` и `detect.low_score` были заведены заранее
+ * (миграция 0024), но их никто не писал: `DetectPageStats` считалась и
+ * выбрасывалась. Из-за этого на вопрос «почему страница 49 не обведена»
+ * ответить было нечем — оставался жёлтый бейдж «Блоков не найдено», который
+ * называет симптом, а не причину.
+ *
+ * Записывается ОДИН код на страницу, а не оба: у них разный смысл и разное
+ * следствие для оператора, и две записи на одно событие сделали бы годовой ряд
+ * по причинам нечитаемым.
+ *
+ * Значения полей сюда не попадают — только счётчики и уверенности (§11).
+ */
+async function recordEmptyPageFeedback(
+  deps: LocalDetectionDeps,
+  input: {
+    readonly revisionId: string;
+    readonly sourcePageId: string;
+    readonly workingPageIndex: number;
+    readonly modelVersion: string;
+    readonly threshold: number;
+    readonly stats: DetectPageStats;
+  },
+): Promise<void> {
+  const sink = deps.feedback;
+  if (sink === undefined) return;
+
+  const best = bestRejected(input.stats);
+  const nearThreshold = best !== null && best >= input.threshold * LOW_SCORE_HINT_RATIO;
+
+  await sink.record({
+    // Тип из закрытого перечня (миграция 0024): отдельного «wrong_detection»
+    // в нём нет, а `recognition_failure` — ближайший по смыслу «конвейер не
+    // получил того, что должен был». Различает случаи код причины, по нему же
+    // строится годовой ряд.
+    feedbackType: 'recognition_failure',
+    reasonCode: nearThreshold ? 'detect.low_score' : 'detect.no_blocks',
+    severity: 'warn',
+    revisionId: input.revisionId,
+    sourcePageId: input.sourcePageId,
+    workingPageIndex: input.workingPageIndex,
+    pipelineStage: 'detect',
+    detectorModelVersion: input.modelVersion,
+    ...(best === null ? {} : { score: best }),
+    observed: {
+      threshold: input.threshold,
+      best_rejected_score: best,
+      raw_by_type: input.stats.rawByType,
+      after_nms: input.stats.afterNms,
+      after_threshold: input.stats.afterThreshold,
+      rejected_min_box: input.stats.rejectedMinBox,
+      tiles_planned: input.stats.tilesPlanned,
+      tiles_inferred: input.stats.tilesInferred,
+    },
+  });
 }
 
 /** Допуск расхождения рендера с картой страниц: скан/DPI не бывают идеальными. */
@@ -396,7 +485,41 @@ export function createLocalDetectionHandler(
         const blocks = ordered.map((candidate, index) =>
           toBlockInput(pageIndex, candidate, index, settings.modelVersion),
         );
-        if (blocks.length === 0) emptyPages += 1;
+
+        // Постраничная сводка: раньше `DetectPageStats` считалась и
+        // выбрасывалась, а в журнал уходил только итог по всей пачке. Из-за
+        // этого «страница не обведена» нельзя было объяснить: неизвестно,
+        // сколько кандидатов было до порога и насколько близко подошёл лучший
+        // непринятый.
+        ctx.logger.info(
+          {
+            event: 'detect_local_page_stats',
+            page: pageIndex,
+            mode: detected.mode,
+            mode_source: detected.modeSource,
+            raw_by_type: detected.stats.rawByType,
+            after_nms: detected.stats.afterNms,
+            after_merge: detected.stats.afterMerge,
+            after_threshold: detected.stats.afterThreshold,
+            final_by_type: detected.stats.finalByType,
+            rejected_min_box: detected.stats.rejectedMinBox,
+            best_rejected_score: detected.stats.bestRejectedScore,
+            threshold: params.defaultThreshold,
+          },
+          'детекция страницы завершена',
+        );
+
+        if (blocks.length === 0) {
+          emptyPages += 1;
+          await recordEmptyPageFeedback(deps, {
+            revisionId: target.revisionId,
+            sourcePageId: page.sourcePageId,
+            workingPageIndex: pageIndex,
+            modelVersion: settings.modelVersion,
+            threshold: params.defaultThreshold,
+            stats: detected.stats,
+          });
+        }
         perPageBlocks.set(pageIndex, blocks);
         targetPageList.push(pageIndex);
       }

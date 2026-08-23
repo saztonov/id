@@ -263,10 +263,23 @@ export interface TileDecodeStats {
   nearFullTile: Partial<Record<DetectionBlockType, number>>;
   rejectedFullTile: Partial<Record<DetectionBlockType, number>>;
   rejectedMinBox: number;
+  /**
+   * Лучшая уверенность НИЖЕ порога сбора (`scoreFloor`) по типам.
+   *
+   * Собирается только ради диагностики и на результат декода не влияет. Нужна
+   * потому, что порог сбора режет кандидатов ЗДЕСЬ, до страничного фильтра:
+   * без этой записи «страница не обведена» невозможно отличить от «модель
+   * видела блок с уверенностью 0.49 при пороге 0.5», а решения оператора в
+   * этих случаях противоположны.
+   *
+   * Топ отсортирован по убыванию, поэтому первый попавшийся кандидат типа —
+   * и есть лучший для него.
+   */
+  bestBelowFloor: Partial<Record<DetectionBlockType, number>>;
 }
 
 export function newTileDecodeStats(): TileDecodeStats {
-  return { nearFullTile: {}, rejectedFullTile: {}, rejectedMinBox: 0 };
+  return { nearFullTile: {}, rejectedFullTile: {}, rejectedMinBox: 0, bestBelowFloor: {} };
 }
 
 function bump(counter: Partial<Record<DetectionBlockType, number>>, bt: DetectionBlockType): void {
@@ -367,11 +380,23 @@ export function decodeTileOutputs(
   });
 
   const out: RawTileDet[] = [];
+  // Сколько типов уже получили запись «лучший ниже порога»: как только все,
+  // сканировать хвост незачем.
+  const classCount = new Set(idToType.values()).size;
   for (let rank = 0; rank < k; rank += 1) {
     const fi = sorted[rank] as number;
     const score = probs[fi] as number;
-    if (score < scoreFloor) {
-      break; // top отсортирован по убыванию — дальше только меньше
+    const belowFloor = score < scoreFloor;
+    // Раньше здесь стоял `break`: топ отсортирован по убыванию, и для РЕЗУЛЬТАТА
+    // хвост действительно не нужен. Но диагностике нужен именно он — лучший из
+    // тех, кого порог не пропустил. Поэтому обход продолжается, пока каждый тип
+    // не получит свою запись, а в `out` при этом по-прежнему не попадает ничего
+    // ниже порога: результат декода не изменился.
+    if (
+      belowFloor &&
+      (stats === undefined || Object.keys(stats.bestBelowFloor).length >= classCount)
+    ) {
+      break;
     }
     const col = fi % cCount;
     const q = (fi - col) / cCount;
@@ -384,12 +409,25 @@ export function decodeTileOutputs(
     const x1 = boxes[q * 4 + 2] as number;
     const y1 = boxes[q * 4 + 3] as number;
     if (x1 - x0 < minBoxNorm || y1 - y0 < minBoxNorm) {
-      if (stats) {
+      if (stats && !belowFloor) {
         stats.rejectedMinBox += 1;
       }
       continue; // вырожденный/слишком тонкий бокс
     }
     const nearFull = x1 - x0 >= fullTileMinRatio && y1 - y0 >= fullTileMinRatio;
+    if (belowFloor) {
+      // Вырожденные и отбракованные guard'ом сюда не попадают выше/ниже —
+      // «лучший непринятый» обязан быть боксом, который приняли бы, будь порог
+      // ниже, иначе число вводило бы в заблуждение.
+      if (
+        stats &&
+        !(nearFull && rejectFullTileTypes?.has(bt)) &&
+        stats.bestBelowFloor[bt] === undefined
+      ) {
+        stats.bestBelowFloor[bt] = score;
+      }
+      continue;
+    }
     if (nearFull && stats) {
       bump(stats.nearFullTile, bt);
     }

@@ -252,6 +252,7 @@ function registerReadRoutes(app: AppInstance): void {
             sortOrder: block.sortOrder,
             source: block.source,
             detectorProvenance: block.detectorProvenance,
+            detectionScore: block.detectionScore,
           })),
         });
     },
