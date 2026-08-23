@@ -243,6 +243,28 @@ function LayoutWorkspace(props: WorkspaceProps): ReactNode {
   const layoutDetail = detail.data;
   const frozen = layoutDetail.state !== 'draft';
   const editable = canEdit && !frozen;
+  /**
+   * Почему панель инструментов недоступна — текстом, а не молча.
+   *
+   * Панель рисуется всегда, и `editable` гасит в ней ВСЁ разом: выбор
+   * инструмента, тип блока, повтор детекции, замену страницы, заморозку.
+   * Серая панель без объяснения неотличима от неработающего экрана — с этого
+   * началось замечание «нет инструментов ручного выделения», хотя инструменты
+   * были на месте и просто не были разрешены роли.
+   *
+   * Порядок причин не произволен: заморозка сильнее прав. У человека без
+   * `markup.edit` на замороженной ревизии верны обе, но правки не будет и
+   * после выдачи права, поэтому называется та, которую он увидит первой.
+   */
+  const disabledReason: string | null = frozen
+    ? layoutDetail.state === 'superseded'
+      ? 'Эта ревизия разметки заменена более поздней — правки идут в неё.'
+      : 'Разметка заморожена: блоки этой ревизии не правятся. ' +
+        'Исправление — новая ревизия разметки.'
+    : canEdit
+      ? null
+      : 'Недостаточно прав: правка разметки требует markup.edit. ' +
+        'Разметку ведут подрядчик, генподрядчик, инженер и администратор.';
 
   const pageList = pages.data ?? [];
   const currentPage =
@@ -304,6 +326,7 @@ function LayoutWorkspace(props: WorkspaceProps): ReactNode {
         layoutId={layoutId}
         onPickLayout={props.onPickLayout}
         editable={editable}
+        disabledReason={disabledReason}
         busy={editing.busy}
         draftType={store.draftType}
         tool={store.tool}
@@ -573,6 +596,8 @@ interface ToolbarProps {
   readonly layoutId: string;
   readonly onPickLayout: (layoutId: string) => void;
   readonly editable: boolean;
+  /** Почему панель недоступна; `null` — доступна. Показывается рядом с кнопками. */
+  readonly disabledReason: string | null;
   readonly busy: boolean;
   readonly draftType: BlockType;
   readonly tool: 'select' | 'draw';
@@ -711,6 +736,18 @@ function MarkupToolbar(props: ToolbarProps): ReactNode {
           label: `${String(Math.round(step * 100))}%`,
         }))}
       />
+
+      {props.disabledReason !== null && (
+        // `flexBasis: '100%'` — причина занимает свою строку под кнопками:
+        // втиснутая между ними, она читалась бы как подпись к соседней.
+        <Typography.Text
+          type="secondary"
+          data-testid="markup-disabled-reason"
+          style={{ flexBasis: '100%' }}
+        >
+          {props.disabledReason}
+        </Typography.Text>
+      )}
     </div>
   );
 }

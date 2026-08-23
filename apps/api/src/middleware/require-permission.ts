@@ -48,9 +48,27 @@ export const PERMISSIONS = {
   'submission.submit': ['contractor', 'general_contractor', 'engineer', 'manager', 'admin'],
 
   'markup.read': ['contractor', 'general_contractor', 'engineer', 'manager', 'admin'],
-  'markup.edit': ['contractor', 'general_contractor', 'engineer'],
-  'markup.freeze': ['contractor', 'general_contractor', 'engineer'],
-  'recognition.start': ['contractor', 'general_contractor', 'engineer'],
+  /**
+   * Правка разметки, её заморозка и отправка на распознавание.
+   *
+   * Администратор добавлен к трём исполняющим ролям в S24. До этого он имел
+   * `markup.read` и не имел `markup.edit`, и это выглядело на экране не как
+   * ограничение прав, а как сломанный портал: панель инструментов разметки
+   * рисуется всегда, а `editable = can('markup.edit') && !frozen` гасил в ней
+   * ВСЁ разом — выбор инструмента, тип блока, повтор детекции, замену
+   * страницы, заморозку. Отличить «нет права» от «кнопки не работают» человеку
+   * было нечем.
+   *
+   * Расширение узкое и осознанное: `admin` уже вправе завести комплект,
+   * загрузить в него файлы и запустить конвейер (`submission.upload`,
+   * `pipeline.run`), то есть создать разметку он мог и раньше — не мог только
+   * поправить её результат. Решения о самом документе это не касается:
+   * `document.edit`, `checks.run` и `revision.approve` у администратора
+   * по-прежнему нет, и приёмку он не подписывает.
+   */
+  'markup.edit': ['contractor', 'general_contractor', 'engineer', 'admin'],
+  'markup.freeze': ['contractor', 'general_contractor', 'engineer', 'admin'],
+  'recognition.start': ['contractor', 'general_contractor', 'engineer', 'admin'],
 
   /**
    * Границы документов, тип, реквизиты: правит проверяющий, не подрядчик.
