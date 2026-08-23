@@ -17,7 +17,9 @@ import {
   resolveInferenceMode,
   type Candidate,
   type DetectPageStats,
+  type InferenceMode,
   type InferenceParams,
+  type ModeSource,
   type TileInferenceResult,
 } from '@id/detection';
 
@@ -35,6 +37,13 @@ export interface DetectPageInput {
   readonly heightPx: number;
   readonly session: OnnxSessionPort;
   readonly params: InferenceParams;
+  /**
+   * Режим инференса из настроек портала: `auto` — решать по манифесту.
+   *
+   * Не `InferenceParams`, потому что это не свойство модели, а решение
+   * оператора о том, как её сегодня применяют (`detection.inference_mode`).
+   */
+  readonly inferenceMode?: InferenceMode | typeof INFERENCE_MODE_AUTO;
 }
 
 export interface DetectPageResult {
@@ -42,19 +51,26 @@ export interface DetectPageResult {
   readonly stats: DetectPageStats;
   /** Текст предупреждения о рассинхроне режима тайлинга или `null`. */
   readonly warning: string | null;
+  /** Какой режим применён и чем он решён — уходит в лог и снимок прогона. */
+  readonly mode: InferenceMode;
+  readonly modeSource: ModeSource;
 }
 
 /**
  * Детекция одной страницы: план плиток → (blank-skip) → препроцессинг →
  * ONNX → числовой постпроцесс `@id/detection`.
  *
- * Режим инференса всегда `auto`: у портала нет собственной настройки
- * `detection.inference_mode` (манифест — единственный источник правды, ADR-0008),
- * поэтому `resolveInferenceMode` выбирает между `tiles`/`whole_page` только по
- * `params.trainingMode` манифеста.
+ * Режим инференса по умолчанию `auto` — тогда `resolveInferenceMode` выбирает
+ * между `tiles`/`whole_page` по `params.trainingMode` манифеста. Явное
+ * значение приходит из настройки `detection.inference_mode` и работает как
+ * kill-switch: он нужен ровно тогда, когда манифест описывает режим обучения
+ * неверно, а инференс обязан идти в масштабе кадра обучения — иначе RF-DETR
+ * выдаёт вырожденные боксы ~на весь кадр. Такая же ручка есть в настройках
+ * эталонного RD WEB.
  */
 export async function detectPage(input: DetectPageInput): Promise<DetectPageResult> {
   const { pageIndex, pngPath, widthPx, heightPx, session, params } = input;
+  const requestedMode = input.inferenceMode ?? INFERENCE_MODE_AUTO;
 
   // Паритет с `detectPageFromTiles` референса: некорректные размеры страницы
   // дают пустой результат, а не исключение. Проверка здесь обязательна —
@@ -68,10 +84,17 @@ export async function detectPage(input: DetectPageInput): Promise<DetectPageResu
       tiles: [],
       params,
     });
-    return { candidates: empty.candidates, stats: empty.stats, warning: null };
+    const degenerate = resolveInferenceMode(requestedMode, params.trainingMode);
+    return {
+      candidates: empty.candidates,
+      stats: empty.stats,
+      warning: null,
+      mode: degenerate.mode,
+      modeSource: degenerate.source,
+    };
   }
 
-  const resolvedMode = resolveInferenceMode(INFERENCE_MODE_AUTO, params.trainingMode);
+  const resolvedMode = resolveInferenceMode(requestedMode, params.trainingMode);
   const plannedTiles = planPageTiles(widthPx, heightPx, {
     tileSize: params.tileSize,
     overlap: params.overlap,
@@ -118,5 +141,7 @@ export async function detectPage(input: DetectPageInput): Promise<DetectPageResu
     candidates: result.candidates,
     stats: result.stats,
     warning: modeMismatchWarning(result.stats, pageIndex),
+    mode: resolvedMode.mode,
+    modeSource: resolvedMode.source,
   };
 }

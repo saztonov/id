@@ -23,18 +23,37 @@
  * спрятано.
  */
 import { useState, type ReactNode } from 'react';
-import { Alert, App as AntApp, Button, Card, Input, Select, Space, Table, Tag, Typography } from 'antd';
+import {
+  Alert,
+  App as AntApp,
+  Button,
+  Card,
+  Input,
+  InputNumber,
+  Select,
+  Space,
+  Table,
+  Tag,
+  Typography,
+} from 'antd';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
+  detectionInferenceModeSettingSchema,
   detectionProviderSettingSchema,
   recognitionProviderSettingSchema,
+  type DetectionInferenceModeSetting,
   type DetectionProviderSetting,
   type RecognitionProviderSetting,
 } from '@id/contracts';
 import { admin } from '../../api/endpoints.js';
 import { adminKeys } from '../../api/keys.js';
 import { describeError, isApiError } from '../../api/problem.js';
-import type { AppSetting, IntegrationStatus, SecretReference, SettingsView } from '../../api/types.js';
+import type {
+  AppSetting,
+  IntegrationStatus,
+  SecretReference,
+  SettingsView,
+} from '../../api/types.js';
 import { useSession } from '../../app/session.js';
 import { mapFieldErrors } from '../../shared/formErrors.js';
 import { ErrorState, LoadingState } from '../../shared/ui.js';
@@ -51,6 +70,7 @@ export function SettingsPanel(): ReactNode {
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
       <RecognitionSettingsCard view={settings.data} />
+      <DetectionTuningCard view={settings.data} />
 
       <Card size="small" title="Настройки портала">
         <Table<AppSetting>
@@ -297,8 +317,8 @@ function RecognitionSettingsCard({ view }: { view: SettingsView }): ReactNode {
   return (
     <Card size="small" title="Распознавание и детекция" data-testid="recognition-settings">
       <Typography.Paragraph type="secondary" style={{ marginTop: 0 }}>
-        Настройки действуют только на новые прогоны: выполняющийся прогон читает собственный
-        снимок настроек и переключением не затрагивается.
+        Настройки действуют только на новые прогоны: выполняющийся прогон читает собственный снимок
+        настроек и переключением не затрагивается.
       </Typography.Paragraph>
 
       <Space direction="vertical" size={12} style={{ width: '100%' }}>
@@ -446,6 +466,320 @@ function RecognitionSettingsCard({ view }: { view: SettingsView }): ReactNode {
             description="Версия локальной модели пуста — модель не загружена: задачи локальной детекции будут честно отказывать. Ручная разметка работает всегда."
           />
         )}
+      </Space>
+    </Card>
+  );
+}
+
+// =====================================================================
+// Качество детекции блоков (ADR-0008)
+// =====================================================================
+
+/** Подписи режимов инференса; значения — из перечисления `@id/contracts`. */
+const INFERENCE_MODE_LABELS: Record<DetectionInferenceModeSetting, string> = {
+  auto: 'Авто (по манифесту модели)',
+  tiles: 'Плитками (принудительно)',
+  whole_page: 'Страница целиком (принудительно)',
+};
+
+/** Тип блока в порогах по классам. Порядок — как в `class_mapping` модели. */
+const TUNING_BLOCK_TYPES = ['text', 'image', 'stamp'] as const;
+type TuningBlockType = (typeof TUNING_BLOCK_TYPES)[number];
+
+const TUNING_BLOCK_TYPE_LABELS: Record<TuningBlockType, string> = {
+  text: 'Текст',
+  image: 'Изображение',
+  stamp: 'Штамп',
+};
+
+function settingRaw(view: SettingsView, key: string): unknown {
+  return view.settings.find((item) => item.key === key)?.value;
+}
+
+/** Хранимое число либо `null` («из манифеста»). */
+function settingNumber(view: SettingsView, key: string): number | null {
+  const value = settingRaw(view, key);
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+/**
+ * Карточка ручек качества детекции.
+ *
+ * ## Почему это вообще настройки, а не константы
+ *
+ * В эталонном RD WEB порог принятия, NMS IoU, склейка разорванного текста,
+ * потолок детекций и режим инференса — настройки сервиса. У портала их не было:
+ * всё читалось только из манифеста модели, а манифест их не обязан содержать и
+ * на практике не содержит. Действовали хардкод-дефолты, и «страница не
+ * обведена» оказывалось состоянием без выхода — снизить порог можно было
+ * только правкой файла модели в хранилище.
+ *
+ * ## Пусто — это «из манифеста», а не ноль
+ *
+ * Пустое поле означает, что значение берётся из манифеста модели. Иначе
+ * администратор, впервые открывший карточку и ничего не менявший, навязал бы
+ * модели значения по умолчанию — а манифест перестал бы быть источником
+ * параметров модели. По той же причине у склейки текста три состояния, а не
+ * переключатель: «выключить» и «не трогать» — разные решения.
+ *
+ * ## Числа сохраняются кнопкой, перечисления — выбором
+ *
+ * У числа есть промежуточные состояния набора (`0.`, `0.2`), и запись каждого
+ * нажатия клавиши сыпала бы 422 на полуслове. У перечисления промежуточного
+ * состояния нет — тот же выбор, что и в карточке выше.
+ */
+function DetectionTuningCard({ view }: { view: SettingsView }): ReactNode {
+  const { can } = useSession();
+  const { message } = AntApp.useApp();
+  const queryClient = useQueryClient();
+  const canManage = can('settings.manage');
+
+  const detection = detectionProviderSettingSchema.safeParse(
+    settingString(view, 'detection.provider'),
+  );
+  const provider: DetectionProviderSetting = detection.success ? detection.data : 'rdweb';
+
+  const mode = detectionInferenceModeSettingSchema.safeParse(
+    settingString(view, 'detection.inference_mode'),
+  );
+  const inferenceMode: DetectionInferenceModeSetting = mode.success ? mode.data : 'auto';
+
+  const mergeRaw = settingRaw(view, 'detection.merge_split_text');
+  const mergeSplitText: 'manifest' | 'on' | 'off' =
+    typeof mergeRaw === 'boolean' ? (mergeRaw ? 'on' : 'off') : 'manifest';
+
+  const perClassRaw = settingRaw(view, 'detection.per_class_thresholds');
+  const perClassStored: Partial<Record<TuningBlockType, number>> =
+    typeof perClassRaw === 'object' && perClassRaw !== null && !Array.isArray(perClassRaw)
+      ? (perClassRaw as Partial<Record<TuningBlockType, number>>)
+      : {};
+
+  const [threshold, setThreshold] = useState<number | null>(() =>
+    settingNumber(view, 'detection.score_threshold'),
+  );
+  const [nmsIou, setNmsIou] = useState<number | null>(() =>
+    settingNumber(view, 'detection.nms_iou'),
+  );
+  const [maxDetections, setMaxDetections] = useState<number | null>(() =>
+    settingNumber(view, 'detection.max_detections'),
+  );
+  const [perClass, setPerClass] =
+    useState<Partial<Record<TuningBlockType, number | null>>>(perClassStored);
+
+  const save = useMutation({
+    mutationFn: (input: { key: string; value: unknown }) =>
+      admin.setSetting(input.key, input.value),
+    onSuccess: async (saved) => {
+      message.success(`Настройка «${saved.title}» сохранена`);
+      await queryClient.invalidateQueries({ queryKey: adminKeys.settings() });
+    },
+    onError: (error) => {
+      message.error(describeError(error));
+    },
+  });
+
+  // Карточка относится только к локальной детекции: у ветки RD WEB
+  // постобработка живёт на их стороне, и показывать ручки, которые ни на что не
+  // влияют, — то же самое, что врать.
+  if (provider !== 'local') return null;
+
+  const disabled = !canManage || save.isPending;
+
+  return (
+    <Card size="small" title="Качество детекции блоков" data-testid="detection-tuning">
+      <Typography.Paragraph type="secondary" style={{ marginTop: 0 }}>
+        Пустое поле — значение берётся из манифеста модели. Настройки действуют на новые задачи
+        детекции; чтобы применить их к уже размеченным страницам, нажмите «Повторить детекцию
+        страницы» на экране разметки. Применённые переопределения попадают в журнал задачи.
+      </Typography.Paragraph>
+
+      <Space direction="vertical" size={12} style={{ width: '100%' }}>
+        <Space wrap align="start" size={16}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxWidth: 320 }}>
+            <span>Режим инференса</span>
+            <Select<DetectionInferenceModeSetting>
+              style={{ width: 280 }}
+              value={inferenceMode}
+              options={detectionInferenceModeSettingSchema.options.map((value) => ({
+                value,
+                label: INFERENCE_MODE_LABELS[value],
+              }))}
+              disabled={disabled}
+              onChange={(value) => {
+                save.mutate({ key: 'detection.inference_mode', value });
+              }}
+              aria-label="Режим инференса детектора"
+              data-testid="detection-inference-mode"
+            />
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              Инференс обязан идти в масштабе кадра обучения: модель, обученная на целых страницах,
+              на плитках выдаёт боксы ~на весь кадр.
+            </Typography.Text>
+          </div>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxWidth: 320 }}>
+            <span>Склейка разорванного текста</span>
+            <Select<'manifest' | 'on' | 'off'>
+              style={{ width: 220 }}
+              value={mergeSplitText}
+              options={[
+                { value: 'manifest', label: 'Из манифеста' },
+                { value: 'on', label: 'Склеивать' },
+                { value: 'off', label: 'Не склеивать' },
+              ]}
+              disabled={disabled}
+              onChange={(value) => {
+                save.mutate({
+                  key: 'detection.merge_split_text',
+                  value: value === 'manifest' ? null : value === 'on',
+                });
+              }}
+              aria-label="Склейка разорванного текста"
+              data-testid="detection-merge-split-text"
+            />
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              Объединяет соседние текстовые блоки. Штампы и изображения не склеиваются никогда.
+            </Typography.Text>
+          </div>
+        </Space>
+
+        <Space wrap align="start" size={16}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxWidth: 320 }}>
+            <span>Порог принятия детекции</span>
+            <Space.Compact>
+              <InputNumber
+                style={{ width: 140 }}
+                min={0}
+                max={1}
+                step={0.05}
+                value={threshold}
+                onChange={setThreshold}
+                placeholder="из манифеста"
+                disabled={!canManage}
+                aria-label="Порог принятия детекции"
+                data-testid="detection-score-threshold"
+              />
+              <Button
+                loading={save.isPending}
+                disabled={!canManage}
+                onClick={() => {
+                  save.mutate({ key: 'detection.score_threshold', value: threshold });
+                }}
+                data-testid="detection-score-threshold-save"
+              >
+                Сохранить
+              </Button>
+            </Space.Compact>
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              Ниже порога детекция отбрасывается. Снижают, когда страницы остаются без блоков.
+            </Typography.Text>
+          </div>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxWidth: 320 }}>
+            <span>Порог IoU при подавлении пересечений</span>
+            <Space.Compact>
+              <InputNumber
+                style={{ width: 140 }}
+                min={0}
+                max={1}
+                step={0.05}
+                value={nmsIou}
+                onChange={setNmsIou}
+                placeholder="из манифеста"
+                disabled={!canManage}
+                aria-label="Порог IoU при подавлении пересечений"
+                data-testid="detection-nms-iou"
+              />
+              <Button
+                loading={save.isPending}
+                disabled={!canManage}
+                onClick={() => {
+                  save.mutate({ key: 'detection.nms_iou', value: nmsIou });
+                }}
+                data-testid="detection-nms-iou-save"
+              >
+                Сохранить
+              </Button>
+            </Space.Compact>
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              Блоки разных типов друг друга не подавляют.
+            </Typography.Text>
+          </div>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxWidth: 320 }}>
+            <span>Потолок детекций на страницу</span>
+            <Space.Compact>
+              <InputNumber
+                style={{ width: 140 }}
+                min={1}
+                max={10000}
+                step={1}
+                precision={0}
+                value={maxDetections}
+                onChange={setMaxDetections}
+                placeholder="из манифеста"
+                disabled={!canManage}
+                aria-label="Потолок детекций на страницу"
+                data-testid="detection-max-detections"
+              />
+              <Button
+                loading={save.isPending}
+                disabled={!canManage}
+                onClick={() => {
+                  save.mutate({ key: 'detection.max_detections', value: maxDetections });
+                }}
+                data-testid="detection-max-detections-save"
+              >
+                Сохранить
+              </Button>
+            </Space.Compact>
+          </div>
+        </Space>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <span>Пороги принятия по типам блоков</span>
+          <Space wrap align="center" size={8}>
+            {TUNING_BLOCK_TYPES.map((type) => (
+              <InputNumber
+                key={type}
+                style={{ width: 200 }}
+                min={0}
+                max={1}
+                step={0.05}
+                value={perClass[type] ?? null}
+                onChange={(value) => {
+                  setPerClass((previous) => ({ ...previous, [type]: value }));
+                }}
+                placeholder="из манифеста"
+                addonBefore={TUNING_BLOCK_TYPE_LABELS[type]}
+                disabled={!canManage}
+                aria-label={`Порог принятия: ${TUNING_BLOCK_TYPE_LABELS[type]}`}
+                data-testid={`detection-threshold-${type}`}
+              />
+            ))}
+            <Button
+              loading={save.isPending}
+              disabled={!canManage}
+              onClick={() => {
+                // Пустое поле означает «нет переопределения», поэтому ключ не
+                // пишется вовсе: записанный ноль означал бы «принимать всё»,
+                // а это другое решение.
+                const value: Record<string, number> = {};
+                for (const type of TUNING_BLOCK_TYPES) {
+                  const perType = perClass[type];
+                  if (typeof perType === 'number') value[type] = perType;
+                }
+                save.mutate({ key: 'detection.per_class_thresholds', value });
+              }}
+              data-testid="detection-per-class-save"
+            >
+              Сохранить
+            </Button>
+          </Space>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            Перекрывают общий порог для своего типа. Незаполненный тип берёт общий порог.
+          </Typography.Text>
+        </div>
       </Space>
     </Card>
   );

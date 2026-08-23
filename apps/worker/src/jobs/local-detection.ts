@@ -58,7 +58,14 @@ import {
   type JobHandler,
   type PageRasterizer,
 } from '@id/api';
-import type { Candidate } from '@id/detection';
+import {
+  applyParamOverrides,
+  describeAppliedOverrides,
+  INFERENCE_MODE_AUTO,
+  type Candidate,
+  type InferenceMode,
+  type InferenceParamOverrides,
+} from '@id/detection';
 
 import { detectPage } from '../detection/detector.js';
 import { DetectionConfigurationError } from '../detection/errors.js';
@@ -83,13 +90,21 @@ export interface LocalDetectionDeps {
   }): Promise<MarkupTarget | null>;
 
   /**
-   * Версия модели детекции из настроек портала (`detection.model_version`).
+   * Настройки детекции портала: версия модели и ручки качества.
    *
-   * Читается ЗДЕСЬ, а не на постановке: роут, ставящий задачу, не знает про
-   * воркерский стор моделей, а версия могла смениться между постановкой и
-   * исполнением (действует на новые прогоны, ADR-0008).
+   * Читаются ЗДЕСЬ, а не на постановке: роут, ставящий задачу, не знает про
+   * воркерский стор моделей, а значения могли смениться между постановкой и
+   * исполнением (действуют на новые прогоны, ADR-0008).
+   *
+   * Поля переопределений необязательны — тесты и легаси-вызовы передают только
+   * версию, и это означает «всё из манифеста», ровно как незаполненная
+   * карточка в админке.
    */
-  detectionSettings(): Promise<{ readonly modelVersion: string }>;
+  detectionSettings(): Promise<{
+    readonly modelVersion: string;
+    readonly inferenceMode?: InferenceMode | typeof INFERENCE_MODE_AUTO;
+    readonly overrides?: InferenceParamOverrides;
+  }>;
 
   /** Карта страниц рабочего документа с размерами и поворотом (`sourcePages`). */
   pageGeometry(input: {
@@ -249,9 +264,37 @@ export function createLocalDetectionHandler(
     }
     const rasterizer: PageRasterizer = deps.rasterizer;
 
-    const { session, params, warnings } = await deps.modelStore.ensureModel(settings.modelVersion);
+    const {
+      session,
+      params: manifestParamsForModel,
+      warnings,
+    } = await deps.modelStore.ensureModel(settings.modelVersion);
     for (const warning of warnings) {
       ctx.logger.warn({ event: 'detect_local_model_warning' }, warning);
+    }
+
+    /**
+     * Настройки портала поверх параметров манифеста.
+     *
+     * Незаполненная карточка ничего не меняет — `applyParamOverrides` трактует
+     * `null` как «из манифеста». В журнал уходит РАЗНИЦА, а не сам объект
+     * настроек: «порог 0.5» в записи не отвечает на вопрос, пришёл он из
+     * модели или из админки, а объяснить прошлую разметку можно только по
+     * этому ответу.
+     */
+    const params = applyParamOverrides(manifestParamsForModel, settings.overrides);
+    const appliedOverrides = describeAppliedOverrides(manifestParamsForModel, params);
+    const inferenceMode = settings.inferenceMode ?? INFERENCE_MODE_AUTO;
+    if (Object.keys(appliedOverrides).length > 0 || inferenceMode !== INFERENCE_MODE_AUTO) {
+      ctx.logger.info(
+        {
+          event: 'detect_local_overrides',
+          model_version: settings.modelVersion,
+          inference_mode: inferenceMode,
+          applied: appliedOverrides,
+        },
+        'параметры детекции переопределены настройками портала',
+      );
     }
 
     const overwriteExisting = ctx.payload.overwriteExisting === true;
@@ -340,6 +383,7 @@ export function createLocalDetectionHandler(
           heightPx: rendered.heightPx,
           session,
           params,
+          inferenceMode,
         });
         if (detected.warning !== null) {
           ctx.logger.warn(

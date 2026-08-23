@@ -575,10 +575,7 @@ function CanvasArea(props: CanvasAreaProps): ReactNode {
     // A3 после портретной A4 ширина показа другая, и предзагрузка по ширине
     // текущей страницы легла бы мимо ключа кэша — то есть отрисовала бы
     // страницу, которую потом никто не возьмёт.
-    const nextFitted = fitInto(
-      { width: nextPage.widthPx, height: nextPage.heightPx },
-      available,
-    );
+    const nextFitted = fitInto({ width: nextPage.widthPx, height: nextPage.heightPx }, available);
     prefetchPage({
       fileId: nextPage.sourceFileId,
       contentUrl: filesApi.contentUrl(nextPage.sourceFileId),

@@ -175,6 +175,18 @@ export type RecognitionProviderSetting = z.infer<typeof recognitionProviderSetti
 export const detectionProviderSettingSchema = z.enum(['rdweb', 'local']);
 export type DetectionProviderSetting = z.infer<typeof detectionProviderSettingSchema>;
 
+/**
+ * Режим инференса детектора (`detection.inference_mode`).
+ *
+ * `auto` — по режиму сборки датасета обучения из манифеста модели
+ * (`tiling.mode`); `tiles` и `whole_page` — принудительный override, тот самый
+ * kill-switch, что есть в настройках эталонного RD WEB. Он нужен ровно тогда,
+ * когда манифест описывает обучение неверно: инференс обязан идти в масштабе
+ * кадра обучения, иначе RF-DETR выдаёт вырожденные боксы ~на весь кадр.
+ */
+export const detectionInferenceModeSettingSchema = z.enum(['auto', 'tiles', 'whole_page']);
+export type DetectionInferenceModeSetting = z.infer<typeof detectionInferenceModeSettingSchema>;
+
 // --- Документы и реквизиты (§3.6, §8) ---
 
 /** Связь между логическими документами (`document_relations.relation`). */

@@ -95,3 +95,9 @@ export {
   type DetectPageStats,
   type TileInferenceResult,
 } from './detect.js';
+export {
+  NO_PARAM_OVERRIDES,
+  applyParamOverrides,
+  describeAppliedOverrides,
+  type InferenceParamOverrides,
+} from './overrides.js';

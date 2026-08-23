@@ -846,7 +846,14 @@ function localDetectionDeps(options: PipelineJobsOptions): LocalDetectionDeps {
 
     detectionSettings: async () => {
       const settings = await readDetectionSettings(db);
-      return { modelVersion: settings.modelVersion };
+      // Ручки качества передаются целиком: решение, что из них реально меняет
+      // параметры модели, принимает `applyParamOverrides` в обработчике — там
+      // же, где виден манифест, поверх которого они кладутся.
+      return {
+        modelVersion: settings.modelVersion,
+        inferenceMode: settings.inferenceMode,
+        overrides: settings.overrides,
+      };
     },
 
     pageGeometry: async ({ revisionId, bundleId }) => {

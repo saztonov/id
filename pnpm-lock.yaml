@@ -62,6 +62,9 @@ importers:
       '@id/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@id/detection':
+        specifier: workspace:*
+        version: link:../../packages/detection
       '@id/doc-types':
         specifier: workspace:*
         version: link:../../packages/doc-types

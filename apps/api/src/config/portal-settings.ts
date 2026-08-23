@@ -22,7 +22,9 @@
  * поведение обязано совпадать с «настройку ещё не трогали», а расхождение
  * заметит экран настроек (он показывает сырое значение).
  */
+import type { InferenceParamOverrides } from '@id/detection';
 import type {
+  DetectionInferenceModeSetting,
   DetectionProviderSetting,
   JsonValue,
   RecognitionProviderSetting,
@@ -82,15 +84,64 @@ export interface DetectionProviderSettings {
   readonly provider: DetectionProviderSetting;
   /** Пустая строка — модель не загружена; локальная детекция честно отказывает. */
   readonly modelVersion: string;
+  /** Режим инференса; `auto` — по манифесту модели. */
+  readonly inferenceMode: DetectionInferenceModeSetting;
+  /**
+   * Переопределения параметров постобработки. Пустые поля означают «из
+   * манифеста» — см. `applyParamOverrides` в `@id/detection`.
+   */
+  readonly overrides: InferenceParamOverrides;
+}
+
+/** Число либо `null`: непригодное хранимое значение — то же, что «не задано». */
+function numberOrNull(value: JsonValue): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+/** Пороги по классам из jsonb. Незнакомые ключи и нечисловые значения отбрасываются. */
+function perClassThresholds(
+  value: JsonValue,
+): Readonly<Partial<Record<'text' | 'image' | 'stamp', number>>> | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+  const source = value as Record<string, JsonValue>;
+  const out: Record<string, number> = {};
+  for (const type of ['text', 'image', 'stamp'] as const) {
+    const threshold = numberOrNull(source[type] ?? null);
+    if (threshold !== null) out[type] = threshold;
+  }
+  return Object.keys(out).length === 0 ? null : out;
 }
 
 export async function readDetectionSettings(db: Database): Promise<DetectionProviderSettings> {
-  const [provider, modelVersion] = await Promise.all([
+  const [
+    provider,
+    modelVersion,
+    inferenceMode,
+    scoreThreshold,
+    classThresholds,
+    nmsIou,
+    mergeSplitText,
+    maxDetections,
+  ] = await Promise.all([
     readEffectiveSetting(db, 'detection.provider'),
     readEffectiveSetting(db, 'detection.model_version'),
+    readEffectiveSetting(db, 'detection.inference_mode'),
+    readEffectiveSetting(db, 'detection.score_threshold'),
+    readEffectiveSetting(db, 'detection.per_class_thresholds'),
+    readEffectiveSetting(db, 'detection.nms_iou'),
+    readEffectiveSetting(db, 'detection.merge_split_text'),
+    readEffectiveSetting(db, 'detection.max_detections'),
   ]);
   return {
     provider: provider as DetectionProviderSetting,
     modelVersion: (modelVersion as string).trim(),
+    inferenceMode: inferenceMode as DetectionInferenceModeSetting,
+    overrides: {
+      defaultThreshold: numberOrNull(scoreThreshold),
+      perClassThresholds: perClassThresholds(classThresholds),
+      nmsIou: numberOrNull(nmsIou),
+      mergeSplitText: typeof mergeSplitText === 'boolean' ? mergeSplitText : null,
+      maxDetections: numberOrNull(maxDetections),
+    },
   };
 }

@@ -186,6 +186,31 @@ function noDetection(): { readonly dets: OnnxTensorLike; readonly labels: OnnxTe
   };
 }
 
+/**
+ * Детекция, уверенность которой лежит МЕЖДУ порогом по умолчанию и сниженным.
+ *
+ * Логит -1 даёт sigmoid ≈ 0.269: ниже дефолтных 0.5 и выше 0.2. Это и есть
+ * воспроизведение боевого случая «страница не обведена вовсе», где детектор
+ * что-то видел, но не дотянул до порога, — крайние ±10 из фикстур выше такой
+ * случай проверить не могут, они от порога слишком далеки.
+ */
+const WEAK_TEXT_SCORE = 1 / (1 + Math.E);
+
+function weakTextDetection(): { readonly dets: OnnxTensorLike; readonly labels: OnnxTensorLike } {
+  return {
+    dets: { data: Float32Array.from([0.5, 0.5, 0.4, 0.2]), dims: [1, 1, 4] },
+    labels: { data: Float32Array.from([-1, -10, -10, -10]), dims: [1, 1, 4] },
+  };
+}
+
+/** Записать настройку детекции в `app_settings` (jsonb, как это делает админка). */
+async function setDetectionSetting(key: string, value: unknown): Promise<void> {
+  await testDb.query(
+    `INSERT INTO app_settings (key, value) VALUES ('${key}', '${JSON.stringify(value)}'::jsonb)
+       ON CONFLICT (key) DO UPDATE SET value = excluded.value`,
+  );
+}
+
 function manifestJson(): Record<string, unknown> {
   return {
     num_classes: 3,
@@ -270,9 +295,16 @@ function localDetectionDeps(session: OnnxSessionPort): LocalDetectionDeps {
     loadTargetByLayout: async ({ revisionId, layoutRevisionId: lrId }) =>
       buildTestMarkupTarget(revisionId, lrId),
 
+    // Настройки читаются целиком, как в боевой сборке зависимостей
+    // (`pipeline.ts`): иначе тест на переопределения проверял бы двойник, а не
+    // тот путь, по которому значения доезжают до модели.
     detectionSettings: async () => {
       const settings = await readDetectionSettings(db);
-      return { modelVersion: settings.modelVersion };
+      return {
+        modelVersion: settings.modelVersion,
+        inferenceMode: settings.inferenceMode,
+        overrides: settings.overrides,
+      };
     },
 
     pageGeometry: async ({ bundleId: bId }) => listBundlePages(db, ADMIN_SCOPE, bId),
@@ -723,5 +755,58 @@ describe('layout.detect_local с моделью', () => {
     const page0 = after.filter((row) => row.working_page_index === 0);
     expect(page0).toHaveLength(1);
     expect(page0[0]?.detector_provenance).toBe('rf_detr');
+  });
+});
+
+/**
+ * Ручки качества детекции (ADR-0008).
+ *
+ * Проверяется ровно тот сценарий, ради которого настройки и заведены: детектор
+ * что-то увидел, но не дотянул до порога, страница осталась без блоков, и
+ * единственным способом это изменить была правка файла модели в хранилище.
+ */
+describe('переопределения параметров детекции настройками портала', () => {
+  it('порог по умолчанию отбрасывает слабую детекцию: страница остаётся пустой', async () => {
+    const session = new QueueSession([weakTextDetection()]);
+    await runJob(session, { pageIndices: [1], overwriteExisting: true });
+    expect(session.calls).toBe(1);
+
+    const page1 = (await blockRows()).filter((row) => row.working_page_index === 1);
+    expect(page1).toHaveLength(0);
+  });
+
+  it('сниженный detection.score_threshold доводит ту же детекцию до блока', async () => {
+    // Ни модель, ни манифест, ни изображение не изменились — изменилась ТОЛЬКО
+    // настройка. Если этот тест краснеет, значит переопределения не доезжают до
+    // постобработки, и карточка в админке ничего не делает.
+    await setDetectionSetting('detection.score_threshold', 0.2);
+
+    const session = new QueueSession([weakTextDetection()]);
+    await runJob(session, { pageIndices: [1], overwriteExisting: true });
+    expect(session.calls).toBe(1);
+
+    const page1 = (await blockRows()).filter((row) => row.working_page_index === 1);
+    expect(page1).toHaveLength(1);
+    expect(page1[0]?.block_type).toBe('text');
+    expect(page1[0]?.detector_provenance).toBe('rf_detr');
+    // Уверенность сохраняется как есть: порог решает, принимать ли детекцию, и
+    // не подменяет её оценку.
+    expect(Number(page1[0]?.detection_score)).toBeCloseTo(WEAK_TEXT_SCORE, 4);
+  });
+
+  it('порог по типу блока перекрывает общий для своего типа', async () => {
+    // Общий порог остаётся сниженным (0.2), но для текста задан жёсткий 0.9 —
+    // значит та же детекция снова не проходит. Обратное поведение означало бы,
+    // что пороги по типам не доезжают либо затирают друг друга.
+    await setDetectionSetting('detection.per_class_thresholds', { text: 0.9 });
+
+    const session = new QueueSession([weakTextDetection()]);
+    await runJob(session, { pageIndices: [1], overwriteExisting: true });
+    expect(session.calls).toBe(1);
+
+    expect((await blockRows()).filter((row) => row.working_page_index === 1)).toHaveLength(0);
+
+    await setDetectionSetting('detection.per_class_thresholds', {});
+    await setDetectionSetting('detection.score_threshold', null);
   });
 });

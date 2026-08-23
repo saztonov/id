@@ -22,6 +22,7 @@ import {
   codeSlugSchema,
   cursorPageSchema,
   DEFAULT_PAGE_LIMIT,
+  detectionInferenceModeSettingSchema,
   detectionProviderSettingSchema,
   docTypeCodeSchema,
   isoDateTimeSchema,
@@ -187,6 +188,71 @@ export const SETTINGS_REGISTRY = {
         message: 'Версия модели — слаг из латиницы, цифр, точки, дефиса и подчёркивания',
       }),
     defaultValue: '',
+  },
+
+  /*
+   * Качество детекции: ручки оператора (ADR-0008).
+   *
+   * В эталонном RD WEB порог принятия, NMS IoU, склейка разорванного текста,
+   * потолок детекций и режим инференса — настройки сервиса. У портала их не
+   * было: всё читалось только из манифеста модели, а манифест их не обязан
+   * содержать и на практике не содержит, поэтому действовали хардкод-дефолты
+   * (порог 0.5, NMS 0.5, склейка выключена, потолка нет). Из-за этого
+   * «страница не обведена» было состоянием без выхода — снизить порог можно
+   * было только правкой файла модели в хранилище.
+   *
+   * `null` во всех числовых ключах означает «взять из манифеста», а НЕ ноль:
+   * иначе администратор, никогда не открывавший карточку, навязывал бы модели
+   * значения по умолчанию. Разбор и слияние — `applyParamOverrides`
+   * в `@id/detection`, снимок применённого — `describeAppliedOverrides`.
+   *
+   * Действуют на НОВЫЕ задачи детекции: уже поставленная читает параметры на
+   * своём исполнении, а прошлая разметка объясняется снимком прогона.
+   */
+  'detection.inference_mode': {
+    title: 'Режим инференса детектора: auto — по манифесту модели',
+    schema: detectionInferenceModeSettingSchema,
+    defaultValue: 'auto',
+  },
+  'detection.score_threshold': {
+    title: 'Порог принятия детекции (пусто — из манифеста модели)',
+    schema: z.number().min(0).max(1).nullable(),
+    defaultValue: null,
+  },
+  /**
+   * Пороги по классам. Заданный класс перекрывает манифест, незаданный его
+   * сохраняет: правка порога для штампа не должна молча менять поведение
+   * текста.
+   */
+  'detection.per_class_thresholds': {
+    title: 'Пороги принятия по типам блоков (пусто — из манифеста модели)',
+    schema: z.object({
+      text: z.number().min(0).max(1).optional(),
+      image: z.number().min(0).max(1).optional(),
+      stamp: z.number().min(0).max(1).optional(),
+    }),
+    defaultValue: {},
+  },
+  'detection.nms_iou': {
+    title: 'Порог IoU при подавлении пересечений (пусто — из манифеста модели)',
+    schema: z.number().min(0).max(1).nullable(),
+    defaultValue: null,
+  },
+  'detection.merge_split_text': {
+    title: 'Склеивать разорванные текстовые блоки (пусто — из манифеста модели)',
+    schema: z.boolean().nullable(),
+    defaultValue: null,
+  },
+  /**
+   * Потолок детекций на страницу. `null` занят под наследование, поэтому снять
+   * потолок, заданный манифестом, этой настройкой нельзя — случай
+   * гипотетический (ни один выложенный манифест `max_detections` не задаёт), а
+   * второй сентинел сделал бы настройку нечитаемой.
+   */
+  'detection.max_detections': {
+    title: 'Потолок числа детекций на страницу (пусто — из манифеста модели)',
+    schema: z.int().min(1).max(10_000).nullable(),
+    defaultValue: null,
   },
   'checks.autorun_after_documents': {
     title: 'Запускать проверки сразу после подтверждения документов',
