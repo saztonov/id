@@ -82,6 +82,52 @@ openssl rand -base64 48   # AUDIT_HMAC_KEY
 секрет** в `S3_SECRET_KEY` (tenant в приложении не используется). Не коммитить
 и не печатать строку.
 
+#### CORS на бакете — обязателен, иначе файлы не грузятся
+
+Байты идут в хранилище **мимо портала**: сервер выдаёт presigned PUT, а браузер
+шлёт `PUT` с телом прямо в S3. `PUT` не относится к «простым» методам, поэтому
+браузер сначала делает preflight `OPTIONS`, и без CORS-политики бакета обрывает
+обмен сам. Пользователь при этом видит отказ загрузки, в котором про CORS не
+сказано ничего, — спецификация запрещает браузеру рассказывать скрипту причину.
+
+Это внешнее требование к бакету, кодом портала не закрываемое. Настраивается
+один раз:
+
+```bash
+cat > cors.json <<'JSON'
+{
+  "CORSRules": [
+    {
+      "AllowedOrigins": ["https://id.su10.ru"],
+      "AllowedMethods": ["PUT"],
+      "AllowedHeaders": ["*"],
+      "ExposeHeaders": ["ETag"],
+      "MaxAgeSeconds": 3600
+    }
+  ]
+}
+JSON
+
+aws --endpoint-url https://s3.cloud.ru s3api put-bucket-cors \
+    --bucket id1 --cors-configuration file://cors.json
+aws --endpoint-url https://s3.cloud.ru s3api get-bucket-cors --bucket id1
+```
+
+Проверка без браузера — preflight обязан вернуть `Access-Control-Allow-Origin`:
+
+```bash
+curl -i -X OPTIONS "<свежий presigned URL из ответа upload/init>" \
+  -H "Origin: https://id.su10.ru" -H "Access-Control-Request-Method: PUT"
+```
+
+Чего в политике быть НЕ должно и почему:
+
+- `AllowCredentials` — клиент шлёт `credentials: 'same-origin'` и cookie в чужой
+  origin не отправляет;
+- `GET`/`HEAD` — содержимое файлов портал отдаёт сам, через
+  `GET /files/{id}/content` под сессией. Presigned GET в браузер не выдаётся
+  принципиально (§4.2): он утекает в историю и живёт мимо RBAC до конца TTL.
+
 `DB` host взять из `/etc/estimat/estimat.env` (`DB_HOST`, порт `6432`) без печати паролей.
 
 `TRUST_PROXY=172.18.0.0/16` — подсеть `edge` (проверить `docker network inspect edge`).
@@ -93,6 +139,18 @@ openssl rand -base64 48   # AUDIT_HMAC_KEY
 - `LLM_MODEL=deepseek/deepseek-v4-flash-0731`
 - `LLM_MODEL_ALLOWLIST=deepseek/deepseek-v4-flash-0731` (в production пустой allowlist запрещает всё)
 - `PROXY_LLM_TOKEN` — только в `/etc/id/id.env`, не в git/чат
+
+**Модель распознавания входит в тот же allowlist.** `recognition.vlm_model`
+выбирается в «Администрирование → Настройки», но запуск прогона сверяется с
+`LLM_MODEL_ALLOWLIST` и отвечает 409 **до** создания прогона. Слаг, выбранный в
+настройках, обязан быть в списке — перечисляются через запятую:
+
+```
+LLM_MODEL_ALLOWLIST=deepseek/deepseek-v4-flash-0731,google/gemini-3.7-flash
+```
+
+Отдельно убедиться, что шлюз `proxyllm.fvds.ru` эту модель пропускает: его
+собственный список моделей портал не видит и проверить не может.
 
 RD WEB (`RDWEB_*`) на первом подъёме не обязателен.
 

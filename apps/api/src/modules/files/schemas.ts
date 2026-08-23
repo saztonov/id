@@ -70,6 +70,24 @@ export const uploadInitBodySchema = z.object({
   sizeBytes: z.int().positive(),
 });
 
+/**
+ * Заведение комплекта вместе с первым файлом — одним запросом.
+ *
+ * Тело — это тело `POST /works` плюс имя и размер файла. Дублированием схем это
+ * не является: `createWorkBodySchema` живёт в модуле навигации и описывает
+ * ДРУГОЙ маршрут, который никуда не делся (комплект без файла заводится им
+ * по-прежнему — например, файл описи реестра).
+ */
+export const createWorkWithFileBodySchema = z.object({
+  objectId: uuidSchema,
+  sectionCode: z.string().min(1).max(64),
+  period: z.string().regex(/^\d{4}-\d{2}-01$/u, 'Месяц — первое число: ГГГГ-ММ-01'),
+  title: z.string().min(1).max(1000),
+  contractorId: uuidSchema.nullish(),
+  fileName: fileNameSchema,
+  sizeBytes: z.int().positive(),
+});
+
 export const uploadInitResponseSchema = z.object({
   /** Подписанный талон: предъявляется на `complete`, см. `upload-token.ts`. */
   uploadId: z.string().min(1),
@@ -82,6 +100,19 @@ export const uploadInitResponseSchema = z.object({
 
 export const uploadCompleteBodySchema = z.object({
   uploadId: z.string().min(1).max(4096),
+});
+
+/**
+ * Ответ заведения комплекта с файлом: комплект, его ревизия и талон загрузки.
+ *
+ * Талон вложен целиком, а не сведён к адресу: клиенту нужны и `uploadId` для
+ * `complete`, и предел размера, чтобы отказ по лимиту пришёл до заливки. Форма
+ * та же, что у `uploadInitResponseSchema`, — второго вида талона в портале нет.
+ */
+export const createdWorkWithFileSchema = z.object({
+  workId: uuidSchema,
+  revisionId: uuidSchema,
+  upload: uploadInitResponseSchema,
 });
 
 /**

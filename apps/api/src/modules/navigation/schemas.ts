@@ -53,15 +53,52 @@ const searchSchema = z.string().min(1).max(200);
 // Комплекты работ
 // =====================================================================
 
+/**
+ * Отбор комплектов.
+ *
+ * `period` (точный месяц) и пара `periodFrom`/`periodTo` живут рядом намеренно.
+ * Точный месяц — вопрос «что за август», и его задают реестр и сверка описи, где
+ * период — свойство папки, а не диапазон. Границы — вопрос «что за квартал», и
+ * его задаёт человек на экране объекта. Выражать первое вырожденным диапазоном
+ * значило бы заставить каждого вызывающего повторять `from === to`.
+ *
+ * Границы включительные и независимые: задана одна — вторая не подразумевается.
+ */
 export const workListQuerySchema = pageQuerySchema.extend({
   objectId: uuidSchema.optional(),
   sectionCode: sectionCodeSchema.optional(),
   period: periodSchema.optional(),
+  periodFrom: periodSchema.optional(),
+  periodTo: periodSchema.optional(),
   registryId: uuidSchema.optional(),
   /** Только комплекты, ещё не включённые ни в один реестр. */
   unassigned: queryFlagSchema.optional(),
   search: searchSchema.optional(),
 });
+
+/**
+ * Сколько комплектов в каждом разделе объекта.
+ *
+ * Считается ТОЙ ЖЕ областью видимости, что и сам список: заголовок «комплектов 7»
+ * над панелью, в которой подрядчику видны два, сообщил бы ему о работе соседей —
+ * тем же способом, каким это делал бы счётчик комплектов в чужой папке (см.
+ * `registryViewSchema`). Поэтому число здесь — не «сколько есть», а «сколько
+ * видно спрашивающему», и другого числа портал не знает.
+ */
+export const sectionCountsQuerySchema = z.object({
+  sectionCode: sectionCodeSchema.optional(),
+  period: periodSchema.optional(),
+  periodFrom: periodSchema.optional(),
+  periodTo: periodSchema.optional(),
+  unassigned: queryFlagSchema.optional(),
+  search: searchSchema.optional(),
+});
+
+export const objectIdParamSchema = z.object({ objectId: uuidSchema });
+
+export const sectionCountsSchema = z.array(
+  z.object({ sectionCode: sectionCodeSchema, works: z.int().min(0) }),
+);
 
 export const workIdParamSchema = z.object({ workId: uuidSchema });
 

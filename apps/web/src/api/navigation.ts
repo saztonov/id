@@ -157,6 +157,7 @@ export interface CursorPage<TItem> {
 export const NAVIGATION_ROUTES = {
   works: `${V1}/works`,
   work: (workId: string) => `${V1}/works/${workId}`,
+  sectionCounts: (objectId: string) => `${V1}/objects/${objectId}/sections/counts`,
   revisionsOfWork: (workId: string) => `${V1}/works/${workId}/revisions`,
   registries: `${V1}/registries`,
   registry: (registryId: string) => `${V1}/registries/${registryId}`,
@@ -261,7 +262,10 @@ function pageQuery(cursor: string | null | undefined, rest: Query): Query {
 export interface WorkFilter {
   readonly objectId?: string | undefined;
   readonly sectionCode?: string | undefined;
+  /** Точный месяц. Границам не противоречит: условия независимы. */
   readonly period?: string | undefined;
+  readonly periodFrom?: string | undefined;
+  readonly periodTo?: string | undefined;
   readonly registryId?: string | undefined;
   readonly unassigned?: boolean | undefined;
   readonly search?: string | undefined;
@@ -277,6 +281,8 @@ export async function listWorks(
         ...(filter.objectId === undefined ? {} : { objectId: filter.objectId }),
         ...(filter.sectionCode === undefined ? {} : { sectionCode: filter.sectionCode }),
         ...(filter.period === undefined ? {} : { period: filter.period }),
+        ...(filter.periodFrom === undefined ? {} : { periodFrom: filter.periodFrom }),
+        ...(filter.periodTo === undefined ? {} : { periodTo: filter.periodTo }),
         ...(filter.registryId === undefined ? {} : { registryId: filter.registryId }),
         // Признак передаётся строкой: сервер принимает только `true` и `false`,
         // потому что `z.coerce.boolean()` считал бы истиной и «false».
@@ -285,6 +291,41 @@ export async function listWorks(
           : { unassigned: filter.unassigned ? 'true' : 'false' }),
         ...(filter.search === undefined || filter.search === '' ? {} : { search: filter.search }),
       }),
+    }),
+  );
+}
+
+/** Сколько комплектов видно спрашивающему в каждом разделе объекта. */
+export interface SectionWorkCount {
+  readonly sectionCode: string;
+  readonly works: number;
+}
+
+/**
+ * Счётчики для заголовков дерева разделов.
+ *
+ * Фильтры передаются те же, что и в `listWorks`, и это не удобство вызывающего:
+ * число над панелью обязано считать ровно то множество, которое панель покажет
+ * при раскрытии. Разошлись бы они — заголовок обещал бы комплекты, которых в
+ * теле нет.
+ */
+export async function listSectionCounts(
+  objectId: string,
+  filter: Omit<WorkFilter, 'objectId' | 'cursor' | 'registryId'> = {},
+): Promise<NavigationResult<SectionWorkCount[]>> {
+  const route = NAVIGATION_ROUTES.sectionCounts(objectId);
+  return loadNavigation(route, () =>
+    get<SectionWorkCount[]>(route, {
+      query: {
+        ...(filter.sectionCode === undefined ? {} : { sectionCode: filter.sectionCode }),
+        ...(filter.period === undefined ? {} : { period: filter.period }),
+        ...(filter.periodFrom === undefined ? {} : { periodFrom: filter.periodFrom }),
+        ...(filter.periodTo === undefined ? {} : { periodTo: filter.periodTo }),
+        ...(filter.unassigned === undefined
+          ? {}
+          : { unassigned: filter.unassigned ? 'true' : 'false' }),
+        ...(filter.search === undefined || filter.search === '' ? {} : { search: filter.search }),
+      },
     }),
   );
 }

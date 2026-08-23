@@ -49,6 +49,35 @@ export interface StartMarkupResult {
    * значение обязано быть настоящим, а не константой.
    */
   readonly jobsCreated: boolean;
+  /**
+   * Детекция пропущена: запускать нечем.
+   *
+   * Не отказ. Черновик разметки создаётся, страницы размечаются руками, и это
+   * рабочий путь портала с самого начала. Отказом это было бы, если бы ручная
+   * разметка зависела от модели, — она не зависит.
+   */
+  readonly detectionSkipReason: string | null;
+}
+
+/**
+ * Почему детекцию нельзя запустить — или `null`, если можно.
+ *
+ * Читается ДО постановки задач и, отдельно, до сборки рабочего документа в
+ * маршруте: без этого пользователь узнавал бы о ненастроенной модели из консоли
+ * задач через минуту после нажатия, а на экране всё это время стояло бы «идёт
+ * детекция».
+ */
+export function detectionUnavailableReason(detection: {
+  readonly provider: string;
+  readonly modelVersion: string;
+}): string | null {
+  if (detection.provider !== 'local') return null;
+  if (detection.modelVersion !== '') return null;
+  return (
+    'Модель детекции не загружена: в настройках портала пуста ' +
+    '`detection.model_version`. Разметьте страницы вручную либо попросите ' +
+    'администратора выложить веса модели.'
+  );
 }
 
 /**
@@ -79,6 +108,29 @@ export async function startMarkupOnBundle(
   const detection = await readDetectionSettings(db);
 
   if (detection.provider === 'local') {
+    // Постановка пачек без выложенной модели давала бы страницу задач,
+    // падающих гарантированно и одинаково: воркер не нашёл бы ни весов, ни
+    // манифеста. Черновик разметки при этом уже создан выше, поэтому ручная
+    // разметка доступна — а значит, отказывать нечему, и правильный ответ здесь
+    // «сделано, но без детекции», а не 409.
+    const unavailable = detectionUnavailableReason(detection);
+    if (unavailable !== null) {
+      input.logger.warn(
+        { event: 'detection_skipped_no_model' },
+        'детекция пропущена: версия модели не задана',
+      );
+      return {
+        layoutRevisionId: layout.id,
+        bundleId: input.bundleId,
+        created,
+        version: layout.version,
+        provider: 'local',
+        jobIds: [],
+        jobsCreated: false,
+        detectionSkipReason: unavailable,
+      };
+    }
+
     if (input.previewCached) {
       // Кэш превью брал картинки у RD WEB; при локальной детекции его взять
       // неоткуда — экран работает через pdf.js (ADR-0008).
@@ -107,6 +159,7 @@ export async function startMarkupOnBundle(
       provider: 'local',
       jobIds: enqueued.jobIds,
       jobsCreated: enqueued.created,
+      detectionSkipReason: null,
     };
   }
 
@@ -144,6 +197,7 @@ export async function startMarkupOnBundle(
     provider: 'rdweb',
     jobIds: [jobId],
     jobsCreated: jobCreated,
+    detectionSkipReason: null,
   };
 }
 

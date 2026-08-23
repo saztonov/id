@@ -59,6 +59,7 @@ import type { AuditActor } from '../../db/repositories/audit.js';
 import {
   acceptRegistry,
   attachRegistryFile,
+  countWorksBySection,
   createDraftRevision,
   createRegistry,
   createWork,
@@ -97,11 +98,14 @@ import {
   registryPageSchema,
   registryReconciliationViewSchema,
   registryViewSchema,
+  objectIdParamSchema,
   registryWorkParamsSchema,
   revisionIdParamSchema,
   revisionListQuerySchema,
   revisionPageSchema,
   reviewReconciliationBodySchema,
+  sectionCountsQuerySchema,
+  sectionCountsSchema,
   updateRegistryBodySchema,
   updateWorkBodySchema,
   workIdParamSchema,
@@ -155,6 +159,34 @@ function registerWorkRoutes(app: AppInstance): void {
       const { scope } = currentAuth(request);
       const page = await listWorks(app.db, scope, request.query);
       return reply.code(200).send({ items: [...page.items], nextCursor: page.nextCursor });
+    },
+  );
+
+  /**
+   * Счётчики комплектов по разделам объекта.
+   *
+   * Нужны заголовкам дерева на экране объекта: раздел подписан числом до того,
+   * как его раскроют, а раскрытие грузит комплекты лениво. Отдельный маршрут, а
+   * не поле в `GET /catalog/objects/{id}/sections`, потому что это данные ИД, а
+   * не справочник: число зависит от области видимости спрашивающего и от
+   * фильтров, которые он выставил, — у справочника ни того, ни другого нет.
+   */
+  app.get(
+    `${PREFIX}/objects/:objectId/sections/counts`,
+    {
+      preHandler: readWorks,
+      schema: {
+        params: objectIdParamSchema,
+        querystring: sectionCountsQuerySchema,
+        response: { 200: sectionCountsSchema },
+      },
+    },
+    async (request, reply) => {
+      const { scope } = currentAuth(request);
+      const { objectId } = request.params;
+      updateContext({ objectId });
+      const counts = await countWorksBySection(app.db, scope, objectId, request.query);
+      return reply.code(200).send([...counts]);
     },
   );
 

@@ -97,13 +97,24 @@ export function PipelineBar({ revisionId, editable }: PipelineBarProps): ReactNo
   const startMarkup = useMutation({
     mutationFn: () => pipeline.markup(revisionId),
     onSuccess: async (result) => {
-      message.success(
-        result.bundleReady
-          ? result.jobCreated
-            ? 'Разметка запущена: детекция пойдёт постраничными пачками'
-            : 'Разметка уже идёт'
-          : 'Собирается рабочий документ, разметка пойдёт сразу за ним',
-      );
+      // Пропуск детекции — предупреждение, а не успех и не отказ: черновик
+      // разметки создан, размечать можно руками, но обещать «идёт детекция»
+      // нельзя — в очередь ничего не положили.
+      if (result.detectionSkipped) {
+        message.warning(
+          result.detectionSkipReason ??
+            'Детекция пропущена: модель не загружена. Разметьте страницы вручную.',
+          10,
+        );
+      } else {
+        message.success(
+          result.bundleReady
+            ? result.jobCreated
+              ? 'Разметка запущена: детекция пойдёт постраничными пачками'
+              : 'Разметка уже идёт'
+            : 'Собирается рабочий документ, разметка пойдёт сразу за ним',
+        );
+      }
       await queryClient.invalidateQueries({ queryKey: revisionKeys.bundles(revisionId) });
       await refresh();
     },

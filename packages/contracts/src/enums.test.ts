@@ -112,20 +112,28 @@ describe('layoutBlockSchema', () => {
 });
 
 describe('objectCodeSchema', () => {
-  it('принимает ровно пять латинских букв или цифр', () => {
-    for (const code of ['A1B2C', '00000', 'zzzzz', 'Ab3Cd']) {
+  it('принимает от одной до пяти букв или цифр', () => {
+    for (const code of ['A1B2C', '00000', 'zzzzz', 'Ab3Cd', 'TST0', 'X']) {
       expect(objectCodeSchema.safeParse(code).success).toBe(true);
     }
   });
 
-  it('отбраковывает любую длину, кроме пяти', () => {
-    for (const code of ['', 'A1B2', 'A1B2C3', 'A1B2C ']) {
+  it('принимает кириллицу: код назначает стройка, а не портал', () => {
+    // Ровно тот случай, ради которого правило расширено (0033): объект `ЗИЛ18`
+    // на боевой стройке. Одиночная буква — законная граница снизу.
+    for (const code of ['ЗИЛ18', 'Ц', 'АБВГД']) {
+      expect(objectCodeSchema.safeParse(code).success).toBe(true);
+    }
+  });
+
+  it('отбраковывает пустое и длиннее пяти', () => {
+    for (const code of ['', 'A1B2C3', 'ЗИЛ180']) {
       expect(objectCodeSchema.safeParse(code).success).toBe(false);
     }
   });
 
-  it('отбраковывает кириллицу и разделители: код уезжает в ключи и шаблоны', () => {
-    for (const code of ['АБВГД', 'A1-B2', 'A1B2_', 'A1B2\n']) {
+  it('отбраковывает разделители: код уезжает в ключи и шаблоны', () => {
+    for (const code of ['A1-B2', 'A1B2_', 'A1B2\n', 'A1B2C ', 'ЗИЛ-8']) {
       expect(objectCodeSchema.safeParse(code).success).toBe(false);
     }
   });
@@ -147,7 +155,8 @@ describe('objectCodeSchema', () => {
     };
 
     expect(constructionObjectSchema.safeParse(object).success).toBe(true);
-    expect(constructionObjectSchema.safeParse({ ...object, code: 'A1B2' }).success).toBe(false);
+    expect(constructionObjectSchema.safeParse({ ...object, code: 'ЗИЛ18' }).success).toBe(true);
+    expect(constructionObjectSchema.safeParse({ ...object, code: 'A1B2C3' }).success).toBe(false);
   });
 });
 

@@ -1734,7 +1734,7 @@ export const constructionObjects = pgTable("construction_objects", {
 			name: "construction_objects_general_contractor_id_fkey"
 		}),
 	unique("construction_objects_code_key").on(table.code),
-	check("construction_objects_code_chk", sql`(code)::text ~ '^[A-Za-z0-9]{5}$'::text`),
+	check("construction_objects_code_chk", sql`((char_length((code)::text) >= 1) AND (char_length((code)::text) <= 5)) AND ((code)::text !~ '[[:space:][:cntrl:][:punct:]]'::text)`),
 ]);
 
 export const catalogImports = pgTable("catalog_imports", {

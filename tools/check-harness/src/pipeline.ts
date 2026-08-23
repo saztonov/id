@@ -32,10 +32,12 @@ import {
   type Segmentation,
 } from '@id/api';
 import {
+  AOSR_FIELDS,
   deriveMaterials,
   isFallbackCode,
   makeGraph,
   makeProfile,
+  makeRevision,
   makeUnavailableRegistries,
   makeUnconfiguredProfile,
   RULE_CATALOG,
@@ -218,6 +220,34 @@ export function runPackage(dir: string, options: HarnessOptions): PackageRunResu
     };
   });
 
+  /**
+   * Месяц комплекта для правила `AOSR.ACT.032`.
+   *
+   * У пакета корпуса месяца нет: это папка сканов, а месяц назначает человек в
+   * портале при заведении. Взять его неоткуда — и взять произвольный тоже
+   * нельзя: правило дало бы замечание на каждый акт каждого пакета, и харнес,
+   * который меряет ЛОЖНЫЕ срабатывания, сам бы их и производил.
+   *
+   * Поэтому месяц берётся по САМОМУ РАННЕМУ распознанному акту — так поступил бы
+   * и человек. Правило от этого не выключается: оно срабатывает там, где акты
+   * одного пакета относятся к разным месяцам, а это ровно тот случай, ради
+   * которого оно и заведено.
+   *
+   * Актов с распознанной датой нет — месяц пуст, и правило честно отвечает `n_a`.
+   */
+  function periodOfPackage(nodes: readonly DocumentNode[]): string {
+    const dates = nodes
+      .filter((node) => node.docTypeCode === 'aosr' && node.isKnownType)
+      .map(
+        (node) =>
+          node.fields.find((field) => field.fieldCode === AOSR_FIELDS.actDate)?.valueDate ?? null,
+      )
+      .filter((value): value is string => value !== null)
+      .sort();
+    const earliest = dates[0];
+    return earliest === undefined ? '' : `${earliest.slice(0, 7)}-01`;
+  }
+
   // Задачи 17–18: разбор реестров и сверка по номеру.
   const registries: RegistryRunView[] = [];
   const registryRows: RegistryRowNode[] = [];
@@ -292,6 +322,7 @@ export function runPackage(dir: string, options: HarnessOptions): PackageRunResu
 
   const graph = makeGraph({
     profile: options.unconfiguredProfile ? makeUnconfiguredProfile() : makeProfile(),
+    revision: makeRevision({ period: periodOfPackage(documents) }),
     documents,
     registryRows,
     relations,

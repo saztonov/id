@@ -67,7 +67,8 @@ import {
   listRunPages,
 } from '../../db/repositories/recognition.js';
 import { dedupeKeyFor } from '../../jobs/types.js';
-import { startMarkupOnBundle } from '../layout/start.js';
+import { detectionUnavailableReason, startMarkupOnBundle } from '../layout/start.js';
+import { readDetectionSettings } from '../../config/portal-settings.js';
 import { startRecognition } from '../recognition/start.js';
 import {
   checkResponseSchema,
@@ -124,6 +125,15 @@ function registerMarkupRoute(app: AppInstance): void {
       // с тем же текстом.
       assertPlanBuildable(plan);
 
+      // Настройка детекции читается ЗДЕСЬ, а не только внутри
+      // `startMarkupOnBundle`, и это не дубль проверки. Веток две: рабочий
+      // документ уже собран — и тогда `startMarkupOnBundle` отработает
+      // синхронно, признак вернётся сам; не собран — и тогда та же функция
+      // отработает в воркере, где отвечать пользователю уже некому. Ответ «идёт
+      // детекция» в этом случае оказался бы ложью, обнаруживаемой минутой позже
+      // и только в консоли задач.
+      const detectionSkipReason = detectionUnavailableReason(await readDetectionSettings(app.db));
+
       const bundles = await listBundles(app.db, scope, revisionId);
       const bundle = bundles[bundles.length - 1];
 
@@ -141,8 +151,10 @@ function registerMarkupRoute(app: AppInstance): void {
           bundleReady: true,
           bundleId: started.bundleId,
           layoutRevisionId: started.layoutRevisionId,
-          jobId: started.jobIds[0] ?? '',
+          jobId: started.jobIds[0] ?? null,
           jobCreated: started.jobsCreated,
+          detectionSkipped: started.detectionSkipReason !== null,
+          detectionSkipReason: started.detectionSkipReason,
         });
       }
 
@@ -172,6 +184,11 @@ function registerMarkupRoute(app: AppInstance): void {
         layoutRevisionId: null,
         jobId,
         jobCreated: created,
+        // Сборка идёт в любом случае — рабочий документ нужен и для ручной
+        // разметки. Предупредить о ненастроенной детекции надо сейчас: за
+        // сборкой пойдёт `layout.start`, и там объяснять будет уже некому.
+        detectionSkipped: detectionSkipReason !== null,
+        detectionSkipReason,
       });
     },
   );

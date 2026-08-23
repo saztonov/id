@@ -138,11 +138,16 @@ test.describe('заявка на регистрацию', () => {
 
     await expect(page.getByText('Заявка принята')).toBeVisible();
 
-    // Тот же адрес — в очереди администратора.
+    // Тот же адрес — в очереди администратора. `?tab=registration` после
+    // сокращения ряда вкладок стал алиасом: он открывает «Пользователей» с
+    // выбранным разделом заявок, а не отдельную вкладку.
     await signInWithPassword(page, LOCAL_LOGINS.admin);
     await page.waitForURL((url) => !url.pathname.startsWith('/login'));
     await page.goto('/admin?tab=registration');
 
+    await expect(
+      page.getByRole('radiogroup', { name: 'Раздел управления пользователями' }),
+    ).toBeVisible();
     await expect(page.getByText(email)).toBeVisible();
   });
 

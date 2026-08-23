@@ -18,7 +18,7 @@ export * from './catalog.js';
 export * from './seed.js';
 export * from './testing.js';
 export { DATE_RULES, SIGNATURE_RULES } from './dates.js';
-export { AOSR_RULES, CROSSCHECK_RULES, EXTERNAL_RULES } from './aosr.js';
+export { AOSR_FIELDS, AOSR_RULES, CROSSCHECK_RULES, EXTERNAL_RULES } from './aosr.js';
 export { EVIDENCE_RULES } from './evidence.js';
 export {
   isLlmReviewCode,

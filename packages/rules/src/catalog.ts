@@ -24,7 +24,7 @@
  * добавленное эксплуатацией, вставало рядом со своей группой, а не в конец.
  */
 import { DATE_RULES, SIGNATURE_RULES } from './dates.js';
-import { AOSR_RULES, CROSSCHECK_RULES, EXTERNAL_RULES } from './aosr.js';
+import { AOSR_RULES, CROSSCHECK_RULES, EXTERNAL_RULES, WORK_PERIOD_RULES } from './aosr.js';
 import { EVIDENCE_RULES } from './evidence.js';
 import { LLM_REVIEW_RULES } from './llm-review.js';
 import type { RuleSpec } from './types.js';
@@ -73,6 +73,13 @@ export const RULE_SEED_BATCHES: readonly RuleSeedBatch[] = [
     // `checks.llm_review`, движок отвечает `n_a` с названной причиной.
     migration: '0031_seed_llm_review_rules',
     rules: LLM_REVIEW_RULES,
+  },
+  {
+    // Месяц комплекта против даты акта (S22). Месяц выбирает человек при
+    // заведении, а сойтись он обязан с тем, что написано в акте, — и увидеть
+    // оба значения сразу можно только здесь, в проверке.
+    migration: '0034_seed_period_rule',
+    rules: WORK_PERIOD_RULES,
   },
 ];
 

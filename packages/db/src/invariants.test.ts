@@ -338,11 +338,40 @@ function blockWith(x0: number, y0: number, x1: number, y1: number, sortOrder: nu
 }
 
 describe('форма реквизитов справочников', () => {
-  it('отвергает код объекта из 4 символов', async () => {
+  /**
+   * Кириллический код — проверка ЛОКАЛИ кластера, а не только ограничения.
+   *
+   * Ограничение намеренно выражено запретом пробелов, управляющих и знаков
+   * пунктуации, а не разрешением `[:alnum:]`: последний класс для кириллицы
+   * зависит от `LC_CTYPE`, и на базе в локали `C` буква «З» им не покрывается.
+   * Тест вставляет `ЗИЛ18` в НАСТОЯЩУЮ базу, поэтому проходит он тогда и только
+   * тогда, когда правило одинаково ведёт себя на боевом кластере.
+   */
+  it('принимает код объекта из кириллицы и одиночную букву', async () => {
     await expect(
       db.query(
         `INSERT INTO construction_objects (code, name, full_name)
-           VALUES ('ABC1', 'Корпус', 'Корпус полностью')`,
+           VALUES ('ЗИЛ18', 'Корпус', 'Корпус полностью'),
+                  ('Ц', 'Корпус Ц', 'Корпус Ц полностью'),
+                  ('ABC1', 'Корпус короткий', 'Корпус короткий полностью')`,
+      ),
+    ).resolves.toBeDefined();
+  });
+
+  it('отвергает код объекта с разделителем', async () => {
+    await expect(
+      db.query(
+        `INSERT INTO construction_objects (code, name, full_name)
+           VALUES ('ЗИЛ-8', 'Корпус', 'Корпус полностью')`,
+      ),
+    ).rejects.toThrow(/construction_objects_code_chk/u);
+  });
+
+  it('отвергает пустой код объекта', async () => {
+    await expect(
+      db.query(
+        `INSERT INTO construction_objects (code, name, full_name)
+           VALUES ('', 'Корпус', 'Корпус полностью')`,
       ),
     ).rejects.toThrow(/construction_objects_code_chk/u);
   });

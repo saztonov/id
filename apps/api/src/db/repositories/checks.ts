@@ -182,6 +182,8 @@ interface RevisionContext {
   readonly sectionCode: string;
   /** Наименование работы: попадает в тексты замечаний вместо кода тома. */
   readonly workTitle: string;
+  /** Месяц комплекта, `ГГГГ-ММ-01`: с ним сверяются даты актов (`AOSR.ACT.032`). */
+  readonly period: string;
   readonly status: string;
 }
 
@@ -197,6 +199,10 @@ async function loadRevisionContext(
       contractorId: submissionRevisions.contractorId,
       sectionCode: works.sectionCode,
       workTitle: works.title,
+      // Дата без времени: месяц — это `ГГГГ-ММ-01`, а не метка времени, и
+      // `to_char` здесь тот же, что в `WORK_SELECTION` навигации. Без него
+      // драйвер отдал бы `Date`, и правило сравнивало бы объект со строкой.
+      period: sql<string>`to_char(${works.period}, 'YYYY-MM-DD')`.as('work_period'),
       status: submissionRevisions.status,
     })
     .from(submissionRevisions)

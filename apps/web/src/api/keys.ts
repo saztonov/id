@@ -63,6 +63,8 @@ export const catalogKeys = {
 export const navigationKeys = {
   works: (filter: string) => ['nav', 'works', filter] as const,
   work: (workId: string) => ['nav', 'works', 'one', workId] as const,
+  sectionCounts: (objectId: string, filter: string) =>
+    ['nav', 'works', 'counts', objectId, filter] as const,
   registries: (filter: string) => ['nav', 'registries', filter] as const,
   registry: (registryId: string) => ['nav', 'registries', 'one', registryId] as const,
   registryItems: (registryId: string) => ['nav', 'registries', 'one', registryId, 'items'] as const,

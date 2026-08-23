@@ -10,31 +10,44 @@
  * доступа, а не сбой загрузки. Экран, молчащий об этом, выглядит рабочим и
  * тогда, когда за ним нет ни одного объекта.
  *
- * Ниже — вход в ревизию по идентификатору. Это не отладочная возможность:
- * deep-link на ревизию приходит в уведомлениях и в консоли задач, и открыть
- * рабочее место по нему обязано быть можно, минуя дерево навигации.
+ * ## Формы ввода идентификатора ревизии здесь больше нет
+ *
+ * Она стояла ради deep-link из уведомлений и консоли задач — и была для этого
+ * не нужна: ссылка `/ids/revisions/{id}` открывает рабочее место сама, без
+ * посредника. Тем, кому она показывалась (пользователю с ПУСТЫМ списком
+ * объектов), поле предлагало ввести UUID — то есть просило руками набрать то,
+ * чего у него взяться неоткуда, и объясняло пустой экран отладочным приёмом.
+ *
+ * ## Список докручивается
+ *
+ * Прежде запрашивались первые сто объектов, и `nextCursor` не читался вовсе:
+ * сто первый объект существовал и был недостижим, а экран об этом молчал.
  */
 import { useState, type ReactNode } from 'react';
-import { Button, Card, Form, Input, Space, Table, Typography } from 'antd';
-import { useQuery } from '@tanstack/react-query';
+import { Button, Input, Table } from 'antd';
+import { useInfiniteQuery } from '@tanstack/react-query';
 import { catalog } from '../../api/endpoints.js';
 import { catalogKeys } from '../../api/keys.js';
 import type { ConstructionObject } from '../../api/types.js';
 import { ErrorState, ExplainedLimitation, LoadingState, ScreenHeading } from '../../shared/ui.js';
-import { Link, useNavigate } from '../../app/router.js';
+import { Link } from '../../app/router.js';
 import { useSession } from '../../app/session.js';
-
-const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 
 export function IdsScreen(): ReactNode {
   const [search, setSearch] = useState('');
-  const navigate = useNavigate();
   const { me } = useSession();
   const scopeKind = me.scope?.kind ?? null;
-  const objects = useQuery({
+
+  const objects = useInfiniteQuery({
     queryKey: catalogKeys.objects(search),
-    queryFn: () => catalog.objects(search === '' ? {} : { search }),
+    queryFn: ({ pageParam }) =>
+      catalog.objects({ ...(search === '' ? {} : { search }), cursor: pageParam }),
+    initialPageParam: null as string | null,
+    getNextPageParam: (last) => last.nextCursor,
   });
+
+  const items = (objects.data?.pages ?? []).flatMap((page) => page.items);
+  const empty = objects.isSuccess && items.length === 0;
 
   return (
     <>
@@ -53,7 +66,7 @@ export function IdsScreen(): ReactNode {
 
       {objects.isPending && <LoadingState label="Загрузка объектов…" />}
       {objects.isError && <ErrorState error={objects.error} />}
-      {objects.isSuccess && objects.data.items.length === 0 && scopeKind === 'contractor' && (
+      {empty && scopeKind === 'contractor' && (
         <div style={{ marginBottom: 16 }}>
           <ExplainedLimitation
             title="Объектов в вашей области видимости нет — и это может быть не ошибкой"
@@ -65,7 +78,7 @@ export function IdsScreen(): ReactNode {
           </ExplainedLimitation>
         </div>
       )}
-      {objects.isSuccess && objects.data.items.length === 0 && scopeKind === 'engineer' && (
+      {empty && scopeKind === 'engineer' && (
         <div style={{ marginBottom: 16 }}>
           <ExplainedLimitation
             title="На вас не назначено ни одного объекта"
@@ -77,69 +90,44 @@ export function IdsScreen(): ReactNode {
         </div>
       )}
       {objects.isSuccess && (
-        <Table<ConstructionObject>
-          rowKey="id"
-          size="middle"
-          dataSource={objects.data.items}
-          pagination={false}
-          locale={{ emptyText: 'Объектов в вашей области видимости нет' }}
-          columns={[
-            {
-              title: 'Код',
-              dataIndex: 'code',
-              key: 'code',
-              render: (code: string, row) => <Link to={`/ids/objects/${row.id}`}>{code}</Link>,
-            },
-            { title: 'Наименование', dataIndex: 'name', key: 'name' },
-            { title: 'Полное наименование', dataIndex: 'fullName', key: 'fullName' },
-            {
-              title: 'Активен',
-              dataIndex: 'isActive',
-              key: 'isActive',
-              render: (value: boolean) => (value ? 'да' : 'нет'),
-            },
-          ]}
-        />
-      )}
-
-      {objects.isSuccess && objects.data.items.length === 0 && (
-        <Card
-          size="small"
-          title="Открыть ревизию комплекта по идентификатору"
-          style={{ marginTop: 24 }}
-        >
-          <Typography.Paragraph type="secondary" style={{ marginTop: 0 }}>
-            Рабочее место ревизии адресуется её идентификатором. Ссылка того же вида приходит в
-            уведомлениях и в консоли задач.
-          </Typography.Paragraph>
-          <Form
-            layout="inline"
-            onFinish={(values: { revisionId?: string }) => {
-              const id = (values.revisionId ?? '').trim();
-              if (UUID_PATTERN.test(id)) navigate(`/ids/revisions/${id}`);
-            }}
-          >
-            <Form.Item
-              name="revisionId"
-              label="Идентификатор ревизии"
-              rules={[
-                {
-                  pattern: UUID_PATTERN,
-                  message: 'Идентификатор ревизии — UUID',
-                },
-              ]}
+        <>
+          <Table<ConstructionObject>
+            rowKey="id"
+            size="middle"
+            dataSource={items}
+            pagination={false}
+            locale={{ emptyText: 'Объектов в вашей области видимости нет' }}
+            columns={[
+              {
+                title: 'Код',
+                dataIndex: 'code',
+                key: 'code',
+                render: (code: string, row) => <Link to={`/ids/objects/${row.id}`}>{code}</Link>,
+              },
+              { title: 'Наименование', dataIndex: 'name', key: 'name' },
+              { title: 'Полное наименование', dataIndex: 'fullName', key: 'fullName' },
+              {
+                title: 'Активен',
+                dataIndex: 'isActive',
+                key: 'isActive',
+                render: (value: boolean) => (value ? 'да' : 'нет'),
+              },
+            ]}
+          />
+          {objects.hasNextPage && (
+            <Button
+              style={{ marginTop: 12 }}
+              size="small"
+              data-testid="objects-more"
+              loading={objects.isFetchingNextPage}
+              onClick={() => {
+                void objects.fetchNextPage();
+              }}
             >
-              <Input style={{ width: 340 }} placeholder="00000000-0000-4000-8000-000000000000" />
-            </Form.Item>
-            <Form.Item>
-              <Space>
-                <Button type="primary" htmlType="submit">
-                  Открыть
-                </Button>
-              </Space>
-            </Form.Item>
-          </Form>
-        </Card>
+              Показать ещё объекты
+            </Button>
+          )}
+        </>
       )}
     </>
   );

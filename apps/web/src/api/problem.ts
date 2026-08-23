@@ -115,6 +115,29 @@ export async function parseProblem(response: Response): Promise<ProblemDetails |
   }
 }
 
+/**
+ * Отказ браузера ДО запроса — `fetch` бросает `TypeError` и молчит о причине.
+ *
+ * Так выглядит непройденный preflight `OPTIONS` к presigned PUT: у бакета нет
+ * CORS-политики, браузер обрывает обмен сам и по требованию спецификации не
+ * сообщает скрипту, что именно случилось, — остаётся `TypeError: Failed to
+ * fetch`. Пользователь при этом видит сообщение, из которого следует «интернет
+ * пропал», хотя настраивать нужно хранилище.
+ *
+ * Различить наверняка нельзя, и текст поэтому называет обе возможности. Это
+ * честнее, чем и молчание, и уверенное «дело в CORS».
+ */
+export function describeUploadFailure(error: unknown): string {
+  if (error instanceof TypeError) {
+    return (
+      'Браузер не смог отправить файл в хранилище. Обычно это значит, что хранилище отвергло ' +
+      'предварительный запрос браузера (CORS): проверьте политику бакета. Реже — обрыв сети. ' +
+      `Сообщение движка: ${error.message}`
+    );
+  }
+  return describeError(error);
+}
+
 /** Человеческий текст ошибки для уведомления. */
 export function describeError(error: unknown): string {
   if (isApiError(error)) {

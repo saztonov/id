@@ -428,19 +428,11 @@ describe('права на справочники: чтение всем, зап�
 });
 
 // =====================================================================
-// Объекты строительства: код ровно пять символов
+// Объекты строительства: код — 1–5 символов любого алфавита
 // =====================================================================
 
-describe('объект строительства: код — ровно пять символов', () => {
-  it('код из 4 и из 6 символов отвергается с 422, из 5 — принимается', async () => {
-    const four = await asAdmin('POST', `${P}/objects`, {
-      code: 'TST1',
-      name: 'Объект с коротким кодом',
-      fullName: 'Объект с коротким кодом',
-    });
-    expect(four.statusCode).toBe(422);
-    expect(pointersOf(four)).toContain('/code');
-
+describe('объект строительства: код — от 1 до 5 символов любого алфавита', () => {
+  it('код из 6 символов отвергается с 422, из 4 и из 5 — принимается', async () => {
     const six = await asAdmin('POST', `${P}/objects`, {
       code: 'TST123',
       name: 'Объект с длинным кодом',
@@ -448,6 +440,15 @@ describe('объект строительства: код — ровно пят�
     });
     expect(six.statusCode).toBe(422);
     expect(pointersOf(six)).toContain('/code');
+
+    // Короткий код стал законным (0033): длина реквизита, назначаемого
+    // стройкой, требованием портала не является.
+    const four = await asAdmin('POST', `${P}/objects`, {
+      code: 'TST1',
+      name: 'Объект с коротким кодом',
+      fullName: 'Объект с коротким кодом',
+    });
+    expect(four.statusCode).toBe(201);
 
     const five = await asAdmin('POST', `${P}/objects`, {
       code: 'TST05',
@@ -461,21 +462,32 @@ describe('объект строительства: код — ровно пят�
       developerId: ORG_DEVELOPER,
     });
 
-    // Ни одна из отвергнутых форм в базу не попала: 422 — это отказ на входе, а
-    // не «вставилось и откатилось».
+    // Отвергнутая форма в базу не попала: 422 — это отказ на входе, а не
+    // «вставилось и откатилось».
     const rows = await db.query<{ total: string }>(
-      `SELECT count(*)::text AS total FROM construction_objects WHERE code IN ('TST1', 'TST123')`,
+      `SELECT count(*)::text AS total FROM construction_objects WHERE code = 'TST123'`,
     );
     expect(rows[0]?.total).toBe('0');
   });
 
-  it('код с недопустимыми символами и повторный код различаются по статусу', async () => {
+  it('кириллический код принимается: он назначен стройкой, а не порталом', async () => {
     const cyrillic = await asAdmin('POST', `${P}/objects`, {
-      code: 'ТЕСТ1',
+      code: 'ЗИЛ18',
+      name: 'Объект ЗИЛ',
+      fullName: 'ЖК «ЗИЛ», корпус 18',
+    });
+    expect(cyrillic.statusCode).toBe(201);
+    expect(cyrillic.json<{ code: string }>()).toMatchObject({ code: 'ЗИЛ18' });
+  });
+
+  it('код с разделителем и повторный код различаются по статусу', async () => {
+    const separator = await asAdmin('POST', `${P}/objects`, {
+      code: 'ЗИЛ-8',
       name: 'Объект',
       fullName: 'Объект',
     });
-    expect(cyrillic.statusCode).toBe(422);
+    expect(separator.statusCode).toBe(422);
+    expect(pointersOf(separator)).toContain('/code');
 
     const duplicate = await asAdmin('POST', `${P}/objects`, {
       code: 'TST01',

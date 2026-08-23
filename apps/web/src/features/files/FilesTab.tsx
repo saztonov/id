@@ -36,7 +36,7 @@ import { Alert, App as AntApp, Button, Popconfirm, Space, Table, Tag, Typography
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { bundles, files, layout } from '../../api/endpoints.js';
 import { revisionKeys, layoutKeys } from '../../api/keys.js';
-import { describeError } from '../../api/problem.js';
+import { describeError, describeUploadFailure } from '../../api/problem.js';
 import type { SourceFile } from '../../api/types.js';
 import { useSession } from '../../app/session.js';
 import { ErrorState, LoadingState } from '../../shared/ui.js';
@@ -72,14 +72,21 @@ export function FilesTab({ revisionId, editable }: FilesTabProps): ReactNode {
   /** Три шага приёма одного файла. */
   const uploadOne = async (file: File): Promise<void> => {
     const ticket = await files.initUpload(revisionId, file.name, file.size);
-    const put = await fetch(ticket.uploadUrl, {
-      method: ticket.method,
-      headers: ticket.headers,
-      body: file,
-      // Драйвер `local` живёт на нашем origin, боевой S3 — на чужом.
-      // `same-origin` не мешает первому и не отправляет cookie второму.
-      credentials: 'same-origin',
-    });
+    let put: Response;
+    try {
+      put = await fetch(ticket.uploadUrl, {
+        method: ticket.method,
+        headers: ticket.headers,
+        body: file,
+        // Драйвер `local` живёт на нашем origin, боевой S3 — на чужом.
+        // `same-origin` не мешает первому и не отправляет cookie второму.
+        credentials: 'same-origin',
+      });
+    } catch (error) {
+      // `TypeError` здесь — это чаще всего непройденный preflight, а не сеть:
+      // `Failed to fetch` без объяснения отправляет искать проблему не туда.
+      throw new Error(describeUploadFailure(error), { cause: error });
+    }
     if (!put.ok) {
       throw new Error(`Хранилище не приняло байты: HTTP ${String(put.status)}`);
     }

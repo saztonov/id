@@ -769,6 +769,69 @@ function evaluateActDates(graph: CheckGraph): RuleResult {
   return summarize(findings, checked, 'ни в одном акте не распознаны даты работ');
 }
 
+/**
+ * Месяц комплекта против даты акта.
+ *
+ * ## Почему это проверка, а не запрет в форме
+ *
+ * Месяц выбирает человек при заведении комплекта, и подставленный по умолчанию
+ * текущий месяц он меняет далеко не всегда. Запретить несовпадение в форме
+ * нельзя по построению: акта в момент заведения ещё нет — есть файл, который
+ * никто не распознавал. Единственное место, где обе величины видны сразу, —
+ * граф проверки, и правило живёт здесь именно поэтому.
+ *
+ * ## Почему `warning`, а не блокер
+ *
+ * Расхождение бывает законным: акт за июль подшивают в августовскую папку, если
+ * в июле его не успели передать. Портал вообще ничего не блокирует сверкой —
+ * его дело подсветить расхождение, а решение принимает человек.
+ *
+ * ## Что считается несовпадением
+ *
+ * Совпадение по ГОДУ И МЕСЯЦУ даты акта. День не участвует: месяц комплекта —
+ * это `ГГГГ-ММ-01` по построению, и сравнивать с ним первое число значило бы
+ * ловить каждый акт, составленный не первого числа.
+ */
+function evaluateWorkPeriod(graph: CheckGraph): RuleResult {
+  const actList = aosrActs(graph);
+  if (actList.length === 0) return notApplicable(NO_ACTS);
+
+  const period = graph.revision.period;
+  if (!isIsoDate(period)) {
+    return notApplicable('у комплекта не задан месяц: сверять дату акта не с чем');
+  }
+  const periodMonth = period.slice(0, 7);
+
+  const findings: RuleFinding[] = [];
+  let checked = 0;
+
+  for (const act of actList) {
+    const actDateValue = field(act, AOSR_FIELDS.actDate);
+    const actDate = actDateValue?.valueDate ?? null;
+    // Нераспознанная дата акта здесь не замечание: её отсутствие уже названо
+    // правилом AOSR.ACT.031, и второе сообщение о том же было бы шумом.
+    if (!isIsoDate(actDate)) continue;
+
+    checked += 1;
+    if (actDate.slice(0, 7) !== periodMonth) {
+      findings.push(
+        defect({
+          ...anchorOfField(act, actDateValue),
+          origin: 'deterministic',
+          message:
+            `Акт ${actLabel(act)} составлен ${formatDate(actDate)}, а комплект заведён за ` +
+            `${formatDate(period)}: месяц не совпадает.`,
+          hint:
+            'Либо смените месяц комплекта, либо убедитесь, что акт подшит в эту папку намеренно ' +
+            '(например, передаётся с опозданием).',
+        }),
+      );
+    }
+  }
+
+  return summarize(findings, checked, 'ни в одном акте не распознана дата составления');
+}
+
 // ---------------------------------------------------------------------------
 // AOSR.SGN — подписанты
 // ---------------------------------------------------------------------------
@@ -2086,6 +2149,26 @@ export const AOSR_RULES: readonly RuleSpec[] = [
     severity: 'error',
     blocking: false,
     evaluate: (graph) => evaluateNextWorks(graph),
+  }),
+];
+
+/**
+ * Сверка месяца комплекта с датами актов (S22).
+ *
+ * Отдельным экспортом, а не строкой в `AOSR_RULES`: партии сида привязаны к
+ * миграциям, а `AOSR_RULES` целиком уехал в применённую `0017`. Дописать код
+ * туда значило бы переписать замороженный файл — раннер объявил бы его
+ * `modified`, и накат встал бы. Механизм партий (`RULE_SEED_BATCHES`) заведён
+ * ровно на этот случай.
+ */
+export const WORK_PERIOD_RULES: readonly RuleSpec[] = [
+  actRule({
+    code: 'AOSR.ACT.032',
+    title: 'Месяц комплекта сходится с датой акта',
+    kind: 'act',
+    severity: 'warning',
+    blocking: false,
+    evaluate: (graph) => evaluateWorkPeriod(graph),
   }),
 ];
 

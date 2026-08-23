@@ -22,34 +22,42 @@
  * исполнения фиксировал его как долг четыре этапа подряд. Здесь оно получает
  * потребителя — консоль задач, глубина очереди и попытки с последними ошибками.
  *
- * ## Журнал и качество — одна вкладка с двумя разделами
+ * ## Вкладки горизонтальные, и это потребовало сократить их до семи
  *
- * Разделов два, а вкладка одна, и это не экономия места: у `Tabs` antd при
- * переполнении появляется кнопка свёртки, а она нарушает `aria-required-children`
- * — внутри `tablist` оказывается элемент, вкладкой не являющийся. Найдено
- * прогоном axe, а не рассуждением. Разделы при этом честно разные и переключаются
- * явно, а не прячутся один в другом.
+ * История такая. Пока меню было горизонтальной полосой, девять вкладок в ширину
+ * помещались. Боковое меню (S18) забрало 240 пикселей, у `Tabs` antd появилась
+ * кнопка свёртки — а она нарушает `aria-required-children`: внутри `tablist`
+ * оказывается элемент, вкладкой не являющийся. Найдено прогоном axe, а не
+ * рассуждением, и тогда вкладки поставили столбцом (`tabPosition="left"`).
  *
- * ## Вкладки вертикальные, и это следствие того же дефекта
+ * Вертикальный столбец расходился со справочниками, где ряд горизонтальный, и
+ * заказчик просил их выровнять. Просто снять `tabPosition` нельзя — вернулся бы
+ * тот же дефект axe. Поэтому вкладок стало СЕМЬ, ровно столько же, сколько в
+ * справочниках, где ряд помещается и axe зелёный. Сокращение — не переименование:
+ * две пары экранов действительно съехались в одну вкладку каждая.
  *
- * Пока меню было горизонтальной полосой, девять вкладок в ширину помещались, и
- * кнопка свёртки не появлялась. Боковое меню (S18) забрало 240 пикселей, и
- * дефект вернулся — то есть «уместить в ширину» никогда и не было решением, оно
- * лишь откладывало отказ до первого узкого экрана. `tabPosition="left"`
- * убирает переполнение по построению: девять пунктов стоят столбцом и
- * сворачивать нечего. Заодно это честнее по смыслу — вкладок здесь столько,
- * что горизонтальный ряд из них всё равно читался списком.
+ * ## Что с чем слито и почему именно так
  *
- * ## Журнал — отдельная вкладка, а не карточка в диагностике
+ * «Заявки на доступ» ушли внутрь «Пользователей»: заявка — это будущая учётная
+ * запись, и человек, который её рассматривает, тем же заходом правит роли уже
+ * заведённых. Разделять их вкладкой значило бы разводить два шага одной работы.
  *
- * У них разный горизонт и разный вопрос. Диагностика отвечает «что происходит
- * прямо сейчас»: очередь, выполняющиеся задачи, последние попытки. Журнал
- * отвечает «что ломалось и чем это чинили» — с историей, статусами и разбором,
- * который живёт годами. Общая вкладка заставила бы один экран обслуживать
- * дежурство и разбор накопленного, а это разные режимы работы.
+ * «Журнал и качество» ушёл внутрь «Диагностики». Горизонт у них разный —
+ * диагностика отвечает «что происходит прямо сейчас», журнал «что ломалось и чем
+ * это чинили», — и внутри вкладки они остаются РАЗНЫМИ разделами, переключаемыми
+ * явно. Приём тот же, которым внутри самого журнала разведены проблемы, аномалии
+ * и качество конвейера: `Segmented`, а не вложенные `Tabs`, — вложенный `tablist`
+ * дал бы ту же кнопку свёртки этажом ниже.
+ *
+ * ## Старые адреса вкладок продолжают работать
+ *
+ * `/admin?tab=journal` и `/admin?tab=registration` разосланы ссылками и стоят в
+ * прогонах. Молча отдавать по ним «Пользователей» — то же самое, что сломать
+ * ссылку, только незаметно. `TAB_ALIASES` переводит старый ключ в пару «вкладка +
+ * раздел», и человек попадает ровно туда, куда шёл.
  */
-import { type ReactNode } from 'react';
-import { Tabs } from 'antd';
+import { useState, type ReactNode } from 'react';
+import { Segmented, Space, Tabs } from 'antd';
 import { ScreenHeading } from '../../shared/ui.js';
 import { useNavigate, useQueryParam } from '../../app/router.js';
 import { useSession } from '../../app/session.js';
@@ -65,10 +73,8 @@ import { PromptsPanel } from './PromptsPanel.js';
 
 const TABS = [
   'users',
-  'registration',
   'candidates',
   'diagnostics',
-  'journal',
   'audit',
   'settings',
   'rules',
@@ -76,42 +82,117 @@ const TABS = [
 ] as const;
 type TabKey = (typeof TABS)[number];
 
+type UsersSection = 'accounts' | 'registration';
+type DiagnosticsSection = 'now' | 'journal';
+
+/**
+ * Ключи вкладок, существовавших до слияния.
+ *
+ * Значение — вкладка, в которую раздел переехал, и раздел внутри неё. Второе
+ * обязательно: привести на «Диагностику» того, кто шёл в журнал ошибок, значит
+ * ответить не на тот вопрос.
+ */
+const TAB_ALIASES: Record<string, { readonly tab: TabKey; readonly section: string }> = {
+  registration: { tab: 'users', section: 'registration' },
+  journal: { tab: 'diagnostics', section: 'journal' },
+};
+
 export function AdminScreen(): ReactNode {
   const navigate = useNavigate();
   const { me } = useSession();
-  const requested = useQueryParam('tab');
-  const tab: TabKey = TABS.includes(requested as TabKey) ? (requested as TabKey) : 'users';
+  const requested = useQueryParam('tab') ?? '';
+  const alias = TAB_ALIASES[requested];
+  const tab: TabKey =
+    alias?.tab ?? (TABS.includes(requested as TabKey) ? (requested as TabKey) : 'users');
 
   return (
     <>
       <ScreenHeading title="Администрирование" />
       <Tabs
-        tabPosition="left"
         activeKey={tab}
         onChange={(key) => navigate(`/admin?tab=${key}`)}
         destroyOnHidden
         items={[
-          { key: 'users', label: 'Пользователи и области', children: <UsersPanel /> },
-          // Вкладка существует только там, где портал распоряжается паролями:
-          // в федеративном режиме заявок на регистрацию не бывает.
-          ...(me.authMode === 'local'
-            ? [
-                {
-                  key: 'registration',
-                  label: 'Заявки на доступ',
-                  children: <RegistrationRequestsPanel />,
-                },
-              ]
-            : []),
-          { key: 'candidates', label: 'Кандидаты в виды ИД', children: <CandidatesPanel /> },
-          { key: 'diagnostics', label: 'Диагностика и задачи', children: <DiagnosticsPanel /> },
-          { key: 'journal', label: 'Журнал и качество', children: <ErrorJournalPanel /> },
+          {
+            key: 'users',
+            label: 'Пользователи',
+            children: (
+              <UsersTab
+                localAuth={me.authMode === 'local'}
+                initialSection={alias?.section === 'registration' ? 'registration' : 'accounts'}
+              />
+            ),
+          },
+          { key: 'candidates', label: 'Кандидаты', children: <CandidatesPanel /> },
+          {
+            key: 'diagnostics',
+            label: 'Диагностика',
+            children: (
+              <DiagnosticsTab initialSection={alias?.section === 'journal' ? 'journal' : 'now'} />
+            ),
+          },
           { key: 'audit', label: 'Аудит', children: <AuditPanel /> },
-          { key: 'settings', label: 'Настройки и интеграции', children: <SettingsPanel /> },
-          { key: 'rules', label: 'Правила и ruleset', children: <RulesPanel /> },
-          { key: 'prompts', label: 'AI и промты', children: <PromptsPanel /> },
+          { key: 'settings', label: 'Настройки', children: <SettingsPanel /> },
+          { key: 'rules', label: 'Правила', children: <RulesPanel /> },
+          { key: 'prompts', label: 'Промты', children: <PromptsPanel /> },
         ]}
       />
     </>
+  );
+}
+
+/**
+ * Учётные записи и заявки на доступ.
+ *
+ * Переключателя нет вовсе, когда портал паролями не распоряжается: в
+ * федеративном режиме заявок на регистрацию не бывает, и `Segmented` из одного
+ * пункта обещал бы выбор, которого нет.
+ */
+function UsersTab({
+  localAuth,
+  initialSection,
+}: {
+  localAuth: boolean;
+  initialSection: UsersSection;
+}): ReactNode {
+  const [section, setSection] = useState<UsersSection>(localAuth ? initialSection : 'accounts');
+
+  if (!localAuth) return <UsersPanel />;
+
+  return (
+    <Space direction="vertical" size={16} style={{ width: '100%' }}>
+      <Segmented<UsersSection>
+        value={section}
+        onChange={setSection}
+        options={[
+          { label: 'Учётные записи', value: 'accounts' },
+          { label: 'Заявки на доступ', value: 'registration' },
+        ]}
+        aria-label="Раздел управления пользователями"
+      />
+      {section === 'accounts' && <UsersPanel />}
+      {section === 'registration' && <RegistrationRequestsPanel />}
+    </Space>
+  );
+}
+
+/** Что происходит сейчас — и что ломалось раньше. */
+function DiagnosticsTab({ initialSection }: { initialSection: DiagnosticsSection }): ReactNode {
+  const [section, setSection] = useState<DiagnosticsSection>(initialSection);
+
+  return (
+    <Space direction="vertical" size={16} style={{ width: '100%' }}>
+      <Segmented<DiagnosticsSection>
+        value={section}
+        onChange={setSection}
+        options={[
+          { label: 'Задачи и очередь', value: 'now' },
+          { label: 'Журнал и качество', value: 'journal' },
+        ]}
+        aria-label="Раздел диагностики"
+      />
+      {section === 'now' && <DiagnosticsPanel />}
+      {section === 'journal' && <ErrorJournalPanel />}
+    </Space>
   );
 }

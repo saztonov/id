@@ -71,7 +71,10 @@ import { isStorageError, type ByteRange } from '../../storage/provider.js';
 import { blobKey, uploadKey } from '../../storage/keys.js';
 import { deriveTicketKey, signUploadTicket, verifyUploadTicket } from './upload-token.js';
 import { UploadTooLargeError, verifyUploadedObject } from './verify.js';
+import { createWork } from '../../db/repositories/navigation.js';
 import {
+  createdWorkWithFileSchema,
+  createWorkWithFileBodySchema,
   fileIdParamSchema,
   fileOrderBodySchema,
   localUploadQuerySchema,
@@ -145,6 +148,99 @@ function registerListRoute(app: AppInstance): void {
 // =====================================================================
 
 function registerUploadRoutes(app: AppInstance, ticketKey: Buffer): void {
+  /**
+   * Комплект и его первый файл — одним запросом.
+   *
+   * ## Зачем маршрут, если оба шага уже есть
+   *
+   * Подрядчик приходит с файлом, а не с намерением завести карточку: сегодня он
+   * заполняет форму комплекта, попадает на экран ревизии, находит вкладку
+   * «Файлы» и грузит туда скан — четыре действия там, где смысл один. Здесь
+   * форма делает один вызов и получает всё сразу: комплект, ревизию и талон.
+   *
+   * ## Почему в модуле файлов, а не навигации
+   *
+   * Из-за ключа подписи талонов. Он выводится в `registerFileRoutes` и при
+   * отсутствии `CSRF_SECRET` (вне продакшна) случаен на процесс. Талон, выданный
+   * другим модулем со своим выводом ключа, не прошёл бы `complete` — и отказ
+   * этот появился бы только в dev, то есть ровно там, где его сочли бы
+   * случайностью.
+   *
+   * ## Что происходит при отказе на заливке
+   *
+   * Ничего не откатывается, и это решение. Комплект остаётся заведённым с
+   * пустой черновой ревизией — рабочим состоянием, в которое файл догружается
+   * вкладкой «Файлы». Удаление комплекта здесь потребовало бы удалять и строку
+   * аудита `work.created`, которую `createWork` уже записал, то есть править
+   * журнал ради косметики.
+   *
+   * Право — `submission.upload`: маршрут делает ровно то, что делают `POST
+   * /works` и `POST /revisions/{id}/files/upload/init`, и авторизуется тем же.
+   */
+  app.post(
+    `${PREFIX}/works/with-file`,
+    {
+      preHandler: uploadFiles,
+      schema: {
+        body: createWorkWithFileBodySchema,
+        response: { 201: createdWorkWithFileSchema },
+      },
+    },
+    async (request, reply) => {
+      const { scope, user } = currentAuth(request);
+      const body = request.body;
+
+      // Предел размера проверяется ДО заведения комплекта: отказ по лимиту не
+      // должен оставлять после себя карточку, которую никто не просил.
+      const maxBytes = app.env.MAX_UPLOAD_BYTES;
+      if (body.sizeBytes > maxBytes) throw tooLarge(maxBytes);
+
+      const created = await createWork(
+        app.db,
+        scope,
+        {
+          objectId: body.objectId,
+          sectionCode: body.sectionCode,
+          period: body.period,
+          contractorId: body.contractorId,
+          title: body.title,
+        },
+        auditActor(app, request),
+      );
+      updateContext({ objectId: created.work.objectId, revisionId: created.revision.id });
+
+      const uploadId = randomUUID();
+      const key = uploadKey(uploadId);
+      const presigned = await app.storage.presignPut({
+        key,
+        expiresInSeconds: UPLOAD_TTL_SECONDS,
+        maxBytes,
+      });
+
+      const ticket = signUploadTicket(ticketKey, {
+        uploadId,
+        targetId: created.revision.id,
+        userId: user.id,
+        fileName: body.fileName,
+        key,
+        expiresAt: Date.parse(presigned.expiresAt),
+      });
+
+      return reply.code(201).send({
+        workId: created.work.id,
+        revisionId: created.revision.id,
+        upload: {
+          uploadId: ticket,
+          uploadUrl: presigned.url,
+          method: 'PUT',
+          headers: presigned.headers,
+          expiresAt: presigned.expiresAt,
+          maxBytes,
+        },
+      });
+    },
+  );
+
   app.post(
     `${PREFIX}/revisions/:revisionId/files/upload/init`,
     {

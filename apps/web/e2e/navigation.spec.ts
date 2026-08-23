@@ -15,8 +15,10 @@
  *
  * 1. Дерево навигации проходится целиком настоящими маршрутами (`/works`,
  *    `/registries`), а не вложенными путями, которых в API нет.
- * 2. Подрядчик заводит комплект сам: объект, раздел, месяц — и вместе с ним
- *    открывается первая ревизия.
+ * 2. Подрядчик заводит комплект сам, ОДНИМ ФАЙЛОМ: раздел берётся из узла
+ *    дерева, наименование — из имени файла, и вместе с комплектом открывается
+ *    первая ревизия. Отдельно проверено, что отказ на заливке байтов комплект
+ *    не выбрасывает: он остаётся черновиком, и экран даёт на него ссылку.
  * 3. Генподрядчик собирает реестр из комплектов, заводит файл описи и передаёт
  *    папку; после передачи состав виден снимком и больше не правится.
  * 4. Отказы объяснены на экране: у пользователя с ролями подрядчика и инженера
@@ -26,10 +28,53 @@
  * Порядок последовательный: сценарии меняют состояние объекта и реестра, и
  * параллельный прогон делил бы одну базу.
  */
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { expect, test, type Page } from '@playwright/test';
 import { IDS, KC, apiPost, signIn } from './support/session.js';
 
 test.describe.configure({ mode: 'serial' });
+
+const FIXTURE = fileURLToPath(
+  new URL('../../../tools/fixtures/pdf/multipage.pdf', import.meta.url),
+);
+
+/**
+ * Раскрыть панель раздела и дождаться его содержимого.
+ *
+ * Содержимое узла монтируется только раскрытым, поэтому «кликнуть и сразу
+ * искать таблицу» — гонка: без ожидания тест ловил бы момент до запроса.
+ */
+async function openSection(page: Page, name: string): Promise<void> {
+  await page.getByRole('button', { name: new RegExp(name, 'u') }).click();
+  await expect(page.getByTestId('new-work').or(page.getByTestId('works-more')).first()).toBeVisible(
+    {
+      timeout: 30_000,
+    },
+  );
+}
+
+/** Месяц выбирается селектом: поля ввода даты у формы больше нет. */
+async function selectPeriod(page: Page, period: string): Promise<void> {
+  const names = [
+    'январь',
+    'февраль',
+    'март',
+    'апрель',
+    'май',
+    'июнь',
+    'июль',
+    'август',
+    'сентябрь',
+    'октябрь',
+    'ноябрь',
+    'декабрь',
+  ];
+  const month = Number(period.split('-')[1] ?? '1');
+  const label = `${names[month - 1] ?? ''} ${period.slice(0, 4)}`;
+  await page.getByTestId('work-period').click();
+  await page.locator('.ant-select-dropdown:visible').getByTitle(label).click();
+}
 
 /** Адреса запросов к API, снятые с сети: контракт проверяется по факту. */
 function recordApiCalls(page: Page): string[] {
@@ -45,14 +90,25 @@ test('дерево навигации проходится настоящими 
   const calls = recordApiCalls(page);
   await signIn(page, KC.engineer, `/ids/objects/${IDS.object}`);
 
-  // Комплекты объекта видны, и это не пустая таблица-заглушка.
+  // До раскрытия раздела комплекты НЕ запрашиваются: содержимое узла грузится
+  // лениво, и проверяется это по сети, а не по виду экрана.
+  await expect(page.getByRole('button', { name: /Кровля/u })).toBeVisible();
+  expect(calls.some((call) => call.startsWith('/api/v1/works?'))).toBe(false);
+
+  // Счётчик в заголовке приходит своим маршрутом, а не выкачиванием комплектов.
+  expect(calls.some((call) => call.includes(`/objects/${IDS.object}/sections/counts`))).toBe(true);
+
+  await openSection(page, 'Кровля');
+
+  // Комплекты раздела видны, и это не пустая таблица-заглушка.
   await expect(page.getByRole('link', { name: 'Комплект с разметкой' })).toBeVisible();
-  await expect(page.getByText('Комплекты объекта: раздел недоступен')).toHaveCount(0);
+  await expect(page.getByText('Комплекты раздела: раздел недоступен')).toHaveCount(0);
 
   // Фильтр объекта ушёл в строку запроса плоской коллекции, а не во вложенный
   // путь: ровно то расхождение, из-за которого экран показывал «недоступно».
   expect(calls.some((call) => call.startsWith('/api/v1/works?'))).toBe(true);
   expect(calls.some((call) => call.includes(`objectId=${IDS.object}`))).toBe(true);
+  expect(calls.some((call) => call.includes(`sectionCode=${IDS.sectionCode}`))).toBe(true);
   expect(calls.some((call) => call.includes(`/objects/${IDS.object}/works`))).toBe(false);
 
   // Реестры объекта читаются той же плоской коллекцией.
@@ -64,18 +120,29 @@ test('дерево навигации проходится настоящими 
   await expect(page.getByText('Комплект работы: Комплект с разметкой')).toBeVisible();
 });
 
-test('подрядчик заводит комплект, и вместе с ним открывается первая ревизия', async ({ page }) => {
+test('подрядчик заводит комплект одним файлом, и открывается первая ревизия', async ({ page }) => {
   await signIn(page, KC.contractor, `/ids/objects/${IDS.object}`);
 
-  await page.getByTestId('work-section').click();
-  await page.locator('.ant-select-dropdown:visible').getByTitle('Кровля').click();
-  await page.getByTestId('work-period').fill(IDS.period);
+  // Раздел берётся из узла дерева, а не из селекта: форма живёт внутри него.
+  await openSection(page, 'Кровля');
+  await page.getByTestId('new-work').click();
+
+  await page.getByTestId('work-file').setInputFiles({
+    name: 'Многостраничный.pdf',
+    mimeType: 'application/pdf',
+    buffer: readFileSync(FIXTURE),
+  });
+
+  // Наименование подставилось из имени файла — и правится тут же.
+  await expect(page.getByTestId('work-title')).toHaveValue('Многостраничный.pdf');
   await page.getByTestId('work-title').fill('Комплект из интерфейса');
+
+  await selectPeriod(page, IDS.period);
   await page.getByTestId('create-work').click();
 
   // Экран уходит на рабочее место новой ревизии: комплект без ревизии — это
   // карточка, в которую некуда загружать файлы.
-  await expect(page).toHaveURL(/\/ids\/revisions\/[0-9a-f-]{36}/u);
+  await expect(page).toHaveURL(/\/ids\/revisions\/[0-9a-f-]{36}/u, { timeout: 30_000 });
 
   // Последствие в базе, а не надпись: комплект в списке объекта и ровно одна
   // ревизия — первая, черновик, без родителя.
@@ -112,11 +179,51 @@ test('подрядчик заводит комплект, и вместе с н�
 
 test('у подрядчика нет поля исполнителя, у генподрядчика — есть', async ({ page }) => {
   await signIn(page, KC.contractor, `/ids/objects/${IDS.object}`);
+  await openSection(page, 'Кровля');
+  await page.getByTestId('new-work').click();
   await expect(page.getByTestId('work-title')).toBeVisible();
   await expect(page.getByTestId('work-contractor')).toHaveCount(0);
 
   await signIn(page, KC.general, `/ids/objects/${IDS.object}`);
+  await openSection(page, 'Кровля');
+  await page.getByTestId('new-work').click();
   await expect(page.getByTestId('work-contractor')).toBeVisible();
+});
+
+test('файл, отвергнутый хранилищем, оставляет комплект черновиком со ссылкой на него', async ({
+  page,
+}) => {
+  await signIn(page, KC.contractor, `/ids/objects/${IDS.object}`);
+
+  // Отказ подделывается на самом PUT байтов — там, где он и случается в бою
+  // (нет CORS-политики бакета, обрыв канала). Комплект к этому моменту уже
+  // заведён, и проверяется именно то, что его не выбрасывают.
+  await page.route('**/api/v1/uploads/local**', (route) => route.abort('failed'));
+
+  await openSection(page, 'Кровля');
+  await page.getByTestId('new-work').click();
+  await page.getByTestId('work-file').setInputFiles({
+    name: 'Оборванный.pdf',
+    mimeType: 'application/pdf',
+    buffer: readFileSync(FIXTURE),
+  });
+  await page.getByTestId('work-title').fill('Комплект с оборванной загрузкой');
+  await selectPeriod(page, IDS.period);
+  await page.getByTestId('create-work').click();
+
+  // Экран называет состояние и даёт путь дальше, а не сообщает «не получилось».
+  const orphan = page.getByTestId('upload-orphan');
+  await expect(orphan).toBeVisible({ timeout: 30_000 });
+  await expect(orphan).toContainText('открыть ревизию');
+
+  // Последствие в базе: комплект существует и у него есть черновая ревизия.
+  const list = await page.request.get(`/api/v1/works?objectId=${IDS.object}&limit=50`);
+  const works = (await list.json()) as {
+    items: { title: string; currentRevisionId: string | null }[];
+  };
+  const created = works.items.find((item) => item.title === 'Комплект с оборванной загрузкой');
+  expect(created, 'комплект не должен удаляться из-за отказа на заливке').toBeDefined();
+  expect(created?.currentRevisionId).not.toBeNull();
 });
 
 test('генподрядчик собирает реестр: номер, состав, файл описи', async ({ page }) => {

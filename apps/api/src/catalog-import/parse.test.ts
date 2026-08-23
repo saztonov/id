@@ -323,19 +323,47 @@ describe('строки объектов', () => {
     expect(codesOf(result, 0)).toEqual(['counterparty_not_found']);
   });
 
-  it('код объекта из четырёх цифр в числовой ячейке — потерянный ноль', () => {
+  /**
+   * Короткий код больше не ошибка — и эвристики «Excel съел ноль» здесь нет.
+   *
+   * До 0033 код из четырёх цифр в числовой ячейке был верным следом потерянного
+   * ведущего нуля: пятизначность была правилом. Теперь `1234` — законный код, и
+   * отличить его от испорченного `01234` нечем. Отвергать оба значило бы
+   * отвергать законные коды ради догадки.
+   */
+  it('короткий код объекта принимается без замечаний', () => {
     const result = parseCatalogImport(
       'construction_objects',
       sheetOf([header, ['1234', 'ЖК Ноль', 'ЖК «Ноль»', '', '', '']], ['1234']),
       snapshot(),
     );
-    expect(codesOf(result, 0)).toEqual(['leading_zero_lost']);
+    expect(codesOf(result, 0)).toEqual([]);
+    expect(rowsOf(result)[0]?.verdict).toBe('create');
   });
 
-  it('код неверной формы — обычная ошибка формата', () => {
+  it('кириллический код объекта принимается', () => {
+    const result = parseCatalogImport(
+      'construction_objects',
+      sheetOf([header, ['ЗИЛ18', 'ЖК ЗИЛ', 'ЖК «ЗИЛ», корпус 18', '', '', '']]),
+      snapshot(),
+    );
+    expect(codesOf(result, 0)).toEqual([]);
+    expect(rowsOf(result)[0]?.verdict).toBe('create');
+  });
+
+  it('код длиннее пяти символов — ошибка формата', () => {
     const result = parseCatalogImport(
       'construction_objects',
       sheetOf([header, ['МОСКВА', 'ЖК Кириллица', 'ЖК «Кириллица»', '', '', '']]),
+      snapshot(),
+    );
+    expect(codesOf(result, 0)).toEqual(['invalid_format']);
+  });
+
+  it('код с разделителем — ошибка формата', () => {
+    const result = parseCatalogImport(
+      'construction_objects',
+      sheetOf([header, ['ЗИЛ-8', 'ЖК Дефис', 'ЖК «Дефис»', '', '', '']]),
       snapshot(),
     );
     expect(codesOf(result, 0)).toEqual(['invalid_format']);

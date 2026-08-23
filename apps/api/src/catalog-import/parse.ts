@@ -365,7 +365,8 @@ function resolveCounterparty(
 // Разбор файла
 // =====================================================================
 
-const OBJECT_CODE = /^[A-Za-z0-9]{5}$/u;
+/** Та же форма, что `objectCodeSchema` в контрактах: 1–5 букв или цифр. */
+const OBJECT_CODE = /^[\p{L}\p{N}]{1,5}$/u;
 
 export function parseCatalogImport(
   target: CatalogImportTarget,
@@ -501,24 +502,22 @@ function judgeObject(
   seenInFile: Set<string>,
   problems: CatalogImportProblem[],
 ): Judged {
-  const codeCell = values.cells.get('code');
   const code = values.raw['code'];
 
+  // Эвристики «потерянного ведущего нуля» здесь больше нет, и это следствие
+  // расширения правила, а не забывчивость: код короче пяти символов стал
+  // ЗАКОННЫМ (0033), и `1234` теперь неотличим от намеренно короткого кода.
+  // Отличить их можно было бы только предупреждением, а замечание разбора
+  // импорта строку отвергает — то есть предупреждение отвергало бы законные
+  // коды. У КПП и ИНН, где длина фиксирована, эвристика осталась.
   if (code !== undefined && !OBJECT_CODE.test(code)) {
-    if (codeCell?.kind === 'integer' && DIGITS_ONLY.test(code) && code.length < 5) {
-      problems.push(
-        problem(
-          'code',
-          'leading_zero_lost',
-          `Код прочитан как число из ${String(code.length)} цифр вместо пяти: Excel отбросил ` +
-            'ведущий ноль. Задайте колонке текстовый формат.',
-        ),
-      );
-    } else {
-      problems.push(
-        problem('code', 'invalid_format', 'Код объекта — ровно 5 латинских букв или цифр.'),
-      );
-    }
+    problems.push(
+      problem(
+        'code',
+        'invalid_format',
+        'Код объекта — от 1 до 5 букв или цифр без пробелов и разделителей.',
+      ),
+    );
   }
 
   limitLength('name', 'Наименование', 255, values, problems);

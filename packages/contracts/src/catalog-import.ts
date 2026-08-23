@@ -134,7 +134,7 @@ const CONSTRUCTION_OBJECT_COLUMNS: readonly CatalogImportColumn[] = [
     title: 'Код',
     required: true,
     aliases: ['код', 'кодобъекта', 'шифр', 'шифробъекта'],
-    hint: 'Ровно 5 латинских букв или цифр; печатается в номерах актов',
+    hint: 'От 1 до 5 букв или цифр любого алфавита; печатается в номерах актов',
   },
   {
     key: 'name',

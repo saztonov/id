@@ -73,7 +73,7 @@
  * Строку с `draft` защищает ещё и `ux_submission_revisions_single_draft`:
  * проверка состояния здесь нужна ради внятного отказа, а инвариант держит БД.
  */
-import { and, asc, desc, eq, ilike, isNotNull, isNull, sql, type SQL } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, ilike, isNotNull, isNull, lte, sql, type SQL } from 'drizzle-orm';
 import { z } from 'zod';
 import { registries, registryItems, submissionRevisions, works } from '@id/db';
 import type {
@@ -371,16 +371,59 @@ function toWork(row: WorkRow): Work {
   return { ...row, kind: row.kind as WorkKind };
 }
 
-export interface WorkListParams {
-  readonly limit: number;
-  readonly cursor?: string | null | undefined;
+/**
+ * Отбор комплектов — без страницы: то же множество, что считает и `sectionCounts`.
+ *
+ * Вынесено в отдельный тип не ради экономии строк, а ради того, чтобы счётчик и
+ * список нельзя было отфильтровать по-разному. Заголовок «комплектов 7» над
+ * таблицей, показывающей два, — это не косметический дефект: он утверждает
+ * существование пяти работ, которых спрашивающий не видит.
+ */
+export interface WorkFilterParams {
   readonly objectId?: string | undefined;
   readonly sectionCode?: string | undefined;
+  /** Точный месяц. С границами не спорит: они независимы и складываются. */
   readonly period?: string | undefined;
+  readonly periodFrom?: string | undefined;
+  readonly periodTo?: string | undefined;
   readonly registryId?: string | undefined;
   /** Только комплекты, не включённые ни в один реестр. */
   readonly unassigned?: boolean | undefined;
   readonly search?: string | undefined;
+}
+
+export interface WorkListParams extends WorkFilterParams {
+  readonly limit: number;
+  readonly cursor?: string | null | undefined;
+}
+
+/**
+ * Условия отбора комплектов — ОДИН экземпляр правила на список и на счётчик.
+ *
+ * Область видимости сюда не входит: её накладывает `withScope` у вызывающего,
+ * и разделение намеренное — забыть обёртку заметнее, чем забыть строку внутри
+ * длинного `allOf`.
+ */
+function workFilters(params: WorkFilterParams): SQL {
+  const term = params.search === undefined ? null : `%${escapeLike(params.search)}%`;
+  return allOf(
+    eq(works.kind, 'complect'),
+    params.objectId === undefined ? undefined : eq(works.objectId, params.objectId),
+    params.sectionCode === undefined ? undefined : eq(works.sectionCode, params.sectionCode),
+    params.period === undefined ? undefined : eq(works.period, params.period),
+    params.periodFrom === undefined ? undefined : gte(works.period, params.periodFrom),
+    params.periodTo === undefined ? undefined : lte(works.period, params.periodTo),
+    params.registryId === undefined ? undefined : eq(works.registryId, params.registryId),
+    // Признак трёхзначен: не задан — «любые», `true` — свободные,
+    // `false` — уже включённые. Молчаливо приравнивать `false` к «любые»
+    // значило бы отвечать на другой вопрос.
+    params.unassigned === undefined
+      ? undefined
+      : params.unassigned
+        ? isNull(works.registryId)
+        : isNotNull(works.registryId),
+    term === null ? undefined : ilike(works.title, term),
+  );
 }
 
 /**
@@ -396,7 +439,6 @@ export async function listWorks(
   params: WorkListParams,
 ): Promise<Page<Work>> {
   const after = decodeCursor(params.cursor, timeCursorSchema);
-  const term = params.search === undefined ? null : `%${escapeLike(params.search)}%`;
 
   const rows = await db
     .select(WORK_SELECTION)
@@ -406,20 +448,7 @@ export async function listWorks(
         scope,
         WORK_SCOPE,
         allOf(
-          eq(works.kind, 'complect'),
-          params.objectId === undefined ? undefined : eq(works.objectId, params.objectId),
-          params.sectionCode === undefined ? undefined : eq(works.sectionCode, params.sectionCode),
-          params.period === undefined ? undefined : eq(works.period, params.period),
-          params.registryId === undefined ? undefined : eq(works.registryId, params.registryId),
-          // Признак трёхзначен: не задан — «любые», `true` — свободные,
-          // `false` — уже включённые. Молчаливо приравнивать `false` к «любые»
-          // значило бы отвечать на другой вопрос.
-          params.unassigned === undefined
-            ? undefined
-            : params.unassigned
-              ? isNull(works.registryId)
-              : isNotNull(works.registryId),
-          term === null ? undefined : ilike(works.title, term),
+          workFilters(params),
           after === null
             ? undefined
             : sql`(${works.createdAt}, ${works.id}) < (${after.at}::timestamptz, ${after.id}::uuid)`,
@@ -431,6 +460,42 @@ export async function listWorks(
 
   const page = paginate(rows, params.limit, (row) => ({ at: row.createdAt, id: row.id }));
   return { items: page.items.map(toWork), nextCursor: page.nextCursor };
+}
+
+export interface SectionWorkCount {
+  readonly sectionCode: string;
+  readonly works: number;
+}
+
+/**
+ * Сколько комплектов у каждого раздела объекта — одним `GROUP BY`.
+ *
+ * Существует ради заголовков дерева на экране объекта: без него число рядом с
+ * названием раздела пришлось бы получать выкачиванием всех комплектов, то есть
+ * ровно тем, чего ленивое дерево и избегает.
+ *
+ * Область и фильтры — те же, что у `listWorks`: см. `workFilters`. Разделы, в
+ * которых спрашивающему не видно ни одного комплекта, в выдаче отсутствуют, а
+ * не приходят нулями — «включён, но пуст» и «включён, но не ваш» портал
+ * различать не обязан, а вот путать их числом не вправе.
+ */
+export async function countWorksBySection(
+  db: Database,
+  scope: AuthScope,
+  objectId: string,
+  params: Omit<WorkFilterParams, 'objectId'> = {},
+): Promise<readonly SectionWorkCount[]> {
+  await requireVisibleObject(db, scope, objectId);
+
+  return db
+    .select({
+      sectionCode: works.sectionCode,
+      works: sql<number>`count(*)::int`,
+    })
+    .from(works)
+    .where(withScope(scope, WORK_SCOPE, workFilters({ ...params, objectId })))
+    .groupBy(works.sectionCode)
+    .orderBy(asc(works.sectionCode));
 }
 
 export async function findWork(

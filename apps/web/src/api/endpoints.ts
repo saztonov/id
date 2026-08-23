@@ -137,6 +137,23 @@ export const auth = {
 // Файлы (§4.2)
 // =====================================================================
 
+export interface CreateWorkWithFileInput {
+  readonly objectId: string;
+  readonly sectionCode: string;
+  readonly period: string;
+  readonly title: string;
+  /** Исполнитель. Задают все, кроме подрядчика: ему сервер берёт свою организацию. */
+  readonly contractorId?: string | undefined;
+  readonly fileName: string;
+  readonly sizeBytes: number;
+}
+
+export interface CreatedWorkWithFile {
+  readonly workId: string;
+  readonly revisionId: string;
+  readonly upload: UploadTicket;
+}
+
 export const files = {
   list: (revisionId: string) =>
     get<{ items: SourceFile[] }>(`${V1}/revisions/${revisionId}/files`).then((r) => r.items),
@@ -145,6 +162,16 @@ export const files = {
     request<UploadTicket>('POST', `${V1}/revisions/${revisionId}/files/upload/init`, {
       body: { fileName, sizeBytes },
     }).then((r) => r.data),
+
+  /**
+   * Комплект и первый файл одним запросом.
+   *
+   * Живёт здесь, а не в `navigation.ts`, потому что возвращает талон загрузки:
+   * дальше идут те же PUT и `completeUpload`, что и у обычного приёма, и
+   * разносить половины одного потока по двум модулям было бы неверно.
+   */
+  createWorkWithFile: (body: CreateWorkWithFileInput) =>
+    request<CreatedWorkWithFile>('POST', `${V1}/works/with-file`, { body }).then((r) => r.data),
 
   completeUpload: (revisionId: string, uploadId: string) =>
     request<SourceFile>('POST', `${V1}/revisions/${revisionId}/files/upload/complete`, {
@@ -178,8 +205,12 @@ export interface StartMarkupPipelineResult {
   readonly bundleReady: boolean;
   readonly bundleId: string | null;
   readonly layoutRevisionId: string | null;
-  readonly jobId: string;
+  /** `null` — задачи не ставились: детекция пропущена (см. ниже). */
+  readonly jobId: string | null;
   readonly jobCreated: boolean;
+  /** Модель детекции не настроена: черновик разметки есть, задач нет. */
+  readonly detectionSkipped: boolean;
+  readonly detectionSkipReason: string | null;
 }
 
 export interface CheckPipelineResult {
@@ -542,9 +573,20 @@ export interface CounterpartyInput {
 }
 
 export const catalog = {
-  objects: (query?: { search?: string; limit?: number }) =>
+  /**
+   * Объекты страницей.
+   *
+   * `cursor` обязателен к передаче вызывающим, который показывает список
+   * целиком: до S22 здесь стоял жёсткий `limit: 100` без чтения `nextCursor`, и
+   * сто первый объект был молча недостижим — экран выглядел полным и им не был.
+   */
+  objects: (query?: { search?: string; cursor?: string | null }) =>
     get<Page<ConstructionObject>>(`${V1}/catalog/objects`, {
-      query: { ...(query?.search === undefined ? {} : { search: query.search }), limit: 100 },
+      query: {
+        ...(query?.search === undefined ? {} : { search: query.search }),
+        ...(query?.cursor === undefined || query.cursor === null ? {} : { cursor: query.cursor }),
+        limit: 100,
+      },
     }),
 
   object: (objectId: string) => get<ConstructionObject>(`${V1}/catalog/objects/${objectId}`),

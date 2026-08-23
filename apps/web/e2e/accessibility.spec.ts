@@ -42,6 +42,24 @@ test('раздел ИД проходит проверку axe', async ({ page })
   await analyze(page);
 });
 
+/**
+ * Экран объекта — с раскрытым разделом и открытой формой заведения.
+ *
+ * Свёрнутое дерево проверяет не то: и панель отбора, и таблица комплектов, и
+ * форма с полем выбора файла появляются только раскрытыми, а разметку без них
+ * axe объявит чистой просто потому, что её нет.
+ */
+test('экран объекта проходит axe с раскрытым разделом', async ({ page }) => {
+  await signIn(page, KC.contractor, `/ids/objects/${IDS.object}`);
+  await page.getByRole('button', { name: /Кровля/u }).click();
+  await expect(page.getByTestId('new-work')).toBeVisible({ timeout: 30_000 });
+  await analyze(page);
+
+  await page.getByTestId('new-work').click();
+  await expect(page.getByTestId('work-title')).toBeVisible();
+  await analyze(page);
+});
+
 test('свёрнутое боковое меню остаётся доступным', async ({ page }) => {
   await signIn(page, KC.admin, '/catalog');
   await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
@@ -92,13 +110,36 @@ test('администрирование проходит axe', async ({ page })
   await analyze(page);
 });
 
+/**
+ * Ряд вкладок администрирования на узком экране.
+ *
+ * Проверка существует ровно потому, что горизонтальный ряд однажды уже сломался
+ * доступностью: при переполнении `Tabs` antd добавляет кнопку свёртки, а она
+ * кладёт внутрь `tablist` элемент, вкладкой не являющийся —
+ * `aria-required-children`, нарушение критического уровня. Ради этого вкладки
+ * держались столбцом; вернув ряд, их сократили до семи. Утверждение «семи хватает»
+ * обязано проверяться прогоном, а не глазомером, и именно на том вьюпорте, где
+ * места меньше всего.
+ */
+test('ряд вкладок администрирования не переполняется на узком экране', async ({ page }) => {
+  await page.setViewportSize({ width: 1024, height: 900 });
+  await signIn(page, KC.admin, '/admin?tab=diagnostics');
+  await expect(page.getByText('Глубина очереди')).toBeVisible();
+
+  // Кнопки свёртки быть не должно: её появление и есть тот дефект, а axe ниже
+  // назвал бы его невнятно — «внутри tablist посторонний элемент».
+  await expect(page.locator('.ant-tabs-nav-more')).toBeHidden();
+  await analyze(page);
+});
+
 test('журнал ошибок проходит axe', async ({ page }) => {
+  // `?tab=journal` — алиас на «Диагностику» с открытым разделом журнала.
   await signIn(page, KC.admin, '/admin?tab=journal');
-  const panel = page.getByRole('tabpanel', { name: 'Журнал и качество' });
+  const panel = page.getByRole('tabpanel', { name: 'Диагностика' });
   await expect(panel).toContainText('Примеров сохранено', { timeout: 30_000 });
   await analyze(page);
 
-  // Остальные разделы той же вкладки: у каждого своя разметка и свои таблицы.
+  // Остальные разделы журнала: у каждого своя разметка и свои таблицы.
   const sections = page.getByRole('radiogroup', { name: 'Раздел журнала' });
 
   await sections.getByText('Аномалии и скорость', { exact: true }).click();

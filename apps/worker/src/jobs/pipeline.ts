@@ -804,6 +804,11 @@ function layoutStartDeps(options: PipelineJobsOptions): LayoutStartDeps {
         bundleId: started.bundleId,
         provider: started.provider,
         jobsEnqueued: started.jobIds.length,
+        // Причина пропуска попадает в результат задачи, а не только в её
+        // журнал: консоль задач показывает именно результат, и «поставлено 0
+        // задач» без объяснения выглядит сбоем сборки, а не ненастроенной
+        // моделью.
+        detectionSkipReason: started.detectionSkipReason,
       };
     },
   };

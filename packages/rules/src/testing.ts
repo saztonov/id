@@ -164,6 +164,10 @@ export function makeRevision(patch: Partial<RevisionNode> = {}): RevisionNode {
     contractorId: 'cp-1',
     sectionCode: 'roofing',
     workTitle: 'Кровля автостоянки',
+    // Тот же месяц, что у актов фикстур (`2026-03`): правило месяца по
+    // умолчанию молчит, и расхождение в тесте задаётся явно, а не достаётся ему
+    // в наследство от фабрики.
+    period: '2026-03-01',
     status: 'submitted',
     ...patch,
   };

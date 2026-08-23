@@ -123,6 +123,7 @@ function unknownSectionGraph(): CheckGraph {
       contractorId: 'cp-1',
       sectionCode: 'external_mechanical_systems',
       workTitle: 'Наружные сети водоснабжения',
+      period: '2026-02-01',
       status: 'submitted',
     },
     today: '2026-03-01',
