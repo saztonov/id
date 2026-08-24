@@ -37,6 +37,10 @@
  * при этом не является: исправление — новая ревизия разметки, и этот путь
  * остался как был.
  *
+ * Молча — да, но не поверх незаконченной работы первой кнопки: пока по ревизии
+ * есть задачи стадии разметки в очереди или в работе, заморозка отказывает. Иначе
+ * нажатие, сделанное слишком рано, убивает всю ещё не выполненную детекцию.
+ *
  * ## Права
  *
  * Обе кнопки — `pipeline.run` (все пять ролей). Это ОДНО действие, и
@@ -55,7 +59,7 @@ import { tracePayload, updateContext } from '../../observability/context.js';
 import { assertPlanBuildable, listBundles, loadBundlePlan } from '../../db/repositories/bundles.js';
 import { listLogicalDocuments } from '../../db/repositories/documents.js';
 import { findRevisionForFiles } from '../../db/repositories/files.js';
-import { enqueueJob } from '../../db/repositories/jobs.js';
+import { computeProcessingStatus, enqueueJob } from '../../db/repositories/jobs.js';
 import {
   freezeLayout,
   listLayoutRevisions,
@@ -69,7 +73,7 @@ import {
 import { dedupeKeyFor } from '../../jobs/types.js';
 import { detectionUnavailableReason, startMarkupOnBundle } from '../layout/start.js';
 import { readDetectionSettings } from '../../config/portal-settings.js';
-import { startRecognition } from '../recognition/start.js';
+import { assertRecognitionStageReady, startRecognition } from '../recognition/start.js';
 import {
   checkResponseSchema,
   recognitionProgressSchema,
@@ -232,6 +236,45 @@ function registerCheckRoute(app: AppInstance): void {
       //    вопрос: распознавание идёт только по замороженной (гейт blocks_hash).
       let frozen = false;
       if (layout.state === 'draft') {
+        /**
+         * Оба отказа ниже — ДО заморозки, и это не стилистика.
+         *
+         * Заморозка необратима для этой ревизии разметки: после неё правка блоков
+         * закрыта, и вернуться можно только новой ревизией разметки. Отказ после
+         * заморозки оставил бы ревизию замороженной ни за что — черновая разметка
+         * ЧЕРНОВАЯ ровно затем, чтобы человек мог её ещё поправить.
+         *
+         * Готовность стадии спрашивается здесь, хотя её же спросит
+         * `startRecognition`: черновая разметка означает, что замороженной нет, а
+         * значит нет и завершённого прогона по ней, — распознавание будет запущено
+         * наверняка.
+         */
+        await assertRecognitionStageReady(app.db, app.env);
+
+        /**
+         * И не поверх незаконченной работы предыдущей кнопки.
+         *
+         * `layout.detect_local` отказывается писать результаты в замороженную
+         * разметку, поэтому заморозка под идущей детекцией убивает КАЖДУЮ ещё не
+         * выполненную постраничную пачку — а их у комплекта десятки. Так и вышло в
+         * проде: тридцать пять отказов «замороженная разметка не принимает
+         * результаты детекции» от одного нажатия, сделанного слишком рано.
+         *
+         * Стадия, а не список типов задач: типов детекции больше одного, и
+         * четвёртый добавили бы, не вспомнив про это место.
+         */
+        const status = await computeProcessingStatus(app.db, scope, revisionId);
+        const layoutStage = status?.stages.find((summary) => summary.stage === 'layout');
+        // `pending` не считает мёртвые задачи: исчерпавшая попытки детекция не
+        // имеет права запереть кнопку навсегда.
+        if (layoutStage !== undefined && layoutStage.pending > 0) {
+          throw conflict(
+            `Выделение блоков ещё идёт: осталось задач ${String(layoutStage.pending)}. ` +
+              'Заморозка разметки прямо сейчас отменила бы их результаты — дождитесь ' +
+              'окончания и нажмите «2. Распознать» снова.',
+          );
+        }
+
         await freezeLayout(app.db, scope, {
           layoutRevisionId: layout.id,
           expectedVersion: layout.version,

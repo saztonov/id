@@ -1143,14 +1143,60 @@ export interface AppendRevisionEventInput {
 }
 
 /**
+ * Сколько раз пытаться занять свободный `seq`.
+ *
+ * Лишний проход — это оператор, который УЖЕ ДОЖДАЛСЯ чужой транзакции (см. ниже
+ * про спекулятивную вставку), а не холостой оборот, поэтому неограниченный цикл
+ * означал бы удержание соединения ровно столько, сколько идёт чужая работа.
+ * Восемь одновременных писателей по ОДНОЙ ревизии уже за пределом наблюдаемого,
+ * и исчерпание лимита теперь честно означает затор, а не проглоченную ошибку.
+ */
+const APPEND_EVENT_MAX_TRIES = 8;
+
+/**
  * Событие ревизии с монотонным `seq`.
  *
  * Номер назначается в SQL (`max(seq) + 1` по этой ревизии), а не счётчиком в
  * приложении: два процесса иначе выдали бы один номер, и SSE-клиент с
- * `Last-Event-ID` пропустил бы событие навсегда. Гонка всё равно возможна при
- * READ COMMITTED — оба транзакта видят один `max`, — поэтому проигравший ловит
- * нарушение первичного ключа и повторяет. Повтор ограничен: бесконечный цикл
- * здесь означал бы удержание соединения под нагрузкой.
+ * `Last-Event-ID` пропустил бы событие навсегда (`modules/events/sse.ts`).
+ *
+ * ## Гонка разрешается БЕЗ исключения, и в этом вся суть
+ *
+ * При READ COMMITTED гонка неизбежна — оба писателя видят один `max`. Но голое
+ * нарушение первичного ключа абортирует ВСЮ транзакцию PostgreSQL, а почти все
+ * вызывающие передают сюда `tx` изнутри `db.transaction()` (`finishRecognitionRun`,
+ * `layout.ts`, `documents.ts`, `navigation.ts`, `workflow.ts`, `bundles.ts`), и
+ * SAVEPOINT в проекте не берётся нигде. То есть прежняя схема «поймать 23505 и
+ * повторить» не могла работать в принципе: повторять внутри аборченной транзакции
+ * нечего, следующий оператор получил бы 25P02. Вдобавок она молчала дважды — её
+ * распознаватель читал `code` с верхнего уровня, а Drizzle 0.45 прячет его в
+ * `cause` (см. `db/driver-errors.ts`), — так что повтор не срабатывал ни разу.
+ *
+ * Цена этого молчания видна в проде: запись события `recognition.failed` упала на
+ * `revision_events_pkey`, и в журнале задачи осталось «duplicate key» ВМЕСТО
+ * настоящей причины отказа распознавания. Отчёт об ошибке не имеет права быть тем
+ * местом, где ошибка теряется.
+ *
+ * ## Почему цикл не вечен и не крутится вхолостую
+ *
+ * `on conflict do nothing` даёт пустой `rows` вместо исключения. Пустым он
+ * окажется только ПОСЛЕ того, как конкурент завершился: на незакоммиченный дубль
+ * PostgreSQL не падает и не пропускает строку сразу, а ждёт исхода чужой
+ * транзакции (спекулятивная вставка). Каждый следующий проход берёт новый снимок
+ * READ COMMITTED, где чужой номер уже виден, и `max(seq) + 1` даёт следующий
+ * свободный. Схема ОПИРАЕТСЯ на READ COMMITTED: при REPEATABLE READ снимок между
+ * операторами не обновлялся бы и повтор стал бы бессмысленным. Уровень изоляции в
+ * проекте нигде не поднимается — если это изменится, менять придётся и здесь.
+ *
+ * ## Почему не sequence и не счётчик в строке ревизии
+ *
+ * `max(seq)` считается по ЗАФИКСИРОВАННЫМ строкам, поэтому откат чужой транзакции
+ * номер не сжигает и дыр не возникает. Последовательность оставляет дыру на каждом
+ * откате, а счётчик в `submission_revisions` ещё и держит блокировку этой строки до
+ * конца транзакции, то есть заводит взаимоблокировку с любым кодом, который сначала
+ * правит ревизию, а потом пишет событие (`workflow.ts`, `navigation.ts` — именно
+ * такие). Дыры небезобидны: SSE отличает «пропущенное вне окна хранения» от «ничего
+ * нового» сравнением `cursor + 1 < oldestSeq`, и на дырявой ленте это ложный `reset`.
  *
  * Области видимости у писателя нет: события пишет конвейер, у которого
  * пользователя нет. Читатель (`listRevisionEvents`) область проверяет.
@@ -1160,31 +1206,34 @@ export async function appendRevisionEvent(
   input: AppendRevisionEventInput,
 ): Promise<number> {
   const payload = JSON.stringify(input.payload ?? {});
-  const MAX_TRIES = 5;
 
-  for (let attempt = 1; attempt <= MAX_TRIES; attempt += 1) {
-    try {
-      const inserted = await db.execute<{ seq: string | number }>(sql`
-        insert into ${revisionEvents} (revision_id, seq, event_type, payload)
-        select ${input.revisionId}::uuid,
-               coalesce(max(seq), 0) + 1,
-               ${input.eventType},
-               ${payload}::jsonb
-          from ${revisionEvents}
-         where ${revisionEvents.revisionId} = ${input.revisionId}::uuid
-        returning seq
-      `);
-      const row = inserted.rows[0];
-      if (row === undefined) {
-        throw internal({ logDetail: 'INSERT события ревизии не вернул seq' });
-      }
-      return Number(row.seq);
-    } catch (error) {
-      if (attempt === MAX_TRIES || !isUniqueViolation(error)) throw error;
-    }
+  for (let attempt = 1; attempt <= APPEND_EVENT_MAX_TRIES; attempt += 1) {
+    // Ошибка драйвера наружу выходит как есть и повтора не получает: отказ записи
+    // события обязан быть виден, а не растворён в цикле.
+    const inserted = await db.execute<{ seq: string | number }>(sql`
+      insert into ${revisionEvents} (revision_id, seq, event_type, payload)
+      select ${input.revisionId}::uuid,
+             coalesce(max(seq), 0) + 1,
+             ${input.eventType},
+             ${payload}::jsonb
+        from ${revisionEvents}
+       where ${revisionEvents.revisionId} = ${input.revisionId}::uuid
+      on conflict (revision_id, seq) do nothing
+      returning seq
+    `);
+    // Пустой `rows` — это штатный проигрыш гонки, а не сбой: агрегат без `group by`
+    // всегда даёт ровно одну строку-кандидата, значит `rows.length ∈ {0, 1}`.
+    const row = inserted.rows[0];
+    if (row !== undefined) return Number(row.seq);
   }
 
-  throw internal({ logDetail: 'не удалось назначить seq события ревизии' });
+  // 500, а не 409: конкуренция за номер события — целиком наша внутренняя
+  // механика, и клиенту тут нечего повторять.
+  throw internal({
+    logDetail:
+      `не удалось назначить seq события ${input.eventType} ревизии ${input.revisionId}: ` +
+      `${String(APPEND_EVENT_MAX_TRIES)} подряд проигранных гонок за номер`,
+  });
 }
 
 export interface RevisionEventWindow {
@@ -1413,12 +1462,6 @@ function maxIso(values: readonly (string | null)[]): string | null {
 
 function isoOf(value: string | Date): string {
   return value instanceof Date ? value.toISOString() : value;
-}
-
-/** SQLSTATE 23505 — нарушение уникальности; для `revision_events` это гонка за `seq`. */
-function isUniqueViolation(error: unknown): boolean {
-  if (typeof error !== 'object' || error === null) return false;
-  return (error as { code?: unknown }).code === '23505';
 }
 
 function encodeCursor(value: unknown): string {

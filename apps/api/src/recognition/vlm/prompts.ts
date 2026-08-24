@@ -384,3 +384,17 @@ export const RECOGNITION_PROMPT_DEFAULTS: Record<
     responseFormat: VLM_STAMP_RESPONSE_FORMAT,
   },
 };
+
+/**
+ * Коды промптов стадии recognize — ОДИН источник для двух гейтов.
+ *
+ * Публикацию этих кодов требует `vlm.start_recognition` на воркере, а проверяет её
+ * ещё и предполёт запуска в `modules/recognition/start.ts` — иначе нажатие кнопки
+ * создаёт прогон и задачу только затем, чтобы они умерли, а причина доходит до
+ * человека лишь через журнал задач. Два независимых списка разошлись бы при
+ * добавлении четвёртого типа блока, и расхождение дало бы либо ложный отказ роута,
+ * либо снова прогон-мертвец.
+ */
+export const RECOGNITION_PROMPT_CODES: readonly string[] = Object.values(
+  RECOGNITION_PROMPT_DEFAULTS,
+).map((preset) => preset.code);

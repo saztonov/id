@@ -42,6 +42,7 @@ import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { sourceFiles, sourcePages, storedBlobs, submissionRevisions } from '@id/db';
 import type { SignatureProbe, WorkflowStatus } from '@id/contracts';
 import type { AuthScope } from '../../auth/scope.js';
+import { driverField } from '../driver-errors.js';
 import { withScope, type ScopeTarget } from '../scoped.js';
 import { appendAudit, type AuditActor } from './audit.js';
 import { appendRevisionEvent } from './jobs.js';
@@ -837,8 +838,16 @@ async function compactFileOrder(executor: Executor, revisionId: string): Promise
   );
 }
 
+/**
+ * Гонка за `sort_order`, а не любой отказ БД.
+ *
+ * Поля читаются через `driverField`, то есть сквозь цепочку `cause`: Drizzle 0.45
+ * оборачивает отказ драйвера в `DrizzleQueryError` и прячет `code`/`constraint`
+ * внутрь. Прежняя проверка смотрела только верхний уровень и потому возвращала
+ * `false` ВСЕГДА — повтор выше по коду не срабатывал ни разу, и конкурентная
+ * загрузка двух файлов в одну ревизию отдавала пользователю 500 вместо тихой
+ * повторной попытки.
+ */
 function isUniqueViolation(error: unknown, constraint: string): boolean {
-  if (typeof error !== 'object' || error === null) return false;
-  const candidate = error as { code?: unknown; constraint?: unknown };
-  return candidate.code === '23505' && candidate.constraint === constraint;
+  return driverField(error, 'code') === '23505' && driverField(error, 'constraint') === constraint;
 }

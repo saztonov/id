@@ -62,6 +62,9 @@ const REVISION_BARE = id(13);
 /** Чужой комплект: недостижим обеими кнопками. */
 const WORK_OTHER = id(14);
 const REVISION_OTHER = id(15);
+/** Комплект с ЧЕРНОВОЙ разметкой и МЁРТВОЙ задачей детекции: кнопка не заперта. */
+const WORK_STUCK = id(16);
+const REVISION_STUCK = id(17);
 
 const USER_A = id(20);
 const USER_B = id(21);
@@ -70,17 +73,30 @@ const USER_ENGINEER = id(22);
 const FILE_READY = id(30);
 const FILE_BARE = id(31);
 const FILE_OTHER = id(32);
+const FILE_STUCK = id(33);
 const PAGE_READY = id(40);
 const PAGE_BARE = id(41);
 const PAGE_OTHER = id(42);
+const PAGE_STUCK = id(43);
 const BUNDLE_READY = id(50);
 const LAYOUT_READY = id(51);
 const BLOCK_READY = id(52);
+const BUNDLE_STUCK = id(53);
+const LAYOUT_STUCK = id(54);
+const BLOCK_STUCK = id(55);
 
 const SHA_READY = 'a'.repeat(64);
 const SHA_WORKING = 'b'.repeat(64);
 const SHA_BARE = 'c'.repeat(64);
 const SHA_OTHER = 'd'.repeat(64);
+const SHA_STUCK = 'e'.repeat(64);
+
+/** Коды промптов стадии recognize: без них распознавание не запускается. */
+const RECOGNIZE_PROMPTS = [
+  'recognition_block_text',
+  'recognition_block_image',
+  'recognition_block_stamp',
+] as const;
 
 const VLM_MODEL = 'qwen/qwen3-vl-235b';
 
@@ -192,6 +208,19 @@ beforeAll(async () => {
     `INSERT INTO source_pages (id, revision_id, source_file_id, file_page_index, revision_ordinal, width_px, height_px, rotation)
        VALUES ('${PAGE_OTHER}', '${REVISION_OTHER}', '${FILE_OTHER}', 0, 0, 1654, 2339, 0)`,
 
+    // --- Комплект с черновой разметкой и мёртвой задачей детекции ---
+    `INSERT INTO works
+       (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
+       VALUES ('${WORK_STUCK}', '${OBJECT}', '${ORG_A}', '${ORG_A}', 'roofing', DATE '2026-01-01', 'Комплект с мёртвой детекцией', '${USER_A}')`,
+    `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
+       VALUES ('${REVISION_STUCK}', '${WORK_STUCK}', '${OBJECT}', '${ORG_A}', 1, 'draft')`,
+    `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
+       VALUES ('${SHA_STUCK}', 'blobs/${SHA_STUCK}', 1024, 'application/pdf')`,
+    `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order, verify_state)
+       VALUES ('${FILE_STUCK}', '${REVISION_STUCK}', '${SHA_STUCK}', 'Застрявший.pdf', 0, 'ok')`,
+    `INSERT INTO source_pages (id, revision_id, source_file_id, file_page_index, revision_ordinal, width_px, height_px, rotation)
+       VALUES ('${PAGE_STUCK}', '${REVISION_STUCK}', '${FILE_STUCK}', 0, 0, 1654, 2339, 0)`,
+
     // Распознавание — через VLM: у ветки RD WEB нет RD-документа, и прогон
     // отказал бы по причине, к этим маршрутам отношения не имеющей.
     `INSERT INTO app_settings (key, value) VALUES ('recognition.provider', '"openrouter_vlm"')`,
@@ -223,9 +252,64 @@ beforeAll(async () => {
                '${OBJECT}', 'text', 'rectangle', 0.1, 0.1, 0.9, 0.4, 0, 'auto', 'rf_detr')`,
   );
 
+  // Тот же комплект для ревизии с мёртвой детекцией.
+  await db.query(
+    `INSERT INTO processing_bundles (id, revision_id, aggregate_manifest_hash, working_pdf_blob_sha256, builder_version)
+       VALUES ('${BUNDLE_STUCK}', '${REVISION_STUCK}', '${manifestHash(SHA_STUCK)}', '${SHA_WORKING}', 'bundle/1+pdf-lib')`,
+  );
+  await db.query(
+    `INSERT INTO processing_bundle_pages (bundle_id, revision_id, working_page_index, source_page_id)
+       VALUES ('${BUNDLE_STUCK}', '${REVISION_STUCK}', 0, '${PAGE_STUCK}')`,
+  );
+  await db.query(
+    `INSERT INTO layout_revisions (id, revision_id, object_id, bundle_id, revision_no, state)
+       VALUES ('${LAYOUT_STUCK}', '${REVISION_STUCK}', '${OBJECT}', '${BUNDLE_STUCK}', 1, 'draft')`,
+  );
+  await db.query(
+    `INSERT INTO layout_blocks
+       (id, layout_revision_id, revision_id, bundle_id, source_page_id, working_page_index, object_id,
+        block_type, shape_type, x0, y0, x1, y1, sort_order, source, detector_provenance)
+       VALUES ('${BLOCK_STUCK}', '${LAYOUT_STUCK}', '${REVISION_STUCK}', '${BUNDLE_STUCK}', '${PAGE_STUCK}', 0,
+               '${OBJECT}', 'text', 'rectangle', 0.1, 0.1, 0.9, 0.4, 0, 'auto', 'rf_detr')`,
+  );
+  // Пачка детекции, исчерпавшая попытки. Ровно то, что осталось в проде после
+  // предыдущей заморозки: такие задачи не имеют права запереть кнопку навсегда.
+  await db.query(
+    `INSERT INTO jobs (type, payload, status, attempts, max_attempts, last_error)
+       VALUES ('layout.detect_local',
+               '{"revisionId": "${REVISION_STUCK}", "layoutRevisionId": "${LAYOUT_STUCK}", "pageIndices": [0]}'::jsonb,
+               'failed', 3, 3, 'Замороженная разметка не принимает результаты детекции')`,
+  );
+
   app = await buildApp({ env: TEST_ENV, pool: createTestPool(db) as unknown as Pool });
   await app.ready();
 }, 180_000);
+
+/**
+ * Публикация промптов стадии recognize — предусловие успешного пути.
+ *
+ * Миграция 0020 кладёт их черновиками, и это НЕ упущение фикстуры, а состояние,
+ * в котором портал приезжает после миграций: публикация — осознанное действие
+ * администратора. Здесь оно делается прямым UPDATE, потому что предмет этого
+ * файла — кнопки конвейера, а не переход состояний промпта.
+ */
+async function publishRecognizePrompts(): Promise<void> {
+  await db.query(
+    `UPDATE prompt_templates
+        SET state = 'published', published_at = now(), published_by = '${USER_A}'
+      WHERE code IN (${RECOGNIZE_PROMPTS.map((code) => `'${code}'`).join(', ')})
+        AND state = 'draft'`,
+  );
+}
+
+/** «Детекция закончилась»: воркера в тесте нет, задачи закрываются руками. */
+async function finishLayoutJobs(revisionId: string): Promise<void> {
+  await db.query(
+    `UPDATE jobs SET status = 'done'
+      WHERE payload->>'revisionId' = '${revisionId}'
+        AND status IN ('queued', 'running')`,
+  );
+}
 
 afterAll(async () => {
   await app.close();
@@ -368,7 +452,44 @@ describe('POST /revisions/{id}/markup', () => {
 // Кнопка «Проверить»
 // =====================================================================
 
+/**
+ * Предполёт стоит ОТДЕЛЬНЫМ набором и раньше остальных: он проверяет состояние,
+ * в котором портал приезжает после миграций, — промпты стадии recognize лежат
+ * черновиками. Дальше по файлу они публикуются, и обратно этот набор уже не
+ * поставить.
+ */
+describe('POST /revisions/{id}/check: готовность стадии распознавания', () => {
+  it('без опубликованных промптов отказывает ДО заморозки и не создаёт прогон', async () => {
+    const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_READY}/check`, {
+      idempotencyKey: 'check-prompts-1',
+    });
+    expect(response.statusCode).toBe(409);
+
+    // Названы ВСЕ недостающие коды сразу: гейт воркера падал на первом же и
+    // заставлял узнавать их по одному — тремя нажатиями и тремя мёртвыми прогонами.
+    const detail = response.json<{ detail: string }>().detail;
+    for (const code of RECOGNIZE_PROMPTS) {
+      expect(detail).toContain(code);
+    }
+
+    // Заморозка необратима, поэтому отказ обязан случиться ДО неё: иначе
+    // разметка осталась бы замороженной ни за что.
+    expect(await layoutStateOf(LAYOUT_READY)).toBe('draft');
+
+    // Ни прогона, ни задачи: именно они и засоряли журнал после каждого нажатия.
+    const runs = await db.query<{ count: string | number }>(
+      `SELECT count(*) AS count FROM recognition_runs WHERE revision_id = '${REVISION_READY}'`,
+    );
+    expect(Number(runs[0]?.count ?? 0)).toBe(0);
+    const jobs = await jobsOf(REVISION_READY);
+    expect(jobs.some((job) => job.type === 'vlm.start_recognition')).toBe(false);
+  });
+});
+
 describe('POST /revisions/{id}/check', () => {
+  // Парный факт к набору выше: предполёт отказывает не вечно.
+  beforeAll(publishRecognizePrompts);
+
   it('без разметки отказывает и называет первую кнопку', async () => {
     const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_BARE}/check`, {
       idempotencyKey: 'check-bare-1',
@@ -377,7 +498,32 @@ describe('POST /revisions/{id}/check', () => {
     expect(response.json<{ detail: string }>().detail).toContain('Разметить');
   });
 
+  it('не морозит разметку, пока детекция ещё идёт', async () => {
+    // Задачи стадии разметки стоят в очереди с нажатия «1. Выделить блоки» выше
+    // по файлу — ровно та последовательность, что дала в проде 35 отказов
+    // «замороженная разметка не принимает результаты детекции» от ОДНОГО нажатия.
+    const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_READY}/check`, {
+      idempotencyKey: 'check-detecting-1',
+    });
+    expect(response.statusCode).toBe(409);
+    expect(response.json<{ detail: string }>().detail).toContain('Выделение блоков ещё идёт');
+
+    expect(await layoutStateOf(LAYOUT_READY)).toBe('draft');
+  });
+
+  it('мёртвая задача детекции кнопку не запирает', async () => {
+    // В проде на момент разбора висели 34 задачи «исчерпали попытки». Если бы они
+    // считались незаконченной работой, кнопка была бы заперта навсегда.
+    const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_STUCK}/check`, {
+      idempotencyKey: 'check-stuck-1',
+    });
+    expect(response.statusCode).toBe(202);
+    expect(response.json<{ frozen: boolean }>().frozen).toBe(true);
+    expect(await layoutStateOf(LAYOUT_STUCK)).toBe('frozen');
+  });
+
   it('замораживает черновую разметку и ставит распознавание со сквозным признаком', async () => {
+    await finishLayoutJobs(REVISION_READY);
     expect(await layoutStateOf(LAYOUT_READY)).toBe('draft');
 
     const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_READY}/check`, {

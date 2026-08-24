@@ -701,6 +701,34 @@ export async function listPromptTemplates(
   return { items: page, nextCursor };
 }
 
+/**
+ * Какие из перечисленных кодов опубликованы.
+ *
+ * Области видимости не принимает намеренно — и это НЕ «забыли аргумент» (шапка
+ * файла настаивает на различии). Функция отвечает ровно на вопрос готовности стадии
+ * и не отдаёт наружу ни текста промпта, ни его версии, ни факта существования
+ * черновиков. Спрашивает её предполёт запуска распознавания
+ * (`modules/recognition/start.ts`), который выполняется под областью подрядчика:
+ * тот вправе знать, почему кнопка отказала, но не вправе читать каталог промтов, а
+ * `listPromptTemplates` выше требует неограниченной области и ответила бы ему 403.
+ *
+ * Больше одной строки на код прийти не может: партиальный уникальный индекс
+ * `ux_prompt_templates_single_published` (0007) держит одну опубликованную версию.
+ */
+export async function readPublishedPromptCodes(
+  db: Database,
+  codes: readonly string[],
+): Promise<ReadonlySet<string>> {
+  if (codes.length === 0) return new Set();
+
+  const rows = await db
+    .select({ code: promptTemplates.code })
+    .from(promptTemplates)
+    .where(and(eq(promptTemplates.state, 'published'), inArray(promptTemplates.code, [...codes])));
+
+  return new Set(rows.map((row) => row.code));
+}
+
 export async function findPromptTemplate(
   db: Database,
   scope: AuthScope,

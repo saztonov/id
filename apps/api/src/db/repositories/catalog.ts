@@ -145,6 +145,7 @@ import type {
 } from '@id/contracts';
 import type { DocTypeGroup, DocTypeKind } from '@id/doc-types';
 import { isEmptyScope, type AuthScope } from '../../auth/scope.js';
+import { driverField } from '../driver-errors.js';
 import { withScope, type ScopeTarget } from '../scoped.js';
 import { appendAudit, type AuditActor } from './audit.js';
 import {
@@ -673,31 +674,6 @@ const CONSTRAINT_PROBLEMS: Readonly<Record<string, ConstraintProblem>> = {
       'Резервный вид ИД нельзя отключить: документу незнакомого вида станет некуда деться (§8.1).',
   },
 };
-
-/** На сколько звеньев `cause` заглядывать в поисках полей ошибки драйвера. */
-const MAX_CAUSE_DEPTH = 4;
-
-/**
- * Поле ошибки драйвера сквозь обёртки.
- *
- * Проверено прогоном: Drizzle 0.45 оборачивает КАЖДУЮ ошибку драйвера в
- * `DrizzleQueryError`, поэтому ни `code`, ни `constraint` на самой ошибке не
- * лежат — они в `cause`. Наивная проверка `error.constraint` не находила ничего,
- * и нарушение уникальности отдавалось клиенту как 500. Обход по цепочке
- * `cause` — единственный способ не зависеть от числа обёрток.
- */
-function driverField(error: unknown, field: 'constraint' | 'code'): string | null {
-  let current: unknown = error;
-  for (let depth = 0; depth < MAX_CAUSE_DEPTH; depth += 1) {
-    if (typeof current !== 'object' || current === null) return null;
-    const value: unknown = (current as Record<string, unknown>)[field];
-    if (typeof value === 'string' && value.length > 0) return value;
-    const cause: unknown = (current as { cause?: unknown }).cause;
-    if (cause === undefined || cause === null || cause === current) return null;
-    current = cause;
-  }
-  return null;
-}
 
 /**
  * Выполняет запись, переводя нарушение ограничения в ответ 409 или 422.
