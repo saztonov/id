@@ -14,9 +14,19 @@ WORKDIR /app
 # укладывала машину в memory pressure до потери SSH.
 ENV ONNXRUNTIME_NODE_INSTALL=skip
 COPY . .
-RUN pnpm install --frozen-lockfile \
-  && pnpm --filter @id/contracts build \
-  && pnpm --filter @id/web exec vite build
+RUN pnpm install --frozen-lockfile && pnpm --filter @id/contracts build
+
+# Идентификатор выкатки: вшивается в бандл и в `version.json` — по нему вкладка
+# узнаёт, что работает на устаревшем коде (§11). Подставляет `deploy-id.sh`
+# (короткий SHA коммита), в compose — build-аргумент службы `id-web`.
+#
+# Сборка фронта вынесена отдельным слоем ровно из-за этого аргумента: `.dockerignore`
+# прячет `.git`, `docs` и `*.md`, поэтому коммит без правок кода не меняет
+# контекст сборки, но меняет SHA. Одним слоем такой коммит тянул бы повторный
+# `pnpm install` — а на VPS с 8 ГБ это та самая нагрузка, из-за которой сборка
+# образов разведена по очереди (см. deploy/deploy-id.sh).
+ARG APP_RELEASE=""
+RUN APP_RELEASE="$APP_RELEASE" pnpm --filter @id/web exec vite build
 
 FROM nginx:alpine AS runtime
 COPY apps/web/nginx.conf /etc/nginx/conf.d/default.conf

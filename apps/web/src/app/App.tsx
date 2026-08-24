@@ -33,6 +33,7 @@ import { AdminScreen } from '../features/admin/AdminScreen.js';
 import { ChangePasswordPage } from '../features/auth/ChangePasswordPage.js';
 import { LoginPage } from '../features/auth/LoginPage.js';
 import { RegisterPage } from '../features/auth/RegisterPage.js';
+import { AppUpdateBanner } from './AppUpdateBanner.js';
 import { ErrorBoundary } from './ErrorBoundary.js';
 import { reportClientError } from './errorReporting.js';
 
@@ -292,6 +293,12 @@ export function App(): ReactNode {
           <ErrorBoundary>
             <QueryClientProvider client={queryClient}>
               <RouterProvider>
+                {/*
+                  Плашка обновления стоит вне `Authenticated`: устаревшая
+                  страница входа — тот же устаревший бандл, и обновиться до
+                  входа дешевле, чем посреди работы.
+                */}
+                <AppUpdateBanner />
                 <Root />
               </RouterProvider>
             </QueryClientProvider>

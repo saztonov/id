@@ -59,6 +59,12 @@ services:
     build:
       context: ..
       dockerfile: apps/web/Dockerfile
+      # Метка выкатки вшивается в бандл на сборке (плашка «доступна новая
+      # версия» и `buildId` в отчётах об ошибках). Значение подставляет
+      # deploy-id.sh; пустое значение здесь безопасно — фронт трактует его как
+      # «сборка не названа» и проверку версий не ведёт.
+      args:
+        APP_RELEASE: ${APP_RELEASE:-}
     image: id-web:${ID_TAG:-latest}
     restart: unless-stopped
     networks: [edge]

@@ -27,23 +27,14 @@
  * который сгенерирован здесь же, а не то, что ответил сервер.
  */
 import { CLIENT_ERROR_PATH, type ClientErrorKind, type ClientErrorReport } from '../api/types.js';
+// Метка выкатки объявлена в одном месте на весь фронт: её же читает плашка
+// «доступна новая версия», и разойтись в трактовке пустого значения им нельзя.
+import { BUILD_ID } from './buildVersion.js';
 
 /** Потолок отправок за жизнь вкладки. */
 const MAX_REPORTS_PER_TAB = 10;
 const MAX_MESSAGE = 500;
 const MAX_STACK = 4_000;
-
-/**
- * Идентификатор сборки.
- *
- * Подставляется сборщиком; в dev-режиме его нет, и это честное `undefined`, а
- * не выдуманное значение: строка «dev» в ряде по релизам смешала бы машины
- * разработчиков с боевой установкой.
- */
-const BUILD_ID: string | undefined =
-  typeof __BUILD_ID__ === 'string' && __BUILD_ID__ !== '' ? __BUILD_ID__ : undefined;
-
-declare const __BUILD_ID__: string | undefined;
 
 interface Suppressed {
   /** Сколько раз ошибка повторилась после отправки первого отчёта. */
