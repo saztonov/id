@@ -8,7 +8,7 @@
  * пустой список у него — это правильный ответ, а не отказ.
  */
 import { useState, type ReactNode } from 'react';
-import { App as AntApp, Button, Input, Popconfirm, Space, Table, Tabs, Tag } from 'antd';
+import { App as AntApp, Button, Input, Space, Table, Tabs, Tag } from 'antd';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { catalog } from '../../api/endpoints.js';
 import { catalogKeys } from '../../api/keys.js';
@@ -25,6 +25,8 @@ import { SectionProfilesPanel } from './SectionProfilesPanel.js';
 import { ImportPanel } from './ImportPanel.js';
 import { CounterpartyDialog, ObjectDialog } from './CatalogForms.js';
 import { ToneTag } from '../../shared/tags.js';
+import { ConfirmIconAction, IconAction, RowActions } from '../../shared/RowActions.js';
+import { EditIcon, TrashIcon } from '../../shared/icons.js';
 import { describeError } from '../../api/problem.js';
 import { useSession } from '../../app/session.js';
 
@@ -80,13 +82,17 @@ export function CatalogScreen(): ReactNode {
  * помех, и текст показывается дословно: «нельзя» без причины отправило бы
  * администратора искать ссылку по всей схеме.
  */
-function RowActions({
+function CardActions({
+  name,
   isActive,
   onEdit,
   onToggleActive,
   onDelete,
   busy,
 }: {
+  /** Название карточки: попадает в имя каждой кнопки, иначе в таблице из
+   *  двадцати строк двадцать кнопок «Удалить» неразличимы на слух. */
+  name: string;
   isActive: boolean;
   onEdit: () => void;
   onToggleActive: () => void;
@@ -94,25 +100,31 @@ function RowActions({
   busy: boolean;
 }): ReactNode {
   return (
-    <Space size={4} wrap>
-      <Button size="small" onClick={onEdit}>
-        Изменить
-      </Button>
-      <Button size="small" loading={busy} onClick={onToggleActive}>
+    <RowActions>
+      <IconAction
+        icon={<EditIcon />}
+        label={`Изменить «${name}»`}
+        loading={busy}
+        onClick={onEdit}
+      />
+      {/*
+        Переключатель остаётся СЛОВОМ, в отличие от соседей. Иконка показывает
+        действие, а не состояние: по глифу нельзя понять, включена карточка
+        сейчас или отключена, а именно это здесь и надо знать.
+      */}
+      <Button size="small" type="text" loading={busy} onClick={onToggleActive}>
         {isActive ? 'Отключить' : 'Включить'}
       </Button>
-      <Popconfirm
-        title="Удалить карточку?"
-        description="Удаление возможно, только если на неё ничего не ссылается."
-        okText="Удалить"
-        cancelText="Отмена"
-        onConfirm={onDelete}
-      >
-        <Button size="small" danger loading={busy}>
-          Удалить
-        </Button>
-      </Popconfirm>
-    </Space>
+      <ConfirmIconAction
+        icon={<TrashIcon />}
+        label={`Удалить «${name}»`}
+        danger
+        loading={busy}
+        onClick={onDelete}
+        confirmTitle={`Удалить «${name}»?`}
+        confirmDescription="Удаление возможно, только если на карточку ничего не ссылается."
+      />
+    </RowActions>
   );
 }
 
@@ -205,7 +217,8 @@ function ObjectsTable(): ReactNode {
                   title: 'Действия',
                   key: 'actions',
                   render: (_value: unknown, row: ConstructionObject) => (
-                    <RowActions
+                    <CardActions
+                      name={row.name}
                       isActive={row.isActive}
                       busy={toggle.isPending || remove.isPending}
                       onEdit={() => {
@@ -330,7 +343,8 @@ function CounterpartiesTable(): ReactNode {
                   title: 'Действия',
                   key: 'actions',
                   render: (_value: unknown, row: Counterparty) => (
-                    <RowActions
+                    <CardActions
+                      name={row.name}
                       isActive={row.isActive}
                       busy={toggle.isPending || remove.isPending}
                       onEdit={() => {

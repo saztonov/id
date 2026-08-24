@@ -29,6 +29,26 @@
  * Карта префиксов знает про сегодняшние события. Событие, которого в ней нет,
  * не игнорируется: перечитывается вся ветка ревизии. Открытый мир §0.5 здесь
  * буквален — экран, молча пропускающий незнакомое, выглядит работающим и врёт.
+ *
+ * ## Пачка событий обесценивает одно и то же один раз (S24)
+ *
+ * Разметка комплекта в сотню страниц — это сотни задач, а каждая задача шлёт по
+ * два события (`job.started`, `job.succeeded`). Сервер отдаёт их пачками до
+ * двухсот кадров подряд (`BATCH_LIMIT` в `modules/events/sse.ts`), и каждый кадр
+ * обесценивал сводку конвейера отдельно. Хуже того, `invalidateQueries` в
+ * TanStack Query v5 идёт с `cancelRefetch: true` по умолчанию: он не
+ * присоединяется к идущему запросу, а отменяет его и начинает новый. Двести
+ * кадров превращались в двести запросов и выбивали серверный лимит за секунды.
+ *
+ * Поэтому ключи копятся и сбрасываются пачкой: первое событие после тишины
+ * применяется сразу (одиночное событие обязано отзываться мгновенно), всё, что
+ * пришло следом в пределах `COALESCE_MS`, — одним сбросом по трейлингу.
+ * Инвалидация при этом идёт с `cancelRefetch: false`: идущий запрос доведёт
+ * дело до конца, а не будет брошен ради точно такого же следующего.
+ *
+ * Это НЕ дублирует дедупликацию в `api/queue.ts`. Очередь схлопывает запросы,
+ * пересёкшиеся в полёте; пришедшие подряд она честно выполнит все. Знание «эта
+ * пачка событий говорит об одном и том же» есть только здесь.
  */
 import {
   createContext,
@@ -42,7 +62,7 @@ import {
 } from 'react';
 import { useQueryClient, type QueryClient } from '@tanstack/react-query';
 import { revisionEvents } from '../../api/endpoints.js';
-import { readEventStream } from '../../api/stream.js';
+import { readEventStream, StreamRejected } from '../../api/stream.js';
 import { layoutKeys, revisionKeys } from '../../api/keys.js';
 import { describeError } from '../../api/problem.js';
 
@@ -94,10 +114,12 @@ const MAX_ATTEMPTS = 5;
  * пространственны (`layout.block_updated`, `documents.segmented`), и новая
  * операция внутри известной области попадает в свою группу сама.
  */
-function invalidateFor(client: QueryClient, revisionId: string, eventType: string): void {
-  const invalidate = (queryKey: readonly unknown[]): void => {
-    void client.invalidateQueries({ queryKey });
-  };
+function invalidateFor(
+  schedule: (queryKey: readonly unknown[]) => void,
+  revisionId: string,
+  eventType: string,
+): void {
+  const invalidate = schedule;
 
   // Сводка стадий — производная от `job_runs`, и её меняет практически любое
   // событие конвейера. Поэтому она обновляется всегда, а не по своей группе.
@@ -155,6 +177,63 @@ function invalidateFor(client: QueryClient, revisionId: string, eventType: strin
   }
 }
 
+/** Пауза схлопывания пачки. Секунда — граница «мгновенно» для обновления сводки. */
+const COALESCE_MS = 1_000;
+
+/**
+ * Планировщик инвалидаций: копит ключи и сбрасывает их пачкой.
+ *
+ * Ключ сравнивается по сериализации, а не по ссылке: `revisionKeys.files(id)`
+ * возвращает НОВЫЙ массив на каждый вызов, и `Set` по ссылкам не схлопнул бы
+ * ничего.
+ *
+ * Первый сброс — немедленный, и это не оптимизация, а требование к отзывчивости:
+ * одиночное событие (человек нажал кнопку на соседней вкладке) обязано менять
+ * экран сразу, а не через секунду. Схлопывается то, что идёт следом.
+ */
+function useInvalidationBatch(client: QueryClient): (queryKey: readonly unknown[]) => void {
+  const pending = useRef(new Map<string, readonly unknown[]>());
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastFlush = useRef(0);
+
+  const flush = useCallback(() => {
+    timer.current = null;
+    lastFlush.current = Date.now();
+    const keys = [...pending.current.values()];
+    pending.current.clear();
+    for (const queryKey of keys) {
+      // `cancelRefetch: false` — иначе каждый сброс бросал бы идущий запрос ради
+      // точно такого же следующего, и при частых событиях завершался бы только
+      // последний. Именно это умножало запросы до отказа по лимиту.
+      void client.invalidateQueries({ queryKey }, { cancelRefetch: false });
+    }
+  }, [client]);
+
+  // Незавершённая пачка при размонтировании отбрасывается намеренно: экрана, для
+  // которого её собирали, уже нет, а таймер, доживший до следующего, обновил бы
+  // чужие данные.
+  useEffect(
+    () => () => {
+      if (timer.current !== null) clearTimeout(timer.current);
+    },
+    [],
+  );
+
+  return useCallback(
+    (queryKey: readonly unknown[]) => {
+      pending.current.set(JSON.stringify(queryKey), queryKey);
+      if (timer.current !== null) return;
+      const quiet = Date.now() - lastFlush.current >= COALESCE_MS;
+      if (quiet) {
+        flush();
+        return;
+      }
+      timer.current = setTimeout(flush, COALESCE_MS);
+    },
+    [flush],
+  );
+}
+
 const StreamContext = createContext<RevisionStreamState | null>(null);
 
 export function RevisionStreamProvider({
@@ -192,6 +271,7 @@ export function usePollingInterval(fallbackMs: number = FALLBACK_POLL_MS): numbe
 
 function useRevisionEventStream(revisionId: string): RevisionStreamState {
   const queryClient = useQueryClient();
+  const scheduleInvalidate = useInvalidationBatch(queryClient);
 
   const [status, setStatus] = useState<StreamStatus>('connecting');
   const [lastEventId, setLastEventId] = useState<number | null>(null);
@@ -275,7 +355,7 @@ function useRevisionEventStream(revisionId: string): RevisionStreamState {
               }
               setLastEventType(frame.event);
               setReceived((count) => count + 1);
-              invalidateFor(queryClient, revisionId, frame.event);
+              invalidateFor(scheduleInvalidate, revisionId, frame.event);
             },
           });
 
@@ -288,6 +368,23 @@ function useRevisionEventStream(revisionId: string): RevisionStreamState {
           continue;
         } catch (streamError) {
           if (stopped || controller.signal.aborted) return;
+
+          // Отказ по лимиту запросов НЕ считается неудачной попыткой.
+          //
+          // Поток не сломан: у вкладки кончился бюджет, и сервер назвал, когда
+          // возвращаться. Считать это отказом значило бы за пять таких ответов
+          // увести экран в `lost`, где свежесть держит опрос раз в пять
+          // секунд, — то есть исчерпание лимита включало бы режим, который
+          // тратит ЕЩЁ больше запросов, и выйти из него можно было бы только
+          // кнопкой. Счётчик попыток остаётся нетронутым, а тесноту разводит
+          // пауза, которую назвал сервер.
+          if (streamError instanceof StreamRejected && streamError.status === 429) {
+            setStatus('reconnecting');
+            setError(streamError.message);
+            await wait(Math.min(streamError.retryAfterMs ?? BASE_RETRY_MS, MAX_RETRY_MS));
+            continue;
+          }
+
           failures += 1;
           setAttempts(failures);
           setError(describeError(streamError));
@@ -313,7 +410,7 @@ function useRevisionEventStream(revisionId: string): RevisionStreamState {
       if (timer !== null) clearTimeout(timer);
       controller.abort();
     };
-  }, [revisionId, restartToken, queryClient]);
+  }, [revisionId, restartToken, queryClient, scheduleInvalidate]);
 
   const reconnect = useCallback(() => {
     setError(null);

@@ -1220,3 +1220,66 @@ describe('состав черновика фиксируется собранн�
     expect(after.map((file) => file.id)).toEqual(files.map((file) => file.id));
   });
 });
+
+// =====================================================================
+// Удаление файла из черновика со сборкой (S24)
+// =====================================================================
+
+/**
+ * Регрессия дефекта, на который указал заказчик.
+ *
+ * `DELETE /revisions/{id}/files/{fileId}` отвечал 409 в ЧЕРНОВИКЕ — потому что у
+ * ревизии уже был собран рабочий документ. Формулировка отказа («состав и
+ * порядок файлов зафиксированы разметкой») звучала как неизменяемость §3.9 и
+ * отправляла искать причину не туда: ревизия была черновиком, а мешала сборка.
+ *
+ * Настоящая причина запрета техническая — на страницах файла висит разметка, а
+ * `processing_bundle_pages.source_page_id` ссылается на `source_pages` внешним
+ * ключом без каскада. Теперь производное сносится явно, и удаление проходит.
+ *
+ * Перестановка файлов после сборки при этом ОСТАЁТСЯ запрещённой (набор выше):
+ * порядок задаёт `aggregate_manifest_hash` уже уехавшего в работу документа, а
+ * удаление честно обесценивает и его.
+ */
+describe('удаление файла из черновика с собранным рабочим документом', () => {
+  it('проходит и уносит с собой рабочий документ вместе с разметкой', async () => {
+    const before = await listFiles(KC.contractor, REVISION_DRAFT);
+    expect(before.length).toBeGreaterThan(1);
+    const victim = before[0];
+    expect(victim).toBeDefined();
+
+    // Рабочий документ мог остаться от соседнего набора: он и есть условие,
+    // которое раньше делало удаление невозможным.
+    const existing = await db.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM processing_bundles WHERE revision_id = '${REVISION_DRAFT}'`,
+    );
+    if ((existing[0]?.n ?? 0) === 0) {
+      const blobs = await db.query<{ sha256: string }>(`SELECT sha256 FROM stored_blobs LIMIT 1`);
+      await db.query(
+        `INSERT INTO processing_bundles (revision_id, aggregate_manifest_hash, working_pdf_blob_sha256, builder_version)
+           VALUES ('${REVISION_DRAFT}', '${'e'.repeat(64)}', '${blobs[0]?.sha256 ?? ''}', 'bundle/1+pdf-lib')`,
+      );
+    }
+
+    const response = await as(
+      KC.contractor,
+      'DELETE',
+      `/api/v1/revisions/${REVISION_DRAFT}/files/${victim?.id ?? ''}`,
+    );
+    expect(response.statusCode).toBe(204);
+
+    // Файла нет, а рабочий документ обесценен целиком: оставить его значило бы
+    // хранить карту страниц, половина которой указывает в никуда.
+    const after = await listFiles(KC.contractor, REVISION_DRAFT);
+    expect(after.map((file) => file.id)).not.toContain(victim?.id);
+
+    const bundles = await db.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM processing_bundles WHERE revision_id = '${REVISION_DRAFT}'`,
+    );
+    expect(bundles[0]?.n).toBe(0);
+
+    // Порядок оставшихся файлов плотный: дыра в нумерации сделала бы «файл № 3»
+    // и третью строку таблицы разными вещами.
+    expect(after.map((file) => file.sortOrder)).toEqual(after.map((_file, index) => index));
+  });
+});

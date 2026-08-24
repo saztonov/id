@@ -80,8 +80,10 @@ test('раздел без профиля назван не настроенны�
 test('реестр РД объекта читается и различает отключённые шифры', async ({ page }) => {
   await signIn(page, KC.admin, '/catalog?tab=rd-documents');
 
-  await expect(page.getByRole('cell', { name: 'АР-2.1-КР' })).toBeVisible();
-  await expect(page.getByRole('cell', { name: 'Кровля. Узлы примыканий' })).toBeVisible();
+  await expect(page.getByRole('cell', { name: 'АР-2.1-КР', exact: true })).toBeVisible();
+  await expect(
+    page.getByRole('cell', { name: 'Кровля. Узлы примыканий', exact: true }),
+  ).toBeVisible();
   await expect(page.getByText('действует')).toBeVisible();
 });
 
@@ -91,7 +93,7 @@ test('подрядчик читает реестр РД своего объек�
   // Объект виден подрядчику потому, что у него есть на нём поставки — это и
   // есть область видимости класса 1. Реестр РД читается по объекту, поэтому
   // отдельного правила ему не нужно, и отдельного пустого экрана — тоже.
-  await expect(page.getByRole('cell', { name: 'АР-2.1-КР' })).toBeVisible();
+  await expect(page.getByRole('cell', { name: 'АР-2.1-КР', exact: true })).toBeVisible();
 });
 
 // =====================================================================
@@ -117,9 +119,13 @@ test('контрагент заводится формой, а битая кон
   await page.getByTestId('counterparty-inn').fill('7700123459');
   await page.getByRole('button', { name: 'Сохранить' }).click();
 
-  await expect(page.getByRole('cell', { name: 'ООО «Испытательный центр»' })).toBeVisible();
+  await expect(
+    page.getByRole('cell', { name: 'ООО «Испытательный центр»', exact: true }),
+  ).toBeVisible();
   // Вид показан наименованием: код `laboratory` человеку ничего не сообщает.
-  await expect(page.getByRole('cell', { name: 'Испытательная лаборатория' })).toBeVisible();
+  await expect(
+    page.getByRole('cell', { name: 'Испытательная лаборатория', exact: true }),
+  ).toBeVisible();
 });
 
 test('объект заводится формой и появляется в разделе ИД', async ({ page }) => {
@@ -131,10 +137,10 @@ test('объект заводится формой и появляется в р
   await page.getByTestId('object-full-name').fill('ЖК «Форма», корпус 1');
   await page.getByRole('button', { name: 'Сохранить' }).click();
 
-  await expect(page.getByRole('cell', { name: 'E2E77' })).toBeVisible();
+  await expect(page.getByRole('cell', { name: 'E2E77', exact: true })).toBeVisible();
 
   await page.goto('/ids');
-  await expect(page.getByRole('cell', { name: 'Объект из формы' })).toBeVisible();
+  await expect(page.getByRole('cell', { name: 'Объект из формы', exact: true })).toBeVisible();
 });
 
 test('удаление объекта со связями отклоняется с названной причиной', async ({ page }) => {
@@ -146,7 +152,7 @@ test('удаление объекта со связями отклоняется
 
   // «Нельзя» без причины отправило бы администратора искать ссылку по схеме.
   await expect(page.getByText(/разделы работ/u)).toBeVisible();
-  await expect(page.getByRole('cell', { name: 'E2E01' })).toBeVisible();
+  await expect(page.getByRole('cell', { name: 'E2E01', exact: true })).toBeVisible();
 });
 
 test('импорт из Excel разбирается воркером и заводит карточки после подтверждения', async ({

@@ -59,6 +59,18 @@ export interface Me {
    */
   mustChangePassword: boolean;
   session: { idleExpiresAt: string; absoluteExpiresAt: string };
+  /**
+   * Действует ли неизменяемость поданных данных (§3.9, S24).
+   *
+   * `false` — режим тестирования: состав поданной ревизии правится, файл
+   * удаляется и после сборки рабочего документа, а препятствия согласованию
+   * показываются, но не запирают кнопки.
+   *
+   * Экран обязан об этом СКАЗАТЬ, а не просто вести себя иначе: плашка в шапке
+   * висит всё время, пока режим включён. Тихо ослабленная защита — худший вид
+   * защиты, потому что выглядит работающей.
+   */
+  immutabilityEnforced: boolean;
 }
 
 /** Публичные признаки режима: доступны без входа. */
@@ -224,6 +236,13 @@ export interface DetectResult {
 // Распознавание
 // =====================================================================
 
+export interface RecognitionWarning {
+  code: string;
+  message: string;
+  /** Страница рабочего документа; `null` — предупреждение о прогоне целиком. */
+  workingPageIndex: number | null;
+}
+
 export interface RecognitionRun {
   id: string;
   revisionId: string;
@@ -238,7 +257,16 @@ export interface RecognitionRun {
   startedAt: string;
   finishedAt: string | null;
   counts: Record<string, unknown>;
-  warnings: unknown[];
+  /**
+   * Предупреждения прогона: причина отказа приходит именно здесь.
+   *
+   * Раньше поле было объявлено как `unknown[]` и не рендерилось ни одним
+   * экраном, поэтому «Отказ» за 0.1 с оставался без объяснения: узнать, что
+   * упало (не настроен VLM-порт, нет блоков в замороженной разметке, не
+   * опубликованы промты стадии `recognize`), можно было только в админ-консоли
+   * задач.
+   */
+  warnings: RecognitionWarning[];
   runDocumentClosedAt: string | null;
 }
 

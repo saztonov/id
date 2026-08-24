@@ -1455,3 +1455,146 @@ describe('сверка описи передачи', () => {
     expect(stale.statusCode).toBe(409);
   });
 });
+
+// =====================================================================
+// Удаление комплекта (S24)
+// =====================================================================
+
+/**
+ * Удаление проверяется через HTTP, а не вызовом репозитория, по той же причине,
+ * по которой так проверяется вся навигация: маршрут, не зарегистрированный в
+ * `app.ts`, проходит собственные тесты и недостижим снаружи.
+ *
+ * Три вопроса, на которые набор обязан ответить:
+ *
+ * 1. **Право.** Удаление — `settings.manage`. Подрядчик, заводящий и
+ *    наполняющий комплекты, не должен уметь стереть чужую работу вместе с
+ *    историей проверок.
+ * 2. **Помехи названы ДО нажатия и совпадают с отказом.** Предпросмотр и 409
+ *    обязаны говорить одно и то же: иначе экран покажет «можно», а сервер
+ *    ответит «нельзя», и различие спишут на сбой.
+ * 3. **Удаляется всё.** Комплект без ревизий, файлов и страниц — единственное
+ *    доказательство, что порядок в `purgeRevisionEntirely` полон: забытая
+ *    таблица дала бы отказ внешнего ключа, а не тихую грязь.
+ */
+describe('DELETE /works/{id}', () => {
+  it('подрядчику удаление закрыто, даже в собственном комплекте', async () => {
+    const response = await as(KC.a, 'DELETE', `/api/v1/works/${WORK_A_DRAFT}`);
+    expect(response.statusCode).toBe(403);
+  });
+
+  it('предпросмотр называет, что исчезнет', async () => {
+    const response = await as(KC.admin, 'GET', `/api/v1/works/${WORK_A_DRAFT}/deletion-preview`);
+    expect(response.statusCode).toBe(200);
+
+    const preview = response.json<{
+      revisions: number;
+      files: number;
+      blockers: readonly string[];
+    }>();
+    expect(preview.revisions).toBeGreaterThan(0);
+    expect(preview.blockers).toEqual([]);
+  });
+
+  it('согласованная ревизия названа помехой и в предпросмотре, и в отказе', async () => {
+    const preview = await as(KC.admin, 'GET', `/api/v1/works/${WORK_A_APPROVED}/deletion-preview`);
+    expect(preview.statusCode).toBe(200);
+    const blockers = preview.json<{ blockers: readonly string[] }>().blockers;
+    expect(blockers.join(' ')).toMatch(/согласованные ревизии/u);
+
+    // Отказ повторяет ту же причину дословно: предпросмотр и переход обязаны
+    // опираться на один список, иначе экран и сервер расходятся во мнении.
+    const attempt = await as(KC.admin, 'DELETE', `/api/v1/works/${WORK_A_APPROVED}`);
+    expect(attempt.statusCode).toBe(409);
+    expect(attempt.json<{ detail: string }>().detail).toMatch(/согласованные ревизии/u);
+
+    // И комплект на месте: отказ обязан быть без последствий.
+    const still = await as(KC.admin, 'GET', `/api/v1/works/${WORK_A_APPROVED}`);
+    expect(still.statusCode).toBe(200);
+  });
+
+  it('удаляет комплект вместе с ревизиями, файлами и страницами', async () => {
+    const response = await as(KC.admin, 'DELETE', `/api/v1/works/${WORK_A_DRAFT}`);
+    expect(response.statusCode).toBe(204);
+
+    const gone = await as(KC.admin, 'GET', `/api/v1/works/${WORK_A_DRAFT}`);
+    expect(gone.statusCode).toBe(404);
+
+    // Последствие в базе, а не код ответа: ревизия, её файлы и страницы обязаны
+    // исчезнуть целиком. Оставшаяся строка не мешала бы работать, но означала
+    // бы, что порядок удаления неполон, — и следующая таблица упёрлась бы в FK.
+    const left = await db.query<{ revisions: number; files: number; pages: number }>(`
+      select
+        (select count(*) from submission_revisions where work_id = '${WORK_A_DRAFT}')::int
+          as revisions,
+        (select count(*) from source_files where revision_id = '${REV_A_DRAFT}')::int as files,
+        (select count(*) from source_pages where revision_id = '${REV_A_DRAFT}')::int as pages
+    `);
+    expect(left[0]).toEqual({ revisions: 0, files: 0, pages: 0 });
+  });
+
+  it('чужой комплект отвечает 404, а не 403: существование чужой работы не подтверждается', async () => {
+    const response = await as(KC.admin, 'DELETE', `/api/v1/works/${id(999)}`);
+    expect(response.statusCode).toBe(404);
+  });
+});
+
+/**
+ * Поданная ревизия в строгом режиме.
+ *
+ * Без явной помехи удаление доходило бы до триггеров §3.9 и падало
+ * `restrict_violation` из драйвера — пятисотым кодом без объяснения. Запрет при
+ * этом ожидаемый: состав поданного комплекта покрыт `aggregate_manifest_hash`, и
+ * всё выведенное из него доказывает, что именно проверяли.
+ */
+describe('DELETE /works/{id} и поданные ревизии', () => {
+  it('поданная ревизия названа помехой, а не даёт пятисотый код', async () => {
+    const preview = await as(KC.admin, 'GET', `/api/v1/works/${WORK_A_PENDING}/deletion-preview`);
+    expect(preview.statusCode).toBe(200);
+    expect(preview.json<{ blockers: readonly string[] }>().blockers.join(' ')).toMatch(
+      /поданные ревизии/u,
+    );
+
+    const attempt = await as(KC.admin, 'DELETE', `/api/v1/works/${WORK_A_PENDING}`);
+    expect(attempt.statusCode).toBe(409);
+    expect(attempt.json<{ detail: string }>().detail).toMatch(/поданные ревизии/u);
+  });
+
+  it('в режиме тестирования поданный комплект удаляется', async () => {
+    // Комплект заводится прямо здесь, а не берётся из общих фикстур: те успевают
+    // попасть в переданный реестр, а это ДРУГАЯ помеха, которую режим
+    // тестирования не снимает и снимать не должен.
+    const work = id(700);
+    const revision = id(701);
+    await db.query(
+      `INSERT INTO works (id, object_id, section_code, period, title, contractor_id,
+                          managed_by_contractor_id, created_by)
+         VALUES ('${work}', '${OBJECT_1}', '${SECTION}', '${PERIOD}', 'Поданный к удалению',
+                 '${ORG_A}', '${ORG_A}', '${USER_A}')`,
+    );
+    await db.query(
+      `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
+         VALUES ('${revision}', '${work}', '${OBJECT_1}', '${ORG_A}', 1, 'draft')`,
+    );
+    await db.query(`UPDATE submission_revisions SET status = 'submitted' WHERE id = '${revision}'`);
+    await db.query(`UPDATE works SET current_revision_id = '${revision}' WHERE id = '${work}'`);
+
+    // Строгий режим: помеха названа.
+    const strict = await as(KC.admin, 'DELETE', `/api/v1/works/${work}`);
+    expect(strict.statusCode).toBe(409);
+
+    await db.query(
+      `INSERT INTO app_settings (key, value) VALUES ('core.enforce_immutability', 'false'::jsonb)
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+    );
+    try {
+      const response = await as(KC.admin, 'DELETE', `/api/v1/works/${work}`);
+      expect(response.statusCode, response.body).toBe(204);
+    } finally {
+      // Строгий режим возвращается обязательно: соседние наборы проверяют
+      // запреты, и оставленный выключатель сделал бы их зелёными независимо от
+      // того, работают ли триггеры.
+      await db.query(`DELETE FROM app_settings WHERE key = 'core.enforce_immutability'`);
+    }
+  });
+});

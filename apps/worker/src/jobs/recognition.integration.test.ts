@@ -559,7 +559,17 @@ describe('цепочка распознавания доводит компле�
     expect(await listRecognitionRuns(db, SCOPE, REVISION)).toHaveLength(1);
   });
 
-  it('артефакты и текст страниц неизменяемы на уровне БД', async () => {
+  /**
+   * Проверяется ПРАВКА обоих: на sha256 артефакта и на смещения текста ссылаются
+   * доказательства замечаний, и подмена сдвинула бы все цитаты.
+   *
+   * Удаление в ЧЕРНОВОЙ ревизии с миграции 0035 разрешено — см. ADR-0015: пока
+   * комплект не подан, доказывать нечего, а безусловный запрет не давал убрать
+   * ошибочный файл из собственного черновика. Обе стороны правила проверяет
+   * `packages/db/src/invariants.test.ts`; здесь проверяется цепочка конвейера, а
+   * не матрица триггеров.
+   */
+  it('артефакты и текст страниц не правятся на уровне БД', async () => {
     await expect(
       testDb.query(
         `UPDATE artifact_versions SET artifact_sha256 = '${'0'.repeat(64)}'
@@ -567,7 +577,10 @@ describe('цепочка распознавания доводит компле�
       ),
     ).rejects.toThrow();
     await expect(
-      testDb.query(`DELETE FROM page_text_versions WHERE recognition_run_id = '${runId}'`),
+      testDb.query(
+        `UPDATE page_text_versions SET text_sha256 = '${'0'.repeat(64)}'
+          WHERE recognition_run_id = '${runId}'`,
+      ),
     ).rejects.toThrow();
   });
 

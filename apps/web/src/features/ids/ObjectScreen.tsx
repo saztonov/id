@@ -49,6 +49,7 @@ import {
   Descriptions,
   Form,
   Input,
+  Modal,
   Select,
   Space,
   Table,
@@ -60,6 +61,8 @@ import { catalog, files } from '../../api/endpoints.js';
 import { catalogKeys, navigationKeys } from '../../api/keys.js';
 import {
   createRegistry,
+  deleteWork,
+  getWorkDeletionPreview,
   listRegistries,
   listSectionCounts,
   listWorks,
@@ -79,6 +82,8 @@ import {
   UnavailableState,
 } from '../../shared/ui.js';
 import { REGISTRY_STATUS_LABELS, labelOf } from '../../shared/labels.js';
+import { IconAction, RowActions } from '../../shared/RowActions.js';
+import { TrashIcon } from '../../shared/icons.js';
 import { Link, useNavigate } from '../../app/router.js';
 import { useSession } from '../../app/session.js';
 
@@ -233,6 +238,7 @@ export function ObjectScreen({ objectId }: { objectId: string }): ReactNode {
                     contractors={assigned}
                     filter={filter}
                     canUpload={can('submission.upload')}
+                    canDelete={can('settings.manage')}
                   />
                 ) : null,
               };
@@ -425,6 +431,115 @@ function WorkFilters({
   );
 }
 
+/**
+ * Удаление комплекта администратором (S24).
+ *
+ * ## Диалог называет числа, а не спрашивает «уверены?»
+ *
+ * Предпросмотр загружается по нажатию, а не заранее: строк в разделе бывает
+ * много, и опрашивать сервер о каждой ради подсказки, которую откроют у одной, —
+ * это тот самый шквал запросов, из-за которого портал выбивал лимит.
+ *
+ * Числа обязательны. «Удалить комплект?» — вопрос, на который нельзя ответить
+ * осознанно: за одинаковыми строками таблицы стоят и пустой черновик, заведённый
+ * по ошибке минуту назад, и комплект на сотню страниц с суточным
+ * распознаванием. Восстановления нет, поэтому цена решения обязана быть видна
+ * ДО него.
+ *
+ * ## Препятствия показываются до нажатия
+ *
+ * Согласованная ревизия, переданный реестр и юридический запрет делают удаление
+ * невозможным. Их список приходит вместе с числами и показывается вместо кнопки
+ * «Удалить»: получить 409 на нажатие — значит узнать причину последним.
+ */
+function DeleteWorkAction({ work }: { work: Work }): ReactNode {
+  const { message } = AntApp.useApp();
+  const queryClient = useQueryClient();
+  const [open, setOpen] = useState(false);
+
+  const preview = useQuery({
+    queryKey: navigationKeys.workDeletionPreview(work.id),
+    queryFn: () => getWorkDeletionPreview(work.id),
+    enabled: open,
+  });
+
+  const remove = useMutation({
+    mutationFn: () => deleteWork(work.id),
+    onSuccess: async () => {
+      message.success(`Комплект «${work.title}» удалён`);
+      setOpen(false);
+      // Обесценивается вся навигационная ветка: комплект исчезает и из списка
+      // раздела, и из счётчика в заголовке, и из состава реестров.
+      await queryClient.invalidateQueries({ queryKey: navigationKeys.root });
+    },
+    onError: (error) => message.error(describeError(error)),
+  });
+
+  const blockers = preview.data?.blockers ?? [];
+
+  return (
+    <>
+      <RowActions>
+        <IconAction
+          icon={<TrashIcon />}
+          label={`Удалить комплект «${work.title}»`}
+          danger
+          onClick={() => setOpen(true)}
+          testId={`delete-work-${work.id}`}
+        />
+      </RowActions>
+
+      <Modal
+        open={open}
+        title={`Удалить комплект «${work.title}»?`}
+        okText="Удалить безвозвратно"
+        cancelText="Отмена"
+        okButtonProps={{
+          danger: true,
+          disabled: preview.isPending || preview.isError || blockers.length > 0,
+        }}
+        confirmLoading={remove.isPending}
+        onCancel={() => setOpen(false)}
+        onOk={() => remove.mutate()}
+        destroyOnHidden
+      >
+        {preview.isPending && <LoadingState label="Считаем, что будет удалено…" />}
+        {preview.isError && <ErrorState error={preview.error} />}
+        {preview.isSuccess &&
+          (blockers.length > 0 ? (
+            <ExplainedLimitation title="Этот комплект удалить нельзя">
+              <ul style={{ margin: '0 0 8px', paddingLeft: 18 }}>
+                {blockers.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+              Согласованная ревизия, переданная папка и юридический запрет — это то, что уже ушло
+              наружу: список переданных работ и принятое решение неизменяемы.
+            </ExplainedLimitation>
+          ) : (
+            <Space direction="vertical" size={8}>
+              <Typography.Text>Будет удалено безвозвратно:</Typography.Text>
+              <ul style={{ margin: 0, paddingLeft: 18 }}>
+                <li>ревизий: {preview.data.revisions}</li>
+                <li>
+                  файлов: {preview.data.files}, страниц: {preview.data.pages}
+                </li>
+                <li>блоков разметки: {preview.data.layoutBlocks}</li>
+                <li>
+                  документов: {preview.data.documents}, замечаний: {preview.data.findings}
+                </li>
+              </ul>
+              <Typography.Text type="secondary">
+                Восстановить комплект будет нечем: удаляются и файлы, и результаты распознавания, и
+                журнал обработки.
+              </Typography.Text>
+            </Space>
+          ))}
+      </Modal>
+    </>
+  );
+}
+
 // =====================================================================
 // Раздел: форма заведения и комплекты
 // =====================================================================
@@ -435,12 +550,15 @@ function SectionPanel({
   contractors,
   filter,
   canUpload,
+  canDelete,
 }: {
   objectId: string;
   section: ObjectSection;
   contractors: readonly ObjectContractor[];
   filter: WorkFilter;
   canUpload: boolean;
+  /** `settings.manage`: удалять комплекты вправе только администратор. */
+  canDelete: boolean;
 }): ReactNode {
   const scoped: WorkFilter = { ...filter, objectId, sectionCode: section.sectionCode };
 
@@ -517,6 +635,19 @@ function SectionPanel({
                     <Link to={`/ids/registries/${registryId}`}>папка</Link>
                   ),
               },
+              // Колонка действий появляется только у администратора: у
+              // остальных ролей ей нечего показать, а пустой столбец «Действия»
+              // читается как «кнопки не загрузились».
+              ...(canDelete
+                ? [
+                    {
+                      title: '',
+                      key: 'actions',
+                      width: 56,
+                      render: (_value: unknown, row: Work) => <DeleteWorkAction work={row} />,
+                    },
+                  ]
+                : []),
             ]}
           />
           {works.hasNextPage && (

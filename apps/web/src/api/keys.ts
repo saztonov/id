@@ -61,7 +61,10 @@ export const catalogKeys = {
 };
 
 export const navigationKeys = {
+  /** Префикс всей навигационной ветки: обесценивается целиком после удаления. */
+  root: ['nav'] as const,
   works: (filter: string) => ['nav', 'works', filter] as const,
+  workDeletionPreview: (workId: string) => ['nav', 'works', 'one', workId, 'deletion'] as const,
   work: (workId: string) => ['nav', 'works', 'one', workId] as const,
   sectionCounts: (objectId: string, filter: string) =>
     ['nav', 'works', 'counts', objectId, filter] as const,

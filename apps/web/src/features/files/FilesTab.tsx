@@ -32,7 +32,7 @@
  * готовность разметки в момент нажатия нельзя.
  */
 import { useRef, useState, type ReactNode } from 'react';
-import { Alert, App as AntApp, Button, Popconfirm, Space, Table, Tag, Typography } from 'antd';
+import { Alert, App as AntApp, Button, Space, Table, Tag, Typography } from 'antd';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { bundles, files, layout } from '../../api/endpoints.js';
 import { revisionKeys, layoutKeys } from '../../api/keys.js';
@@ -41,6 +41,8 @@ import type { SourceFile } from '../../api/types.js';
 import { useSession } from '../../app/session.js';
 import { ErrorState, LoadingState } from '../../shared/ui.js';
 import { VERIFY_STATE_LABELS } from '../../shared/labels.js';
+import { ConfirmIconAction, IconAction, RowActions } from '../../shared/RowActions.js';
+import { MoveDownIcon, MoveUpIcon, OpenIcon, TrashIcon } from '../../shared/icons.js';
 
 export interface FilesTabProps {
   readonly revisionId: string;
@@ -62,6 +64,14 @@ export function FilesTab({ revisionId, editable }: FilesTabProps): ReactNode {
   const bundleList = useQuery({
     queryKey: revisionKeys.bundles(revisionId),
     queryFn: () => bundles.list(revisionId),
+  });
+  // Ревизии разметки читаются здесь ровно ради предупреждения об удалении: тот
+  // же ключ уже держит экран разметки, поэтому второго запроса при переходе не
+  // будет, а «удалить файл» без слов о том, что вместе с ним исчезнет разметка,
+  // — это кнопка, о последствиях которой спрашивают уже постфактум.
+  const layoutList = useQuery({
+    queryKey: layoutKeys.revisions(revisionId),
+    queryFn: () => layout.listRevisions(revisionId),
   });
 
   const refreshAll = async (): Promise<void> => {
@@ -180,6 +190,23 @@ export function FilesTab({ revisionId, editable }: FilesTabProps): ReactNode {
   const canUpload = editable && can('submission.upload');
   const bundle = (bundleList.data ?? []).at(-1) ?? null;
 
+  // Что именно аннулирует удаление файла. Пересчёт страниц ревизии обесценивает
+  // рабочий документ целиком (разметка ложится на его страницы), а вместе с ним
+  // — разметку и всё распознанное по ней. Молчаливое удаление выглядело бы
+  // дешёвым действием, а стоит оно всего конвейера по этому комплекту.
+  const layoutCount = (layoutList.data ?? []).filter((item) => item.state !== 'superseded').length;
+  const deletionWarning =
+    bundle === null ? (
+      'Страницы ревизии будут перенумерованы.'
+    ) : (
+      <>
+        Вместе с файлом будет удалён рабочий документ ({bundle.pageCount}{' '}
+        {plural(bundle.pageCount, 'страница', 'страницы', 'страниц')})
+        {layoutCount > 0 && ' и разметка с результатами распознавания по ней'}. Разметить и
+        распознать комплект придётся заново.
+      </>
+    );
+
   const move = (index: number, delta: number): void => {
     const target = index + delta;
     if (target < 0 || target >= items.length) return;
@@ -276,25 +303,23 @@ export function FilesTab({ revisionId, editable }: FilesTabProps): ReactNode {
             title: '№',
             key: 'order',
             width: 110,
-            render: (_value, _row, index) => (
+            render: (_value, row, index) => (
               <Space size={4}>
                 <span>{index + 1}</span>
-                <Button
-                  size="small"
-                  disabled={!editable || index === 0 || reorder.isPending}
-                  onClick={() => move(index, -1)}
-                  aria-label={`Переместить файл ${String(index + 1)} выше`}
-                >
-                  ↑
-                </Button>
-                <Button
-                  size="small"
-                  disabled={!editable || index === items.length - 1 || reorder.isPending}
-                  onClick={() => move(index, 1)}
-                  aria-label={`Переместить файл ${String(index + 1)} ниже`}
-                >
-                  ↓
-                </Button>
+                <RowActions>
+                  <IconAction
+                    icon={<MoveUpIcon />}
+                    label={`Переместить «${row.fileName}» выше`}
+                    disabled={!editable || index === 0 || reorder.isPending}
+                    onClick={() => move(index, -1)}
+                  />
+                  <IconAction
+                    icon={<MoveDownIcon />}
+                    label={`Переместить «${row.fileName}» ниже`}
+                    disabled={!editable || index === items.length - 1 || reorder.isPending}
+                    onClick={() => move(index, 1)}
+                  />
+                </RowActions>
               </Space>
             ),
           },
@@ -319,27 +344,39 @@ export function FilesTab({ revisionId, editable }: FilesTabProps): ReactNode {
           {
             title: 'Действия',
             key: 'actions',
+            width: 96,
             render: (_value, row) => (
-              <Space size={6}>
-                <a href={files.contentUrl(row.id)} target="_blank" rel="noreferrer">
-                  Открыть
-                </a>
-                <Popconfirm
-                  title="Удалить файл из ревизии?"
-                  okText="Удалить"
-                  cancelText="Отмена"
-                  onConfirm={() => remove.mutate(row.id)}
+              <RowActions>
+                <IconAction
+                  icon={<OpenIcon />}
+                  label={`Открыть «${row.fileName}» в новой вкладке`}
+                  href={files.contentUrl(row.id)}
+                />
+                <ConfirmIconAction
+                  icon={<TrashIcon />}
+                  label={`Удалить «${row.fileName}» из ревизии`}
+                  danger
                   disabled={!canUpload}
-                >
-                  <Button size="small" danger disabled={!canUpload}>
-                    Удалить
-                  </Button>
-                </Popconfirm>
-              </Space>
+                  loading={remove.isPending}
+                  onClick={() => remove.mutate(row.id)}
+                  confirmTitle={`Удалить «${row.fileName}»?`}
+                  confirmDescription={deletionWarning}
+                />
+              </RowActions>
             ),
           },
         ]}
       />
     </>
   );
+}
+
+/** Склонение по русскому правилу: 1 страница, 2 страницы, 5 страниц. */
+function plural(count: number, one: string, few: string, many: string): string {
+  const mod100 = count % 100;
+  if (mod100 >= 11 && mod100 <= 14) return many;
+  const mod10 = count % 10;
+  if (mod10 === 1) return one;
+  if (mod10 >= 2 && mod10 <= 4) return few;
+  return many;
 }

@@ -19,8 +19,15 @@
  * Токен сессии вращается (`POST /auth/csrf`), и вкладка, открытая до вращения,
  * законно получает 403. Слепой повтор любого 403 маскировал бы отсутствие прав,
  * а повтор без границы дал бы цикл.
+ *
+ * **4. В сеть отсюда никто не ходит напрямую.** Каждая попытка уезжает через
+ * `api/queue.ts`: он держит темп, параллелизм, дедупликацию одинаковых чтений в
+ * полёте, повторы по 429/5xx и общую паузу по `Retry-After`. Повтор CSRF
+ * остался здесь и в очередь не переехал намеренно — это протокол приложения, а
+ * не свойство транспорта, и очереди незачем знать про вращение токена.
  */
-import { ApiError, isCsrfRejection, parseProblem } from './problem.js';
+import { ApiError, isCsrfRejection, parseProblem, retryAfterMsOf } from './problem.js';
+import { submit, type RequestKind } from './queue.js';
 
 /** Заголовок CSRF (`apps/api/src/auth/session.ts`). */
 const CSRF_HEADER = 'x-csrf-token';
@@ -112,26 +119,55 @@ async function readBody<T>(response: Response): Promise<T> {
   return (await response.json()) as T;
 }
 
+/**
+ * Ключ дедупликации.
+ *
+ * Только для `GET` и только когда у запроса нет полей, различающих намерение:
+ * `If-Match` и `Idempotency-Key` на чтении не ставятся, а собственные заголовки
+ * вызывающего могут менять ответ, и склеивать такие запросы нельзя.
+ */
+function dedupeKeyOf(method: HttpMethod, url: string, options: RequestOptions): string | null {
+  if (method !== 'GET') return null;
+  if (options.headers !== undefined && Object.keys(options.headers).length > 0) return null;
+  return `GET ${url}`;
+}
+
 async function attempt(
   method: HttpMethod,
   path: string,
   options: RequestOptions,
   csrfToken: string | null,
 ): Promise<Response> {
-  const headers: Record<string, string> = { accept: 'application/json', ...options.headers };
-  if (options.body !== undefined) headers['content-type'] = 'application/json';
-  if (options.ifMatch !== undefined) headers['if-match'] = `"${String(options.ifMatch)}"`;
-  if (options.idempotencyKey !== undefined) {
-    headers['idempotency-key'] = options.idempotencyKey;
-  }
-  if (MUTATING_METHODS.has(method) && csrfToken !== null) headers[CSRF_HEADER] = csrfToken;
+  const url = buildUrl(path, options.query);
+  const kind: RequestKind = MUTATING_METHODS.has(method) ? 'mutation' : 'read';
 
-  return fetch(buildUrl(path, options.query), {
-    method,
-    credentials: 'same-origin',
-    headers,
-    ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
+  return submit({
+    kind,
+    dedupeKey: dedupeKeyOf(method, url, options),
     ...(options.signal === undefined ? {} : { signal: options.signal }),
+    // Заголовки собираются на КАЖДУЮ попытку, а не один раз снаружи: между
+    // повторами токен CSRF мог смениться на другой вкладке, и замороженный
+    // набор ушёл бы со старым.
+    send: (signal) => {
+      const headers: Record<string, string> = { accept: 'application/json', ...options.headers };
+      if (options.body !== undefined) headers['content-type'] = 'application/json';
+      if (options.ifMatch !== undefined) headers['if-match'] = `"${String(options.ifMatch)}"`;
+      if (options.idempotencyKey !== undefined) {
+        headers['idempotency-key'] = options.idempotencyKey;
+      }
+      if (MUTATING_METHODS.has(method) && csrfToken !== null) headers[CSRF_HEADER] = csrfToken;
+
+      return fetch(url, {
+        method,
+        credentials: 'same-origin',
+        headers,
+        ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
+        // Сигнал очереди, а не вызывающего: очередь связывает их сама и добавляет
+        // собственную отмену. Раньше сигнал не доходил до `fetch` вовсе, и
+        // «отменённый» TanStack Query запрос всё равно уезжал на сервер.
+        signal,
+      });
+    },
   });
 }
 
@@ -158,7 +194,12 @@ export async function request<T>(
   }
 
   if (!response.ok) {
-    throw new ApiError(response.status, await parseProblem(response), `HTTP ${response.status}`);
+    throw new ApiError(
+      response.status,
+      await parseProblem(response),
+      `HTTP ${String(response.status)}`,
+      retryAfterMsOf(response),
+    );
   }
 
   return {

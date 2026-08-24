@@ -27,7 +27,7 @@
  * ссылка хуже её отсутствия.
  */
 import { useState, type ReactNode } from 'react';
-import { App as AntApp, Button, Segmented, Space, Table, Tag, Typography } from 'antd';
+import { App as AntApp, Button, Collapse, Segmented, Space, Table, Tag, Typography } from 'antd';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { bundles, checks, workflow } from '../../api/endpoints.js';
 import { navigationKeys, revisionKeys } from '../../api/keys.js';
@@ -39,7 +39,7 @@ import {
 import { describeError } from '../../api/problem.js';
 import type { Finding } from '../../api/types.js';
 import { useSession } from '../../app/session.js';
-import { Link } from '../../app/router.js';
+import { Link, useQueryParam } from '../../app/router.js';
 import { ErrorState, LoadingState } from '../../shared/ui.js';
 import {
   FINDING_ORIGIN_LABELS,
@@ -49,6 +49,9 @@ import {
   labelOf,
 } from '../../shared/labels.js';
 import { OverrideDialog } from './OverrideDialog.js';
+import { DocumentsTab } from '../documents/DocumentsTab.js';
+import { FieldsTab } from '../fields/FieldsTab.js';
+import { ApprovalCard } from '../workflow/ApprovalCard.js';
 
 type StateFilter = 'all' | 'open' | 'undetermined' | 'waived' | 'resolved';
 
@@ -77,6 +80,15 @@ export function ChecksTab({ revisionId }: { revisionId: string }): ReactNode {
   const queryClient = useQueryClient();
   const [stateFilter, setStateFilter] = useState<StateFilter>('all');
   const [overriding, setOverriding] = useState<Finding | null>(null);
+  // Какая секция раскрыта, решает адрес: по `?section=documents` сюда ведут
+  // ссылки «К документу» и «К реквизиту» из таблицы замечаний, а также прежние
+  // адреса `?tab=documents` и `?tab=fields`, которые `RevisionScreen`
+  // переписывает на этот вид. Ссылка, ведущая на свёрнутую секцию, — это ссылка,
+  // которая не работает.
+  const requestedSection = useQueryParam('section');
+  const [openSections, setOpenSections] = useState<string[]>(
+    requestedSection === 'documents' || requestedSection === 'fields' ? [requestedSection] : [],
+  );
 
   const runs = useQuery({
     queryKey: revisionKeys.checkRuns(revisionId),
@@ -99,19 +111,6 @@ export function ChecksTab({ revisionId }: { revisionId: string }): ReactNode {
     queryKey: revisionKeys.bundlePages(bundleId ?? 'none'),
     queryFn: () => bundles.pages(bundleId ?? ''),
     enabled: bundleId !== null,
-  });
-
-  const run = useMutation({
-    mutationFn: () => checks.run(revisionId),
-    onSuccess: async (result) => {
-      message.success(
-        result.created
-          ? 'Прогон проверок поставлен в очередь'
-          : 'Прогон проверок уже стоит в очереди',
-      );
-      await queryClient.invalidateQueries({ queryKey: revisionKeys.checkRuns(revisionId) });
-    },
-    onError: (error) => message.error(describeError(error)),
   });
 
   const override = useMutation({
@@ -143,15 +142,20 @@ export function ChecksTab({ revisionId }: { revisionId: string }): ReactNode {
       <TransferReconciliationCard revisionId={revisionId} />
 
       <Space wrap style={{ marginBottom: 12 }}>
-        <Button
-          type="primary"
-          onClick={() => run.mutate()}
-          loading={run.isPending}
-          disabled={!can('checks.run')}
-          data-testid="run-checks"
-        >
-          Запустить проверку
-        </Button>
+        {/*
+          Кнопки «Запустить проверку» здесь больше нет (S24).
+
+          Она запускала ТОЛЬКО последнюю стадию, а над вкладками стояла
+          «Проверить», запускавшая конвейер целиком. Два похожих имени с разным
+          охватом — источник путаницы, на которую и указал заказчик: «есть кнопка
+          Проверить, есть вкладка Проверка, где есть кнопка Запустить проверку…
+          не понятно, за что отвечают».
+
+          Работа не потеряна: «2. Распознать» над вкладками сама выбирает точку
+          входа по состоянию и при готовых документах ставит ровно `checks.run`
+          (`modules/pipeline/routes.ts`). Гранулярный маршрут
+          `POST /revisions/{id}/checks` остался — это ручной путь инженера.
+        */}
         <Segmented<StateFilter>
           value={stateFilter}
           onChange={setStateFilter}
@@ -242,6 +246,46 @@ export function ChecksTab({ revisionId }: { revisionId: string }): ReactNode {
         ]}
       />
 
+      {/*
+        «Документы» и «Реквизиты» переехали сюда из собственных вкладок (S24).
+
+        Это не перестановка ради экономии места. Обе — РЕЗУЛЬТАТ разбора, ради
+        которого нажимали «Распознать», а не отдельные этапы работы: инженер не
+        идёт «на вкладку Документы», он смотрит, что портал вычитал из комплекта,
+        — там же, где смотрит замечания. Шесть вкладок заставляли искать, на
+        какой из них лежит ответ.
+
+        Свёрнуты по умолчанию и с ленивым рендером: у обеих внутри свои запросы и
+        таблицы на сотни строк, и грузить их ради «Открытых замечаний» незачем.
+      */}
+      <Collapse
+        style={{ marginTop: 16 }}
+        destroyOnHidden
+        activeKey={openSections}
+        onChange={(keys) => setOpenSections(Array.isArray(keys) ? keys : [keys])}
+        items={[
+          {
+            key: 'documents',
+            label: 'Документы комплекта',
+            children: <DocumentsTab revisionId={revisionId} />,
+          },
+          {
+            key: 'fields',
+            label: 'Реквизиты',
+            children: <FieldsTab revisionId={revisionId} />,
+          },
+        ]}
+      />
+
+      {/*
+        Согласование — последним, под результатом проверки. Подрядчик видит, что
+        нашлось, и тут же решает, отдавать ли комплект генподрядчику; раньше для
+        этого надо было уйти на вкладку «История» к журналу.
+      */}
+      <div style={{ marginTop: 16 }}>
+        <ApprovalCard revisionId={revisionId} />
+      </div>
+
       <OverrideDialog
         finding={overriding}
         busy={override.isPending}
@@ -292,7 +336,7 @@ function EvidenceLinks({
 
   if (finding.targetType === 'document' && finding.targetId !== null) {
     links.push(
-      <Link key="document" to={`/ids/revisions/${revisionId}?tab=documents`}>
+      <Link key="document" to={`/ids/revisions/${revisionId}?tab=checks&section=documents`}>
         К документу
       </Link>,
     );
@@ -300,7 +344,7 @@ function EvidenceLinks({
 
   if (finding.targetType === 'field_value' && finding.targetId !== null) {
     links.push(
-      <Link key="field" to={`/ids/revisions/${revisionId}?tab=fields`}>
+      <Link key="field" to={`/ids/revisions/${revisionId}?tab=checks&section=fields`}>
         К реквизиту
       </Link>,
     );

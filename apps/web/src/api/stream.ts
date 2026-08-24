@@ -24,6 +24,31 @@
  * это решение за него.
  */
 
+import { retryAfterMsOf } from './problem.js';
+
+/**
+ * Поток отклонён ответом сервера.
+ *
+ * Отдельный класс, а не `Error` с текстом: политика переподключения живёт в
+ * экране (`features/revision/stream.tsx`), и решать «ждать названную паузу или
+ * считать попытку неудачной» он обязан по коду ответа, а не разбором строки.
+ */
+export class StreamRejected extends Error {
+  readonly status: number;
+  readonly retryAfterMs: number | null;
+
+  constructor(status: number, retryAfterMs: number | null) {
+    super(
+      status === 429
+        ? 'Поток событий придержан: слишком много запросов'
+        : `Поток событий отклонён: HTTP ${String(status)}`,
+    );
+    this.name = 'StreamRejected';
+    this.status = status;
+    this.retryAfterMs = retryAfterMs;
+  }
+}
+
 /** Кадр потока: имя, данные и номер, если сервер его назвал. */
 export interface SseFrame {
   readonly id: string | null;
@@ -116,7 +141,13 @@ export async function readEventStream(options: SseOptions): Promise<void> {
   });
 
   if (!response.ok) {
-    throw new Error(`Поток событий отклонён: HTTP ${String(response.status)}`);
+    // 429 отличается от прочих отказов и по причине, и по лечению: поток не
+    // сломан, у вкладки просто кончился бюджет запросов. Обычная ошибка сожгла
+    // бы одну из пяти попыток переподключения и приблизила переход в `lost`, где
+    // свежесть держит опрос — то есть исчерпание лимита включало бы более
+    // прожорливый режим. Здесь вместо этого называется пауза, которую назвал
+    // сервер, и вызывающий её выжидает.
+    throw new StreamRejected(response.status, retryAfterMsOf(response));
   }
   const body = response.body;
   if (body === null) throw new Error('Браузер не отдал тело потока событий');

@@ -58,6 +58,24 @@ export async function readRecognitionSettings(db: Database): Promise<Recognition
   };
 }
 
+/**
+ * Действует ли неизменяемость §3.9 (`core.enforce_immutability`).
+ *
+ * Второй читатель того же ключа: первый — SQL-функция `immutability_enforced()`
+ * из миграции 0035, которую спрашивают триггеры. Дублирование намеренное и не
+ * сводимое к одному месту: триггер обязан решать внутри БД (иначе прямой SQL
+ * обходит запрет), а репозиторий обязан решать ДО запроса — чтобы отвечать
+ * человеку понятной причиной, а не ловить `restrict_violation` из драйвера и
+ * гадать, какой из сорока трёх триггеров сработал.
+ *
+ * Ключ и значение по умолчанию у обоих читателей общие: расхождение дало бы
+ * режим, в котором один слой пропускает, а другой отвергает.
+ */
+export async function readImmutabilityEnforced(db: Database): Promise<boolean> {
+  const value = await readEffectiveSetting(db, 'core.enforce_immutability');
+  return value !== false;
+}
+
 /** Режим dry-run стадий AI (`ai.dry_run_only`) — уходит в снимок прогона VLM. */
 export async function readAiDryRunOnly(db: Database): Promise<boolean> {
   const value = await readEffectiveSetting(db, 'ai.dry_run_only');

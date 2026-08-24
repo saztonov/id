@@ -45,6 +45,7 @@ import type { AuthScope } from '../../auth/scope.js';
 import { withScope, type ScopeTarget } from '../scoped.js';
 import { appendAudit, type AuditActor } from './audit.js';
 import { appendRevisionEvent } from './jobs.js';
+import { purgeDerivedForRevision } from './purge.js';
 import { conflict, notFound, unprocessable } from '../../lib/problem.js';
 
 export type Database = NodePgDatabase;
@@ -624,15 +625,33 @@ export async function reorderSourceFiles(
  * ревизии, поэтому чистка хранилища — дело `storage.gc` (§12), который считает
  * ссылки, а не удаляет по факту одной удалённой строки.
  */
+export interface DeleteSourceFileOptions {
+  /** Действует ли §3.9; см. `EditableRevisionOptions`. */
+  readonly enforceImmutability?: boolean;
+}
+
 export async function deleteSourceFile(
   db: Database,
   scope: AuthScope,
   revisionId: string,
   fileId: string,
   actor: AuditActor,
+  options: DeleteSourceFileOptions = {},
 ): Promise<boolean> {
   return db.transaction(async (tx) => {
-    const revision = await requireEditableRevision(tx, scope, revisionId);
+    // Собранный рабочий документ больше не запрещает удаление, и это исправление
+    // дефекта, а не послабление. Прежний отказ звучал как «состав и порядок
+    // файлов зафиксированы разметкой», то есть ссылался на неизменяемость,
+    // которой в черновике нет: рабочий документ черновика пересобирается в
+    // любой момент. Настоящая причина запрета была технической — на страницах
+    // файла висит разметка, и внешний ключ не даёт их удалить. Теперь эта
+    // разметка сносится явно, а пользователь предупреждён о том, что теряет.
+    const revision = await requireEditableRevision(tx, scope, revisionId, {
+      ...(options.enforceImmutability === undefined
+        ? {}
+        : { enforceImmutability: options.enforceImmutability }),
+      allowBuiltBundle: true,
+    });
 
     const [target] = await tx
       .select({ id: sourceFiles.id, fileName: sourceFiles.fileName })
@@ -640,6 +659,14 @@ export async function deleteSourceFile(
       .where(and(eq(sourceFiles.id, fileId), eq(sourceFiles.revisionId, revisionId)))
       .limit(1);
     if (target === undefined) return false;
+
+    // Производное сносится целиком по ВСЕЙ ревизии, а не по одному файлу, и это
+    // не грубость. Рабочий документ — склейка всех файлов, разметка ложится на
+    // его страницы, распознавание идёт по разметке: удаление одного файла
+    // сдвигает нумерацию страниц у всех остальных и обесценивает цепочку целиком.
+    // Выборочная чистка оставила бы разметку, указывающую на страницы с другими
+    // номерами, — то есть данные, которые выглядят целыми и врут.
+    await purgeDerivedForRevision(tx, revisionId);
 
     // Страницы раньше файла: FK не каскадный намеренно, чтобы удаление
     // страницы никогда не происходило как побочный эффект.
@@ -655,7 +682,7 @@ export async function deleteSourceFile(
       entityType: 'source_file',
       entityId: fileId,
       objectId: revision.objectId,
-      payload: { revisionId, fileName: target.fileName },
+      payload: { revisionId, fileName: target.fileName, derivedPurged: true },
     });
     await appendRevisionEvent(tx, {
       revisionId,
@@ -725,20 +752,45 @@ function toFileView(row: {
  * подан (409), рабочий документ собран (409). Сливать их в один — значит
  * заставлять подрядчика гадать, что именно не так.
  */
+export interface EditableRevisionOptions {
+  /**
+   * Действует ли §3.9 (`core.enforce_immutability`).
+   *
+   * `false` — режим тестирования: оба запрета ниже пропускаются. Значение
+   * приходит СНАРУЖИ, а не читается здесь: функция вызывается внутри транзакции
+   * и по нескольку раз за операцию, а настройка одна на запрос — читать её на
+   * каждый вызов значило бы платить лишним запросом за неменяющийся ответ.
+   */
+  readonly enforceImmutability?: boolean;
+  /**
+   * Разрешить правку состава при собранном рабочем документе.
+   *
+   * Отдельно от режима тестирования, потому что это ДРУГОЙ случай. Сборка не
+   * доказательство: рабочий документ черновика пересобирается в любой момент, и
+   * запрет здесь стоял не ради неизменяемости, а ради того, чтобы разметка не
+   * осталась висеть на удалённых страницах. Вызывающий, который эту разметку
+   * сносит сам (`purgeDerivedForRevision`), берёт ответственность на себя.
+   */
+  readonly allowBuiltBundle?: boolean;
+}
+
 export async function requireEditableRevision(
   executor: Executor,
   scope: AuthScope,
   revisionId: string,
+  options: EditableRevisionOptions = {},
 ): Promise<RevisionForFiles> {
   const revision = await findRevisionForFiles(executor, scope, revisionId);
   if (revision === null) throw notFound('Ревизия поставки не найдена.');
 
-  if (revision.status !== EDITABLE_STATUS) {
+  const enforce = options.enforceImmutability !== false;
+
+  if (enforce && revision.status !== EDITABLE_STATUS) {
     throw conflict(
       `Состав ревизии в статусе «${revision.status}» неизменяем. Исправление вносится новой ревизией.`,
     );
   }
-  if (revision.hasBundle) {
+  if (revision.hasBundle && options.allowBuiltBundle !== true) {
     throw conflict(
       'Рабочий документ ревизии уже собран: состав и порядок файлов зафиксированы разметкой.',
     );

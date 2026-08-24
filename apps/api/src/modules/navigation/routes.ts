@@ -46,7 +46,7 @@
  */
 import type { FastifyRequest } from 'fastify';
 import type { AppInstance } from '../../app.js';
-import { notFound } from '../../lib/problem.js';
+import { conflict, notFound } from '../../lib/problem.js';
 import { requireIdempotencyKey, requireIfMatch } from '../../lib/http-headers.js';
 import { currentAuth } from '../../middleware/require-auth.js';
 import {
@@ -63,6 +63,7 @@ import {
   createDraftRevision,
   createRegistry,
   createWork,
+  deleteWork,
   excludeWork,
   findRegistry,
   findRegistryFile,
@@ -75,9 +76,11 @@ import {
   listRegistryWorks,
   listWorkRevisions,
   listWorks,
+  previewWorkDeletion,
   updateRegistry,
   updateWork,
 } from '../../db/repositories/navigation.js';
+import { readImmutabilityEnforced } from '../../config/portal-settings.js';
 import {
   findRegistryReconciliation,
   findWorkReconciliation,
@@ -108,6 +111,7 @@ import {
   sectionCountsSchema,
   updateRegistryBodySchema,
   updateWorkBodySchema,
+  workDeletionPreviewSchema,
   workIdParamSchema,
   workListQuerySchema,
   workPageSchema,
@@ -124,6 +128,13 @@ const PREFIX = '/api/v1';
 
 const readWorks = requirePermission('submission.read');
 const uploadWorks = requirePermission('submission.upload');
+/**
+ * Удаление комплекта — администраторское действие.
+ *
+ * Не `submission.upload`, которым заводят и наполняют комплекты: завести свой
+ * и стереть чужую работу вместе с историей проверок — разные по весу действия.
+ */
+const manageWorks = requirePermission('settings.manage');
 const manageRegistry = requirePermission('registry.manage');
 const acceptRegistryPermission = requirePermission('registry.accept');
 /** Чтение реестра доступно всем, кто вообще видит ИД. */
@@ -242,6 +253,70 @@ function registerWorkRoutes(app: AppInstance): void {
       return reply.code(200).send(updated);
     },
   );
+
+  /**
+   * Что исчезнет вместе с комплектом.
+   *
+   * Отдельный GET перед удалением, а не текст в подтверждении: числа знает
+   * только БД. Он же отвечает, можно ли удалять вообще, — тем же списком
+   * `blockers`, что вернёт отказ. Экран показывает препятствия ДО нажатия, как
+   * это уже делает согласование ревизии: кнопка, которая гарантированно
+   * получит 409, вводит в заблуждение.
+   *
+   * Право на просмотр то же, что на удаление: числа по чужому комплекту — это
+   * сведения о чужой работе, и отдавать их шире, чем само действие, незачем.
+   */
+  app.get(
+    `${PREFIX}/works/:workId/deletion-preview`,
+    {
+      preHandler: manageWorks,
+      schema: { params: workIdParamSchema, response: { 200: workDeletionPreviewSchema } },
+    },
+    async (request, reply) => {
+      const { scope } = currentAuth(request);
+      const preview = await previewWorkDeletion(
+        app.db,
+        scope,
+        request.params.workId,
+        await readImmutabilityEnforced(app.db),
+      );
+      if (preview === null) throw notFound('Комплект не найден.');
+      return reply.code(200).send({ ...preview, blockers: [...preview.blockers] });
+    },
+  );
+
+  /**
+   * Удаление комплекта со всем содержимым.
+   *
+   * Объявлено через `app.route`, а не `app.delete`: правило eslint, запрещающее
+   * запросы к БД вне `db/repositories/`, ищет вызовы `.delete()` по имени метода
+   * и не различает `db.delete` от `app.delete` (так же сделаны остальные DELETE
+   * портала — см. `modules/files/routes.ts`).
+   *
+   * Отказ 409 перечисляет помехи дословно: «нельзя» без причины отправляет
+   * администратора искать её по схеме.
+   */
+  app.route({
+    method: 'DELETE',
+    url: `${PREFIX}/works/:workId`,
+    preHandler: manageWorks,
+    schema: { params: workIdParamSchema },
+    handler: async (request, reply) => {
+      const { scope } = currentAuth(request);
+      const result = await deleteWork(
+        app.db,
+        scope,
+        request.params.workId,
+        auditActor(app, request),
+        await readImmutabilityEnforced(app.db),
+      );
+      if (result === null) throw notFound('Комплект не найден.');
+      if (!result.deleted) {
+        throw conflict(`Комплект удалить нельзя: ${result.blockers.join('; ')}.`);
+      }
+      return reply.code(204).send();
+    },
+  });
 }
 
 // =====================================================================

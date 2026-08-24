@@ -63,6 +63,13 @@ import { MATCH_STATE_LABELS, PAGE_ROLE_LABELS, labelOf } from '../../shared/labe
 import { ToneTag } from '../../shared/tags.js';
 import { useManualLabel } from './useManualLabel.js';
 
+/**
+ * Ширина выпадающего списка видов ИД — та же, что на панели разметки
+ * (`markup/PageTypePanel.tsx`). Оба списка показывают ОДИН каталог, и разная
+ * ширина читалась бы как разный набор.
+ */
+const TYPE_POPUP_WIDTH = 560;
+
 export function DocumentsTab({ revisionId }: { revisionId: string }): ReactNode {
   const { can } = useSession();
   const { message } = AntApp.useApp();
@@ -139,10 +146,12 @@ export function DocumentsTab({ revisionId }: { revisionId: string }): ReactNode 
   if (list.isPending) return <LoadingState label="Загрузка документов…" />;
   if (list.isError) return <ErrorState error={list.error} />;
 
-  const typeOptions = (docTypes.data ?? []).map((type) => ({
-    value: type.code,
-    label: `${type.name}${type.isFallback ? ' (резервный)' : ''}`,
-  }));
+  // `title` дублирует подпись: названия видов ИД доходят до 74 символов, и
+  // подсказка по наведению — единственный способ дочитать строку, не выбирая её.
+  const typeOptions = (docTypes.data ?? []).map((type) => {
+    const label = `${type.name}${type.isFallback ? ' (резервный)' : ''}`;
+    return { value: type.code, label, title: label };
+  });
 
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
@@ -216,7 +225,11 @@ export function DocumentsTab({ revisionId }: { revisionId: string }): ReactNode 
             render: (_value, row) => (
               <Select
                 size="small"
+                // Ширину поля в таблице не раздуваем — колонок и без того много;
+                // читаемость даёт список шире поля (по умолчанию antd повторяет
+                // ширину поля и обрезает названия ещё и в нём).
                 style={{ minWidth: 240 }}
+                popupMatchSelectWidth={TYPE_POPUP_WIDTH}
                 value={typeDraft[row.id] ?? row.docTypeCode}
                 placeholder="тип не определён"
                 options={typeOptions}
@@ -555,7 +568,7 @@ function DocumentCard({ documentId }: { documentId: string }): ReactNode {
  */
 interface ManualLabelControls {
   readonly canEdit: boolean;
-  readonly typeOptions: readonly { value: string; label: string }[];
+  readonly typeOptions: readonly { value: string; label: string; title: string }[];
   readonly pending: boolean;
   readonly onSetType: (sourcePageId: string, docTypeCode: string) => void;
   readonly onSetContinuation: (sourcePageId: string) => void;
@@ -632,6 +645,7 @@ function ClassificationTable({
               <Select
                 size="small"
                 style={{ minWidth: 200 }}
+                popupMatchSelectWidth={TYPE_POPUP_WIDTH}
                 placeholder="тип страницы…"
                 {...(row.source === 'manual' && row.docTypeCode !== null
                   ? { value: row.docTypeCode }

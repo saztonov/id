@@ -63,6 +63,16 @@ export function hasPermission(roles: readonly UserRole[], permission: Permission
 export interface SessionValue {
   readonly me: Me;
   readonly can: (permission: Permission) => boolean;
+  /**
+   * Действует ли неизменяемость §3.9 (S24).
+   *
+   * Рядом с `can`, потому что отвечает на такой же вопрос — «можно ли это
+   * действие», — но по другой причине: `can` смотрит на роль, а это на режим
+   * работы портала. Смешивать их в одном предикате было бы ошибкой: отказ по
+   * праву и отказ по неизменяемости чинятся по-разному, и объяснять их надо
+   * разными словами.
+   */
+  readonly immutabilityEnforced: boolean;
 }
 
 const SessionContext = createContext<SessionValue | null>(null);
@@ -80,6 +90,7 @@ export function useMeQuery(): UseQueryResult<Me, unknown> {
 export function SessionProvider({ me, children }: { me: Me; children: ReactNode }): ReactNode {
   const value: SessionValue = {
     me,
+    immutabilityEnforced: me.immutabilityEnforced,
     can: (permission) => hasPermission(me.roles, permission),
   };
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;

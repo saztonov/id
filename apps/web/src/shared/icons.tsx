@@ -74,3 +74,64 @@ export function SettingsIcon({ size = 18 }: IconProps = {}): ReactNode {
     </>,
   );
 }
+
+// =====================================================================
+// Действия в таблицах (S24)
+// =====================================================================
+
+/*
+ * Глифы действий рисуются здесь по той же причине, что и три навигационных
+ * выше: `@ant-design/icons` в зависимостях нет, и добавлять пакет с тысячами
+ * путей ради пяти фигур незачем.
+ *
+ * Все пять — БЕЗ подписи внутри, поэтому имя действия обязано приходить снаружи
+ * (`RowActions.tsx` требует `label` типом). Иконка сама по себе ничего не
+ * значит: «крестик» одинаково читается как «удалить» и как «закрыть», и решает
+ * это не рисунок, а доступное имя.
+ */
+
+/** Удаление: корзина. */
+export function TrashIcon({ size = 16 }: IconProps = {}): ReactNode {
+  return frame(
+    size,
+    <>
+      <path d="M4 7h16" />
+      <path d="M10 11v6M14 11v6" />
+      <path d="M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12" />
+      <path d="M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+    </>,
+  );
+}
+
+/** Правка: карандаш. */
+export function EditIcon({ size = 16 }: IconProps = {}): ReactNode {
+  return frame(
+    size,
+    <>
+      <path d="M4 20h4l10-10a2.8 2.8 0 0 0-4-4L4 16z" />
+      <path d="M13.5 6.5 17.5 10.5" />
+    </>,
+  );
+}
+
+/** Открыть в новой вкладке: стрелка из рамки. */
+export function OpenIcon({ size = 16 }: IconProps = {}): ReactNode {
+  return frame(
+    size,
+    <>
+      <path d="M14 4h6v6" />
+      <path d="M20 4 11 13" />
+      <path d="M18 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h5" />
+    </>,
+  );
+}
+
+/** Переместить выше. */
+export function MoveUpIcon({ size = 16 }: IconProps = {}): ReactNode {
+  return frame(size, <path d="M12 19V6M6 12l6-6 6 6" />);
+}
+
+/** Переместить ниже. */
+export function MoveDownIcon({ size = 16 }: IconProps = {}): ReactNode {
+  return frame(size, <path d="M12 5v13M6 12l6 6 6-6" />);
+}

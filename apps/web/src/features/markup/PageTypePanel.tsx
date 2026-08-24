@@ -31,6 +31,16 @@ import type { DocType, PageClassification } from '../../api/types.js';
 import { ToneTag } from '../../shared/tags.js';
 import { useManualLabel } from '../documents/useManualLabel.js';
 
+/**
+ * Ширина выпадающего списка видов ИД.
+ *
+ * 560 px покрывают самое длинное название каталога целиком. Число, а не
+ * `false`: `false` отдаёт ширину содержимому, и список прыгал бы от страницы к
+ * странице вслед за самой длинной ВИДИМОЙ строкой — при поиске по подстроке
+ * набор строк меняется на каждое нажатие клавиши.
+ */
+const POPUP_WIDTH = 560;
+
 export interface PageTypePanelProps {
   readonly revisionId: string;
   /** Страница рабочего документа, открытая на канве. */
@@ -50,10 +60,14 @@ export function PageTypePanel(props: PageTypePanelProps): ReactNode {
   const isManual = classification?.source === 'manual';
   const pageNo = page.workingPageIndex + 1;
 
-  const typeOptions = docTypes.map((type) => ({
-    value: type.code,
-    label: `${type.name}${type.isFallback ? ' (резервный)' : ''}`,
-  }));
+  // `title` дублирует подпись: даже в широком списке названия вроде «Акт
+  // освидетельствования участков сетей инженерно-технического обеспечения»
+  // упираются в правый край, и подсказка по наведению — единственный способ
+  // дочитать строку, не выбирая её.
+  const typeOptions = docTypes.map((type) => {
+    const label = `${type.name}${type.isFallback ? ' (резервный)' : ''}`;
+    return { value: type.code, label, title: label };
+  });
 
   return (
     <div
@@ -74,7 +88,20 @@ export function PageTypePanel(props: PageTypePanelProps): ReactNode {
       <Space size={6} wrap>
         <Select
           size="small"
-          style={{ minWidth: 240 }}
+          // Ширина фиксированная, а не `flex`: `Space` оборачивает каждого
+          // потомка в собственный `div`, поэтому селект НЕ является flex-
+          // элементом панели, и `flex-basis` на нём был бы проигнорирован.
+          // 420 px вмещают большинство названий каталога; остальное дочитывается
+          // в выпадающем списке и в подсказке. Прежние 240 px резали до двух
+          // слов даже короткие названия. `maxWidth: '100%'` спасает узкий экран:
+          // панель `flex-wrap`, и селект переносится целиком, а не выдавливает
+          // соседей за край.
+          style={{ width: 420, maxWidth: '100%' }}
+          // Выпадающий список ШИРЕ поля. По умолчанию antd повторяет ширину
+          // поля (`popupMatchSelectWidth: true`), и обрезание из поля попадало
+          // в список — то есть выбрать было нельзя даже вслепую по началу
+          // строки, если начала совпадают («Акт освидетельствования …»).
+          popupMatchSelectWidth={POPUP_WIDTH}
           // Значение — ТОЛЬКО ручная метка вида (B-DOC с типом). Автовывод и
           // «продолжение» значением не показываются: у продолжения собственного
           // типа нет, а автовывод подписан отдельным текстом ниже.

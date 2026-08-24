@@ -42,12 +42,27 @@ export type ProblemSlug =
 export class ApiError extends Error {
   readonly status: number;
   readonly problem: ProblemDetails | null;
+  /**
+   * Через сколько сервер разрешил повторить (`Retry-After`), в миллисекундах.
+   *
+   * Хранится в ошибке, потому что заголовки ответа дальше транспорта не идут, а
+   * без этого числа экран не может сказать «данные подтянутся через N секунд» и
+   * скатывается к «не удалось получить данные» — сообщению, из которого следует,
+   * что сломалось, хотя всего лишь попросили подождать.
+   */
+  readonly retryAfterMs: number | null;
 
-  constructor(status: number, problem: ProblemDetails | null, fallback: string) {
+  constructor(
+    status: number,
+    problem: ProblemDetails | null,
+    fallback: string,
+    retryAfterMs: number | null = null,
+  ) {
     super(problem?.detail ?? problem?.title ?? fallback);
     this.name = 'ApiError';
     this.status = status;
     this.problem = problem;
+    this.retryAfterMs = retryAfterMs;
   }
 
   /** Вид проблемы, если сервер его назвал. */
@@ -86,6 +101,38 @@ export function isUnauthenticated(value: unknown): boolean {
  */
 export function isVersionConflict(value: unknown): boolean {
   return isApiError(value) && value.status === 412;
+}
+
+/**
+ * Слишком много запросов.
+ *
+ * Отдельный предикат по той же причине, что и `isVersionConflict`: на этом
+ * условии экран ведёт себя иначе, чем при любой другой ошибке, — он НЕ прячет
+ * уже показанные данные. Они не устарели катастрофически, обновление просто
+ * задержится, и подменять их красным экраном значит наказывать пользователя за
+ * то, что портал слишком часто спрашивал сервер.
+ */
+export function isRateLimited(value: unknown): boolean {
+  return isApiError(value) && value.status === 429;
+}
+
+/**
+ * Разбор `Retry-After` из ответа.
+ *
+ * Спецификация допускает две формы — секунды и HTTP-дату. Портал шлёт секунды
+ * (`apps/api/src/lib/problem.ts`), но разбирать обе дешевле, чем однажды
+ * получить дату от промежуточного прокси и молча посчитать её нулём.
+ */
+export function retryAfterMsOf(response: Response): number | null {
+  const raw = response.headers.get('retry-after');
+  if (raw === null) return null;
+
+  const seconds = Number(raw.trim());
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.round(seconds * 1000);
+
+  const at = Date.parse(raw);
+  if (Number.isNaN(at)) return null;
+  return Math.max(0, at - Date.now());
 }
 
 /** Ответ отвергнут проверкой CSRF — токен обновляется и запрос повторяется один раз. */

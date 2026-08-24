@@ -66,6 +66,7 @@ import {
   reorderSourceFiles,
   requireEditableRevision,
 } from '../../db/repositories/files.js';
+import { readImmutabilityEnforced } from '../../config/portal-settings.js';
 import { LOCAL_UPLOAD_PATH } from '../../storage/local.js';
 import { isStorageError, type ByteRange } from '../../storage/provider.js';
 import { blobKey, uploadKey } from '../../storage/keys.js';
@@ -504,12 +505,17 @@ function registerDeleteRoute(app: AppInstance): void {
     schema: { params: revisionFileParamSchema },
     handler: async (request, reply) => {
       const { scope } = currentAuth(request);
+      // Флаг читается ЗДЕСЬ, один раз на запрос: репозиторий вызывает
+      // `requireEditableRevision` внутри транзакции, и чтение настройки на
+      // каждый вызов стоило бы лишнего запроса ради неменяющегося ответа.
+      const enforceImmutability = await readImmutabilityEnforced(app.db);
       const removed = await deleteSourceFile(
         app.db,
         scope,
         request.params.revisionId,
         request.params.fileId,
         auditActor(app, request),
+        { enforceImmutability },
       );
       if (!removed) throw notFound('Файл не найден.');
       return reply.code(204).send();

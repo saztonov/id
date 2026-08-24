@@ -33,11 +33,12 @@
  * Роли влияют только на состав меню. Право проверяет сервер (§4.1): скрытая
  * ссылка не защищает раздел, она избавляет от перехода, который кончится 403.
  */
-import { useState, type ReactNode } from 'react';
-import { Layout, Typography } from 'antd';
+import { useEffect, useState, type ReactNode } from 'react';
+import { Alert, Layout, Typography } from 'antd';
 import { Link, useLocation } from './router.js';
 import { useSession, type Permission } from './session.js';
 import { session as sessionApi } from '../api/endpoints.js';
+import { onRateLimitPause, pausedUntilMs } from '../api/queue.js';
 import { CatalogIcon, DocumentIcon, SettingsIcon } from '../shared/icons.js';
 
 interface NavItem {
@@ -281,9 +282,87 @@ export function AppShell({ children }: { children: ReactNode }): ReactNode {
           Content, а не на второй элемент внутри него.
         */}
         <Layout.Content id="main" style={{ padding: 16, flex: 1, minWidth: 0 }}>
+          <TestingModeNotice />
+          <RateLimitNotice />
           {children}
         </Layout.Content>
       </div>
     </Layout>
+  );
+}
+
+/**
+ * Портал придержал обновления по требованию сервера.
+ *
+ * Отдельная полоса, а не ошибка экрана, и это не смягчение формулировки.
+ * Ответ 429 не означает, что данные недоступны: то, что уже показано, остаётся
+ * годным — обновление просто задержится на названное сервером время. Прежнее
+ * поведение подменяло весь экран красным «Не удалось получить данные», то есть
+ * отнимало у пользователя работающую страницу за то, что портал слишком часто
+ * спрашивал сервер. Виноват при этом был клиент, а расплачивался человек.
+ *
+ * Полоса живёт в оболочке, а не на экране ревизии: бюджет запросов общий на весь
+ * API (ключ лимита — адрес), поэтому пауза касается и каталога, и справочников,
+ * и любого другого открытого экрана.
+ */
+function RateLimitNotice(): ReactNode {
+  const [until, setUntil] = useState(() => pausedUntilMs());
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => onRateLimitPause(setUntil), []);
+
+  useEffect(() => {
+    if (until === 0) return;
+    const timer = setInterval(() => setNow(Date.now()), 500);
+    return () => {
+      clearInterval(timer);
+    };
+  }, [until]);
+
+  const leftMs = until - now;
+  if (until === 0 || leftMs <= 0) return null;
+
+  return (
+    <Alert
+      type="info"
+      showIcon
+      style={{ marginBottom: 12 }}
+      data-testid="rate-limit-notice"
+      message="Портал притормаживает обновление данных"
+      description={`Слишком много запросов подряд. Показанное на экране остаётся верным; обновление продолжится через ${String(Math.ceil(leftMs / 1000))} с.`}
+    />
+  );
+}
+
+/**
+ * Неизменяемость данных отключена.
+ *
+ * Плашка висит всё время, пока режим включён, и закрыть её нельзя. Это не
+ * навязчивость: в этом режиме поданный комплект перестаёт быть неприкосновенным
+ * — файл удаляется из ревизии, которую уже отправили на согласование, а
+ * согласовать можно комплект, не прошедший ни одной проверки. Признак, который
+ * надо искать в настройках, здесь бесполезен: узнать о режиме обязан каждый, кто
+ * работает в портале, а не только тот, кто его включал.
+ *
+ * Отдельно от `RateLimitNotice`, хотя обе живут в оболочке: та говорит о том,
+ * что сейчас происходит, и исчезает сама, а эта — о том, как настроен портал.
+ */
+function TestingModeNotice(): ReactNode {
+  const { immutabilityEnforced } = useSession();
+  if (immutabilityEnforced) return null;
+
+  return (
+    <Alert
+      type="warning"
+      showIcon
+      style={{ marginBottom: 12 }}
+      data-testid="testing-mode-notice"
+      message="Режим тестирования: неизменяемость данных отключена"
+      description={
+        'Состав поданных комплектов правится, файлы удаляются, а препятствия согласованию ' +
+        'показываются, но не запрещают действие. Перед боевой эксплуатацией включите настройку ' +
+        '«Неизменяемость поданных данных» на странице «Администрирование».'
+      }
+    />
   );
 }

@@ -159,6 +159,7 @@ export const NAVIGATION_ROUTES = {
   work: (workId: string) => `${V1}/works/${workId}`,
   sectionCounts: (objectId: string) => `${V1}/objects/${objectId}/sections/counts`,
   revisionsOfWork: (workId: string) => `${V1}/works/${workId}/revisions`,
+  workDeletionPreview: (workId: string) => `${V1}/works/${workId}/deletion-preview`,
   registries: `${V1}/registries`,
   registry: (registryId: string) => `${V1}/registries/${registryId}`,
   registryWork: (registryId: string, workId: string) =>
@@ -373,6 +374,42 @@ export async function createWork(input: CreateWorkInput): Promise<CreatedWork> {
     },
   });
   return response.data;
+}
+
+/**
+ * Что исчезнет вместе с комплектом.
+ *
+ * Спрашивается ПЕРЕД показом подтверждения, а не считается на клиенте: экран
+ * объекта не держит ни блоков разметки, ни замечаний, и посчитать их ему нечем.
+ * `blockers` тот же список, которым ответит отказ, — препятствия показываются до
+ * нажатия, а не выясняются им.
+ */
+export interface WorkDeletionPreview {
+  workId: string;
+  title: string;
+  revisions: number;
+  files: number;
+  pages: number;
+  layoutBlocks: number;
+  documents: number;
+  findings: number;
+  blockers: string[];
+}
+
+export async function getWorkDeletionPreview(workId: string): Promise<WorkDeletionPreview> {
+  return get<WorkDeletionPreview>(NAVIGATION_ROUTES.workDeletionPreview(workId));
+}
+
+/**
+ * Удаление комплекта со всем содержимым.
+ *
+ * Право — `settings.manage` (администратор). Сервер отвергает удаление 409 с
+ * перечислением помех, если у комплекта есть согласованная ревизия, он включён в
+ * переданный реестр или на ревизию наложен юридический запрет: это уже ушло
+ * наружу и перестало быть внутренним делом портала.
+ */
+export async function deleteWork(workId: string): Promise<void> {
+  await request<void>('DELETE', NAVIGATION_ROUTES.work(workId));
 }
 
 // =====================================================================

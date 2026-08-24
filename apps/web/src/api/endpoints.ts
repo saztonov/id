@@ -255,7 +255,10 @@ export const pipeline = {
     }).then((r) => r.data),
 
   /** Постраничный прогресс распознавания: «идёт» без числа страниц бесполезно. */
-  progress: (runId: string) => get<RecognitionProgress>(`${V1}/recognition-runs/${runId}/progress`),
+  progress: (runId: string, signal?: AbortSignal) =>
+    get<RecognitionProgress>(`${V1}/recognition-runs/${runId}/progress`, {
+      ...(signal === undefined ? {} : { signal }),
+    }),
 };
 
 // =====================================================================
@@ -534,8 +537,18 @@ export const workflow = {
 // =====================================================================
 
 export const revisionEvents = {
-  processingStatus: (revisionId: string) =>
-    get<ProcessingStatus>(`${V1}/revisions/${revisionId}/processing-status`),
+  /**
+   * Сводка стадий конвейера.
+   *
+   * Единственное чтение портала, которое опрашивается в цикле и обесценивается
+   * потоком событий, поэтому именно оно принимает `AbortSignal` от TanStack
+   * Query. Без сигнала отменённый рефетч всё равно уезжал на сервер и съедал
+   * слот лимита — а `invalidateQueries` отменяет рефетч на каждое событие.
+   */
+  processingStatus: (revisionId: string, signal?: AbortSignal) =>
+    get<ProcessingStatus>(`${V1}/revisions/${revisionId}/processing-status`, {
+      ...(signal === undefined ? {} : { signal }),
+    }),
   streamUrl: (revisionId: string) => `${V1}/revisions/${revisionId}/events`,
 };
 

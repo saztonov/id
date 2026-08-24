@@ -25,6 +25,7 @@ import { hasPortalAccess, type DevStubIdentity } from './oidc.js';
 import { recordAuthEvent } from './local/audit.js';
 import { registerLocalAuthRoutes } from './local/routes.js';
 import { provisionUser } from './provisioning.js';
+import { readImmutabilityEnforced } from '../config/portal-settings.js';
 import {
   CSRF_COOKIE,
   csrfCookieOptions,
@@ -109,6 +110,26 @@ const meResponseSchema = z.object({
     idleExpiresAt: z.string(),
     absoluteExpiresAt: z.string(),
   }),
+  /**
+   * Режим работы портала (S24).
+   *
+   * `immutabilityEnforced: false` означает, что действует режим тестирования:
+   * триггеры §3.9 пропускают запись, состав поданной ревизии правится, а
+   * блокеры согласования показываются, но не запирают кнопки.
+   *
+   * Отдаётся здесь, а не отдельным запросом, по двум причинам. Первая: значение
+   * нужно ВСЕМ экранам сразу — оболочка рисует плашку, «Файлы» объясняют
+   * последствия удаления, «Проверка» решает, гасить ли кнопки, — и отдельный
+   * запрос означал бы одинаковую загрузку в трёх местах. Вторая: `/me` и так
+   * запрашивается первым и кэшируется на минуту, а режим меняется раз в
+   * несколько недель.
+   *
+   * Права на чтение настроек это не требует: факт «неизменяемость выключена»
+   * обязан быть виден каждому, кто работает в портале. Тихо ослабленная защита —
+   * худший вид защиты, и прятать её от подрядчика значило бы прятать от того,
+   * чей комплект в этом режиме перестаёт быть неприкосновенным.
+   */
+  immutabilityEnforced: z.boolean(),
 });
 
 /**
@@ -383,6 +404,7 @@ function registerSharedAuthRoutes(app: AppInstance): void {
       // Режим берётся из конфигурации, а не у провайдера: в локальном режиме
       // провайдера нет вовсе, и спрашивать «какой у тебя режим» не у кого.
       authMode: env.AUTH_MODE,
+      immutabilityEnforced: await readImmutabilityEnforced(app.db),
       user: {
         id: resolution.user.id,
         email: resolution.user.email,

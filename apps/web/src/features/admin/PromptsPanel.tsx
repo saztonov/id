@@ -49,6 +49,8 @@ import { useSession } from '../../app/session.js';
 import { ErrorState, LoadingState, UnavailableState } from '../../shared/ui.js';
 import { applyFieldErrors, mapFieldErrors, type FieldPath } from '../../shared/formErrors.js';
 import { ToneTag, type Tone } from '../../shared/tags.js';
+import { IconAction } from '../../shared/RowActions.js';
+import { EditIcon } from '../../shared/icons.js';
 
 /** Стадии конвейера, на которых работает промт (`prompt_templates_stage_chk`). */
 const STAGES: Record<string, string> = {
@@ -274,9 +276,11 @@ function PromptsWorkspace(): ReactNode {
                 render: (_value, row) => (
                   <Space size={4} wrap>
                     {row.state === 'draft' && (
-                      <Button size="small" onClick={() => setEditing(row)}>
-                        Править текст
-                      </Button>
+                      <IconAction
+                        icon={<EditIcon />}
+                        label={`Править текст промта ${row.code} версии ${String(row.version)}`}
+                        onClick={() => setEditing(row)}
+                      />
                     )}
                     {TRANSITIONS[row.state].map((step) => (
                       <Button

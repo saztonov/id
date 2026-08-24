@@ -19,7 +19,7 @@
  * переживает переключение вкладок; состояние потока вкладки читают из контекста
  * (`stream.tsx`).
  */
-import { type ReactNode } from 'react';
+import { useEffect, type ReactNode } from 'react';
 import { Alert, Tabs, Tag, Typography } from 'antd';
 import { useQuery } from '@tanstack/react-query';
 import { workflow } from '../../api/endpoints.js';
@@ -31,16 +31,28 @@ import { Link, useNavigate, useQueryParam } from '../../app/router.js';
 import { periodLabel } from '../ids/ObjectScreen.js';
 import { FilesTab } from '../files/FilesTab.js';
 import { MarkupScreen } from '../markup/MarkupScreen.js';
-import { DocumentsTab } from '../documents/DocumentsTab.js';
-import { FieldsTab } from '../fields/FieldsTab.js';
 import { ChecksTab } from '../checks/ChecksTab.js';
 import { HistoryTab } from '../history/HistoryTab.js';
 import { PipelineBar } from './PipelineBar.js';
 import { RevisionStreamProvider } from './stream.js';
 import { StreamIndicator } from './StreamIndicator.js';
 
-const TABS = ['files', 'markup', 'documents', 'fields', 'checks', 'history'] as const;
+const TABS = ['files', 'markup', 'checks', 'history'] as const;
 type TabKey = (typeof TABS)[number];
+
+/**
+ * Прежние вкладки, ставшие секциями «Проверки» (S24).
+ *
+ * Адреса `?tab=documents` и `?tab=fields` обязаны продолжать работать: по ним
+ * ходят ссылки «finding → evidence» из таблицы замечаний — переход к
+ * доказательству, отдельный пункт приёмки §16, — и любые ссылки, которые люди
+ * успели сохранить. Молча открывать вместо них «Файлы» значило бы сломать
+ * навигацию, оставив её на вид исправной.
+ */
+const MOVED_TO_CHECKS: Readonly<Record<string, 'documents' | 'fields'>> = {
+  documents: 'documents',
+  fields: 'fields',
+};
 
 /** Терминальные состояния: производное содержимое заперто (§3.9). */
 const TERMINAL = ['returned', 'approved', 'superseded'];
@@ -99,7 +111,23 @@ export function RevisionScreen({ revisionId }: { revisionId: string }): ReactNod
 function RevisionWorkspace({ revisionId }: { revisionId: string }): ReactNode {
   const navigate = useNavigate();
   const requested = useQueryParam('tab');
-  const tab: TabKey = TABS.includes(requested as TabKey) ? (requested as TabKey) : 'files';
+  const moved = requested === null ? undefined : MOVED_TO_CHECKS[requested];
+  const tab: TabKey =
+    moved !== undefined
+      ? 'checks'
+      : TABS.includes(requested as TabKey)
+        ? (requested as TabKey)
+        : 'files';
+
+  // Старый адрес переписывается на новый, а не просто открывает «Проверку»:
+  // иначе строка в браузере продолжала бы обещать вкладку, которой нет, и
+  // копирование ссылки из адресной строки воспроизводило бы устаревший вид.
+  // `section` раскрывает нужную секцию — ссылка обязана вести к содержимому, а
+  // не к свёрнутому заголовку.
+  useEffect(() => {
+    if (moved === undefined) return;
+    navigate(`/ids/revisions/${revisionId}?tab=checks&section=${moved}`, { replace: true });
+  }, [moved, navigate, revisionId]);
 
   const state = useQuery({
     queryKey: revisionKeys.workflow(revisionId),
@@ -162,16 +190,6 @@ function RevisionWorkspace({ revisionId }: { revisionId: string }): ReactNode {
             key: 'markup',
             label: 'Разметка',
             children: <MarkupScreen revisionId={revisionId} />,
-          },
-          {
-            key: 'documents',
-            label: 'Документы',
-            children: <DocumentsTab revisionId={revisionId} />,
-          },
-          {
-            key: 'fields',
-            label: 'Реквизиты',
-            children: <FieldsTab revisionId={revisionId} />,
           },
           {
             key: 'checks',

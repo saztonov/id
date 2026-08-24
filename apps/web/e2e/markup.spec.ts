@@ -156,6 +156,12 @@ test.describe('экран разметки', () => {
 
     // Вид ИД выбирается DOM-контролом над канвой — у действия есть путь мимо
     // Konva (§17). Поиск сужает виртуализованный список до нужной опции.
+    //
+    // Опция ищется по `title`, и с S24 это НАМЕРЕННЫЙ атрибут, а не следствие
+    // обрезания: `PageTypePanel` ставит полное название в `title` каждой опции,
+    // потому что даже в широком списке длинные виды ИД упираются в правый край.
+    // Раньше `title` вешала antd на усечённый текст, и тест зависел от дефекта,
+    // который здесь и чинится, — расширь список, и локатор перестал бы работать.
     const combo = panel.getByRole('combobox', { name: 'Вид ИД страницы 1' });
     await combo.click();
     await combo.fill('скрытых работ');
@@ -173,7 +179,12 @@ test.describe('экран разметки', () => {
           `/api/v1/revisions/${IDS.revisionMarkup}/classifications`,
         );
         const body = (await response.json()) as {
-          items: { sourcePageId: string; source: string; label: string; docTypeCode: string | null }[];
+          items: {
+            sourcePageId: string;
+            source: string;
+            label: string;
+            docTypeCode: string | null;
+          }[];
         };
         const row = body.items.find((item) => item.sourcePageId === IDS.page0);
         return row === undefined ? 'нет' : `${row.source}:${row.label}:${row.docTypeCode ?? ''}`;
@@ -195,7 +206,12 @@ test.describe('экран разметки', () => {
           `/api/v1/revisions/${IDS.revisionMarkup}/classifications`,
         );
         const body = (await response.json()) as {
-          items: { sourcePageId: string; source: string; label: string; docTypeCode: string | null }[];
+          items: {
+            sourcePageId: string;
+            source: string;
+            label: string;
+            docTypeCode: string | null;
+          }[];
         };
         const row = body.items.find((item) => item.sourcePageId === IDS.page1);
         return row === undefined ? 'нет' : `${row.source}:${row.label}:${row.docTypeCode ?? ''}`;

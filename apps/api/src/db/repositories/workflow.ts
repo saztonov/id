@@ -281,6 +281,19 @@ export interface WorkflowActionInput {
   readonly expectedVersion: number;
   readonly comment?: string | undefined;
   readonly actor: AuditActor;
+  /**
+   * Запирают ли блокеры переход (`core.enforce_immutability`, S24).
+   *
+   * `false` — режим тестирования: препятствия по-прежнему ВЫЧИСЛЯЮТСЯ и уходят
+   * на экран, но переход не отвергают. Убирать сам список было бы ошибкой:
+   * «чего не хватает» — самая полезная часть этого ответа, и на этапе
+   * тестирования она нужна не меньше, чем на бою. Мешает не список, а запрет.
+   *
+   * Проверка версии (`If-Match`), права и переходы статусов остаются в силе:
+   * они защищают не от неполноты комплекта, а от гонки и от чужого действия, и
+   * к неизменяемости отношения не имеют.
+   */
+  readonly enforceBlockers?: boolean;
 }
 
 export interface SubmitInput extends WorkflowActionInput {
@@ -425,13 +438,21 @@ export async function submitRevision(
   const revision = await requireRevision(db, scope, input.revisionId);
   const readiness = await loadRevisionReadiness(db, scope, input.revisionId);
   const blockers = submitBlockers(revision, readiness);
-  if (blockers.length > 0) {
+  if (blockers.length > 0 && input.enforceBlockers !== false) {
     throw conflict(`Комплект нельзя подать: ${blockers.join('; ')}.`);
   }
-  if (readiness.bundleManifestHash !== input.aggregateManifestHash) {
+  if (
+    readiness.bundleManifestHash !== input.aggregateManifestHash &&
+    input.enforceBlockers !== false
+  ) {
     // Состав изменился между сборкой рабочего документа и подачей. Молча
     // подать «то, что есть» нельзя: разметка и распознавание уже идут по
     // собранному документу, и хэш описывал бы не его.
+    //
+    // В режиме тестирования проверка снята вместе с блокерами, и это не
+    // отдельное послабление, а условие того, чтобы первое имело смысл: чаще
+    // всего рабочего документа просто нет, `bundleManifestHash` равен null, и
+    // подача упиралась бы сюда сразу после снятого «рабочий документ не собран».
     throw conflict(
       'Состав ревизии изменился после сборки рабочего документа: соберите его заново.',
     );
@@ -680,7 +701,7 @@ export async function approveRevision(
   // значило бы отправить человека чинить то, что не откроет ему это действие.
   const readiness = await loadRevisionReadiness(db, scope, input.revisionId);
   const blockers = approveBlockers(revision, readiness);
-  if (blockers.length > 0) {
+  if (blockers.length > 0 && input.enforceBlockers !== false) {
     throw conflict(`Комплект нельзя согласовать: ${blockers.join('; ')}.`);
   }
 

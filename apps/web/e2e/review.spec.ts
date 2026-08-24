@@ -28,17 +28,28 @@ test('замечание видно вместе с важностью, сост
   await expect(page.getByText('Сверьте значение с выпиской ЕГРЮЛ')).toBeVisible();
 });
 
+// Согласование живёт на вкладке «Проверка» с S24: решение принимают, глядя на
+// список замечаний, а не на журнал. На «Истории» остался журнал без кнопок.
 test('экран согласования показывает препятствия до нажатия', async ({ page }) => {
-  await signIn(page, KC.engineer, `/ids/revisions/${IDS.revisionReview}?tab=history`);
+  await signIn(page, KC.engineer, `/ids/revisions/${IDS.revisionReview}?tab=checks`);
 
+  await expect(page.getByTestId('approval-card')).toBeVisible();
   await expect(page.getByTestId('revision-status')).toContainText('На проверке');
   // Подача уже состоялась, поэтому препятствие подаче названо, а кнопка выключена.
-  await expect(page.getByText('Мешает подать')).toBeVisible();
+  await expect(page.getByText('Мешает отправить')).toBeVisible();
   await expect(page.getByTestId('submit-revision')).toBeDisabled();
 });
 
-test('согласование меняет статус ревизии в базе', async ({ page }) => {
+test('вкладка «История» не предлагает действий', async ({ page }) => {
   await signIn(page, KC.engineer, `/ids/revisions/${IDS.revisionReview}?tab=history`);
+
+  await expect(page.getByTestId('revision-status')).toBeVisible();
+  await expect(page.getByTestId('submit-revision')).toHaveCount(0);
+  await expect(page.getByTestId('approve-revision')).toHaveCount(0);
+});
+
+test('согласование меняет статус ревизии в базе', async ({ page }) => {
+  await signIn(page, KC.engineer, `/ids/revisions/${IDS.revisionReview}?tab=checks`);
 
   await page.getByTestId('approve-revision').click();
 
@@ -56,6 +67,8 @@ test('согласование меняет статус ревизии в ба�
 test('согласованная ревизия заперта: правка производного содержимого недоступна', async ({
   page,
 }) => {
+  // Прежний адрес вкладки «Документы» обязан продолжать работать: он
+  // переписывается на секцию «Проверки», а не открывает «Файлы» молча.
   await signIn(page, KC.engineer, `/ids/revisions/${IDS.revisionReview}?tab=documents`);
 
   await expect(page.getByText('Ревизия в терминальном состоянии')).toBeVisible();

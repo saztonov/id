@@ -99,6 +99,7 @@ import { withScope, type ScopeTarget } from '../scoped.js';
 import { appendAudit, type AuditActor } from './audit.js';
 import { findConstructionObject, objectVisibility, visibleWhere } from './catalog.js';
 import { appendRevisionEvent } from './jobs.js';
+import { purgeRevisionEntirely } from './purge.js';
 import type { Database } from './users.js';
 
 const WORK_SCOPE: ScopeTarget = {
@@ -653,6 +654,221 @@ export async function updateWork(
   );
 
   return findWork(db, scope, workId);
+}
+
+// =====================================================================
+// Удаление комплекта (S24)
+// =====================================================================
+
+/**
+ * Что исчезнет вместе с комплектом.
+ *
+ * Отдельный ответ, а не строка подтверждения на клиенте: числа знает только БД,
+ * а решение принимает человек. «Удалить комплект?» без чисел — это вопрос, на
+ * который нельзя ответить осознанно: за безобидным названием может стоять
+ * ревизия с сотней страниц и суточной работой распознавания.
+ */
+export interface WorkDeletionPreview {
+  readonly workId: string;
+  readonly title: string;
+  readonly revisions: number;
+  readonly files: number;
+  readonly pages: number;
+  readonly layoutBlocks: number;
+  readonly documents: number;
+  readonly findings: number;
+  /**
+   * Что мешает удалить. Пустой список — удаление пройдёт.
+   *
+   * Фразы готовые и русские, как `submitBlockers` в рабочем процессе: словарь
+   * поверх кодов на клиенте потерял бы числа, а «нельзя» без причины отправляет
+   * администратора искать её по всей схеме.
+   */
+  readonly blockers: readonly string[];
+}
+
+/**
+ * Помехи удалению комплекта.
+ *
+ * Все три — про то, что уже ушло наружу и перестало быть внутренним делом
+ * портала. Согласованная ревизия — это принятое решение с архивом и хэшем
+ * состава; переданный реестр — подписанная папка, список работ в которой
+ * доказывает, что именно передавали; юридический запрет прямо требует хранить.
+ * Удалить комплект в этих случаях значит переписать чужой документ, и режим
+ * тестирования тут ничего не меняет: он ослабляет запреты СВОЕЙ базы, а не
+ * обязательства перед второй стороной.
+ */
+async function workDeletionBlockers(
+  db: Database,
+  workId: string,
+  enforceImmutability: boolean,
+): Promise<readonly string[]> {
+  const result = await db.execute<{
+    approved: number;
+    issued: number;
+    holds: number;
+    submitted: number;
+  }>(sql`
+    select
+      (select count(*) from submission_revisions
+        where work_id = ${workId}::uuid and status = 'approved')::int as approved,
+      (select count(*) from submission_revisions
+        where work_id = ${workId}::uuid
+          and status in ('submitted', 'in_review', 'returned'))::int as submitted,
+      (select count(*) from registries r
+         join registry_items ri on ri.registry_id = r.id
+        where ri.work_id = ${workId}::uuid and r.status <> 'draft')::int as issued,
+      (select count(*) from legal_holds lh
+         join submission_revisions sr on sr.id = lh.revision_id
+        where sr.work_id = ${workId}::uuid and lh.released_at is null)::int as holds
+  `);
+
+  const row = result.rows[0];
+  const blockers: string[] = [];
+  if (row === undefined) return blockers;
+
+  if (row.approved > 0) {
+    blockers.push(
+      `в комплекте есть согласованные ревизии: ${String(row.approved)} — согласование отменяется решением, а не удалением`,
+    );
+  }
+  if (row.issued > 0) {
+    blockers.push(
+      `комплект включён в переданный реестр (записей: ${String(row.issued)}) — список переданных работ неизменяем`,
+    );
+  }
+  if (row.holds > 0) {
+    blockers.push(`на ревизии наложен неснятый юридический запрет: ${String(row.holds)}`);
+  }
+  // Поданная ревизия — помеха ТОЛЬКО в строгом режиме, и названа она явно, а не
+  // оставлена триггерам. Без этой строки удаление доходило бы до БД и падало
+  // `restrict_violation` из драйвера — то есть пятисотым кодом без объяснения,
+  // хотя запрет ожидаемый и объяснимый: состав поданного комплекта покрыт хэшем,
+  // и всё выведенное из него доказывает, что именно проверяли.
+  if (enforceImmutability && row.submitted > 0) {
+    blockers.push(
+      `в комплекте есть поданные ревизии: ${String(row.submitted)} — состав поданного ` +
+        'комплекта неизменяем (§3.9). Удаление доступно в режиме тестирования',
+    );
+  }
+  return blockers;
+}
+
+export async function previewWorkDeletion(
+  db: Database,
+  scope: AuthScope,
+  workId: string,
+  enforceImmutability: boolean,
+): Promise<WorkDeletionPreview | null> {
+  const work = await findWork(db, scope, workId);
+  if (work === null) return null;
+
+  const counts = await db.execute<{
+    revisions: number;
+    files: number;
+    pages: number;
+    blocks: number;
+    documents: number;
+    findings: number;
+  }>(sql`
+    with rev as (select id from submission_revisions where work_id = ${workId}::uuid)
+    select
+      (select count(*) from rev)::int as revisions,
+      (select count(*) from source_files where revision_id in (select id from rev))::int as files,
+      (select count(*) from source_pages where revision_id in (select id from rev))::int as pages,
+      (select count(*) from layout_blocks where revision_id in (select id from rev))::int as blocks,
+      (select count(*) from logical_documents
+        where revision_id in (select id from rev))::int as documents,
+      (select count(*) from findings where revision_id in (select id from rev))::int as findings
+  `);
+
+  const row = counts.rows[0];
+  return {
+    workId,
+    title: work.title,
+    revisions: row?.revisions ?? 0,
+    files: row?.files ?? 0,
+    pages: row?.pages ?? 0,
+    layoutBlocks: row?.blocks ?? 0,
+    documents: row?.documents ?? 0,
+    findings: row?.findings ?? 0,
+    blockers: await workDeletionBlockers(db, workId, enforceImmutability),
+  };
+}
+
+/**
+ * Удалить комплект со всем содержимым.
+ *
+ * `null` — комплекта нет или он вне области видимости; различать их снаружи
+ * нельзя (§1.6), и маршрут отвечает на оба случая одинаково.
+ *
+ * Право на это действие — `settings.manage`, то есть администратор, а не
+ * `submission.upload`: загрузить свой комплект и стереть чужую работу вместе с
+ * историей проверок — разные по весу действия, и первое не должно давать
+ * второго.
+ *
+ * Удаление идёт ОДНОЙ транзакцией по всем ревизиям: комплект, у которого
+ * половина ревизий исчезла, а половина осталась, — это состояние, которого в
+ * модели нет и восстанавливать которое нечем.
+ */
+export async function deleteWork(
+  db: Database,
+  scope: AuthScope,
+  workId: string,
+  actor: AuditActor,
+  enforceImmutability: boolean,
+): Promise<{ readonly deleted: boolean; readonly blockers: readonly string[] } | null> {
+  const preview = await previewWorkDeletion(db, scope, workId, enforceImmutability);
+  if (preview === null) return null;
+  if (preview.blockers.length > 0) return { deleted: false, blockers: preview.blockers };
+
+  const work = await findWork(db, scope, workId);
+  if (work === null) return null;
+
+  await guardNavigation(() =>
+    db.transaction(async (tx) => {
+      const revisions = await tx
+        .select({ id: submissionRevisions.id })
+        .from(submissionRevisions)
+        .where(eq(submissionRevisions.workId, workId));
+
+      // Указатель обнуляется ПЕРВЫМ: `works.current_revision_id` ссылается на
+      // строку, которую мы сейчас удалим, и внешний ключ иначе отверг бы
+      // удаление ревизии раньше, чем дело дойдёт до самого комплекта.
+      await tx.update(works).set({ currentRevisionId: null }).where(eq(works.id, workId));
+
+      for (const revision of revisions) {
+        await purgeRevisionEntirely(tx, revision.id);
+      }
+
+      // Сверка с описью и членство в папке привязаны к работе, а не к ревизии, и
+      // своих строк в `purgeRevisionEntirely` не имеют.
+      await tx.execute(
+        sql`delete from registry_reconciliation_works where work_id = ${workId}::uuid`,
+      );
+      await tx.execute(sql`delete from registry_items where work_id = ${workId}::uuid`);
+      await tx.delete(works).where(eq(works.id, workId));
+
+      // Название и период попадают в след: после удаления карточки узнать, что
+      // именно исчезло, будет неоткуда.
+      await appendAudit(tx, scope, {
+        ...actor,
+        action: 'work.deleted',
+        entityType: 'work',
+        entityId: workId,
+        objectId: work.objectId,
+        payload: {
+          title: work.title,
+          period: work.period,
+          revisions: preview.revisions,
+          files: preview.files,
+          pages: preview.pages,
+        },
+      });
+    }),
+  );
+
+  return { deleted: true, blockers: [] };
 }
 
 // =====================================================================

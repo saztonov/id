@@ -668,15 +668,81 @@ describe('неизменяемость на уровне БД (§3.9)', () => {
     ).rejects.toThrow(/артефакт прогона распознавания/u);
   });
 
-  it('запрещает DELETE artifact_versions', async () => {
-    await expect(
-      db.query(`DELETE FROM artifact_versions WHERE id = '${ID.artifact}'`),
-    ).rejects.toThrow(/артефакт прогона распознавания/u);
+  /**
+   * Артефакт неизменяем ВСЕГДА на правку и удаляем только вместе с черновиком
+   * (миграция 0035, ADR-0015).
+   *
+   * До S24 запрет на удаление был безусловным. Практическое следствие оказалось
+   * не тем, ради которого он ставился: подрядчик не мог убрать ошибочный файл из
+   * СВОЕГО ЖЕ черновика, если успел нажать «Распознать», — и получал пятисотый
+   * код из драйвера вместо объяснения.
+   *
+   * Артефакт доказывает, что именно проверяли, а проверяют поданное. Пока
+   * ревизия черновик, доказывать нечего: хэш состава не записан, наружу ничего
+   * не уходило. Поэтому проверяются ОБЕ стороны — иначе тест доказывал бы только
+   * то, что послабление удалось внести.
+   */
+  it('DELETE artifact_versions разрешён в черновике и запрещён после подачи', async () => {
+    const artifactOfDraft = async (): Promise<number> => {
+      const rows = await db.query<{ n: number }>(
+        `SELECT count(*)::int AS n FROM artifact_versions WHERE id = '${ID.artifact}'`,
+      );
+      return rows[0]?.n ?? -1;
+    };
 
-    const rows = await db.query<{ n: number }>(
-      `SELECT count(*)::int AS n FROM artifact_versions WHERE id = '${ID.artifact}'`,
+    // Ревизия фикстуры — черновик: удаление проходит.
+    await db.query(`DELETE FROM artifact_versions WHERE id = '${ID.artifact}'`);
+    expect(await artifactOfDraft()).toBe(0);
+
+    // Вторая сторона строится на СВОЁМ комплекте, а не переводом фикстуры в
+    // поданную: возврат из `submitted` в `draft` запрещён отдельным триггером
+    // (`submission_revisions_no_reopen`), и соседние наборы этого файла считают
+    // ревизию черновиком.
+    const own = (n: number): string => id(120 + n);
+    for (const statement of [
+      `INSERT INTO works
+           (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
+         VALUES ('${own(0)}', '${ID.object}', '${ID.contractor}', '${ID.contractor}', 'roofing',
+                 DATE '2026-02-01', 'Поданный комплект', '${ID.user}')`,
+      `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no)
+         VALUES ('${own(1)}', '${own(0)}', '${ID.object}', '${ID.contractor}', 1)`,
+      `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order)
+         VALUES ('${own(2)}', '${own(1)}', '${sha('a')}', 'submitted.pdf', 0)`,
+      `INSERT INTO source_pages (id, revision_id, source_file_id, file_page_index,
+                                 revision_ordinal, width_px, height_px)
+         VALUES ('${own(3)}', '${own(1)}', '${own(2)}', 0, 0, 1654, 2339)`,
+      `INSERT INTO processing_bundles (id, revision_id, aggregate_manifest_hash,
+                                       working_pdf_blob_sha256, builder_version)
+         VALUES ('${own(4)}', '${own(1)}', '${sha('e')}', '${sha('a')}', 'builder-1')`,
+      `INSERT INTO processing_bundle_pages (bundle_id, revision_id, working_page_index, source_page_id)
+         VALUES ('${own(4)}', '${own(1)}', 0, '${own(3)}')`,
+      `INSERT INTO layout_revisions (id, revision_id, object_id, bundle_id, revision_no,
+                                     state, blocks_hash, frozen_at, frozen_by)
+         VALUES ('${own(5)}', '${own(1)}', '${ID.object}', '${own(4)}', 1,
+                 'frozen', '${sha('c')}', now(), '${ID.user}')`,
+      `INSERT INTO rd_run_documents (id, layout_revision_id, rd_document_id, rd_project_id)
+         VALUES ('${own(6)}', '${own(5)}', 'rd-doc-2', 'rd-project-2')`,
+      `INSERT INTO recognition_runs (id, revision_id, layout_revision_id, rd_run_document_id,
+                                     local_layout_hash, working_pdf_sha256)
+         VALUES ('${own(7)}', '${own(1)}', '${own(5)}', '${own(6)}', '${sha('c')}', '${sha('a')}')`,
+      `INSERT INTO artifact_versions (id, recognition_run_id, kind, s3_key, artifact_sha256, byte_size)
+         VALUES ('${own(8)}', '${own(7)}', 'md', 'artifacts/md-2', '${sha('f')}', 4096)`,
+      // Сборка и разметка обязаны быть ДО подачи: после неё их вставку запрещает
+      // тот же класс триггеров, что и всё остальное содержимое.
+      `UPDATE submission_revisions SET status = 'submitted', submitted_at = now(),
+              aggregate_manifest_hash = '${sha('e')}' WHERE id = '${own(1)}'`,
+    ]) {
+      await db.query(statement);
+    }
+
+    await expect(db.query(`DELETE FROM artifact_versions WHERE id = '${own(8)}'`)).rejects.toThrow(
+      /артефакт прогона распознавания/u,
     );
-    expect(rows[0]?.n).toBe(1);
+
+    const kept = await db.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM artifact_versions WHERE id = '${own(8)}'`,
+    );
+    expect(kept[0]?.n).toBe(1);
   });
 
   it('запрещает UPDATE опубликованного промта', async () => {
@@ -704,6 +770,98 @@ describe('неизменяемость на уровне БД (§3.9)', () => {
          WHERE code = 'page_classify_base' AND version = 2`,
     );
     expect(rows[0]?.system_prompt).toBe('исправленный черновик');
+  });
+});
+
+// =====================================================================
+// Выключатель неизменяемости (0035, S24)
+// =====================================================================
+
+/**
+ * Режим тестирования проверяется в ОБЕ стороны, и это принципиально.
+ *
+ * Выключатель ослабляет инвариант §3.9 — самый дорогой из объявленных. Тест,
+ * проверяющий только что «при false запись проходит», доказывает лишь, что
+ * защиту удалось снять. Вопрос, ради которого выключатель и сделан
+ * выключателем, другой: ВЕРНЁТСЯ ли строгость. Поэтому каждый набор ниже
+ * возвращает флаг обратно и требует прежнего отказа.
+ *
+ * Проверяется и умолчание: строки в `app_settings` нет ни в одной базе, и
+ * забытая настройка обязана означать строгий режим, а не открытый.
+ */
+describe('выключатель неизменяемости (§3.9, режим тестирования)', () => {
+  const setMode = async (enforced: boolean | null): Promise<void> => {
+    if (enforced === null) {
+      await db.query(`DELETE FROM app_settings WHERE key = 'core.enforce_immutability'`);
+      return;
+    }
+    await db.query(
+      `INSERT INTO app_settings (key, value) VALUES ('core.enforce_immutability', '${String(enforced)}'::jsonb)
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+    );
+  };
+
+  afterAll(async () => {
+    await setMode(null);
+  });
+
+  it('без строки в настройках действует строгий режим', async () => {
+    await setMode(null);
+    const rows = await db.query<{ enforced: boolean }>(
+      'SELECT immutability_enforced() AS enforced',
+    );
+    expect(rows[0]?.enforced).toBe(true);
+  });
+
+  it('строгий режим по-прежнему запирает состав поданной ревизии', async () => {
+    await setMode(true);
+    await expect(
+      db.query(
+        `INSERT INTO source_files (revision_id, blob_sha256, file_name, sort_order)
+           VALUES ('${ID.reviewRevision}', '${sha('switch-on')}', 'строгий.pdf', 90)`,
+      ),
+    ).rejects.toThrow(/исходный файл/u);
+  });
+
+  it('режим тестирования пропускает правку состава поданной ревизии', async () => {
+    await setMode(false);
+    await db.query(
+      // Тот же blob, что у существующих файлов: `stored_blobs` дедуплицирует
+      // содержимое по sha256, и заводить новую строку ради проверки триггера
+      // незачем — проверяется он, а не внешний ключ.
+      `INSERT INTO source_files (revision_id, blob_sha256, file_name, sort_order)
+         VALUES ('${ID.reviewRevision}', '${sha('a')}', 'тестовый.pdf', 91)`,
+    );
+    const rows = await db.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM source_files
+         WHERE revision_id = '${ID.reviewRevision}' AND file_name = 'тестовый.pdf'`,
+    );
+    expect(rows[0]?.n).toBe(1);
+
+    // И тут же удаляем — DELETE запирает тот же триггер, что и INSERT.
+    await db.query(
+      `DELETE FROM source_files
+         WHERE revision_id = '${ID.reviewRevision}' AND file_name = 'тестовый.pdf'`,
+    );
+  });
+
+  it('режим тестирования пропускает UPDATE согласованной ревизии', async () => {
+    // Другая функция (`deny_modification`), поэтому проверяется отдельно: три
+    // обработчика получили охранник независимо, и пропуск в одном из них
+    // означал бы, что выключатель работает наполовину.
+    await setMode(false);
+    await db.query(
+      `UPDATE submission_revisions SET version = version + 1 WHERE id = '${ID.approvedRevision}'`,
+    );
+  });
+
+  it('возврат в строгий режим снова запирает согласованную ревизию', async () => {
+    await setMode(true);
+    await expect(
+      db.query(
+        `UPDATE submission_revisions SET version = version + 1 WHERE id = '${ID.approvedRevision}'`,
+      ),
+    ).rejects.toThrow(/согласованную ревизию/u);
   });
 });
 

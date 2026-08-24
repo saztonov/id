@@ -102,6 +102,27 @@ export const sectionCountsSchema = z.array(
 
 export const workIdParamSchema = z.object({ workId: uuidSchema });
 
+/**
+ * Предпросмотр удаления комплекта (S24).
+ *
+ * Числа отдаются отдельным ответом, а не считаются на клиенте по уже загруженным
+ * спискам: экран комплекта не держит ни блоков разметки, ни замечаний, и
+ * посчитать их ему нечем. Диалог удаления обязан назвать, что именно исчезнет, —
+ * иначе «Удалить комплект?» это вопрос, на который нельзя ответить осознанно.
+ */
+export const workDeletionPreviewSchema = z.object({
+  workId: uuidSchema,
+  title: z.string(),
+  revisions: z.int().nonnegative(),
+  files: z.int().nonnegative(),
+  pages: z.int().nonnegative(),
+  layoutBlocks: z.int().nonnegative(),
+  documents: z.int().nonnegative(),
+  findings: z.int().nonnegative(),
+  /** Готовые русские фразы: словарь поверх кодов на клиенте потерял бы числа. */
+  blockers: z.array(z.string()),
+});
+
 export const workPageSchema = cursorPageSchema(workSchema);
 
 export const workListSchema = z.array(workSchema);

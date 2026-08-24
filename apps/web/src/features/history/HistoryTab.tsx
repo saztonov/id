@@ -1,19 +1,25 @@
 /**
- * Вкладка «История»: согласование, стадии обработки, прогоны распознавания (§14).
+ * Вкладка «История»: журнал обработки и согласования (§14).
  *
- * ## Согласование показывает препятствия ДО нажатия
+ * ## Здесь ничего не запускается и не решается (S24)
  *
- * `submitBlockers` и `approveBlockers` приходят готовым списком вместе со
- * статусом — экран обязан показывать, что именно мешает, а не выяснять это
- * отказом на нажатие. Фразы приходят русскими и с числами; словарь-переводчик
- * поверх них потерял бы числа (см. `shared/labels.ts`).
+ * Кнопок действий на вкладке нет ни одной. Карточка согласования переехала на
+ * «Проверку» (`features/workflow/ApprovalCard.tsx`) — туда, где принимается
+ * решение: под список замечаний. Здесь остался ответ на вопрос «что уже
+ * происходило», и смешивать его с «что сделать дальше» — то самое устройство,
+ * из-за которого «Подать на проверку» оказывалась на вкладке с журналом.
  *
- * ## `If-Match` на переходах
+ * Состояние согласования показано, но ТОЛЬКО на чтение: журнал без текущего
+ * статуса заставлял бы переключаться на другую вкладку ради одной строки.
  *
- * Каждое действие workflow требует версию ревизии. Версия берётся из ответа
- * `GET /workflow`, а не запоминается: между открытием вкладки и нажатием кнопки
- * ревизию мог тронуть другой проверяющий, и тогда переход обязан быть отвергнут,
- * а не выполнен по устаревшему представлению.
+ * ## Причина отказа обязана быть видна здесь
+ *
+ * До S24 отказ выглядел как «Отказов: 1» в таблице стадий и красный тег в
+ * таблице прогонов. Почему именно — не отвечал ни один экран портала, хотя текст
+ * приходит в тех же ответах: `jobTypes[].lastErrorMessage` в сводке стадий и
+ * `warnings` у прогона распознавания. Оба поля были объявлены в типах и не
+ * читались ни одной строкой разметки, и диагностика упиралась в админ-консоль
+ * задач, доступную только администратору.
  *
  * ## Стадии — вычисляемая сводка
  *
@@ -29,33 +35,20 @@
  * возвращается — свежесть экрана не должна зависеть от уведомлений (§3.8).
  */
 import { useState, type ReactNode } from 'react';
-import {
-  Alert,
-  App as AntApp,
-  Button,
-  Card,
-  Descriptions,
-  Form,
-  Input,
-  Modal,
-  Space,
-  Table,
-  Tag,
-  Timeline,
-  Typography,
-} from 'antd';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { Alert, Card, Descriptions, Space, Table, Tag, Timeline, Typography } from 'antd';
+import { useQuery } from '@tanstack/react-query';
 import { recognition, revisionEvents, workflow } from '../../api/endpoints.js';
 import { revisionKeys } from '../../api/keys.js';
-import { describeError } from '../../api/problem.js';
 import type {
   Artifact,
   BlockResult,
+  ProcessingStatus,
   RecognitionRun,
   StageSummary,
   WorkflowState,
 } from '../../api/types.js';
 import { useSession } from '../../app/session.js';
+import { Link } from '../../app/router.js';
 import { ErrorState, LoadingState } from '../../shared/ui.js';
 import { usePollingInterval } from '../revision/stream.js';
 import { isDryRun, isVlmRun, recognitionProviderLabel, runProviderOf } from './runProvider.js';
@@ -69,9 +62,6 @@ import {
 
 export function HistoryTab({ revisionId }: { revisionId: string }): ReactNode {
   const { can } = useSession();
-  const { message } = AntApp.useApp();
-  const queryClient = useQueryClient();
-  const [returning, setReturning] = useState(false);
   const [openedRun, setOpenedRun] = useState<string | null>(null);
   const pollingInterval = usePollingInterval();
 
@@ -81,8 +71,11 @@ export function HistoryTab({ revisionId }: { revisionId: string }): ReactNode {
   });
   const status = useQuery({
     queryKey: revisionKeys.processingStatus(revisionId),
-    queryFn: () => revisionEvents.processingStatus(revisionId),
-    refetchInterval: pollingInterval,
+    queryFn: ({ signal }) => revisionEvents.processingStatus(revisionId, signal),
+    // Функция, а не число: после отказа опрос обязан замолкнуть. Прежний
+    // фиксированный интервал продолжал тикать и по 429 — то есть добивал уже
+    // исчерпанный лимит запросов ровно тогда, когда сервер просил перестать.
+    refetchInterval: (query) => (query.state.error === null ? pollingInterval : false),
   });
   const runs = useQuery({
     queryKey: revisionKeys.recognitionRuns(revisionId),
@@ -93,48 +86,20 @@ export function HistoryTab({ revisionId }: { revisionId: string }): ReactNode {
     queryFn: () => workflow.archive(revisionId),
   });
 
-  const refresh = async (): Promise<void> => {
-    await queryClient.invalidateQueries({ queryKey: revisionKeys.workflow(revisionId) });
-    await queryClient.invalidateQueries({ queryKey: revisionKeys.archive(revisionId) });
-  };
-
-  const act = useMutation({
-    mutationFn: async (input: {
-      kind: 'submit' | 'review' | 'approve' | 'return';
-      version: number;
-      reason?: string;
-    }) => {
-      switch (input.kind) {
-        case 'submit':
-          return workflow.submit(revisionId, input.version);
-        case 'review':
-          return workflow.takeToReview(revisionId, input.version);
-        case 'approve':
-          return workflow.approve(revisionId, input.version);
-        case 'return':
-          return workflow.returnToContractor(revisionId, input.version, input.reason ?? '');
-      }
-    },
-    onSuccess: async (result) => {
-      message.success(
-        `Ревизия переведена в состояние «${labelOf(WORKFLOW_STATUS_LABELS, result.revision.status)}»`,
-      );
-      setReturning(false);
-      await refresh();
-    },
-    onError: (error) => message.error(describeError(error)),
-  });
-
   if (state.isPending) return <LoadingState label="Загрузка состояния согласования…" />;
   if (state.isError) return <ErrorState error={state.error} />;
 
   const data: WorkflowState = state.data;
-  const version = data.revision.version;
 
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
-      <Card size="small" title="Согласование">
-        <Descriptions size="small" column={2} style={{ marginBottom: 12 }}>
+      {/*
+        Состояние согласования — только на чтение. Кнопки переходов живут на
+        вкладке «Проверка», под списком замечаний: решение принимают, глядя на
+        результат проверки, а не на журнал.
+      */}
+      <Card size="small" title="Состояние согласования">
+        <Descriptions size="small" column={2}>
           <Descriptions.Item label="Статус">
             <Tag data-testid="revision-status">
               {labelOf(WORKFLOW_STATUS_LABELS, data.revision.status)}
@@ -146,65 +111,23 @@ export function HistoryTab({ revisionId }: { revisionId: string }): ReactNode {
           <Descriptions.Item label="Состав (хэш)">
             {data.revision.aggregateManifestHash?.slice(0, 12) ?? '—'}
           </Descriptions.Item>
-          <Descriptions.Item label="Версия">{version}</Descriptions.Item>
+          <Descriptions.Item label="Версия">{data.revision.version}</Descriptions.Item>
         </Descriptions>
 
         {data.revision.returnReason !== null && (
           <Alert
             type="warning"
             showIcon
-            style={{ marginBottom: 12 }}
+            style={{ marginTop: 12 }}
             message="Причина возврата"
             description={data.revision.returnReason}
           />
         )}
 
-        <Blockers title="Мешает подать" items={data.submitBlockers} />
-        <Blockers title="Мешает согласовать" items={data.approveBlockers} />
-
-        <Space wrap style={{ marginTop: 12 }}>
-          <Button
-            type="primary"
-            data-testid="submit-revision"
-            disabled={data.submitBlockers.length > 0 || !can('submission.submit')}
-            loading={act.isPending}
-            onClick={() => act.mutate({ kind: 'submit', version })}
-          >
-            Подать на проверку
-          </Button>
-          <Button
-            data-testid="take-to-review"
-            disabled={data.revision.status !== 'submitted' || !can('revision.approve')}
-            loading={act.isPending}
-            onClick={() => act.mutate({ kind: 'review', version })}
-          >
-            Взять на проверку
-          </Button>
-          <Button
-            type="primary"
-            data-testid="approve-revision"
-            disabled={data.approveBlockers.length > 0 || !can('revision.approve')}
-            loading={act.isPending}
-            onClick={() => act.mutate({ kind: 'approve', version })}
-          >
-            Согласовать
-          </Button>
-          <Button
-            danger
-            data-testid="return-revision"
-            disabled={!can('revision.return')}
-            onClick={() => setReturning(true)}
-          >
-            Вернуть подрядчику
-          </Button>
-        </Space>
-
-        <ReturnDialog
-          open={returning}
-          busy={act.isPending}
-          onCancel={() => setReturning(false)}
-          onSubmit={(reason) => act.mutate({ kind: 'return', version, reason })}
-        />
+        <Typography.Paragraph type="secondary" style={{ marginTop: 12, marginBottom: 0 }}>
+          Подать, согласовать или вернуть комплект можно на вкладке{' '}
+          <Link to={`/ids/revisions/${revisionId}?tab=checks`}>«Проверка»</Link>.
+        </Typography.Paragraph>
       </Card>
 
       <Card size="small" title="Действия по ревизии">
@@ -239,6 +162,17 @@ export function HistoryTab({ revisionId }: { revisionId: string }): ReactNode {
               size="small"
               pagination={false}
               dataSource={status.data.stages}
+              expandable={{
+                // Раскрытие стадии показывает, ЧТО именно упало и что сказал
+                // сервер. Текст ошибки приходит в том же ответе
+                // (`jobTypes[].lastErrorMessage`) и раньше не читался ни одной
+                // строкой разметки: «Отказов: 1» отправляло искать причину в
+                // админ-консоль задач, доступную только администратору.
+                expandedRowRender: (row) => (
+                  <JobTypeBreakdown stage={row.stage} jobTypes={status.data.jobTypes} />
+                ),
+                rowExpandable: (row) => status.data.jobTypes.some((job) => job.stage === row.stage),
+              }}
               columns={[
                 {
                   title: 'Стадия',
@@ -355,6 +289,58 @@ export function HistoryTab({ revisionId }: { revisionId: string }): ReactNode {
 }
 
 /**
+ * Задачи стадии и последняя ошибка каждой.
+ *
+ * Сводка по стадии отвечает «сколько упало», а этот разбор — «что именно и
+ * почему». Разница существенна: стадия `layout` — это и сборка рабочего
+ * документа, и постраничная детекция, и анализ покрытия; «отказов: 1» без имени
+ * задачи не говорит, чинить хранилище или модель.
+ *
+ * Класс ошибки показан рядом с текстом, а не вместо него: текст объясняет
+ * человеку, класс — тому, кто пойдёт искать это в журнале §11.
+ */
+function JobTypeBreakdown({
+  stage,
+  jobTypes,
+}: {
+  stage: StageSummary['stage'];
+  jobTypes: ProcessingStatus['jobTypes'];
+}): ReactNode {
+  const rows = jobTypes.filter((job) => job.stage === stage);
+  if (rows.length === 0) return null;
+
+  return (
+    <Table<ProcessingStatus['jobTypes'][number]>
+      rowKey="jobType"
+      size="small"
+      pagination={false}
+      dataSource={rows}
+      columns={[
+        { title: 'Задача', dataIndex: 'jobType', key: 'jobType' },
+        { title: 'Попыток', dataIndex: 'attempts', key: 'attempts', width: 90 },
+        { title: 'Успешно', dataIndex: 'succeeded', key: 'succeeded', width: 90 },
+        { title: 'Отказов', dataIndex: 'failed', key: 'failed', width: 90 },
+        {
+          title: 'Последняя ошибка',
+          key: 'error',
+          render: (_value, row) =>
+            row.lastErrorMessage === null && row.lastErrorClass === null ? (
+              <Typography.Text type="secondary">отказов не было</Typography.Text>
+            ) : (
+              <Space direction="vertical" size={0}>
+                <Typography.Text>{row.lastErrorMessage ?? 'текст не записан'}</Typography.Text>
+                {row.lastErrorClass !== null && (
+                  <Typography.Text type="secondary">класс: {row.lastErrorClass}</Typography.Text>
+                )}
+              </Space>
+            ),
+        },
+      ]}
+    />
+  );
+}
+
+/**
  * Подробности одного прогона распознавания (§6.2).
  *
  * Показывается то, ради чего прогон и делается: сколько страниц получили текст,
@@ -423,6 +409,36 @@ function RecognitionRunDetail({ runId }: { runId: string }): ReactNode {
         </Descriptions.Item>
       </Descriptions>
 
+      {/*
+        Предупреждения прогона: здесь и лежит причина отказа.
+
+        Поле `warnings` приходило с сервера с самого начала и не рендерилось ни
+        одним экраном, поэтому «Отказ» за 0.1 с был состоянием без объяснения.
+        Тон зависит от исхода прогона: у завершённого это замечания по пути
+        («страниц с отказом: 3»), у упавшего — то единственное, ради чего сюда и
+        приходят.
+      */}
+      {run.data.warnings.length > 0 && (
+        <Alert
+          type={run.data.status === 'done' ? 'warning' : 'error'}
+          showIcon
+          data-testid="run-warnings"
+          message={run.data.status === 'done' ? 'Замечания прогона' : 'Почему прогон не удался'}
+          description={
+            <ul style={{ margin: 0, paddingLeft: 18 }}>
+              {run.data.warnings.map((warning, index) => (
+                <li key={`${warning.code}-${String(index)}`}>
+                  {warning.message}
+                  {warning.workingPageIndex !== null &&
+                    ` (страница ${String(warning.workingPageIndex + 1)})`}
+                  <Typography.Text type="secondary"> · {warning.code}</Typography.Text>
+                </li>
+              ))}
+            </ul>
+          }
+        />
+      )}
+
       {blocks.isSuccess && blocks.data.length > 0 && (
         <Table<BlockResult>
           rowKey="layoutBlockId"
@@ -487,64 +503,5 @@ function RecognitionRunDetail({ runId }: { runId: string }): ReactNode {
         ]}
       />
     </Space>
-  );
-}
-
-function Blockers({ title, items }: { title: string; items: readonly string[] }): ReactNode {
-  if (items.length === 0) return null;
-  return (
-    <Alert
-      type="info"
-      showIcon
-      style={{ marginBottom: 8 }}
-      message={title}
-      description={
-        <ul style={{ margin: 0, paddingLeft: 18 }}>
-          {items.map((item) => (
-            <li key={item}>{item}</li>
-          ))}
-        </ul>
-      }
-    />
-  );
-}
-
-function ReturnDialog(props: {
-  readonly open: boolean;
-  readonly busy: boolean;
-  readonly onCancel: () => void;
-  readonly onSubmit: (reason: string) => void;
-}): ReactNode {
-  const [form] = Form.useForm<{ reason: string }>();
-  return (
-    <Modal
-      open={props.open}
-      title="Вернуть ревизию подрядчику"
-      okText="Вернуть"
-      cancelText="Отмена"
-      confirmLoading={props.busy}
-      onCancel={props.onCancel}
-      onOk={() => {
-        void form.validateFields().then((values) => props.onSubmit(values.reason.trim()));
-      }}
-      destroyOnHidden
-    >
-      <Typography.Paragraph type="secondary">
-        Возврат не переоткрывает ревизию: она закрывается, и создаётся новая с ссылкой на
-        родительскую.
-      </Typography.Paragraph>
-      <Form form={form} layout="vertical" preserve={false}>
-        <Form.Item
-          name="reason"
-          label="Причина возврата"
-          rules={[
-            { required: true, message: 'Причина обязательна' },
-            { min: 10, message: 'Причина короче десяти символов — это отписка' },
-          ]}
-        >
-          <Input.TextArea rows={4} data-testid="return-reason" />
-        </Form.Item>
-      </Form>
-    </Modal>
   );
 }

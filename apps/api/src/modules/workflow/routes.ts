@@ -55,6 +55,7 @@ import {
   type RevisionWorkflowView,
   type WorkflowResult,
 } from '../../db/repositories/workflow.js';
+import { readImmutabilityEnforced } from '../../config/portal-settings.js';
 import { dedupeKeyFor } from '../../jobs/types.js';
 import { tracePayload, updateContext } from '../../observability/context.js';
 import { documentPdfKey } from '../../storage/keys.js';
@@ -229,6 +230,9 @@ function registerTransitionRoutes(app: AppInstance): void {
         revisionId,
         actorUserId: user.id,
         expectedVersion,
+        // Блокеры остаются в ответе `GET /workflow` и на экране в любом режиме;
+        // выключается только их право отвергнуть переход.
+        enforceBlockers: await readImmutabilityEnforced(app.db),
         aggregateManifestHash: plan.aggregateManifestHash,
         ...(request.body.comment === undefined ? {} : { comment: request.body.comment }),
         actor: auditActor(app, request),
@@ -327,6 +331,7 @@ function registerTransitionRoutes(app: AppInstance): void {
         revisionId,
         actorUserId: user.id,
         expectedVersion,
+        enforceBlockers: await readImmutabilityEnforced(app.db),
         ...(request.body.comment === undefined ? {} : { comment: request.body.comment }),
         actor: auditActor(app, request),
       });
