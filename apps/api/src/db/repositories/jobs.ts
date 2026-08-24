@@ -56,6 +56,7 @@ import { conflict, internal, unprocessable } from '../../lib/problem.js';
 import {
   isJobType,
   jobDefinition,
+  JOB_TYPES,
   jobTypesOfQueue,
   parseJobPayload,
   revisionIdOf,
@@ -881,6 +882,46 @@ export async function cancelJob(
   });
 
   return findJob(db, scope, jobId);
+}
+
+/**
+ * Снять с очереди незавершённые задачи одной стадии по ревизии.
+ *
+ * Не путать с `cancelJob`: та — действие администратора над ОДНОЙ задачей, с
+ * аудитом и отказом на выполняющейся. Здесь конвейер снимает СВОЙ же остаток,
+ * потому что человек нажал следующую кнопку и результаты предыдущей стадии ему
+ * больше не нужны. Аудита нет намеренно: это не решение о чужой работе, а часть
+ * обработки одного нажатия, и след от неё — событие ревизии у вызывающего.
+ *
+ * Отменяются и `queued`, и `running`. Взятую воркером попытку строкой в таблице
+ * не остановить — она доработает и завершится сама; отметка нужна, чтобы такая
+ * задача не встала в очередь снова после `failJob` и не считалась незаконченной
+ * работой. Отставший обработчик, обнаружив, что цель ушла, обязан выйти тихо, а
+ * не отказом (`detection_batch_obsolete` в `local-detection.ts`).
+ *
+ * Стадия, а не список типов: типы задач одной стадии добавляются со временем, и
+ * забытый в списке тип означал бы молча недоснятый остаток.
+ */
+export async function cancelPendingJobsOfStage(
+  db: JobExecutor,
+  revisionId: string,
+  stage: ProcessingStage,
+): Promise<number> {
+  const types = JOB_TYPES.filter((type) => stageOf(type) === stage);
+  if (types.length === 0) return 0;
+
+  const cancelled = await db.execute<{ id: string }>(sql`
+    update ${jobs}
+       set status = 'cancelled', locked_by = null, locked_until = null, updated_at = now()
+     where ${jobs.payload} ->> 'revisionId' = ${revisionId}
+       and ${jobs.status} in ('queued', 'running')
+       and ${jobs.type} in (${sql.join(
+         types.map((type) => sql`${type}`),
+         sql`, `,
+       )})
+    returning id
+  `);
+  return cancelled.rows.length;
 }
 
 export interface QueueDepthRow {

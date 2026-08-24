@@ -285,23 +285,6 @@ beforeAll(async () => {
   await app.ready();
 }, 180_000);
 
-/**
- * Публикация промптов стадии recognize — предусловие успешного пути.
- *
- * Миграция 0020 кладёт их черновиками, и это НЕ упущение фикстуры, а состояние,
- * в котором портал приезжает после миграций: публикация — осознанное действие
- * администратора. Здесь оно делается прямым UPDATE, потому что предмет этого
- * файла — кнопки конвейера, а не переход состояний промпта.
- */
-async function publishRecognizePrompts(): Promise<void> {
-  await db.query(
-    `UPDATE prompt_templates
-        SET state = 'published', published_at = now(), published_by = '${USER_A}'
-      WHERE code IN (${RECOGNIZE_PROMPTS.map((code) => `'${code}'`).join(', ')})
-        AND state = 'draft'`,
-  );
-}
-
 /** «Детекция закончилась»: воркера в тесте нет, задачи закрываются руками. */
 async function finishLayoutJobs(revisionId: string): Promise<void> {
   await db.query(
@@ -452,43 +435,25 @@ describe('POST /revisions/{id}/markup', () => {
 // Кнопка «Проверить»
 // =====================================================================
 
-/**
- * Предполёт стоит ОТДЕЛЬНЫМ набором и раньше остальных: он проверяет состояние,
- * в котором портал приезжает после миграций, — промпты стадии recognize лежат
- * черновиками. Дальше по файлу они публикуются, и обратно этот набор уже не
- * поставить.
- */
-describe('POST /revisions/{id}/check: готовность стадии распознавания', () => {
-  it('без опубликованных промптов отказывает ДО заморозки и не создаёт прогон', async () => {
-    const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_READY}/check`, {
-      idempotencyKey: 'check-prompts-1',
-    });
-    expect(response.statusCode).toBe(409);
-
-    // Названы ВСЕ недостающие коды сразу: гейт воркера падал на первом же и
-    // заставлял узнавать их по одному — тремя нажатиями и тремя мёртвыми прогонами.
-    const detail = response.json<{ detail: string }>().detail;
-    for (const code of RECOGNIZE_PROMPTS) {
-      expect(detail).toContain(code);
-    }
-
-    // Заморозка необратима, поэтому отказ обязан случиться ДО неё: иначе
-    // разметка осталась бы замороженной ни за что.
-    expect(await layoutStateOf(LAYOUT_READY)).toBe('draft');
-
-    // Ни прогона, ни задачи: именно они и засоряли журнал после каждого нажатия.
-    const runs = await db.query<{ count: string | number }>(
-      `SELECT count(*) AS count FROM recognition_runs WHERE revision_id = '${REVISION_READY}'`,
-    );
-    expect(Number(runs[0]?.count ?? 0)).toBe(0);
-    const jobs = await jobsOf(REVISION_READY);
-    expect(jobs.some((job) => job.type === 'vlm.start_recognition')).toBe(false);
-  });
-});
-
 describe('POST /revisions/{id}/check', () => {
-  // Парный факт к набору выше: предполёт отказывает не вечно.
-  beforeAll(publishRecognizePrompts);
+  /**
+   * Промпты стадии recognize этот файл НЕ публикует — ни здесь, ни где-либо ещё,
+   * и это утверждение, а не упущение.
+   *
+   * Сид-миграция кладёт три кода черновиками, и раньше кнопка на этом отказывала:
+   * распознавание требовало ручной публикации текста, который лежит в коде и из
+   * которого сама миграция и сгенерирована. Теперь отсутствие опубликованной
+   * версии означает «взят встроенный текст», поэтому каждый успешный прогон ниже
+   * по файлу доказывает заодно и это.
+   */
+  it('промпты стадии recognize остались черновиками — и это ничему не мешает', async () => {
+    const rows = await db.query<{ state: string }>(
+      `SELECT state FROM prompt_templates
+        WHERE code IN (${RECOGNIZE_PROMPTS.map((code) => `'${code}'`).join(', ')})`,
+    );
+    expect(rows).toHaveLength(RECOGNIZE_PROMPTS.length);
+    expect(rows.every((row) => row.state === 'draft')).toBe(true);
+  });
 
   it('без разметки отказывает и называет первую кнопку', async () => {
     const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_BARE}/check`, {
@@ -646,5 +611,101 @@ describe('GET /recognition-runs/{id}/progress', () => {
       `/api/v1/recognition-runs/${runs[0]?.id ?? ''}/progress`,
     );
     expect(response.statusCode).toBe(404);
+  });
+});
+
+// =====================================================================
+// Режим тестирования: конвейер не отказывает
+// =====================================================================
+
+/**
+ * Выключатель ADR-0015 распространён на гейты конвейера.
+ *
+ * Набор идёт ПОСЛЕДНИМ и настройку обратно не возвращает: она глобальная, и
+ * тесты выше проверяют строгий режим на той же базе. Порядок здесь — часть
+ * фикстуры, а не случайность.
+ *
+ * Предмет — ровно то, чем заказчик упёрся на стенде: «можно отправлять на
+ * распознавание идущие выделения», «повторное распознавание просто заменяет
+ * предыдущее, не создаёт новую ревизию».
+ */
+describe('POST /revisions/{id}/check при выключенной неизменяемости', () => {
+  beforeAll(async () => {
+    await db.query(
+      `INSERT INTO app_settings (key, value) VALUES ('core.enforce_immutability', 'false'::jsonb)
+         ON CONFLICT (key) DO UPDATE SET value = excluded.value`,
+    );
+  });
+
+  it('повторное выделение блоков перезаписывает разметку, а не заводит следующую', async () => {
+    // REVISION_STUCK пришла сюда с ЗАМОРОЖЕННОЙ разметкой и прогоном по ней:
+    // в строгом режиме это ровно тот случай, когда заводилась «Ревизия 2».
+    expect(await layoutStateOf(LAYOUT_STUCK)).toBe('frozen');
+
+    const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_STUCK}/markup`);
+    expect(response.statusCode).toBe(202);
+
+    const body = response.json<{ layoutRevisionId: string | null }>();
+    expect(body.layoutRevisionId).toBe(LAYOUT_STUCK);
+    expect(await layoutStateOf(LAYOUT_STUCK)).toBe('draft');
+
+    const layouts = await db.query<{ count: string | number }>(
+      `SELECT count(*) AS count FROM layout_revisions WHERE revision_id = '${REVISION_STUCK}'`,
+    );
+    expect(Number(layouts[0]?.count ?? 0)).toBe(1);
+
+    // Сброс снёс производное прежнего распознавания: без него детекция упёрлась
+    // бы в block_results.layout_block_id ON DELETE RESTRICT.
+    const runs = await db.query<{ count: string | number }>(
+      `SELECT count(*) AS count FROM recognition_runs WHERE revision_id = '${REVISION_STUCK}'`,
+    );
+    expect(Number(runs[0]?.count ?? 0)).toBe(0);
+  });
+
+  it('идущая детекция не отказ, а отмена остатка', async () => {
+    // Задачи детекции от нажатия выше стоят в очереди.
+    const before = await db.query<{ count: string | number }>(
+      `SELECT count(*) AS count FROM jobs
+        WHERE payload->>'revisionId' = '${REVISION_STUCK}' AND status IN ('queued', 'running')`,
+    );
+    expect(Number(before[0]?.count ?? 0)).toBeGreaterThan(0);
+
+    const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_STUCK}/check`, {
+      idempotencyKey: 'check-soft-1',
+    });
+    expect(response.statusCode).toBe(202);
+    expect(await layoutStateOf(LAYOUT_STUCK)).toBe('frozen');
+
+    // Остаток снят явно: мёртвых задач «замороженная разметка не принимает
+    // результаты детекции» после этого не появляется.
+    const layoutPending = await db.query<{ count: string | number }>(
+      `SELECT count(*) AS count FROM jobs
+        WHERE payload->>'revisionId' = '${REVISION_STUCK}'
+          AND type LIKE 'layout.%' AND status IN ('queued', 'running')`,
+    );
+    expect(Number(layoutPending[0]?.count ?? 0)).toBe(0);
+  });
+
+  it('повторное распознавание заменяет прежний прогон, а не отказывает', async () => {
+    const before = await db.query<{ id: string }>(
+      `SELECT id FROM recognition_runs
+        WHERE revision_id = '${REVISION_STUCK}' AND status = 'running'`,
+    );
+    expect(before).toHaveLength(1);
+
+    const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_STUCK}/check`, {
+      idempotencyKey: 'check-soft-2',
+    });
+    expect(response.statusCode).toBe(202);
+    expect(response.json<{ stage: string }>().stage).toBe('recognition');
+
+    // Прогон ровно один — новый. Прежний снесён сбросом вместе со своими
+    // страницами: «заменяет предыдущее» здесь буквально.
+    const after = await db.query<{ id: string; status: string }>(
+      `SELECT id, status FROM recognition_runs WHERE revision_id = '${REVISION_STUCK}'`,
+    );
+    expect(after).toHaveLength(1);
+    expect(after[0]?.status).toBe('running');
+    expect(after[0]?.id).not.toBe(before[0]?.id);
   });
 });

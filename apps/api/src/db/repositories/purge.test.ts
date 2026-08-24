@@ -33,7 +33,7 @@ import { afterAll, beforeAll, expect, it } from 'vitest';
 import { createPgliteDatabase, type TestDatabase } from '@id/db-harness';
 import { loadMigrations } from '@id/migrator';
 
-import { DERIVED_DELETES, REVISION_DELETES } from './purge.js';
+import { DERIVED_DELETES, PIPELINE_RESET_DELETES, REVISION_DELETES } from './purge.js';
 
 const MIGRATIONS_DIR = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -200,3 +200,36 @@ function splitSqlStatements(sql: string): readonly string[] {
   if (current.trim() !== '') statements.push(current.trim());
   return statements;
 }
+
+/**
+ * Сброс конвейера — ПОДМНОЖЕСТВО того же порядка, а не второй список.
+ *
+ * Утверждение структурное, как и всё в этом файле: сценарный тест доказывал бы,
+ * что сегодняшний список работает, и промолчал бы ровно тогда, когда нужен, — при
+ * появлении новой таблицы ниже разметки. Два разошедшихся списка дают
+ * `foreign key violation` посреди операции, объяснить который пользователю нечем.
+ */
+it('сброс конвейера сохраняет порядок DERIVED_DELETES и щадит разметку', () => {
+  const derived = DERIVED_DELETES.map((step) => step.table);
+  const reset = PIPELINE_RESET_DELETES.map((step) => step.table);
+
+  // Порядок совпадает: подмножество получено фильтром, а не переписано руками.
+  expect(reset).toEqual(derived.filter((table) => reset.includes(table)));
+
+  // Разметка и рабочий документ переживают сброс — иначе «распознать заново
+  // поверх той же разметки» означало бы «поверх никакой».
+  const kept = derived.filter((table) => !reset.includes(table)).sort();
+  expect(kept).toEqual([
+    'layout_block_points',
+    'layout_blocks',
+    'layout_revisions',
+    'processing_bundle_pages',
+    'processing_bundles',
+  ]);
+
+  // Результаты распознавания уходят обязательно: `block_results.layout_block_id`
+  // объявлен ON DELETE RESTRICT, и без их удаления переразметка упрётся в него.
+  expect(reset).toContain('block_results');
+  expect(reset).toContain('current_block_result');
+  expect(reset).toContain('recognition_runs');
+});

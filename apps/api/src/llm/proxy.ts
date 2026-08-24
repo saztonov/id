@@ -381,10 +381,24 @@ export interface GatewayFailure {
 /**
  * Текст отказа без содержимого ответа.
  *
- * Берётся только `error.message` либо `detail` и только начало строки: тело
- * ответа шлюза — это эхо промта, то есть текст ИД, и ему в журнале не место.
- * Код ошибки возвращается отдельно: `upstream_response_too_large` меняет класс
- * отказа, и распознавать его по подстроке текста было бы гаданием.
+ * Берётся `error.message` либо `detail` и только начало строки: тело ответа
+ * шлюза — это эхо промта, то есть текст ИД, и ему в журнале не место. Код ошибки
+ * возвращается отдельно: `upstream_response_too_large` меняет класс отказа, и
+ * распознавать его по подстроке текста было бы гаданием.
+ *
+ * ## Почему читается ещё и `error.metadata`
+ *
+ * Шлюз, отвергая запрос, отвечает собственным `message` — часто это родовое
+ * «Provider returned error», из которого не следует ничего. Настоящую причину
+ * (не тот слаг модели, апстрим не принимает картинки, лимит провайдера) он кладёт
+ * в `error.metadata.raw`, а имя апстрима — в `error.metadata.provider_name`.
+ * Прежде это поле не читалось вовсе, и разбор прод-инцидента упёрся ровно в
+ * него: в журнале стояло «Шлюз LLM ответил 400: Provider returned error», и
+ * узнать, чем именно шлюз недоволен, было неоткуда.
+ *
+ * `raw` — сообщение об ОТКАЗЕ от апстрима, а не распознанный текст: эхо промта
+ * туда не попадает. Срез до 200 символов оставлен как страховка на случай, если
+ * какой-то провайдер вернёт в нём простыню.
  */
 export async function describeFailure(response: Response): Promise<GatewayFailure> {
   let detail = '';
@@ -393,10 +407,31 @@ export async function describeFailure(response: Response): Promise<GatewayFailur
     const text = await response.text();
     const parsed: unknown = text.length > 0 ? JSON.parse(text) : null;
     if (typeof parsed === 'object' && parsed !== null) {
-      const record = parsed as { error?: { message?: unknown; code?: unknown }; detail?: unknown };
+      const record = parsed as {
+        error?: {
+          message?: unknown;
+          code?: unknown;
+          metadata?: { raw?: unknown; provider_name?: unknown };
+        };
+        detail?: unknown;
+      };
       const candidate = record.error?.message ?? record.detail;
       if (typeof candidate === 'string') detail = candidate.slice(0, 200);
-      if (typeof record.error?.code === 'string') code = record.error.code;
+
+      const provider = record.error?.metadata?.provider_name;
+      if (typeof provider === 'string' && provider !== '') {
+        detail = detail === '' ? `провайдер ${provider}` : `${detail} (провайдер ${provider})`;
+      }
+      const raw = record.error?.metadata?.raw;
+      if (typeof raw === 'string' && raw !== '') {
+        detail = detail === '' ? raw.slice(0, 200) : `${detail}: ${raw.slice(0, 200)}`;
+      }
+
+      // Код у шлюза бывает и числовым (`"code": 400`) — прежняя проверка
+      // «только строка» отбрасывала его молча.
+      const rawCode = record.error?.code;
+      if (typeof rawCode === 'string') code = rawCode;
+      else if (typeof rawCode === 'number') code = String(rawCode);
     }
   } catch {
     detail = '';

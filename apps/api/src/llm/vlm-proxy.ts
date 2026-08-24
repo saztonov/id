@@ -304,7 +304,11 @@ export class ProxyVlmProvider implements VlmPort {
                 'или объём запрашиваемого ответа.',
             );
           }
-          throw new LlmTransportError(this.#scrub(failure.message), {
+          // Слаг модели в тексте отказа: шлюз собственного каталога моделей
+          // порталу не показывает, и «Шлюз LLM ответил 400» без имени модели не
+          // отличает «модель не та» от «запрос не тот». На разборе прод-инцидента
+          // именно этого и не хватило.
+          throw new LlmTransportError(`${this.#scrub(failure.message)} [модель ${model}]`, {
             status: response.status,
           });
         }

@@ -37,9 +37,11 @@
  * при этом не является: исправление — новая ревизия разметки, и этот путь
  * остался как был.
  *
- * Молча — да, но не поверх незаконченной работы первой кнопки: пока по ревизии
- * есть задачи стадии разметки в очереди или в работе, заморозка отказывает. Иначе
- * нажатие, сделанное слишком рано, убивает всю ещё не выполненную детекцию.
+ * Молча — да, но не поверх незаконченной работы первой кнопки: нажатие, сделанное
+ * слишком рано, обесценивает всю ещё не выполненную детекцию. В строгом режиме
+ * заморозка при незакончившейся разметке отказывает; в режиме тестирования
+ * (ADR-0015) — снимает остаток с очереди и идёт дальше, потому что «распознать
+ * незаконченное выделение» там штатное желание, а не ошибка.
  *
  * ## Права
  *
@@ -59,20 +61,26 @@ import { tracePayload, updateContext } from '../../observability/context.js';
 import { assertPlanBuildable, listBundles, loadBundlePlan } from '../../db/repositories/bundles.js';
 import { listLogicalDocuments } from '../../db/repositories/documents.js';
 import { findRevisionForFiles } from '../../db/repositories/files.js';
-import { computeProcessingStatus, enqueueJob } from '../../db/repositories/jobs.js';
+import {
+  cancelPendingJobsOfStage,
+  computeProcessingStatus,
+  enqueueJob,
+} from '../../db/repositories/jobs.js';
+import { resetPipelineForRevision } from '../../db/repositories/purge.js';
 import {
   freezeLayout,
   listLayoutRevisions,
   type LayoutRevisionView,
 } from '../../db/repositories/layout.js';
 import {
+  finishRecognitionRun,
   findRecognitionRun,
   listRecognitionRuns,
   listRunPages,
 } from '../../db/repositories/recognition.js';
 import { dedupeKeyFor } from '../../jobs/types.js';
 import { detectionUnavailableReason, startMarkupOnBundle } from '../layout/start.js';
-import { readDetectionSettings } from '../../config/portal-settings.js';
+import { readDetectionSettings, readImmutabilityEnforced } from '../../config/portal-settings.js';
 import { assertRecognitionStageReady, startRecognition } from '../recognition/start.js';
 import {
   checkResponseSchema,
@@ -223,6 +231,11 @@ function registerCheckRoute(app: AppInstance): void {
       if (revision === null) throw notFound('Ревизия поставки не найдена.');
       updateContext({ revisionId, objectId: revision.objectId });
 
+      // Строгий режим (ADR-0015). Читается один раз на нажатие: два чтения по
+      // ходу обработки могли бы застать разные значения, и одно нажатие повело бы
+      // себя наполовину строго, наполовину мягко.
+      const enforceGates = await readImmutabilityEnforced(app.db);
+
       const layouts = await listLayoutRevisions(app.db, scope, revisionId);
       const layout = latestUsableLayout(layouts);
       if (layout === null) {
@@ -254,11 +267,16 @@ function registerCheckRoute(app: AppInstance): void {
         /**
          * И не поверх незаконченной работы предыдущей кнопки.
          *
-         * `layout.detect_local` отказывается писать результаты в замороженную
-         * разметку, поэтому заморозка под идущей детекцией убивает КАЖДУЮ ещё не
-         * выполненную постраничную пачку — а их у комплекта десятки. Так и вышло в
-         * проде: тридцать пять отказов «замороженная разметка не принимает
-         * результаты детекции» от одного нажатия, сделанного слишком рано.
+         * Детекция отказывается писать результаты в замороженную разметку, поэтому
+         * заморозка под идущей детекцией обесценивает КАЖДУЮ ещё не выполненную
+         * постраничную пачку — а их у комплекта десятки.
+         *
+         * Строгий режим отвечает отказом: подождать полминуты дешевле, чем
+         * распознавать половину блоков. В режиме тестирования ждать не заставляем —
+         * «распознать незаконченное выделение» там штатное желание, — но и мусора
+         * не оставляем: остаток снимается с очереди ЯВНО. Пачка, которую воркер уже
+         * взял, отменой не остановится и завершится тихо (`detection_batch_obsolete`
+         * в `local-detection.ts`), а не отказом.
          *
          * Стадия, а не список типов задач: типов детекции больше одного, и
          * четвёртый добавили бы, не вспомнив про это место.
@@ -268,10 +286,17 @@ function registerCheckRoute(app: AppInstance): void {
         // `pending` не считает мёртвые задачи: исчерпавшая попытки детекция не
         // имеет права запереть кнопку навсегда.
         if (layoutStage !== undefined && layoutStage.pending > 0) {
-          throw conflict(
-            `Выделение блоков ещё идёт: осталось задач ${String(layoutStage.pending)}. ` +
-              'Заморозка разметки прямо сейчас отменила бы их результаты — дождитесь ' +
-              'окончания и нажмите «2. Распознать» снова.',
+          if (enforceGates) {
+            throw conflict(
+              `Выделение блоков ещё идёт: осталось задач ${String(layoutStage.pending)}. ` +
+                'Заморозка разметки прямо сейчас отменила бы их результаты — дождитесь ' +
+                'окончания и нажмите «2. Распознать» снова.',
+            );
+          }
+          const cancelled = await cancelPendingJobsOfStage(app.db, revisionId, 'layout');
+          request.log.info(
+            { event: 'detection_cancelled_by_check', revision_id: revisionId, cancelled },
+            'остаток выделения блоков снят с очереди нажатием «Распознать»',
           );
         }
 
@@ -292,13 +317,36 @@ function registerCheckRoute(app: AppInstance): void {
       const runOfLayout = runs.filter((run) => run.layoutRevisionId === layout.id);
       const active = runOfLayout.find((run) => run.status === 'running');
       if (active !== undefined) {
-        throw conflict(
-          'Распознавание этой разметки уже идёт. Дождитесь его завершения — ' +
-            'анализ и проверки пойдут следом сами.',
+        if (enforceGates) {
+          throw conflict(
+            'Распознавание этой разметки уже идёт. Дождитесь его завершения — ' +
+              'анализ и проверки пойдут следом сами.',
+          );
+        }
+        /**
+         * «Повторное распознавание просто заменяет предыдущее»: идущий прогон
+         * закрывается, его страницы и результаты снесены сбросом ниже, новый
+         * стартует с нуля. Задачи прежнего прогона доживут свою попытку и
+         * остановятся на гейте «прогон уже завершён» — их результаты писать
+         * некуда, потому что строк прогона больше нет.
+         */
+        await finishRecognitionRun(app.db, scope, {
+          runId: active.id,
+          status: 'failed',
+          reason: 'заменён новым запуском распознавания',
+        });
+        request.log.info(
+          { event: 'recognition_run_superseded', revision_id: revisionId, run_id: active.id },
+          'идущий прогон распознавания закрыт нажатием «Распознать»',
         );
       }
-      const done = runOfLayout.some((run) => run.status === 'done');
+      const done = enforceGates && runOfLayout.some((run) => run.status === 'done');
       if (!done) {
+        if (!enforceGates && runOfLayout.length > 0) {
+          // Прежние результаты по этой разметке больше не описывают то, что
+          // получится сейчас: сносим их до старта, а не «поверх».
+          await resetPipelineForRevision(app.db, revisionId);
+        }
         const started = await startRecognition(app.db, app.env, scope, {
           revisionId,
           frozenLayoutId: layout.id,

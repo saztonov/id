@@ -39,27 +39,23 @@ import { tracePayload } from '../../observability/context.js';
 export async function assertRecognitionStageReady(db: Database, env: Env): Promise<void> {
   const recognition = await readRecognitionSettings(db);
   if (recognition.provider !== 'openrouter_vlm') return;
-  await assertVlmStageReady(db, env, recognition);
+  assertVlmStageReady(env, recognition);
 }
 
 /**
- * Три отказа ДО создания прогона, все по одной причине: иначе прогон умер бы, не
- * сделав ничего, а человек узнал бы об этом из журнала задач, а не из ответа на
- * своё нажатие.
+ * Два отказа ДО создания прогона — и оба про КОНФИГУРАЦИЮ, а не про процесс.
  *
- * Третий — публикация промптов. `vlm.start_recognition` требует опубликованными все
- * коды стадии recognize, а сид-миграция 0020 кладёт их черновиками: публикация
- * задумана как осознанное действие администратора. Без этой проверки каждое нажатие
- * создаёт прогон и задачу ровно затем, чтобы они умерли через 50 мс.
+ * Пустая модель и модель вне allowlist дают гарантированный отказ на первом же
+ * сетевом вызове: прогон родился бы затем, чтобы умереть. Это не гейт конвейера,
+ * который «мешает тестировать», а неверная настройка портала, и режим тестирования
+ * её не отменяет — он ослабляет запреты своей базы, а не законы шлюза.
  *
- * Перечисляются ВСЕ недостающие коды сразу: гейт воркера падает на первом же и
- * заставляет узнавать их по одному — тремя нажатиями и тремя мёртвыми прогонами.
+ * Третьей проверки — публикации промптов — здесь БОЛЬШЕ НЕТ. Она требовала ручной
+ * публикации текста, который лежит в коде и из которого генерируется сама
+ * сид-миграция; теперь отсутствие опубликованной версии значит «взят встроенный
+ * текст» (`recognitionPromptDefaultByCode`), а не отказ.
  */
-async function assertVlmStageReady(
-  db: Database,
-  env: Env,
-  recognition: { readonly vlmModel: string },
-): Promise<void> {
+function assertVlmStageReady(env: Env, recognition: { readonly vlmModel: string }): void {
   if (recognition.vlmModel === '') {
     throw conflict(
       'Модель распознавания не выбрана: задайте recognition.vlm_model в настройках портала.',
@@ -74,16 +70,18 @@ async function assertVlmStageReady(
         'согласуйте слаг с эксплуатацией.',
     );
   }
+}
 
+/**
+ * Коды стадии recognize, у которых нет опубликованной версии, — предупреждение, а
+ * не отказ.
+ *
+ * Тот же приём, что у блокеров согласования в ADR-0015: «чего не хватает» полезно
+ * и на этапе тестирования, мешает не список, а запрет.
+ */
+export async function recognitionPromptsOnBuiltinText(db: Database): Promise<readonly string[]> {
   const published = await readPublishedPromptCodes(db, RECOGNITION_PROMPT_CODES);
-  const missing = RECOGNITION_PROMPT_CODES.filter((code) => !published.has(code));
-  if (missing.length > 0) {
-    throw conflict(
-      `Стадия распознавания не готова: промпты ${missing.join(', ')} не опубликованы. ` +
-        'Откройте раздел администрирования → «AI и промты» и проведите каждый из них ' +
-        'по маршруту черновик → на испытание → опубликовать.',
-    );
-  }
+  return RECOGNITION_PROMPT_CODES.filter((code) => !published.has(code));
 }
 
 export interface StartRecognitionResult {
@@ -125,7 +123,7 @@ export async function startRecognition(
   let firstJobType: 'layout.reconcile' | 'vlm.start_recognition';
 
   if (recognition.provider === 'openrouter_vlm') {
-    await assertVlmStageReady(db, env, recognition);
+    assertVlmStageReady(env, recognition);
 
     settingsSnapshot = {
       version: 2,

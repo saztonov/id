@@ -39,7 +39,9 @@ import {
   markRunPage,
   mergeRunSettingsSnapshot,
   publishVlmRunResults,
+  readImmutabilityEnforced,
   RECOGNITION_PROMPT_DEFAULTS,
+  recognitionPromptDefaultByCode,
   recognizeBlock,
   schemaHash,
   seedRunPages,
@@ -1259,27 +1261,50 @@ function vlmRecognitionDeps(options: PipelineJobsOptions): VlmRecognitionDeps {
     },
 
     /**
-     * Опубликованный промпт по коду (не по стадии, в отличие от сегментации):
+     * Промпт по коду (не по стадии, в отличие от сегментации):
      * `ux_prompt_templates_single_published` гарантирует не больше одной
      * опубликованной версии на код, поэтому неоднозначности здесь нет.
+     *
+     * Пустой каталог — не отказ, а встроенный текст с `version: 0`. Сид-миграция
+     * промптов генерируется из тех же констант, поэтому «черновик, который забыли
+     * опубликовать» и «встроенный текст» — одна и та же строка; требовать ручной
+     * публикации, чтобы её получить, значило бы убивать прогон ни за что.
      */
-    publishedPromptByCode: async (code) => {
+    promptByCode: async (code) => {
       const page = await listPromptTemplates(db, SYSTEM_SCOPE, {
         code,
         state: 'published',
         limit: 1,
       });
       const row = page.items[0];
-      if (row === undefined) return null;
+      if (row !== undefined) {
+        return {
+          code: row.code,
+          version: row.version,
+          systemPrompt: row.systemPrompt,
+          userTemplate: row.userTemplate,
+          outputSchema: row.outputSchema,
+          modelOverride: row.modelOverride,
+        };
+      }
+
+      const preset = recognitionPromptDefaultByCode(code);
+      if (preset === null) {
+        // Код не из `RECOGNITION_PROMPT_DEFAULTS`: постановка задачи ссылается на
+        // промпт, которого нет ни в каталоге, ни в коде. Это дефект вызывающего.
+        throw new Error(`Промпт ${code} неизвестен: нет ни опубликованной версии, ни встроенной`);
+      }
       return {
-        code: row.code,
-        version: row.version,
-        systemPrompt: row.systemPrompt,
-        userTemplate: row.userTemplate,
-        outputSchema: row.outputSchema,
-        modelOverride: row.modelOverride,
+        code: preset.code,
+        version: 0,
+        systemPrompt: preset.systemPrompt,
+        userTemplate: preset.userTemplate,
+        outputSchema: preset.responseFormat.schema,
+        modelOverride: null,
       };
     },
+
+    enforceGates: () => readImmutabilityEnforced(db),
 
     /** Параметры генерации и `responseFormat` по типу блока — чистые данные, без БД. */
     generationProfile: (blockType) => {

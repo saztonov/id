@@ -326,7 +326,27 @@ export function createLocalDetectionHandler(
       throw new MarkupStateError('Ревизия разметки не найдена');
     }
     if (target.state !== 'draft') {
-      throw new MarkupStateError('Замороженная разметка не принимает результаты детекции');
+      /**
+       * Разметку заморозили, пока пачка ждала исполнителя. Это не ошибка — это
+       * «опоздал, уже не нужно»: человек нажал «Распознать», и результаты этой
+       * пачки писать больше некуда.
+       *
+       * Прежде здесь был отказ, и он стоил дорого: одно преждевременное нажатие
+       * убивало КАЖДУЮ невыполненную постраничную пачку, а `MarkupStateError` не
+       * объявляет `retriable`, то есть считается преходящей — каждая убитая пачка
+       * сжигала все пять попыток. Тридцать пять «исчерпали попытки» в журнале от
+       * одного нажатия появились именно так.
+       */
+      ctx.logger.info(
+        {
+          event: 'detection_batch_obsolete',
+          layout_revision_id: target.layoutRevisionId,
+          layout_state: target.state,
+          pages: ctx.payload.pageIndices?.length ?? 0,
+        },
+        'разметка уже не черновик: пачка детекции устарела и пропущена',
+      );
+      return;
     }
 
     const pageIndices = ctx.payload.pageIndices;

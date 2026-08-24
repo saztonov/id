@@ -43,7 +43,10 @@
  *    ничего, пока все страницы не терминальны И `listBlockEnvelopes` не
  *    покрывает `loadFrozenBlocks` полностью — нулевой/неполный результат не
  *    считается успехом (строже RD WEB: там законный допуск — блоки STAMP, тут
- *    его нет, все три типа обязаны быть покрыты).
+ *    его нет, все три типа обязаны быть покрыты). При выключенной неизменяемости
+ *    (`core.enforce_immutability = false`, ADR-0015) вместо отказа публикуется
+ *    согласованное подмножество: восемьдесят распознанных страниц полезнее нуля,
+ *    а какая отвалилась — видно поимённо.
  * 3. **Идемпотентность через БД, не через память.** `insertBlockResult`
  *    (`ON CONFLICT DO NOTHING` на стороне репозитория) — единственный путь
  *    записи результата; повторная аренда `vlm.recognize_page` не платит дважды
@@ -151,9 +154,15 @@ export interface VlmRunPageState {
   readonly blocksRefused: number;
 }
 
-/** Опубликованный промпт стадии `recognize` по коду. */
-export interface VlmPublishedPrompt {
+/** Промпт стадии `recognize` по коду: опубликованная версия либо встроенный текст. */
+export interface VlmPrompt {
   readonly code: string;
+  /**
+   * Версия из каталога, либо `0` — «опубликованной версии нет, взят встроенный
+   * текст». Ноль уезжает в `settings_snapshot.promptVersions` наравне с прочими:
+   * прогон обязан доказывать, чем он выполнен, и «встроенным» — такой же ответ,
+   * как «версией 3».
+   */
   readonly version: number;
   readonly systemPrompt: string;
   readonly userTemplate: string;
@@ -331,6 +340,15 @@ export interface VlmRecognitionDeps {
   loadFrozenBlocks(runId: string): Promise<readonly VlmFrozenBlock[]>;
 
   /**
+   * Действует ли строгий режим (`core.enforce_immutability`, ADR-0015).
+   *
+   * Как wired: `readImmutabilityEnforced(db)`. Читается по требованию, а не при
+   * сборке зависимостей: настройка переключается администратором на живом
+   * портале, и снимок, снятый при старте воркера, врал бы до перезапуска.
+   */
+  enforceGates(): Promise<boolean>;
+
+  /**
    * Как wired: `processing_bundle_pages ⋈ source_pages` по `sourcePageId` в
    * пределах `bundleId` ревизии разметки прогона (тот же bundle, что и
    * `loadBundlePlan`/`listBundlePages`), `widthPx/heightPx/rotation` —
@@ -436,13 +454,20 @@ export interface VlmRecognitionDeps {
   artifactId(runId: string, kind: ArtifactKind): Promise<string>;
 
   /**
+   * Текст промпта по коду — ВСЕГДА разрешается, `null` не бывает.
+   *
    * Как wired: `listPromptTemplates(db, SYSTEM_SCOPE, {code, state:'published', limit:1})`,
-   * `items[0] ?? null`. Двух опубликованных версий одного кода быть не может
+   * а при пустом ответе — встроенный текст `recognitionPromptDefaultByCode(code)`
+   * с `version: 0`. Двух опубликованных версий одного кода быть не может
    * (`ux_prompt_templates_single_published` — партиальный уникальный индекс по
    * `code`), поэтому неоднозначности здесь нет в отличие от `publishedPrompt`
    * по стадии в `pipeline.ts` (там на стадию — несколько кодов).
+   *
+   * Не-`null` — это контракт, а не удобство: пока метод мог вернуть пустоту, у
+   * старта прогона стоял гейт «опубликуйте промпты стадии recognize», и он убивал
+   * прогон на первой же миллисекунде. Тип теперь делает этот гейт невыразимым.
    */
-  publishedPromptByCode(code: string): Promise<VlmPublishedPrompt | null>;
+  promptByCode(code: string): Promise<VlmPrompt>;
 
   /**
    * Как wired: `RECOGNITION_PROMPT_DEFAULTS[blockType]` (`apps/api/src/recognition/vlm/prompts.ts`)
@@ -574,18 +599,50 @@ type VlmJobType = 'vlm.start_recognition' | 'vlm.recognize_page' | 'vlm.finalize
 
 const MAX_REASON_LENGTH = 400;
 
-function vlmTerminationReason(jobType: string, error: unknown): string {
+/**
+ * Причина закрытия прогона — по факту, а не по шаблону.
+ *
+ * Прежний текст говорил «исчерпала попытки» всегда, в том числе на первой попытке
+ * из пяти, когда прогон закрывала неповторяемая ошибка. В журнале это выглядело
+ * как исчерпанный лимит, которого не было, и уводило разбор в сторону.
+ */
+function vlmTerminationReason(jobType: string, error: unknown, exhausted: boolean): string {
   const name = error instanceof Error ? error.name : 'Error';
   const message = error instanceof Error ? error.message : String(error);
-  const scrubbed = redactAbsoluteUrls(`задача ${jobType} исчерпала попытки: ${name}: ${message}`);
+  const what = exhausted ? 'исчерпала попытки' : 'отказала неповторимо';
+  const scrubbed = redactAbsoluteUrls(`задача ${jobType} ${what}: ${name}: ${message}`);
   return scrubbed.text.slice(0, MAX_REASON_LENGTH);
+}
+
+/**
+ * Останавливает ли отказ ВЕСЬ прогон, а не только текущий вызов.
+ *
+ * Берётся у самого отказа (`LlmError.stopsBatch`) — тем же приёмом, что в
+ * `segmentation.ts`, где стадия анализа этот флаг уже уважает. Отказ, ничего о
+ * себе не сказавший, прогон не останавливает: продолжить обход страниц дешевле,
+ * чем потерять восемьдесят распознанных из-за одной.
+ *
+ * До правки здесь стояло `classifyFailure(error).permanent`, то есть `!retriable`,
+ * — и это сводило два РАЗНЫХ вопроса к одному. `retriable` отвечает «поможет ли
+ * повтор ЭТОГО вызова», `stopsBatch` — «имеет ли смысл продолжать остальные»
+ * (см. шапку `LlmError` в `llm/port.ts`). Транспортный 400 на одной странице
+ * неповторим, но остальные восемьдесят две страницы к нему отношения не имеют;
+ * на проде именно это и случилось: одна страница закрыла прогон целиком, а
+ * оставшиеся 128 задач умерли с «прогон уже завершён». Прогон останавливают
+ * только четыре отказа, которые объявляют `stopsBatch: true`: заблокированный
+ * провайдер, выключенный ИИ, модель вне allowlist, исчерпанный бюджет.
+ */
+function stopsBatch(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false;
+  const value: unknown = (error as { stopsBatch?: unknown }).stopsBatch;
+  return value === true;
 }
 
 /**
  * Аналог `withRunTermination` из `recognition.ts` (там не экспортирован —
  * свой, тем же образцом, см. шапку файла). Закрывает прогон на последней
- * попытке или при неповторяемой ошибке; `finishRun` уже вызванный внутри
- * обработчика (гейты с конкретной причиной) делает повторный вызов здесь
+ * попытке или при отказе, останавливающем весь обход; `finishRun` уже вызванный
+ * внутри обработчика (гейты с конкретной причиной) делает повторный вызов здесь
  * идемпотентным no-op — `finishRecognitionRun` пишет только из `running`.
  */
 function withVlmRunTermination<T extends VlmJobType>(
@@ -596,16 +653,17 @@ function withVlmRunTermination<T extends VlmJobType>(
     try {
       await handler(ctx);
     } catch (error) {
-      if (ctx.attempt >= ctx.maxAttempts || classifyFailure(error).permanent) {
+      const exhausted = ctx.attempt >= ctx.maxAttempts;
+      if (exhausted || stopsBatch(error)) {
         const payload = ctx.payload as { readonly recognitionRunId: string };
         try {
           const outcome = await deps.finishRun({
             runId: payload.recognitionRunId,
             status: error instanceof VlmRecognitionIntegrityError ? 'integrity_error' : 'failed',
-            reason: vlmTerminationReason(ctx.type, error),
+            reason: vlmTerminationReason(ctx.type, error, exhausted),
             warnings: [
               {
-                code: 'job_attempts_exhausted',
+                code: exhausted ? 'job_attempts_exhausted' : 'job_stops_batch',
                 jobType: ctx.type,
                 attempt: ctx.attempt,
                 errorClass: classifyFailure(error).errorClass,
@@ -618,10 +676,13 @@ function withVlmRunTermination<T extends VlmJobType>(
               job_type: ctx.type,
               attempt: ctx.attempt,
               max_attempts: ctx.maxAttempts,
+              exhausted,
               error_class: classifyFailure(error).errorClass,
               changed: outcome.changed,
             },
-            'попытки задачи исчерпаны, прогон VLM-распознавания завершён',
+            exhausted
+              ? 'попытки задачи исчерпаны, прогон VLM-распознавания завершён'
+              : 'отказ останавливает весь обход, прогон VLM-распознавания завершён',
           );
         } catch (finishError) {
           ctx.logger.error(
@@ -828,24 +889,20 @@ export function createVlmStartHandler(
       throw new VlmRecognitionStateError('В замороженной разметке нет блоков: распознавать нечего');
     }
 
-    // --- Публикация промптов всех трёх кодов ---
+    // --- Версии промптов, которыми пойдёт этот прогон ---
+    //
+    // Гейта «опубликуйте промпты стадии recognize» здесь больше нет. Он убивал
+    // прогон на первой же миллисекунде, требуя ручной публикации текста, который
+    // и так лежит в коде: сид-миграция промптов генерируется из тех же констант.
+    // Теперь отсутствие опубликованной версии — это `version: 0` в снимке, а не
+    // отказ (см. `recognitionPromptDefaultByCode`).
     const promptVersions: Record<string, number> = {};
     for (const blockType of RECOGNIZE_BLOCK_TYPES) {
       const profile = deps.generationProfile(blockType);
-      const published = await deps.publishedPromptByCode(profile.code);
-      if (published === null) {
-        await deps.finishRun({
-          runId: run.runId,
-          status: 'failed',
-          reason: `опубликуйте промпты стадии recognize: код ${profile.code} не опубликован`,
-        });
-        throw new VlmRecognitionConfigurationError(
-          `Опубликуйте промпты стадии recognize: код ${profile.code} не опубликован`,
-        );
-      }
+      const published = await deps.promptByCode(profile.code);
       // Сверка неизменности НЕ выполняется: правка system/user промпта
-      // администратором законна (см. VlmPublishedPrompt.modelOverride) —
-      // фиксируется только версия, использованная этим прогоном.
+      // администратором законна (см. VlmPrompt.modelOverride) — фиксируется
+      // только версия, использованная этим прогоном.
       promptVersions[blockType] = published.version;
       if (published.modelOverride !== null && published.modelOverride !== model) {
         ctx.logger.warn(
@@ -1196,14 +1253,9 @@ export function createVlmRecognizePageHandler(
             continue;
           }
 
-          const published = await deps.publishedPromptByCode(generationProfile.code);
-          if (published === null) {
-            // Защитный гейт: vlm.start_recognition уже гарантировал публикацию,
-            // это либо гонка с архивацией промпта, либо дефект постановки.
-            throw new VlmRecognitionConfigurationError(
-              `Промпт ${generationProfile.code} не опубликован (проверено при старте, но недоступно сейчас)`,
-            );
-          }
+          // Защитного гейта «промпт не опубликован» здесь больше нет: текст
+          // разрешается всегда — опубликованной версией либо встроенной.
+          const published = await deps.promptByCode(generationProfile.code);
           const prompt: VlmRecognizeBlockPrompt = {
             code: published.code,
             version: published.version,
@@ -1280,11 +1332,34 @@ export function createVlmRecognizePageHandler(
               );
               continue;
             }
+            if (!stopsBatch(error) && classifyFailure(error).permanent) {
+              /**
+               * Неповторимый отказ, который прогон не останавливает, — например
+               * транспортный 400 на одном кропе. Повторять его бессмысленно, а
+               * бросать наверх нельзя: наверху задача умирает, `markRunPage` не
+               * вызывается вовсе, и страница остаётся `pending` НАВСЕГДА — именно
+               * из-за этого финализация потом крутила «N страниц из M не
+               * терминальны» до исчерпания шестидесяти попыток.
+               *
+               * Поэтому блок засчитывается непокрытым, а обход идёт дальше: по
+               * совокупности страница станет `failed`, и это честный терминальный
+               * исход с названной причиной.
+               */
+              invalidCount += 1;
+              ctx.logger.warn(
+                {
+                  event: 'block_permanent_failure',
+                  layout_block_id: block.id,
+                  error_class: classifyFailure(error).errorClass,
+                  reason: error instanceof Error ? error.message : String(error),
+                },
+                'блок отказал неповторимо, обход страницы продолжается',
+              );
+              continue;
+            }
             // retriable → движок повторит (checkpoint защитит уже записанное);
-            // неповторяемая stopsBatch-ошибка (бюджет/allowlist/провайдер
-            // заблокирован) → withVlmRunTermination закроет прогон по
-            // classifyFailure(error).permanent — по ретраебельности, а не по
-            // перечислению классов (см. шапку файла).
+            // stopsBatch-ошибка (бюджет/allowlist/провайдер заблокирован,
+            // выключенный ИИ) → withVlmRunTermination закроет прогон.
             throw error;
           }
 
@@ -1517,35 +1592,71 @@ export function createVlmFinalizeHandler(deps: VlmRecognitionDeps): JobHandler<'
     }
 
     const counts = aggregateRunPageCounts(pages);
-    const frozen = await deps.loadFrozenBlocks(run.runId);
+    const frozenAll = await deps.loadFrozenBlocks(run.runId);
     const envelopes = await deps.listBlockEnvelopes(run.runId);
+    const incomplete = counts.pagesFailed > 0 || envelopes.length < frozenAll.length;
 
-    if (counts.pagesFailed > 0 || envelopes.length < frozen.length) {
+    /**
+     * Неполное покрытие: отказ или частичный результат.
+     *
+     * В строгом режиме «распознали не всё» — это провал прогона: неполный набор
+     * блоков нельзя выдавать за результат, по которому потом принимают решение.
+     * В режиме тестирования запрет мешает ровно тому, ради чего режим и заведён:
+     * восемьдесят распознанных страниц полезнее нуля, а какая именно страница
+     * отвалилась — видно поимённо.
+     *
+     * Публикуется при этом СОГЛАСОВАННОЕ подмножество: `assemble` требует точной
+     * биекции «замороженный блок ↔ результат», поэтому в сборку уходят только те
+     * блоки, у которых результат есть. Иначе сверка развалилась бы на первом же
+     * непокрытом блоке, и «частичный результат» превратился бы в отказ с другой
+     * формулировкой.
+     */
+    const covered = new Set(envelopes.map((envelope) => envelope.layoutBlockId));
+    const frozen = incomplete ? frozenAll.filter((block) => covered.has(block.id)) : frozenAll;
+
+    if (incomplete && !(await deps.enforceGates())) {
+      ctx.logger.warn(
+        {
+          event: 'vlm_recognition_partial_publish',
+          pages_failed: counts.pagesFailed,
+          pages_total: counts.pagesTotal,
+          blocks_expected: frozenAll.length,
+          blocks_covered: envelopes.length,
+        },
+        'покрытие неполно, но режим тестирования публикует распознанное',
+      );
+    } else if (incomplete) {
       await deps.finishRun({
         runId: run.runId,
         status: 'failed',
         reason:
           counts.pagesFailed > 0
             ? `${counts.pagesFailed} страниц завершились с ошибкой из ${counts.pagesTotal}`
-            : `покрыто ${envelopes.length} блоков из ${frozen.length}: нулевой/неполный результат не считается успехом`,
+            : `покрыто ${envelopes.length} блоков из ${frozenAll.length}: нулевой/неполный результат не считается успехом`,
         counts: {
           ...counts,
-          blocksExpected: frozen.length,
+          blocksExpected: frozenAll.length,
           blocksCovered: envelopes.length,
         },
         warnings: [
           ...(counts.pagesFailed > 0 ? [{ code: 'pages_failed', pages: counts.pagesFailed }] : []),
-          ...(envelopes.length < frozen.length
-            ? [{ code: 'coverage_incomplete', expected: frozen.length, covered: envelopes.length }]
+          ...(envelopes.length < frozenAll.length
+            ? [
+                {
+                  code: 'coverage_incomplete',
+                  expected: frozenAll.length,
+                  covered: envelopes.length,
+                },
+              ]
             : []),
         ],
       });
       throw new VlmRecognitionCoverageError(
-        `Покрытие неполно: ${envelopes.length} блоков из ${frozen.length}, страниц с ошибкой: ${counts.pagesFailed}`,
+        `Покрытие неполно: ${envelopes.length} блоков из ${frozenAll.length}, страниц с ошибкой: ${counts.pagesFailed}`,
       );
     }
 
-    // --- Полное покрытие: конверты → канонические блоки, валидация схемой ---
+    // --- Конверты → канонические блоки, валидация схемой ---
     const results = new Map<string, RecognitionBlock>();
     for (const envelope of envelopes) {
       const block = parseBlockEnvelope(envelope.contentJson);

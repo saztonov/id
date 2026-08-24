@@ -63,6 +63,7 @@ import {
   createDraftRevision,
   createRegistry,
   createWork,
+  deleteRevision,
   deleteWork,
   excludeWork,
   findRegistry,
@@ -359,6 +360,38 @@ function registerRevisionRoutes(app: AppInstance): void {
       return reply.code(201).send(revision);
     },
   );
+
+  /**
+   * Удаление одной ревизии со всем производным.
+   *
+   * Право то же, что у удаления комплекта, — `settings.manage`: стереть чужую
+   * работу вместе с историей проверок тяжелее, чем завести свою.
+   *
+   * `app.route`, а не `app.delete`: правило eslint, запрещающее запросы к БД вне
+   * `db/repositories/`, ищет вызовы `.delete()` по имени метода и не отличает
+   * `db.delete` от `app.delete` (так же сделаны остальные DELETE портала).
+   */
+  app.route({
+    method: 'DELETE',
+    url: `${PREFIX}/revisions/:revisionId`,
+    preHandler: manageWorks,
+    schema: { params: revisionIdParamSchema },
+    handler: async (request, reply) => {
+      const { scope } = currentAuth(request);
+      const result = await deleteRevision(
+        app.db,
+        scope,
+        request.params.revisionId,
+        auditActor(app, request),
+        await readImmutabilityEnforced(app.db),
+      );
+      if (result === null) throw notFound('Ревизия не найдена.');
+      if (!result.deleted) {
+        throw conflict(`Ревизию удалить нельзя: ${result.blockers.join('; ')}.`);
+      }
+      return reply.code(204).send();
+    },
+  });
 }
 
 // =====================================================================

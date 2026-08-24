@@ -581,7 +581,17 @@ export function createDetectPagesHandler(deps: MarkupDeps): JobHandler<'layout.d
     });
     if (target === null) throw new MarkupStateError('Ревизия разметки не найдена');
     if (target.state !== 'draft') {
-      throw new MarkupStateError('Замороженная разметка не принимает результаты детекции');
+      // «Опоздал, уже не нужно», а не отказ — разбор в `local-detection.ts`.
+      ctx.logger.info(
+        {
+          event: 'detection_batch_obsolete',
+          layout_revision_id: target.layoutRevisionId,
+          layout_state: target.state,
+          pages: ctx.payload.pageIndices?.length ?? 0,
+        },
+        'разметка уже не черновик: пачка детекции устарела и пропущена',
+      );
+      return;
     }
 
     const runDocument = await deps.findRunDocument(target.layoutRevisionId);

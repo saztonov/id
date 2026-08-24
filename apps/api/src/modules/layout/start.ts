@@ -25,7 +25,8 @@ import type { Database } from '../../db/repositories/users.js';
 import { listBundlePages } from '../../db/repositories/bundles.js';
 import { enqueueJob } from '../../db/repositories/jobs.js';
 import { ensureDraftLayout } from '../../db/repositories/layout.js';
-import { readDetectionSettings } from '../../config/portal-settings.js';
+import { resetPipelineForRevision } from '../../db/repositories/purge.js';
+import { readDetectionSettings, readImmutabilityEnforced } from '../../config/portal-settings.js';
 import { DETECT_BATCH_LIMIT } from '../../integrations/rdweb/legacy-adapter.js';
 import { dedupeKeyFor } from '../../jobs/types.js';
 import { conflict } from '../../lib/problem.js';
@@ -97,9 +98,32 @@ export async function startMarkupOnBundle(
     readonly logger: Logger;
   },
 ): Promise<StartMarkupResult> {
+  /**
+   * Режим читается ЗДЕСЬ, а не приходит аргументом: вызывающих у разметки трое
+   * (гранулярный маршрут, кнопка «1. Выделить блоки» и продолжение сборки в
+   * воркере), и третий — задача, у которой запроса нет. Забытый аргумент у любого
+   * из них означал бы, что одна и та же кнопка ведёт себя по-разному в
+   * зависимости от того, через какую дверь вошли.
+   */
+  const enforceGates = await readImmutabilityEnforced(db);
+
+  /**
+   * Повторное нажатие поверх распознанного: сначала сброс.
+   *
+   * `block_results.layout_block_id` объявлен `ON DELETE RESTRICT`, поэтому
+   * детекция не смогла бы снести и заменить блок, по которому уже есть результат,
+   * — упёрлась бы во внешний ключ посреди импорта. Плюс документы и замечания,
+   * выведенные из прежнего текста, после переразметки описывают блоки, которых
+   * больше нет.
+   */
+  if (!enforceGates) {
+    await resetPipelineForRevision(db, input.revisionId);
+  }
+
   const { layout, created } = await ensureDraftLayout(db, scope, {
     revisionId: input.revisionId,
     bundleId: input.bundleId,
+    enforceGates,
   });
 
   // Ветвление детекции (ADR-0008): локальный RF-DETR не создаёт RD-документ и

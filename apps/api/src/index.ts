@@ -293,12 +293,18 @@ export type {
 export {
   parseModelAllowlist,
   readAiDryRunOnly,
+  readImmutabilityEnforced,
   readRecognitionSettings,
 } from './config/portal-settings.js';
 export type { RecognitionProviderSettings } from './config/portal-settings.js';
 
 /** VLM-распознавание по кропам блоков (ADR-0007, план v3). */
-export { RECOGNITION_PROMPT_DEFAULTS, substitutePlaceholders } from './recognition/vlm/prompts.js';
+export {
+  RECOGNITION_PROMPT_CODES,
+  RECOGNITION_PROMPT_DEFAULTS,
+  recognitionPromptDefaultByCode,
+  substitutePlaceholders,
+} from './recognition/vlm/prompts.js';
 export type {
   PromptSubstitutionContext,
   RecognitionPromptDefault,

@@ -278,7 +278,10 @@ function deps(overrides: Partial<VlmRecognitionDeps> = {}): VlmRecognitionDeps {
     readArtifactBytes: async () => null,
     writeArtifactBytes: async () => {},
     artifactId: async () => 'artifact-1',
-    publishedPromptByCode: async (code: string) => publishedPrompt(code),
+    promptByCode: async (code: string) => publishedPrompt(code),
+    // По умолчанию строгий режим: тесты проверяют штатные гейты, а послабления
+    // режима тестирования включаются точечно, там где они и есть предмет.
+    enforceGates: async () => true,
     generationProfile: (blockType) => generationProfile(blockType),
     vlm: unexpected('vlm.complete') as never,
     recognizeBlock: unexpected('recognizeBlock') as VlmRecognitionDeps['recognizeBlock'],
@@ -326,11 +329,18 @@ describe('createVlmStartHandler', () => {
     expect(sink.enqueued).toHaveLength(0);
   });
 
-  it('отсутствие опубликованного промпта — конфигурационный отказ', async () => {
+  it('неопубликованный промпт — не отказ, а встроенный текст: version 0 в снимке', async () => {
+    // Прежде это был конфигурационный отказ, закрывавший прогон. Требование было
+    // лишним: сид-миграция промптов генерируется из тех же констант, что и
+    // встроенный текст, — публикация ничего не добавляла, кроме ручного шага.
     const { fn: finishRun, calls: finishCalls } = idempotentFinishRun();
+    const snapshots: Record<string, unknown>[] = [];
     const d = deps({
-      publishedPromptByCode: async (code: string) =>
-        code === 'recognition_block_image' ? null : publishedPrompt(code),
+      promptByCode: async (code: string) =>
+        code === 'recognition_block_image' ? publishedPrompt(code, 0) : publishedPrompt(code),
+      mergeSnapshot: async (_runId: string, patch: Record<string, unknown>) => {
+        snapshots.push(patch);
+      },
       finishRun,
     });
     const sink = makeSink();
@@ -341,10 +351,13 @@ describe('createVlmStartHandler', () => {
       sink,
     );
 
-    await expect(handler(ctx)).rejects.toThrow(VlmRecognitionConfigurationError);
-    expect(finishCalls).toHaveLength(1);
-    expect(finishCalls[0]?.['status']).toBe('failed');
-    expect(String(finishCalls[0]?.['reason'])).toContain('recognition_block_image');
+    await handler(ctx);
+
+    expect(finishCalls).toHaveLength(0);
+    // Ноль уезжает в снимок наравне с прочими версиями: прогон обязан
+    // доказывать, чем он выполнен, и «встроенным» — такой же ответ.
+    expect(snapshots[0]?.['promptVersions']).toMatchObject({ image: 0, text: 1, stamp: 1 });
+    expect(sink.enqueued.length).toBeGreaterThan(0);
   });
 
   it('пустая разметка (0 блоков) — failed с внятной причиной', async () => {
@@ -726,11 +739,71 @@ describe('createVlmRecognizePageHandler', () => {
 
     await expect(handler(ctx)).rejects.toThrow('месячный бюджет исчерпан');
 
-    // retriable:false → classifyFailure().permanent === true → закрывается
-    // НЕМЕДЛЕННО, даже на первой из пяти попыток.
+    // stopsBatch:true → закрывается НЕМЕДЛЕННО, даже на первой из пяти попыток:
+    // при исчерпанном бюджете остальные страницы всё равно обречены.
     expect(finishCalls).toHaveLength(1);
     expect(finishCalls[0]?.['status']).toBe('failed');
     expect(recorded).toHaveLength(1);
+  });
+
+  it('неповторимый отказ БЕЗ stopsBatch не закрывает прогон: страница failed, обход идёт дальше', async () => {
+    // Регрессия на прод-инцидент: шлюз ответил 400 на ОДНОЙ странице, и прогон из
+    // 83 страниц закрылся целиком, а оставшиеся 128 задач умерли с «прогон уже
+    // завершён». Причина была в том, что закрытие решалось по `retriable`, хотя у
+    // отказа есть отдельный флаг ровно про это — `stopsBatch`.
+    const finishCalls: Record<string, unknown>[] = [];
+    const marked: Record<string, unknown>[] = [];
+    class FakeTransportError extends Error {
+      readonly retriable = false;
+      readonly stopsBatch = false;
+      readonly status = 400;
+      readonly attempt = {
+        provider: 'proxy_llm',
+        model: 'vendor/model-1',
+        inputHash: 'e'.repeat(64),
+        latencyMs: 9,
+      };
+      constructor() {
+        super('Шлюз LLM ответил 400: Provider returned error');
+        this.name = 'LlmTransportError';
+      }
+    }
+    const d = deps({
+      workingPdfToFile: async () => ({ path: '/tmp/work.pdf', cleanup: async () => {} }),
+      rasterizer: {
+        kind: 'pdftoppm',
+        version: '1.0',
+        renderPage: async () => ({ widthPx: 595, heightPx: 842 }),
+      },
+      crop: async () => ({ png: new Uint8Array([1]), widthPx: 20, heightPx: 20 }),
+      recognizeBlock: async () => {
+        throw new FakeTransportError();
+      },
+      recordAiRun: async () => {},
+      markRunPage: async (input: Record<string, unknown>) => {
+        marked.push(input);
+      },
+      finishRun: async (input: Record<string, unknown>) => {
+        finishCalls.push(input);
+        return { changed: true };
+      },
+    });
+    const sink = makeSink();
+    const handler = createVlmRecognizePageHandler(d);
+    const ctx = makeContext(
+      'vlm.recognize_page',
+      { revisionId: REVISION, recognitionRunId: RUN, pageIndex: 0 },
+      sink,
+      { attempt: 1, maxAttempts: 5 },
+    );
+
+    // Задача завершается УСПЕШНО: повторять неповторимое незачем, а бросать наверх
+    // нельзя — тогда markRunPage не вызовется и страница застрянет в pending.
+    await handler(ctx);
+
+    expect(finishCalls).toHaveLength(0);
+    expect(marked).toHaveLength(1);
+    expect(marked[0]?.['status']).toBe('failed');
   });
 
   it('retriable-ошибка НЕ закрывает прогон раньше времени (движок повторит)', async () => {

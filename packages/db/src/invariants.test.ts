@@ -863,6 +863,51 @@ describe('выключатель неизменяемости (§3.9, режим
       ),
     ).rejects.toThrow(/согласованную ревизию/u);
   });
+
+  /**
+   * Подтверждённый документ (0016) и страницы поданной ревизии (0013) — две
+   * функции, ЗАБЫТЫЕ выключателем 0035: они заведены отдельными миграциями и
+   * охранника не получили. Обе стоят в пути `purge.ts`, то есть режим тестирования
+   * был включён, а удаление всё равно падало — отказом, которого в этом режиме
+   * обещано не выдавать. Миграция 0036 добавила им тот же ранний выход.
+   */
+  it('строгий режим запирает удаление подтверждённого документа', async () => {
+    await setMode(true);
+    await db.query(
+      `UPDATE logical_documents SET is_confirmed = true, confirmed_by = '${ID.user}',
+              confirmed_at = now()
+        WHERE id = '${ID.document2}'`,
+    );
+    await expect(
+      db.query(`DELETE FROM logical_documents WHERE id = '${ID.document2}'`),
+    ).rejects.toThrow(/подтверждён человеком/u);
+  });
+
+  it('режим тестирования пропускает удаление подтверждённого документа', async () => {
+    await setMode(false);
+    await db.query(`DELETE FROM logical_documents WHERE id = '${ID.document2}'`);
+    const rows = await db.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM logical_documents WHERE id = '${ID.document2}'`,
+    );
+    expect(rows[0]?.n).toBe(0);
+  });
+
+  it('режим тестирования пропускает удаление страницы поданной ревизии', async () => {
+    // Функция `deny_locked_source_page_content` (0013) — третья независимая, и
+    // пропуск в ней означал бы, что выключатель снова работает наполовину.
+    await setMode(false);
+    await db.query(
+      `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order)
+         VALUES ('${ID.document1}', '${ID.reviewRevision}', '${sha('a')}', 'страничный.pdf', 92)`,
+    );
+    await db.query(
+      `INSERT INTO source_pages (revision_id, source_file_id, file_page_index, revision_ordinal,
+                                 width_px, height_px, rotation)
+         VALUES ('${ID.reviewRevision}', '${ID.document1}', 0, 90, 100, 200, 0)`,
+    );
+    await db.query(`DELETE FROM source_pages WHERE source_file_id = '${ID.document1}'`);
+    await db.query(`DELETE FROM source_files WHERE id = '${ID.document1}'`);
+  });
 });
 
 // =====================================================================

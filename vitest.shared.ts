@@ -1,3 +1,4 @@
+import { availableParallelism } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 import { defineConfig } from 'vitest/config';
@@ -57,6 +58,22 @@ const workspaceAliases = Object.fromEntries(
   ]),
 );
 
+/**
+ * Потолок параллелизма: тесты упираются в ПАМЯТЬ, а не в процессор.
+ *
+ * Каждый файл, которому нужна БД, поднимает собственный pglite — то есть
+ * настоящий PostgreSQL, скомпилированный в WASM, со своей кучей. Таких файлов у
+ * `@id/api` уже десятки, и при `maxWorkers = число ядер` прогон валится не
+ * падением теста, а `FATAL ERROR: Zone Allocation failed — process out of
+ * memory`: воркеры умирают целиком, унося с собой файлы, которые в них
+ * исполнялись. Отчёт при этом показывает «10 файлов упали» без единой красной
+ * проверки — то есть гейт краснеет по причине, к коду отношения не имеющей.
+ *
+ * Четыре — эмпирический предел, при котором прогон проходит на машине с 16 ГБ.
+ * Меньше ядер — берётся их число: ставить больше воркеров, чем ядер, смысла нет.
+ */
+const maxWorkers = Math.max(1, Math.min(4, availableParallelism()));
+
 export default defineConfig({
   resolve: {
     alias: workspaceAliases,
@@ -65,5 +82,6 @@ export default defineConfig({
     include: ['src/**/*.{test,spec}.ts'],
     exclude: ['**/node_modules/**', '**/dist/**'],
     passWithNoTests: true,
+    maxWorkers,
   },
 });

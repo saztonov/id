@@ -29,7 +29,7 @@
  * разметку ни списком, ни по прямому идентификатору (§16).
  */
 import { createHash } from 'node:crypto';
-import { and, asc, eq, inArray, isNull, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import {
   layoutBlockPoints,
   layoutBlocks,
@@ -438,6 +438,61 @@ export async function findDraftLayout(
   return rows[0] ?? null;
 }
 
+/**
+ * Разморозить последнюю разметку ревизии и вернуть её как черновик.
+ *
+ * Только для режима тестирования (см. `ensureDraftLayout`). `null` — размораживать
+ * нечего: разметки у ревизии ещё нет, и вызывающий заведёт первую обычным путём.
+ *
+ * Триггеры `layout_revisions_frozen_immutable` и `layout_revisions_supersede_only`
+ * переходу `frozen → draft` не мешают: миграция 0035 добавила им ранний выход по
+ * `immutability_enforced()`, а сюда мы попадаем только когда настройка выключена.
+ * CHECK `layout_revisions_frozen_chk` тоже доволен: он требует `blocks_hash` и
+ * `frozen_at` лишь у не-черновика.
+ *
+ * `bundle_id` переписывается на текущий рабочий документ: комплект могли
+ * пересобрать между нажатиями, и разметка обязана лежать на той карте страниц, по
+ * которой её сейчас считают. Блоки при этом не трогаются — их заменит детекция,
+ * а страницы вне новой карты отсеет `importDetectedBlocks`.
+ */
+async function thawLatestLayout(
+  db: Database,
+  scope: AuthScope,
+  input: EnsureDraftLayoutInput,
+): Promise<LayoutRevisionView | null> {
+  const rows = await db
+    .select({ id: layoutRevisions.id })
+    .from(layoutRevisions)
+    .innerJoin(submissionRevisions, eq(layoutRevisions.revisionId, submissionRevisions.id))
+    .where(withScope(scope, REVISION_SCOPE, eq(layoutRevisions.revisionId, input.revisionId)))
+    .orderBy(desc(layoutRevisions.revisionNo))
+    .limit(1);
+
+  const found = rows[0];
+  if (found === undefined) return null;
+
+  await db
+    .update(layoutRevisions)
+    .set({
+      state: 'draft',
+      blocksHash: null,
+      frozenAt: null,
+      frozenBy: null,
+      bundleId: input.bundleId,
+      version: sql`${layoutRevisions.version} + 1`,
+      updatedAt: sql`now()`,
+    })
+    .where(eq(layoutRevisions.id, found.id));
+
+  await appendRevisionEvent(db, {
+    revisionId: input.revisionId,
+    eventType: 'layout.thawed',
+    payload: { layoutRevisionId: found.id, bundleId: input.bundleId },
+  });
+
+  return findLayoutRevision(db, scope, found.id);
+}
+
 // =====================================================================
 // Создание черновика
 // =====================================================================
@@ -447,6 +502,13 @@ export interface EnsureDraftLayoutInput {
   readonly bundleId: string;
   /** §5.3: `full_page` допустим только на однородных текстовых комплектах. */
   readonly detectorProfile?: 'rf_detr' | 'full_page';
+  /**
+   * Строгий режим (`core.enforce_immutability`, ADR-0015). `false` — повторное
+   * выделение блоков ПЕРЕЗАПИСЫВАЕТ единственную разметку вместо того, чтобы
+   * заводить следующую по номеру. Умолчание строгое: забытый аргумент не имеет
+   * права молча сменить поведение.
+   */
+  readonly enforceGates?: boolean;
 }
 
 export interface EnsureDraftLayoutResult {
@@ -464,6 +526,19 @@ export interface EnsureDraftLayoutResult {
  * Профиль порогов пиннится ЗДЕСЬ, а не в момент расчёта флагов: иначе
  * перепубликация профиля между детекцией и анализом дала бы флаги, посчитанные
  * по одному профилю, и запись о другом.
+ *
+ * ## Одна разметка вместо ряда ревизий (режим тестирования)
+ *
+ * В строгом режиме замороженная разметка — доказательство: она названа в
+ * `blocks_hash` прогона распознавания, и переразметка обязана завести СЛЕДУЮЩУЮ
+ * ревизию, чтобы прежний результат остался объяснимым. При выключенной
+ * неизменяемости доказывать нечего, а ряд «Ревизия 1, 2, 3…» превращает
+ * повторное нажатие кнопки в накопление мусора и выносит наружу понятие, которого
+ * на этапе тестирования не должно быть видно вовсе. Поэтому замороженная разметка
+ * там РАЗМОРАЖИВАЕТСЯ и переиспользуется.
+ *
+ * Ручная правка при этом переживает переразметку: `importDetectedBlocks` сносит
+ * только блоки `source='auto'` и целиком пропускает страницы с ручными.
  */
 export async function ensureDraftLayout(
   db: Database,
@@ -479,6 +554,11 @@ export async function ensureDraftLayout(
       );
     }
     return { layout: existing, created: false };
+  }
+
+  if (input.enforceGates === false) {
+    const reused = await thawLatestLayout(db, scope, input);
+    if (reused !== null) return { layout: reused, created: false };
   }
 
   const profile = await findActiveLayoutProfile(db);

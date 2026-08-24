@@ -47,7 +47,7 @@ import {
   updateLayoutBlock,
   type LayoutRevisionView,
 } from '../../db/repositories/layout.js';
-import { readDetectionSettings } from '../../config/portal-settings.js';
+import { readDetectionSettings, readImmutabilityEnforced } from '../../config/portal-settings.js';
 import { enqueueDetectBatches, enqueueLocalDetectBatches, startMarkupOnBundle } from './start.js';
 import {
   blockCreateSchema,
@@ -432,7 +432,29 @@ function registerPageRoutes(app: AppInstance): void {
       const layout = await findLayoutRevision(app.db, scope, request.params.layoutId);
       if (layout === null) throw notFound('Ревизия разметки не найдена.');
       if (layout.state !== 'draft') {
-        throw conflict('Замороженную разметку заново не детектируют: создайте новую ревизию.');
+        /**
+         * Ручной путь инженера — тот же ответ, что у кнопки.
+         *
+         * В строгом режиме заново детектировать замороженную разметку нельзя: по
+         * ней уже считан `blocks_hash`, и прогон распознавания ссылается именно на
+         * этот набор блоков. В режиме тестирования доказывать нечего, и «создайте
+         * новую ревизию» — совет ровно про то понятие, которое там убрано. Разметка
+         * размораживается и перезаписывается, как это делает «1. Выделить блоки».
+         */
+        if (await readImmutabilityEnforced(app.db)) {
+          throw conflict('Замороженную разметку заново не детектируют: создайте новую ревизию.');
+        }
+        const restarted = await startMarkupOnBundle(app.db, scope, {
+          revisionId: layout.revisionId,
+          bundleId: layout.bundleId,
+          previewCached: app.env.PREVIEW_MODE === 'cached',
+          logger: request.log as unknown as Logger,
+        });
+        return reply.code(202).send({
+          layoutRevisionId: restarted.layoutRevisionId,
+          batches: restarted.jobIds.length,
+          jobIds: [...restarted.jobIds],
+        });
       }
 
       const requested = request.body.workingPageIndices;

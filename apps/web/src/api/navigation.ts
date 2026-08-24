@@ -416,30 +416,20 @@ export async function deleteWork(workId: string): Promise<void> {
 // Ревизии комплекта
 // =====================================================================
 
-export async function listRevisions(
-  workId: string,
-  cursor?: string | null,
-): Promise<NavigationResult<CursorPage<SubmissionRevisionSummary>>> {
-  const route = NAVIGATION_ROUTES.revisionsOfWork(workId);
-  return loadNavigation(route, () =>
-    get<CursorPage<SubmissionRevisionSummary>>(route, { query: pageQuery(cursor, {}) }),
-  );
-}
-
 /**
- * Ручное открытие следующей ревизии.
+ * Удаление одной ревизии со всем производным.
  *
- * Разрешено сервером ровно там, где возврат уже отработал или не мог отработать
- * вовсе: `approved`, `superseded` и «ревизий нет». Открытый черновик, ожидание
- * решения и уже отработавший возврат дают 409 с внятным текстом — экран
- * показывает этот текст, а не прячет кнопку по собственной догадке о состоянии.
+ * Право — `settings.manage` (администратор), то же, что у удаления комплекта.
+ * Сервер отвергает 409 с перечислением помех: согласованная ревизия, переданный
+ * реестр, юридический запрет и «это единственная ревизия комплекта» — последнее
+ * означает, что удалять надо комплект целиком.
+ *
+ * Клиентских функций `listRevisions`/`createRevision` здесь больше нет: их не
+ * вызывал ни один экран, а ряд ревизий как понятие с интерфейса убран — работа
+ * идёт с комплектом. Маршруты на сервере остались, наружу они не выведены.
  */
-export async function createRevision(workId: string): Promise<SubmissionRevisionSummary> {
-  const response = await request<SubmissionRevisionSummary>(
-    'POST',
-    NAVIGATION_ROUTES.revisionsOfWork(workId),
-  );
-  return response.data;
+export async function deleteRevision(revisionId: string): Promise<void> {
+  await request<void>('DELETE', `/api/v1/revisions/${revisionId}`);
 }
 
 // =====================================================================

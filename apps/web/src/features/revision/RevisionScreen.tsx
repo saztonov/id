@@ -19,12 +19,14 @@
  * переживает переключение вкладок; состояние потока вкладки читают из контекста
  * (`stream.tsx`).
  */
-import { useEffect, type ReactNode } from 'react';
-import { Alert, Tabs, Tag, Typography } from 'antd';
-import { useQuery } from '@tanstack/react-query';
+import { useEffect, useState, type ReactNode } from 'react';
+import { Alert, App as AntApp, Button, Modal, Tabs, Tag, Typography } from 'antd';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { workflow } from '../../api/endpoints.js';
 import { navigationKeys, revisionKeys } from '../../api/keys.js';
-import { getWork } from '../../api/navigation.js';
+import { deleteRevision, getWork } from '../../api/navigation.js';
+import { describeError } from '../../api/problem.js';
+import { useSession } from '../../app/session.js';
 import { ErrorState, LoadingState, ScreenHeading } from '../../shared/ui.js';
 import { WORK_KIND_LABELS, WORKFLOW_STATUS_LABELS, labelOf } from '../../shared/labels.js';
 import { Link, useNavigate, useQueryParam } from '../../app/router.js';
@@ -100,6 +102,79 @@ function WorkLine({ workId }: { workId: string }): ReactNode {
   );
 }
 
+/**
+ * Удалить эту ревизию со всем производным.
+ *
+ * Нужна ровно там, где неудачную попытку хочется стереть и начать заново, — на
+ * этапе тестирования это основной способ убрать за собой. Право `settings.manage`
+ * то же, что у удаления комплекта: завести свою работу и стереть чужую вместе с
+ * историей проверок — разные по весу действия.
+ *
+ * Препятствия (согласованная ревизия, переданный реестр, юридический запрет,
+ * «единственная ревизия комплекта») сервер называет в 409 поимённо, и текст
+ * показывается как есть. Отдельного предпросмотра с числами здесь нет намеренно:
+ * у комплекта он оправдан — там за одной строкой прячется вся работа, — а здесь
+ * человек уже стоит на экране этой самой ревизии и видит её содержимое вкладками.
+ */
+function DeleteRevisionAction({
+  revisionId,
+  workId,
+}: {
+  revisionId: string;
+  workId: string;
+}): ReactNode {
+  const { can } = useSession();
+  const { message } = AntApp.useApp();
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  const [open, setOpen] = useState(false);
+
+  const work = useQuery({
+    queryKey: navigationKeys.work(workId),
+    queryFn: () => getWork(workId),
+  });
+
+  const remove = useMutation({
+    mutationFn: () => deleteRevision(revisionId),
+    onSuccess: async () => {
+      message.success('Ревизия удалена вместе со всем производным');
+      setOpen(false);
+      await queryClient.invalidateQueries({ queryKey: navigationKeys.root });
+      // Экран удалённой ревизии показывать нечего — уходим к объекту, откуда в
+      // комплект и заходят.
+      const objectId = work.data?.kind === 'available' ? work.data.data.objectId : null;
+      navigate(objectId === null ? '/ids' : `/ids/objects/${objectId}`);
+    },
+    onError: (error) => message.error(describeError(error)),
+  });
+
+  if (!can('settings.manage')) return null;
+
+  return (
+    <>
+      <Button danger size="small" onClick={() => setOpen(true)} data-testid="delete-revision">
+        Удалить ревизию
+      </Button>
+      <Modal
+        open={open}
+        title="Удалить ревизию?"
+        okText="Удалить безвозвратно"
+        cancelText="Отмена"
+        okButtonProps={{ danger: true }}
+        confirmLoading={remove.isPending}
+        onCancel={() => setOpen(false)}
+        onOk={() => remove.mutate()}
+        destroyOnHidden
+      >
+        <Typography.Paragraph>
+          Уйдут файлы, страницы, рабочий документ, разметка, распознанный текст, документы,
+          реквизиты и замечания этой ревизии. Восстановления нет.
+        </Typography.Paragraph>
+      </Modal>
+    </>
+  );
+}
+
 export function RevisionScreen({ revisionId }: { revisionId: string }): ReactNode {
   return (
     <RevisionStreamProvider revisionId={revisionId}>
@@ -110,6 +185,7 @@ export function RevisionScreen({ revisionId }: { revisionId: string }): ReactNod
 
 function RevisionWorkspace({ revisionId }: { revisionId: string }): ReactNode {
   const navigate = useNavigate();
+  const { immutabilityEnforced } = useSession();
   const requested = useQueryParam('tab');
   const moved = requested === null ? undefined : MOVED_TO_CHECKS[requested];
   const tab: TabKey =
@@ -134,23 +210,47 @@ function RevisionWorkspace({ revisionId }: { revisionId: string }): ReactNode {
     queryFn: () => workflow.state(revisionId),
   });
 
-  if (state.isPending) return <LoadingState label="Загрузка ревизии…" />;
-  if (state.isError) return <ErrorState error={state.error} title="Ревизия недоступна" />;
+  // Тот же ключ, что у `WorkLine`: react-query объединит их в один запрос, а не
+  // сходит на сервер дважды за одной карточкой.
+  const work = useQuery({
+    queryKey: navigationKeys.work(state.data?.revision.workId ?? 'none'),
+    queryFn: () => getWork(state.data?.revision.workId ?? ''),
+    enabled: state.data !== undefined,
+  });
+  const workTitle = work.data?.kind === 'available' ? work.data.data.title : null;
+
+  if (state.isPending) return <LoadingState label="Загрузка комплекта…" />;
+  if (state.isError) return <ErrorState error={state.error} title="Комплект недоступен" />;
 
   const revision = state.data.revision;
-  const sourceEditable = revision.status === 'draft';
-  const derivedEditable = !TERMINAL.includes(revision.status);
+  /**
+   * Что правится, решает не только статус.
+   *
+   * В режиме тестирования (`core.enforce_immutability = false`, ADR-0015) сервер
+   * состав поданной ревизии править РАЗРЕШАЕТ, а экран всё равно гасил вкладку
+   * «Файлы» — то есть запрещал то, что портал уже разрешил, и человек упирался в
+   * серую кнопку без объяснения. Условие здесь теперь совпадает с серверным.
+   */
+  const sourceEditable = revision.status === 'draft' || !immutabilityEnforced;
+  const derivedEditable = !TERMINAL.includes(revision.status) || !immutabilityEnforced;
 
   return (
     <>
+      {/*
+        Заголовок называет КОМПЛЕКТ, а не номер ревизии. Ряд «Ревизия № 1, 2, 3»
+        выносил наружу внутреннее устройство хранения: человек работает с одним
+        документом, а не с их историей, и повторное выделение блоков теперь
+        перезаписывает разметку, а не заводит следующую по номеру.
+      */}
       <ScreenHeading
-        title={`Ревизия № ${String(revision.revisionNo)}`}
+        title={workTitle ?? 'Комплект работ'}
         extra={
           <>
             <Tag data-testid="revision-status-badge">
               {labelOf(WORKFLOW_STATUS_LABELS, revision.status)}
             </Tag>
             <StreamIndicator />
+            <DeleteRevisionAction revisionId={revisionId} workId={revision.workId} />
           </>
         }
       />

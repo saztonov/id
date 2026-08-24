@@ -80,17 +80,21 @@ export function MarkupScreen({ revisionId }: MarkupScreenProps): ReactNode {
     queryFn: () => layout.listRevisions(revisionId),
   });
 
-  const [selectedLayoutId, setSelectedLayoutId] = useState<string | null>(null);
-
   useEvidenceTarget();
   usePdfCacheCleanup();
 
-  // Открывается последняя ревизия разметки. Явный выбор пользователя имеет
-  // приоритет: инженер сравнивает замороженную с черновой, и «всегда последняя»
-  // перебрасывало бы его обратно при каждом обновлении списка.
-  const layoutId = selectedLayoutId ?? revisions.data?.[revisions.data.length - 1]?.id ?? null;
+  /**
+   * Разметка одна, и выбирать нечего.
+   *
+   * Прежде здесь стоял выпадающий список «Ревизия 3 — Заморожена»: повторное
+   * выделение блоков заводило следующую ревизию разметки, и человеку приходилось
+   * держать в голове, какая из них сейчас настоящая. Теперь повтор перезаписывает
+   * ту же (`ensureDraftLayout` размораживает её), поэтому берётся последняя — она
+   * же единственная, — а выбор из списка убран вместе с самим понятием.
+   */
+  const layoutId = revisions.data?.[revisions.data.length - 1]?.id ?? null;
 
-  if (revisions.isPending) return <LoadingState label="Загрузка ревизий разметки…" />;
+  if (revisions.isPending) return <LoadingState label="Загрузка разметки…" />;
   if (revisions.isError) return <ErrorState error={revisions.error} />;
   if (layoutId === null) {
     return (
@@ -99,7 +103,7 @@ export function MarkupScreen({ revisionId }: MarkupScreenProps): ReactNode {
         showIcon
         message="Разметки ещё нет"
         description={
-          'Ревизия разметки создаётся кнопкой «Разметить файл» на вкладке «Файлы»: ' +
+          'Разметка создаётся кнопкой «1. Выделить блоки» над вкладками: ' +
           'она собирает рабочий документ и запускает постраничную детекцию.'
         }
       />
@@ -111,11 +115,6 @@ export function MarkupScreen({ revisionId }: MarkupScreenProps): ReactNode {
       key={layoutId}
       revisionId={revisionId}
       layoutId={layoutId}
-      layoutIds={(revisions.data ?? []).map((item) => ({
-        id: item.id,
-        label: `Ревизия ${String(item.revisionNo)} — ${LAYOUT_STATE_LABELS[item.state]}`,
-      }))}
-      onPickLayout={setSelectedLayoutId}
       canEdit={can('markup.edit')}
       canFreeze={can('markup.freeze')}
       canRecognize={can('recognition.start')}
@@ -133,8 +132,6 @@ export function MarkupScreen({ revisionId }: MarkupScreenProps): ReactNode {
 interface WorkspaceProps {
   readonly revisionId: string;
   readonly layoutId: string;
-  readonly layoutIds: readonly { id: string; label: string }[];
-  readonly onPickLayout: (layoutId: string) => void;
   readonly canEdit: boolean;
   readonly canFreeze: boolean;
   readonly canRecognize: boolean;
@@ -330,9 +327,7 @@ function LayoutWorkspace(props: WorkspaceProps): ReactNode {
         blocksHash={layoutDetail.blocksHash}
         blockCount={blocks.length}
         coverage={coverageOf(pageBlocks)}
-        layoutIds={props.layoutIds}
         layoutId={layoutId}
-        onPickLayout={props.onPickLayout}
         editable={editable}
         disabledReason={disabledReason}
         busy={editing.busy}
@@ -650,9 +645,7 @@ interface ToolbarProps {
   readonly blocksHash: string | null;
   readonly blockCount: number;
   readonly coverage: number;
-  readonly layoutIds: readonly { id: string; label: string }[];
   readonly layoutId: string;
-  readonly onPickLayout: (layoutId: string) => void;
   readonly editable: boolean;
   /** Почему панель недоступна; `null` — доступна. Показывается рядом с кнопками. */
   readonly disabledReason: string | null;
@@ -688,14 +681,10 @@ function MarkupToolbar(props: ToolbarProps): ReactNode {
         background: '#fafafa',
       }}
     >
-      <Select
-        size="small"
-        value={props.layoutId}
-        onChange={props.onPickLayout}
-        options={props.layoutIds.map((item) => ({ value: item.id, label: item.label }))}
-        style={{ minWidth: 220 }}
-        aria-label="Ревизия разметки"
-      />
+      {/*
+        Выбора разметки здесь больше нет: она одна. Тег состояния остался — он
+        отвечает на вопрос «почему нельзя править», а не «какую из них я смотрю».
+      */}
       <Tag color={props.state === 'draft' ? 'blue' : 'default'}>
         {LAYOUT_STATE_LABELS[props.state]}
       </Tag>

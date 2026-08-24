@@ -31,6 +31,7 @@ import { LruCache } from './prompt.js';
 import {
   ProxyLlmProvider,
   chatCompletionsUrl,
+  describeFailure,
   idempotencyKey,
   type CachedCompletion,
 } from './proxy.js';
@@ -471,5 +472,59 @@ describe('отказы', () => {
       h.provider.complete({ ...REQUEST, userPrompt: 'ПАСПОРТ КАЧЕСТВА №7' }),
     ).rejects.toBeInstanceOf(LlmRateLimitError);
     expect(h.calls).toHaveLength(1);
+  });
+});
+
+// =====================================================================
+// Разбор отказа шлюза
+// =====================================================================
+
+/**
+ * Регрессия на разбор прод-инцидента: прогон из 83 страниц оборвался, и всё, что
+ * осталось в журнале, — «Шлюз LLM ответил 400: Provider returned error». Причина
+ * была в ответе шлюза с самого начала, просто не читалась.
+ */
+describe('describeFailure', () => {
+  function gatewayResponse(body: unknown, status = 400): Response {
+    return new Response(JSON.stringify(body), { status });
+  }
+
+  it('достаёт настоящую причину из error.metadata.raw', async () => {
+    const failure = await describeFailure(
+      gatewayResponse({
+        error: {
+          message: 'Provider returned error',
+          code: 400,
+          metadata: { provider_name: 'Google', raw: 'model not found: google/gemini-3.7-flash' },
+        },
+      }),
+    );
+
+    expect(failure.message).toContain('Provider returned error');
+    expect(failure.message).toContain('Google');
+    expect(failure.message).toContain('model not found');
+  });
+
+  it('числовой error.code больше не отбрасывается', async () => {
+    // Прежняя проверка «только строка» молча теряла код: у шлюза он часто число,
+    // а по коду ветвится обработка 502 upstream_response_too_large.
+    const failure = await describeFailure(gatewayResponse({ error: { message: 'x', code: 400 } }));
+    expect(failure.code).toBe('400');
+  });
+
+  it('строковый error.code сохраняется как был', async () => {
+    const failure = await describeFailure(
+      gatewayResponse({ error: { message: 'x', code: 'upstream_response_too_large' } }, 502),
+    );
+    expect(failure.code).toBe('upstream_response_too_large');
+  });
+
+  it('пустое и неразбираемое тело дают статус без домыслов', async () => {
+    expect((await describeFailure(new Response('', { status: 500 }))).message).toBe(
+      'Шлюз LLM ответил 500',
+    );
+    expect((await describeFailure(new Response('не json', { status: 502 }))).message).toBe(
+      'Шлюз LLM ответил 502',
+    );
   });
 });

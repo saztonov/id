@@ -73,7 +73,20 @@
  * Строку с `draft` защищает ещё и `ux_submission_revisions_single_draft`:
  * проверка состояния здесь нужна ради внятного отказа, а инвариант держит БД.
  */
-import { and, asc, desc, eq, gte, ilike, isNotNull, isNull, lte, sql, type SQL } from 'drizzle-orm';
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  gte,
+  ilike,
+  isNotNull,
+  isNull,
+  lte,
+  ne,
+  sql,
+  type SQL,
+} from 'drizzle-orm';
 import { z } from 'zod';
 import { registries, registryItems, submissionRevisions, works } from '@id/db';
 import type {
@@ -794,6 +807,150 @@ export async function previewWorkDeletion(
     findings: row?.findings ?? 0,
     blockers: await workDeletionBlockers(db, workId, enforceImmutability),
   };
+}
+
+/**
+ * Удалить ОДНУ ревизию комплекта со всем производным.
+ *
+ * Отдельно от `deleteWork`, потому что вопрос другой: не «этого комплекта не
+ * должно быть», а «эта попытка не удалась, начнём заново». Механика удаления при
+ * этом общая — `purgeRevisionEntirely`, тот же топологический порядок.
+ *
+ * Помехи берутся те же, что у комплекта, но считаются по ОДНОЙ ревизии: режим
+ * тестирования ослабляет запреты своей базы, а не обязательства перед второй
+ * стороной — согласованную ревизию, переданный реестр и юридический запрет он не
+ * отменяет (ADR-0015).
+ *
+ * Последняя ревизия комплекта не удаляется: вход в комплект на экране — это
+ * `works.current_revision_id`, и комплект без единой ревизии стал бы недостижим,
+ * а `DELETE /works/{id}` — ровно то действие, которое здесь и требуется. Отказ
+ * называет его прямо, а не оставляет искать.
+ */
+export async function deleteRevision(
+  db: Database,
+  scope: AuthScope,
+  revisionId: string,
+  actor: AuditActor,
+  enforceImmutability: boolean,
+): Promise<{ readonly deleted: boolean; readonly blockers: readonly string[] } | null> {
+  const rows = await db
+    .select({
+      id: submissionRevisions.id,
+      workId: submissionRevisions.workId,
+      objectId: submissionRevisions.objectId,
+      revisionNo: submissionRevisions.revisionNo,
+      status: submissionRevisions.status,
+    })
+    .from(submissionRevisions)
+    .where(withScope(scope, REVISION_SCOPE, eq(submissionRevisions.id, revisionId)))
+    .limit(1);
+
+  const revision = rows[0];
+  if (revision === undefined) return null;
+
+  const blockers = await revisionDeletionBlockers(db, revision, enforceImmutability);
+  if (blockers.length > 0) return { deleted: false, blockers };
+
+  await guardNavigation(() =>
+    db.transaction(async (tx) => {
+      /**
+       * Указатель комплекта переводится на соседнюю ревизию ПЕРВЫМ.
+       *
+       * `works.current_revision_id` ссылается на строку, которую мы сейчас
+       * удалим, и внешний ключ отверг бы удаление раньше, чем дело дойдёт до
+       * него. Берётся ревизия с наибольшим номером из оставшихся — то есть та,
+       * на которую и указывал бы комплект, если бы удаляемой не было.
+       */
+      const previous = await tx
+        .select({ id: submissionRevisions.id })
+        .from(submissionRevisions)
+        .where(
+          and(
+            eq(submissionRevisions.workId, revision.workId),
+            ne(submissionRevisions.id, revisionId),
+          ),
+        )
+        .orderBy(desc(submissionRevisions.revisionNo))
+        .limit(1);
+
+      await tx
+        .update(works)
+        .set({ currentRevisionId: previous[0]?.id ?? null })
+        .where(eq(works.id, revision.workId));
+
+      // Дети удаляемой ревизии по `parent_revision_id`: ссылка без каскада, и
+      // осиротить её нельзя. Родителем становится тот же сосед.
+      await tx
+        .update(submissionRevisions)
+        .set({ parentRevisionId: previous[0]?.id ?? null })
+        .where(eq(submissionRevisions.parentRevisionId, revisionId));
+
+      await purgeRevisionEntirely(tx, revisionId);
+
+      await appendAudit(tx, scope, {
+        ...actor,
+        action: 'revision.deleted',
+        entityType: 'submission_revision',
+        entityId: revisionId,
+        objectId: revision.objectId,
+        payload: {
+          workId: revision.workId,
+          revisionNo: revision.revisionNo,
+          status: revision.status,
+        },
+      });
+    }),
+  );
+
+  return { deleted: true, blockers: [] };
+}
+
+/** Помехи удалению одной ревизии — те же четыре, что у комплекта. */
+async function revisionDeletionBlockers(
+  db: Database,
+  revision: { readonly id: string; readonly workId: string; readonly status: string },
+  enforceImmutability: boolean,
+): Promise<readonly string[]> {
+  const result = await db.execute<{ siblings: number; issued: number; holds: number }>(sql`
+    select
+      (select count(*) from submission_revisions
+        where work_id = ${revision.workId}::uuid)::int as siblings,
+      (select count(*) from registries r
+         join registry_items ri on ri.registry_id = r.id
+        where ri.revision_id = ${revision.id}::uuid and r.status <> 'draft')::int as issued,
+      (select count(*) from legal_holds
+        where revision_id = ${revision.id}::uuid and released_at is null)::int as holds
+  `);
+
+  const row = result.rows[0];
+  const blockers: string[] = [];
+  if (row === undefined) return blockers;
+
+  if (row.siblings <= 1) {
+    blockers.push(
+      'это единственная ревизия комплекта — комплект без ревизий недостижим с экрана; ' +
+        'удалите комплект целиком',
+    );
+  }
+  if (revision.status === 'approved') {
+    blockers.push('ревизия согласована — согласование отменяется решением, а не удалением');
+  }
+  if (row.issued > 0) {
+    blockers.push(
+      `ревизия включена в переданный реестр (записей: ${String(row.issued)}) — ` +
+        'список переданных работ неизменяем',
+    );
+  }
+  if (row.holds > 0) {
+    blockers.push(`на ревизию наложен неснятый юридический запрет: ${String(row.holds)}`);
+  }
+  if (enforceImmutability && revision.status !== 'draft') {
+    blockers.push(
+      `ревизия в статусе «${revision.status}» — состав поданного комплекта неизменяем (§3.9). ` +
+        'Удаление доступно в режиме тестирования',
+    );
+  }
+  return blockers;
 }
 
 /**
