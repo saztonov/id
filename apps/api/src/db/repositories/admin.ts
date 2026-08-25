@@ -1049,9 +1049,14 @@ const RULESET_SELECTION = {
   publishedBy: rulesetVersions.publishedBy,
   notes: rulesetVersions.notes,
   createdAt: isoUtc<string>(rulesetVersions.createdAt, 'created_at_iso'),
+  // Внешняя колонка написана ТЕКСТОМ, а не через `${rulesetVersions.id}`: в
+  // выборке без джойнов Drizzle рендерит подставленную колонку без имени
+  // таблицы, и `"id"` связался бы с внутренней областью подзапроса. Сегодня
+  // счётчик верен лишь потому, что у `ruleset_rules` нет колонки `id`, — то
+  // есть корректность держится на отсутствии колонки в чужой таблице.
   ruleCount: sql<number>`(select count(*)::int
                             from ruleset_rules r
-                           where r.ruleset_version_id = ${rulesetVersions.id})`.as('rule_count'),
+                           where r.ruleset_version_id = ruleset_versions.id)`.as('rule_count'),
 };
 
 const rulesetCursorSchema = z.object({ createdAt: z.string().min(1), id: z.uuid() });

@@ -149,7 +149,12 @@ const FILE_SELECTION = {
   blobSha256: sourceFiles.blobSha256,
   sizeBytes: storedBlobs.sizeBytes,
   mime: storedBlobs.mime,
-  pageCount: sql<number>`(select count(*)::int from ${sourcePages} where ${sourcePages.sourceFileId} = ${sourceFiles.id})`,
+  // Внутренняя таблица под алиасом, внешняя — ТЕКСТОМ, по той же причине, что у
+  // `hasBundle` ниже: подстановка `${sourceFiles.id}` рендерится без имени
+  // таблицы, и в запросе без джойнов условие связалось бы с `p.id`. Здесь оно
+  // работало только потому, что оба чтения делают по два `innerJoin`, — то есть
+  // корректность зависела от вызывающего.
+  pageCount: sql<number>`(select count(*)::int from ${sourcePages} p where p.source_file_id = source_files.id)`,
   createdAt: isoTimestamp(sourceFiles.createdAt),
 };
 
@@ -449,7 +454,6 @@ export async function saveFileVerdict(
       .select({
         id: sourceFiles.id,
         verifyState: sourceFiles.verifyState,
-        pageCount: sql<number>`(select count(*)::int from ${sourcePages} where ${sourcePages.sourceFileId} = ${sourceFiles.id})`,
       })
       .from(sourceFiles)
       .where(and(eq(sourceFiles.id, input.fileId), eq(sourceFiles.revisionId, input.revisionId)))
@@ -458,6 +462,22 @@ export async function saveFileVerdict(
     if (current === undefined) {
       return { kind: 'locked', reason: 'файла нет в этой ревизии' };
     }
+
+    // Страницы считаются ОТДЕЛЬНЫМ запросом, а не коррелированным подзапросом в
+    // выборке выше, и это исправление дефекта, а не стилистика. Выборка файла
+    // джойнов не имеет, а в таком запросе Drizzle рендерит подставленную колонку
+    // без имени таблицы: условие `${sourcePages.sourceFileId} = ${sourceFiles.id}`
+    // превращалось в `source_file_id = "id"`, где обе стороны связывались с
+    // `source_pages`. Счётчик был вечным нулём, поэтому задача КАЖДЫЙ раз
+    // пыталась записать геометрию, уже записанную приёмом файла, и умирала на
+    // `source_pages_file_index_uq` — вместе с ней откатывался и вердикт, ради
+    // которого задача существует. Тот же механизм однажды обнулил `hasBundle`
+    // (см. `findRevisionForFiles`).
+    const [pageRow] = await tx
+      .select({ count: sql<number>`count(*)::int` })
+      .from(sourcePages)
+      .where(eq(sourcePages.sourceFileId, input.fileId));
+    const pageCount = Number(pageRow?.count ?? 0);
 
     const changed = current.verifyState !== input.verifyState;
 
@@ -470,26 +490,39 @@ export async function saveFileVerdict(
       })
       .where(eq(sourceFiles.id, input.fileId));
 
-    if (Number(current.pageCount) === 0 && input.pages.length > 0) {
+    if (pageCount === 0 && input.pages.length > 0) {
       const [ordinalRow] = await tx
         .select({ next: sql<number>`coalesce(max(${sourcePages.revisionOrdinal}) + 1, 0)` })
         .from(sourcePages)
         .where(eq(sourcePages.revisionId, input.revisionId));
       const firstOrdinal = Number(ordinalRow?.next ?? 0);
 
-      await tx.insert(sourcePages).values(
-        input.pages.map((page, index) => ({
-          revisionId: input.revisionId,
-          sourceFileId: input.fileId,
-          filePageIndex: index,
-          revisionOrdinal: firstOrdinal + index,
-          widthPx: page.widthPx,
-          heightPx: page.heightPx,
-          rotation: page.rotation,
-          attentionFlags: [],
-        })),
-      );
-      await renumberPages(tx, input.revisionId);
+      // `onConflictDoNothing` БЕЗ цели: конкурент, успевший записать те же
+      // страницы между счётом и вставкой, нарушил бы и
+      // `source_pages_file_index_uq`, и `source_pages_revision_ordinal_uq` —
+      // цель по одному ключу оставила бы второй отказом. Проверка-и-потом-
+      // запись разными операторами гонку не закрывает в принципе, а «писать,
+      // только если страниц нет» — ровно то, что выражает сама операция.
+      const inserted = await tx
+        .insert(sourcePages)
+        .values(
+          input.pages.map((page, index) => ({
+            revisionId: input.revisionId,
+            sourceFileId: input.fileId,
+            filePageIndex: index,
+            revisionOrdinal: firstOrdinal + index,
+            widthPx: page.widthPx,
+            heightPx: page.heightPx,
+            rotation: page.rotation,
+            attentionFlags: [],
+          })),
+        )
+        .onConflictDoNothing()
+        .returning({ id: sourcePages.id });
+
+      // Пересчёт ординалов — только если строки появились: проигравший гонку
+      // иначе переставлял бы нумерацию всей ревизии впустую.
+      if (inserted.length > 0) await renumberPages(tx, input.revisionId);
     }
 
     if (changed) {

@@ -282,8 +282,14 @@ const BUNDLE_SELECTION = {
     sql<string>`to_char(${processingBundles.createdAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`.as(
       'created_at_iso',
     ),
+  // Внутренняя таблица под алиасом, внешняя — ТЕКСТОМ: в запросе без джойнов
+  // Drizzle рендерит подставленную колонку без имени таблицы, и `bundle_id = "id"`
+  // связалось бы с `id` самой `processing_bundle_pages` (тот же дефект, что
+  // обнулял `hasBundle` и счётчик страниц файла в `files.ts`). Сегодня все три
+  // чтения этой выборки джойнят ревизию, но корректность не должна зависеть от
+  // того, сохранит ли следующий вызывающий джойн.
   pageCount:
-    sql<number>`(select count(*)::int from ${processingBundlePages} where ${processingBundlePages.bundleId} = ${processingBundles.id})`.as(
+    sql<number>`(select count(*)::int from ${processingBundlePages} bp where bp.bundle_id = processing_bundles.id)`.as(
       'page_count',
     ),
 };

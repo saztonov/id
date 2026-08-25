@@ -42,10 +42,13 @@ import {
   createStorage,
   dedupeKeyFor,
   enqueueSystemJob,
+  evaluatePdfFile,
   JobRunner,
   loadEnv,
   loadPdfLibModule,
   NoopErrorReporter,
+  PDF_MIME,
+  storableVerdict,
   type Database,
   type PdfToolkit,
   type StorageProvider,
@@ -87,6 +90,18 @@ const CONTENT_B = fixture('single-1');
 const SHA_A = sha256(CONTENT_A);
 const SHA_B = sha256(CONTENT_B);
 
+/**
+ * Геометрия `single-1` — тем же вердиктом, каким её считает приём файла.
+ *
+ * Не константами: числа, списанные руками, разошлись бы с фикстурой при первой
+ * же её перегенерации, и разошлись бы молча — тест продолжал бы проходить,
+ * проверяя не то состояние, которое бывает в проде.
+ */
+const PAGES_B = storableVerdict(
+  evaluatePdfFile(CONTENT_B, { maxBytes: 64 * 1024 * 1024, maxPages: 500, declaredMime: PDF_MIME }),
+  '2026-08-24T14:54:33.000Z',
+).pages;
+
 const STORAGE_DIR = mkdtempSync(join(tmpdir(), 'id-pipeline-e2e-'));
 
 const TEST_ENV = loadEnv({
@@ -119,9 +134,9 @@ const FIXTURE: readonly string[] = [
   `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
      VALUES ('${REVISION}', '${SUBMISSION}', '${OBJECT}', '${ORG_CONTRACTOR}', 1, 'draft')`,
 
-  // Файлы записаны БЕЗ состояния проверки и без страниц: колонка `verify_state`
-  // имеет значение по умолчанию `pending`, и именно из него задача обязана
-  // вывести файл. Раньше в этой ситуации она только падала.
+  // Оба файла записаны БЕЗ состояния проверки: колонка `verify_state` имеет
+  // значение по умолчанию `pending`, и именно из него задача обязана вывести
+  // файл. Раньше в этой ситуации она только падала.
   `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
      VALUES ('${SHA_A}', 'blobs/${SHA_A}', ${CONTENT_A.byteLength}, 'application/pdf')`,
   `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
@@ -130,6 +145,22 @@ const FIXTURE: readonly string[] = [
      VALUES ('${FILE_A}', '${REVISION}', '${SHA_A}', 'АОСР.pdf', 0)`,
   `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order)
      VALUES ('${FILE_B}', '${REVISION}', '${SHA_B}', 'Сертификат.pdf', 1)`,
+
+  // А вот СТРАНИЦЫ у двух файлов в разном состоянии, и это не прихоть фикстуры,
+  // а два разных входа задачи. `FILE_A` страниц не имеет — задача записывает
+  // геометрию сама. `FILE_B` имеет их с приёма: синхронная загрузка пишет ту же
+  // геометрию тем же `storableVerdict`, поэтому в проде это как раз обычный
+  // случай, а «файл без страниц» — редкий. Прежде фикстура знала только второй
+  // вход, и дефект счётчика страниц (подзапрос без квалификации таблиц отдавал
+  // вечный ноль) был здесь невидим: задача каждый раз пыталась записать уже
+  // записанное и умирала на `source_pages_file_index_uq`.
+  ...PAGES_B.map(
+    (page, index) =>
+      `INSERT INTO source_pages
+         (id, revision_id, source_file_id, file_page_index, revision_ordinal, width_px, height_px, rotation)
+       VALUES ('${id(32 + index)}', '${REVISION}', '${FILE_B}', ${index}, ${index},
+               ${page.widthPx}, ${page.heightPx}, ${page.rotation})`,
+  ),
 ];
 
 let testDb: TestDatabase;
@@ -242,6 +273,17 @@ describe('file.verify и file.signature_probe пишут состояние, а 
     );
     expect(files.map((file) => file.verify_state)).toEqual(['ok', 'ok']);
     expect(files.every((file) => file.verify_error === null)).toBe(true);
+  });
+
+  it('файлу с уже записанными страницами задача их не дублирует', async () => {
+    // Боевой вход задачи: страницы записал приём файла. Прежде она пыталась
+    // записать их второй раз, получала `source_pages_file_index_uq` и откатывала
+    // транзакцию вместе с вердиктом — то есть единственная её работа не
+    // выполнялась никогда, а ревизия показывала отказ на принятом файле.
+    const pages = await testDb.query<{ count: string | number }>(
+      `SELECT count(*) AS count FROM source_pages WHERE source_file_id = '${FILE_B}'`,
+    );
+    expect(Number(pages[0]?.count ?? 0)).toBe(PAGES_B.length);
   });
 
   it('страницы записаны с геометрией и сплошными позициями ревизии', async () => {
