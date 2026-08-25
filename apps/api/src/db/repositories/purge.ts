@@ -37,12 +37,27 @@
  * стирать след предыдущей попытки вместе с её результатом значило бы прятать от
  * пользователя, что попытка вообще случалась.
  *
+ * ## Почему сносу предшествует отмена задач
+ *
+ * Очередь производным не является и в списках ниже её нет: `jobs` ссылается на
+ * ревизию через payload, без внешнего ключа, — поэтому удаление проходило и
+ * оставляло задачи жить. Оставленные, они делали ровно две вещи. Мёртвая
+ * держала `dead > 0`, то есть красную плашку «обработка остановилась» на
+ * ревизии, у которой снесли причину отказа. Стоящая в очереди просыпалась по
+ * `next_run_at`, не находила ни прогона, ни разметки и рождала нового мертвеца:
+ * сброс не заканчивал прошлую попытку, а размножал её.
+ *
+ * Поэтому каждая из трёх операций сначала зовёт `cancelJobsOfRevision`, и в
+ * `purgeRevisionEntirely` — обязательно ДО `REVISION_DELETES`, где `job_runs`
+ * удаляются: закрывать открытые попытки после было бы уже нечего.
+ *
  * При полном удалении комплекта журнал уходит вместе с ним: строки ссылаются на
  * ревизию внешним ключом, и оставить их невозможно технически, а хранить
  * «историю несуществующего» — бессмысленно.
  */
 import { sql, type SQL } from 'drizzle-orm';
 
+import { cancelJobsOfRevision } from './jobs.js';
 import type { Database } from './users.js';
 
 type Executor = Pick<Database, 'execute'>;
@@ -204,6 +219,7 @@ export async function purgeDerivedForRevision(
   executor: Executor,
   revisionId: string,
 ): Promise<void> {
+  await cancelJobsOfRevision(executor, revisionId);
   await runDeletes(executor, DERIVED_DELETES, revisionId);
 }
 
@@ -220,6 +236,12 @@ export async function resetPipelineForRevision(
   executor: Executor,
   revisionId: string,
 ): Promise<void> {
+  // Стадии перечислены, а не сняты все: сброс конвейера оставляет рабочий
+  // документ и разметку, поэтому задачи `uploaded` и `layout` относятся к тому,
+  // что переживает сброс, и снимать их было бы отменой чужой живой работы.
+  await cancelJobsOfRevision(executor, revisionId, {
+    stages: ['recognition', 'analysis', 'checks'],
+  });
   await runDeletes(executor, PIPELINE_RESET_DELETES, revisionId);
 }
 
@@ -231,6 +253,10 @@ export async function resetPipelineForRevision(
  * транзакции.
  */
 export async function purgeRevisionEntirely(executor: Executor, revisionId: string): Promise<void> {
+  // Отмена — ДО `REVISION_DELETES`: там удаляются `job_runs`, и закрывать
+  // открытые попытки после было бы уже нечего. Порядок здесь такой же
+  // обязательный, как топологический порядок самих удалений.
+  await cancelJobsOfRevision(executor, revisionId);
   await runDeletes(executor, DERIVED_DELETES, revisionId);
   await runDeletes(executor, REVISION_DELETES, revisionId);
   await executor.execute(sql`delete from submission_revisions where id = ${revisionId}`);

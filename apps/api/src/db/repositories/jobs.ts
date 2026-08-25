@@ -945,6 +945,83 @@ export async function cancelPendingJobsOfStage(
   return cancelled.rows.length;
 }
 
+/**
+ * Снять с ревизии ВСЕ незаконченные задачи — включая мёртвые.
+ *
+ * Пара к `purge.ts`: сброс конвейера и удаление комплекта сносят производное, но
+ * `jobs` не трогали вовсе, и это давало две беды сразу.
+ *
+ * Мёртвая задача прежнего прогона продолжала держать `dead > 0`, то есть красную
+ * плашку «обработка остановилась» на ревизии, у которой сбросили ровно то, из-за
+ * чего задача умерла. А `queued` — просыпалась по `next_run_at`, не находила ни
+ * прогона, ни разметки, и рождала НОВОГО мертвеца: сброс не заканчивал прошлую
+ * попытку, а размножал её.
+ *
+ * Поэтому здесь, в отличие от `cancelPendingJobsOfStage`, снимается и `failed`:
+ * та функция снимает остаток идущей работы («человек нажал следующую кнопку»),
+ * а эта закрывает работу, предмета которой больше нет. Мёртвая задача переживать
+ * снос своего предмета не имеет права — разбирать в ней уже нечего.
+ *
+ * `job_runs` НЕ удаляются: это журнал (§11 и шапка `purge.ts`). Открытые попытки
+ * закрываются исходом `cancelled` — строка без `outcome` означает «попытка идёт»,
+ * и оставленная открытой навсегда попала бы в `in_flight` сводки обработки.
+ *
+ * `stages` не задан — снимаются задачи всех стадий, включая обслуживающие
+ * (`stageOf` вернул `null`): при полном удалении ревизии не должно остаться
+ * ничего, что на неё сошлётся.
+ */
+export async function cancelJobsOfRevision(
+  db: JobExecutor,
+  revisionId: string,
+  options: { readonly stages?: readonly ProcessingStage[] | undefined } = {},
+): Promise<number> {
+  const stages = options.stages;
+  const typeFilter =
+    stages === undefined
+      ? null
+      : JOB_TYPES.filter((type) => {
+          const stage = stageOf(type);
+          return stage !== null && stages.includes(stage);
+        });
+  // Пустой список типов — не «снять всё», а «снимать нечего»: молчаливое
+  // расширение до всех типов было бы худшим из возможных прочтений.
+  if (typeFilter !== null && typeFilter.length === 0) return 0;
+
+  const cancelled = await db.execute<{ id: string }>(sql`
+    update ${jobs}
+       set status = 'cancelled', locked_by = null, locked_until = null, updated_at = now()
+     where ${jobs.payload} ->> 'revisionId' = ${revisionId}
+       and ${jobs.status} in ('queued', 'running', 'failed')
+       ${
+         typeFilter === null
+           ? sql``
+           : sql`and ${jobs.type} in (${sql.join(
+               typeFilter.map((type) => sql`${type}`),
+               sql`, `,
+             )})`
+       }
+    returning id
+  `);
+
+  if (cancelled.rows.length === 0) return 0;
+
+  // Попытки закрываются ОТДЕЛЬНЫМ оператором по списку идентификаторов, а не
+  // подзапросом по `jobs`: к этому моменту статус уже переписан, и подзапрос
+  // «где задача отменена» захватил бы задачи, отменённые кем-то раньше, вместе
+  // с их давно закрытыми попытками.
+  await db.execute(sql`
+    update ${jobRuns}
+       set finished_at = now(), outcome = 'cancelled'
+     where ${jobRuns.outcome} is null
+       and ${jobRuns.jobId} in (${sql.join(
+         cancelled.rows.map((row) => sql`${row.id}::uuid`),
+         sql`, `,
+       )})
+  `);
+
+  return cancelled.rows.length;
+}
+
 export interface QueueDepthRow {
   readonly jobType: string;
   readonly status: string;

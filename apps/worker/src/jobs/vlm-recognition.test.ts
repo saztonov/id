@@ -1130,10 +1130,42 @@ describe('createVlmFinalizeHandler', () => {
       sink,
     );
 
-    await expect(handler(ctx)).rejects.toThrow(VlmRecognitionStateError);
+    await handler(ctx);
+
     // Повторный вызов не трогает ни публикацию, ни (напрямую) finishRun —
     // прогон уже не 'running', и обработчик останавливается на первой же
     // проверке цели, не переигрывая уже свершившийся исход.
     expect(publishResults).not.toHaveBeenCalled();
+    // И выходит ТИХО, а не отказом: устаревшая задача — это «опоздал, уже не
+    // нужно». Отказ здесь сжигал бы все попытки каждой задачи снятого прогона
+    // (на комплекте в 83 страницы — сотня мертвецов) и держал бы красную плашку
+    // на ревизии, у которой всё уже сброшено.
+    expect(sink.logs.map((entry) => entry.fields['event'])).toContain('vlm_run_obsolete');
+  });
+
+  it('прогон снесён сбросом: задача пропускается тихо, а не отказом', async () => {
+    const finishRun = vi.fn(async () => ({ changed: false }));
+    const publishResults = vi.fn();
+    const d = deps({
+      loadRun: async () => null,
+      finishRun,
+      publishResults: publishResults as never,
+    });
+    const sink = makeSink();
+    const handler = createVlmFinalizeHandler(d);
+    const ctx = makeContext(
+      'vlm.finalize_run',
+      { revisionId: REVISION, recognitionRunId: RUN },
+      sink,
+      // Последняя попытка: именно на ней прежний отказ объявлял задачу мёртвой
+      // и пытался закрыть прогон, которого больше нет.
+      { attempt: 5, maxAttempts: 5 },
+    );
+
+    await handler(ctx);
+
+    expect(publishResults).not.toHaveBeenCalled();
+    expect(finishRun).not.toHaveBeenCalled();
+    expect(sink.logs.map((entry) => entry.fields['event'])).toContain('vlm_run_obsolete');
   });
 });

@@ -2,9 +2,10 @@
  * Две регрессии репозитория задач, обе — на прод-инциденты.
  *
  * 1. Назначение `seq` события ревизии: проигрыш гонки не убивает транзакцию.
- * 2. Ключ дедупликации: какие терминальные состояния его держат (0039).
+ * 2. Отмена задач ревизии: сброс не оставляет за собой ни мертвецов, ни спящих.
+ * 3. Ключ дедупликации: какие терминальные состояния его держат (0039).
  *
- * Разбор первой — ниже; вторая описана над своим `describe`.
+ * Разбор первой — ниже; остальные описаны над своими `describe`.
  *
  * # Назначение `seq` события ревизии
  *
@@ -44,7 +45,8 @@ import {
 import { loadMigrations } from '@id/migrator';
 
 import { HttpProblem } from '../../lib/problem.js';
-import { appendRevisionEvent, enqueueSystemJob } from './jobs.js';
+import { appendRevisionEvent, cancelJobsOfRevision, enqueueSystemJob } from './jobs.js';
+import { resetPipelineForRevision } from './purge.js';
 import type { Database } from './users.js';
 
 const MIGRATIONS_DIR = join(
@@ -230,6 +232,91 @@ describe('appendRevisionEvent внутри транзакции', () => {
 });
 
 // =====================================================================
+// Отмена задач ревизии: сброс не оставляет за собой ни мертвецов, ни спящих
+// =====================================================================
+
+/**
+ * Сброс конвейера и удаление комплекта сносили производное, но `jobs` не
+ * трогали вовсе: внешнего ключа на ревизию у задачи нет, и удаление проходило,
+ * оставляя очередь жить. Мёртвая задача продолжала держать красную плашку на
+ * ревизии, у которой снесли причину отказа; стоящая в очереди просыпалась, не
+ * находила прогона и рождала НОВОГО мертвеца — сброс не заканчивал прошлую
+ * попытку, а размножал её.
+ */
+describe('cancelJobsOfRevision', () => {
+  async function seed(type: 'checks.run' | 'doc.classify_pages', status: string): Promise<string> {
+    const { jobId } = await enqueueSystemJob(db, {
+      type,
+      payload: { revisionId: REVISION },
+      dedupeKey: `${type}:${REVISION}:cancel-${status}`,
+    });
+    await testDb.query(`UPDATE jobs SET status = '${status}' WHERE id = '${jobId}'`);
+    return jobId;
+  }
+
+  const statusOf = async (jobId: string): Promise<string | undefined> =>
+    (await testDb.query<{ status: string }>(`SELECT status FROM jobs WHERE id = '${jobId}'`))[0]
+      ?.status;
+
+  it('снимает и queued, и running, и мёртвые', async () => {
+    const queued = await seed('checks.run', 'queued');
+    const running = await seed('checks.run', 'running');
+    const dead = await seed('checks.run', 'failed');
+    // `done` не трогается: работа сделана, переписывать её исход нечем.
+    const done = await seed('checks.run', 'done');
+
+    const cancelled = await cancelJobsOfRevision(db, REVISION);
+    expect(cancelled).toBeGreaterThanOrEqual(3);
+
+    expect(await statusOf(queued)).toBe('cancelled');
+    expect(await statusOf(running)).toBe('cancelled');
+    // Мёртвая снимается в отличие от `cancelPendingJobsOfStage`: та снимает
+    // остаток идущей работы, эта закрывает работу, предмета которой больше нет.
+    expect(await statusOf(dead)).toBe('cancelled');
+    expect(await statusOf(done)).toBe('done');
+  });
+
+  it('открытая попытка закрывается исходом cancelled, а строка журнала остаётся', async () => {
+    const jobId = await seed('doc.classify_pages', 'running');
+    await testDb.query(
+      `INSERT INTO job_runs (job_id, job_type, revision_id, attempt)
+         VALUES ('${jobId}', 'doc.classify_pages', '${REVISION}', 1)`,
+    );
+
+    await cancelJobsOfRevision(db, REVISION);
+
+    const runs = await testDb.query<{ outcome: string | null; finished_at: string | null }>(
+      `SELECT outcome, finished_at FROM job_runs WHERE job_id = '${jobId}'`,
+    );
+    // Строка НЕ удалена: `job_runs` — журнал (§11). Но и не оставлена открытой:
+    // `outcome IS NULL` означает «попытка идёт», и такая строка навсегда попала
+    // бы в in_flight сводки обработки.
+    expect(runs).toHaveLength(1);
+    expect(runs[0]?.outcome).toBe('cancelled');
+    expect(runs[0]?.finished_at).not.toBeNull();
+  });
+
+  it('со списком стадий снимает только их', async () => {
+    const analysis = await seed('doc.classify_pages', 'queued');
+    const checks = await seed('checks.run', 'queued');
+
+    await cancelJobsOfRevision(db, REVISION, { stages: ['analysis'] });
+
+    expect(await statusOf(analysis)).toBe('cancelled');
+    expect(await statusOf(checks)).toBe('queued');
+  });
+
+  it('пустой список стадий не снимает ничего', async () => {
+    const job = await seed('checks.run', 'queued');
+
+    // Пустой список — «снимать нечего», а не «снять всё». Молчаливое расширение
+    // до всех типов было бы худшим из возможных прочтений.
+    expect(await cancelJobsOfRevision(db, REVISION, { stages: [] })).toBe(0);
+    expect(await statusOf(job)).toBe('queued');
+  });
+});
+
+// =====================================================================
 // Ключ дедупликации по всем четырём терминальным состояниям (0039)
 // =====================================================================
 
@@ -296,6 +383,33 @@ describe('enqueueSystemJob: какие состояния держат dedupe_ke
       expect(rows[0]?.count).toBe(2);
     },
   );
+
+  it('после отмены задача ставится заново — сквозь сброс конвейера', async () => {
+    // Тот самый путь, из-за которого «нажал, и ничего не происходит»: сброс
+    // отменяет задачи ревизии, и следующее нажатие обязано поставить работу
+    // снова, а не получить в ответ отменённого мертвеца.
+    const key = `checks.run:${REVISION}:reset`;
+    const before = await enqueueSystemJob(db, {
+      type: 'checks.run',
+      payload: { revisionId: REVISION },
+      dedupeKey: key,
+    });
+
+    await resetPipelineForRevision(db, REVISION);
+
+    const status = await testDb.query<{ status: string }>(
+      `SELECT status FROM jobs WHERE id = '${before.jobId}'`,
+    );
+    expect(status[0]?.status).toBe('cancelled');
+
+    const after = await enqueueSystemJob(db, {
+      type: 'checks.run',
+      payload: { revisionId: REVISION },
+      dedupeKey: key,
+    });
+    expect(after.created).toBe(true);
+    expect(after.jobId).not.toBe(before.jobId);
+  });
 
   it('предикат ON CONFLICT совпадает с индексом: оператор не отказывает', async () => {
     // Расхождение предиката с `ux_jobs_dedupe_key` даёт не тихий дефект, а

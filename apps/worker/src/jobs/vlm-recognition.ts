@@ -704,16 +704,45 @@ function withVlmRunTermination<T extends VlmJobType>(
 // Мелкие чистые помощники
 // =====================================================================
 
+/**
+ * Прогон, в который ещё можно писать, — или `null`, если писать уже некуда.
+ *
+ * `null` возвращается в двух случаях, и оба — «опоздал, уже не нужно», а не
+ * отказ: строки прогона нет вовсе (сброс конвейера или удаление комплекта её
+ * снесли) либо прогон уже терминален (его заменило новое нажатие «Распознать»,
+ * закрыла финализация, отменил человек).
+ *
+ * Прежде здесь был `VlmRecognitionStateError`, и он стоил ровно того же, что
+ * стоил отказ устаревшей пачки детекции до S24: класс не объявляет `retriable`,
+ * то есть считается преходящим, и КАЖДАЯ задача уже неактуального прогона
+ * сжигала все свои попытки, чтобы в конце объявить себя мёртвой. На комплекте в
+ * 83 страницы это сотня мертвецов и красная плашка на ревизии, у которой всё
+ * уже сброшено. Образец тихого выхода — `detection_batch_obsolete` в
+ * `local-detection.ts`.
+ *
+ * Настоящие расхождения состояния (пустая разметка, разошедшийся хэш блоков,
+ * непригодный снимок настроек) остаются отказами: там предмет работы на месте,
+ * и молчать о нём нельзя.
+ */
 async function loadRunningVlmRun(
   deps: VlmRecognitionDeps,
+  ctx: { readonly logger: JobContext<VlmJobType>['logger']; readonly type: string },
   payload: { readonly revisionId: string; readonly recognitionRunId: string },
-): Promise<VlmRunTarget> {
+): Promise<VlmRunTarget | null> {
   const run = await deps.loadRun(payload);
-  if (run === null) throw new VlmRecognitionStateError('Прогон распознавания не найден');
-  if (run.status !== 'running') {
-    throw new VlmRecognitionStateError(
-      `Прогон уже завершён со статусом ${run.status}: продолжать его нельзя`,
+  if (run === null || run.status !== 'running') {
+    ctx.logger.info(
+      {
+        event: 'vlm_run_obsolete',
+        job_type: ctx.type,
+        recognition_run_id: payload.recognitionRunId,
+        run_status: run?.status ?? null,
+      },
+      run === null
+        ? 'прогон распознавания уже снесён: задача устарела и пропущена'
+        : 'прогон распознавания уже завершён: задача устарела и пропущена',
     );
+    return null;
   }
   return run;
 }
@@ -849,7 +878,8 @@ export function createVlmStartHandler(
   deps: VlmRecognitionDeps,
 ): JobHandler<'vlm.start_recognition'> {
   return withVlmRunTermination(deps, async (ctx: JobContext<'vlm.start_recognition'>) => {
-    const run = await loadRunningVlmRun(deps, ctx.payload);
+    const run = await loadRunningVlmRun(deps, ctx, ctx.payload);
+    if (run === null) return;
 
     requireVlm(deps);
     const rasterizer = requireRasterizer(deps);
@@ -1088,7 +1118,8 @@ export function createVlmRecognizePageHandler(
   deps: VlmRecognitionDeps,
 ): JobHandler<'vlm.recognize_page'> {
   return withVlmRunTermination(deps, async (ctx: JobContext<'vlm.recognize_page'>) => {
-    const run = await loadRunningVlmRun(deps, ctx.payload);
+    const run = await loadRunningVlmRun(deps, ctx, ctx.payload);
+    if (run === null) return;
     const pageIndex = ctx.payload.pageIndex;
     const requestedModel = snapshotModelOf(run);
 
@@ -1581,7 +1612,8 @@ async function storeCanonicalArtifact(
 
 export function createVlmFinalizeHandler(deps: VlmRecognitionDeps): JobHandler<'vlm.finalize_run'> {
   return withVlmRunTermination(deps, async (ctx: JobContext<'vlm.finalize_run'>) => {
-    const run = await loadRunningVlmRun(deps, ctx.payload);
+    const run = await loadRunningVlmRun(deps, ctx, ctx.payload);
+    if (run === null) return;
     const pages = await deps.listRunPages(run.runId);
 
     const pending = pages.filter((page) => page.status === 'pending');
