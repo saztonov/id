@@ -1,5 +1,12 @@
 /**
- * Назначение `seq` события ревизии: проигрыш гонки не убивает транзакцию.
+ * Две регрессии репозитория задач, обе — на прод-инциденты.
+ *
+ * 1. Назначение `seq` события ревизии: проигрыш гонки не убивает транзакцию.
+ * 2. Ключ дедупликации: какие терминальные состояния его держат (0039).
+ *
+ * Разбор первой — ниже; вторая описана над своим `describe`.
+ *
+ * # Назначение `seq` события ревизии
  *
  * Это регрессия на прод-инцидент. `appendRevisionEvent` ловил нарушение первичного
  * ключа и повторял, но повтор не срабатывал никогда: распознаватель читал `code` с
@@ -37,7 +44,7 @@ import {
 import { loadMigrations } from '@id/migrator';
 
 import { HttpProblem } from '../../lib/problem.js';
-import { appendRevisionEvent } from './jobs.js';
+import { appendRevisionEvent, enqueueSystemJob } from './jobs.js';
 import type { Database } from './users.js';
 
 const MIGRATIONS_DIR = join(
@@ -219,5 +226,93 @@ describe('appendRevisionEvent внутри транзакции', () => {
     // сравнением cursor + 1 < oldestSeq, и дырявая лента даёт ложный reset.
     expect(rows.map((row) => Number(row.seq))).toEqual([1, 2]);
     expect(rows[1]?.event_type).toBe('recognition.failed');
+  });
+});
+
+// =====================================================================
+// Ключ дедупликации по всем четырём терминальным состояниям (0039)
+// =====================================================================
+
+/**
+ * Регрессия на дефект, из-за которого конвейер молча не запускался.
+ *
+ * Индекс 0007 исключал из уникальности только `done`, поэтому ОТМЕНЁННАЯ задача
+ * держала ключ вечно. `enqueueSystemJob` при конфликте возвращает не ошибку, а
+ * найденную задачу с `created: false` — и повторное нажатие кнопки получало в
+ * ответ идентификатор мертвеца, который никогда не выполнится. Наблюдалось это
+ * как «нажал, и ничего не происходит»: маршрут «Проверить» в режиме
+ * тестирования снимает остаток детекции `cancelPendingJobsOfStage`, после чего
+ * та же кнопка переставала ставить что-либо.
+ *
+ * Проверяются все четыре состояния разом и в одном тесте намеренно: дефект был
+ * ровно в том, что различие между ними никто не выразил, и утверждение о
+ * `cancelled` без соседей по таблице легко «починить», сломав `failed`.
+ */
+describe('enqueueSystemJob: какие состояния держат dedupe_key', () => {
+  /** Свой ключ на состояние: тесты внутри describe делят одну базу. */
+  const keyOf = (status: string): string => `checks.run:${REVISION}:${status}`;
+
+  async function enqueue(status: string): Promise<{ jobId: string; created: boolean }> {
+    return enqueueSystemJob(db, {
+      type: 'checks.run',
+      payload: { revisionId: REVISION },
+      dedupeKey: keyOf(status),
+    });
+  }
+
+  it.each([
+    ['queued', false],
+    ['running', false],
+    ['failed', false],
+  ] as const)('состояние %s: ключ занят, вторая задача не ставится', async (status, expected) => {
+    const first = await enqueue(status);
+    expect(first.created).toBe(true);
+
+    await testDb.query(`UPDATE jobs SET status = '${status}' WHERE id = '${first.jobId}'`);
+
+    const second = await enqueue(status);
+    expect(second.created).toBe(expected);
+    // Возвращается именно существующая задача, а не новая с тем же ключом.
+    expect(second.jobId).toBe(first.jobId);
+  });
+
+  it.each([['done'], ['cancelled']] as const)(
+    'состояние %s: ключ свободен, задача ставится заново',
+    async (status) => {
+      const first = await enqueue(status);
+      expect(first.created).toBe(true);
+
+      await testDb.query(`UPDATE jobs SET status = '${status}' WHERE id = '${first.jobId}'`);
+
+      const second = await enqueue(status);
+      expect(second.created).toBe(true);
+      expect(second.jobId).not.toBe(first.jobId);
+
+      // Обе строки живут под одним ключом: частичный индекс их не считает
+      // конфликтом, и журнал прежней попытки не переписан.
+      const rows = await testDb.query<{ count: number }>(
+        `SELECT count(*)::int AS count FROM jobs WHERE dedupe_key = '${keyOf(status)}'`,
+      );
+      expect(rows[0]?.count).toBe(2);
+    },
+  );
+
+  it('предикат ON CONFLICT совпадает с индексом: оператор не отказывает', async () => {
+    // Расхождение предиката с `ux_jobs_dedupe_key` даёт не тихий дефект, а
+    // «no unique or exclusion constraint matching the ON CONFLICT
+    // specification» на КАЖДОЙ постановке. Проверяется здесь, а не на стенде.
+    const key = `checks.run:${REVISION}:predicate`;
+    const first = await enqueueSystemJob(db, {
+      type: 'checks.run',
+      payload: { revisionId: REVISION },
+      dedupeKey: key,
+    });
+    await expect(
+      enqueueSystemJob(db, {
+        type: 'checks.run',
+        payload: { revisionId: REVISION },
+        dedupeKey: key,
+      }),
+    ).resolves.toEqual({ jobId: first.jobId, created: false });
   });
 });
