@@ -91,7 +91,7 @@ function harness(behaviour: (index: number) => Promise<LlmCallResult>, pageCount
     saveRegistryMatches: () => Promise.resolve({ updated: 0, skipped: 0 }),
     saveDocumentRelations: () => Promise.resolve({ removed: 0, written: 0, skipped: 0 }),
     observeCandidate: () => Promise.resolve({ created: false, occurrences: 1 }),
-    publishedPrompt: () => Promise.resolve(PROMPT),
+    stagePrompt: () => Promise.resolve(PROMPT),
     callLlm: (input) => {
       calls.push(calls.length);
       void input;

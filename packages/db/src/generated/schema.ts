@@ -969,6 +969,7 @@ export const rulesetVersions = pgTable("ruleset_versions", {
 	publishedBy: uuid("published_by"),
 	notes: text(),
 	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	origin: text().default('manual').notNull(),
 }, (table) => [
 	index("ix_ruleset_versions_published_by").using("btree", table.publishedBy.asc().nullsLast().op("uuid_ops")),
 	foreignKey({
@@ -977,7 +978,8 @@ export const rulesetVersions = pgTable("ruleset_versions", {
 			name: "ruleset_versions_published_by_fkey"
 		}),
 	unique("ruleset_versions_version_key").on(table.version),
-	check("ruleset_versions_published_chk", sql`(published_at IS NULL) OR (published_by IS NOT NULL)`),
+	check("ruleset_versions_origin_chk", sql`origin = ANY (ARRAY['manual'::text, 'builtin'::text])`),
+	check("ruleset_versions_published_chk", sql`(published_at IS NULL) OR (published_by IS NOT NULL) OR (origin = 'builtin'::text)`),
 ]);
 
 export const validationRuns = pgTable("validation_runs", {

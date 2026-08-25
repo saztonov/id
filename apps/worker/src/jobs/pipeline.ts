@@ -31,6 +31,7 @@ import { join } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 
 import {
+  analysisPromptDefaultByStage,
   assembleRecognitionResult,
   insertBlockResultIdempotent,
   listRunBlockEnvelopes,
@@ -1726,21 +1727,31 @@ function segmentationDeps(options: PipelineJobsOptions): SegmentationDeps {
     },
 
     /**
-     * Опубликованный промт стадии.
+     * Промт стадии: опубликованный, иначе встроенный.
      *
      * Двух опубликованных промтов одной стадии быть не должно, и «взять
      * первый» здесь запрещено: выбор между ними определял бы результат
      * классификации молча. Уникальный индекс БД гарантирует один
      * опубликованный промт на КОД, но не на стадию, поэтому проверка здесь
      * настоящая, а не удвоение ограничения.
+     *
+     * Пустой каталог — НЕ отказ и не пропуск стадии, а встроенный текст с
+     * `version: 0`. Прежде `null` отсюда означал «стадия пропущена целиком», и
+     * это выключало весь анализ: сид-миграция 0032 кладёт `extract` и `check`
+     * черновиками, а `page_classify` не сеяла ни одна миграция. Требовать
+     * ручной публикации ради текста, из которого сама сид-миграция и
+     * сгенерирована, значило запирать конвейер ни за чем — тот же вывод уже
+     * сделан для стадии `recognize` (`promptByCode` выше).
+     *
+     * `null` остаётся ровно для одного случая: стадия, у которой встроенного
+     * текста нет вовсе. Тогда пропуск с названной причиной — законный исход.
      */
-    publishedPrompt: async (stage): Promise<PublishedPrompt | null> => {
+    stagePrompt: async (stage): Promise<PublishedPrompt | null> => {
       const page = await listPromptTemplates(db, SYSTEM_SCOPE, {
         stage,
         state: 'published',
         limit: 10,
       });
-      if (page.items.length === 0) return null;
       if (page.items.length > 1) {
         throw new PipelineScopeError(
           `Стадия ${stage}: опубликовано ${page.items.length} промтов; ` +
@@ -1748,13 +1759,27 @@ function segmentationDeps(options: PipelineJobsOptions): SegmentationDeps {
         );
       }
       const row = page.items[0];
-      if (row === undefined) return null;
+      if (row !== undefined) {
+        return {
+          code: row.code,
+          version: row.version,
+          systemPrompt: row.systemPrompt,
+          userTemplate: row.userTemplate,
+          modelOverride: row.modelOverride,
+        };
+      }
+
+      const preset = analysisPromptDefaultByStage(stage);
+      if (preset === null) return null;
       return {
-        code: row.code,
-        version: row.version,
-        systemPrompt: row.systemPrompt,
-        userTemplate: row.userTemplate,
-        modelOverride: row.modelOverride,
+        code: preset.code,
+        // Ноль — не «версия неизвестна», а «версия из кода»: строка каталога с
+        // таким номером не создаётся никогда, поэтому значение однозначно и
+        // видно в `ai_runs.prompt_version`.
+        version: 0,
+        systemPrompt: preset.text.system,
+        userTemplate: preset.text.user,
+        modelOverride: null,
       };
     },
 
@@ -1862,7 +1887,7 @@ function checksLlmReviewDeps(options: PipelineJobsOptions): ChecksLlmReviewDeps 
 
     saveLlmFindings: async (input) => saveLlmFindings(db, await scopeOf(input.revisionId), input),
 
-    publishedPrompt: segmentation.publishedPrompt,
+    stagePrompt: segmentation.stagePrompt,
     callLlm: segmentation.callLlm,
     recordAiRun: segmentation.recordAiRun,
   };

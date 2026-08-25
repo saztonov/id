@@ -23,11 +23,13 @@ import { createPgliteDatabase } from '@id/db-harness';
 import { applyMigrations, checksumOf, loadMigrations } from '@id/migrator';
 import type { SqlExecutor } from '@id/migrator';
 import {
+  BUILTIN_RULESET_MIGRATION,
   RULE_CATALOG,
   RULE_SEED_BATCHES,
   RuleRegistryError,
   assertRuleRegistryMatches,
   duplicateRuleCodes,
+  generateBuiltinRulesetSql,
   generateRuleSeedSql,
 } from '@id/rules';
 
@@ -85,6 +87,90 @@ describe('seed реестра правил не отстаёт от катало
     // Дубль означал бы, что вторая реализация вытесняет первую при сиде, а
     // правило остаётся в списке включённых и молча не исполняется.
     expect(duplicateRuleCodes()).toEqual([]);
+  });
+
+  it('встроенный набор совпадает с текущим выводом generateBuiltinRulesetSql()', () => {
+    expect(
+      checksumOf(committedSeedOf(BUILTIN_RULESET_MIGRATION)),
+      `${BUILTIN_RULESET_MIGRATION}.sql разошёлся с умолчаниями каталога. ` +
+        'Перегенерируйте: pnpm rules:seed:generate',
+    ).toBe(checksumOf(generateBuiltinRulesetSql()));
+  });
+});
+
+/**
+ * Встроенный набор правил: без него портал не проверяет НИЧЕГО.
+ *
+ * `checks.run` отказывал «активная версия набора правил не назначена», потому
+ * что `ruleset_versions` не сеяла ни одна миграция, а `ruleset.active_version_id`
+ * по умолчанию `NULL`. Реестр правил при этом был засеян с S4, и снаружи это
+ * выглядело как «правила есть, а замечаний нет ни при каких данных».
+ */
+describe('встроенный набор правил применяется и активируется', () => {
+  let db: TestDatabase;
+
+  beforeAll(async () => {
+    db = await createPgliteDatabase();
+    await applyMigrations(db as unknown as SqlExecutor, loadMigrations(MIGRATIONS_DIR));
+  }, 120_000);
+
+  afterAll(async () => {
+    await db?.close();
+  });
+
+  it('версия опубликована поставкой, а не подделанным published_by', () => {
+    return db
+      .query<{ origin: string; published_at: string | null; published_by: string | null }>(
+        `SELECT origin, published_at, published_by FROM ruleset_versions WHERE version = 'builtin-1'`,
+      )
+      .then((rows) => {
+        expect(rows).toHaveLength(1);
+        expect(rows[0]?.origin).toBe('builtin');
+        // Опубликована: иначе снимок не действует и прогон правил не начнётся.
+        expect(rows[0]?.published_at).not.toBeNull();
+        // И БЕЗ автора: `published_by` читают как доказательство решения
+        // человека, а решения человека здесь не было.
+        expect(rows[0]?.published_by).toBeNull();
+      });
+  });
+
+  it('снимок покрывает весь каталог и повторяет умолчания правил', async () => {
+    const rows = await db.query<{
+      rule_code: string;
+      severity: string;
+      is_blocking: boolean;
+      is_enabled: boolean;
+    }>(
+      `SELECT r.rule_code, r.severity, r.is_blocking, r.is_enabled
+         FROM ruleset_rules r
+         JOIN ruleset_versions v ON v.id = r.ruleset_version_id
+        WHERE v.version = 'builtin-1'
+        ORDER BY r.rule_code`,
+    );
+
+    expect(rows).toHaveLength(RULE_CATALOG.length);
+    const byCode = new Map(rows.map((row) => [row.rule_code, row]));
+    for (const spec of RULE_CATALOG) {
+      const row = byCode.get(spec.code);
+      expect(row, `правила ${spec.code} нет в снимке встроенного набора`).toBeDefined();
+      expect(row?.severity).toBe(spec.defaultSeverity);
+      // Приведение: pglite отдаёт boolean, драйвер PostgreSQL — тоже, но
+      // сравнение через Boolean() переживает и строковое 't'.
+      expect(Boolean(row?.is_blocking)).toBe(spec.defaultBlocking);
+      expect(Boolean(row?.is_enabled)).toBe(true);
+    }
+  });
+
+  it('указатель активной версии показывает на него', async () => {
+    const setting = await db.query<{ value: string }>(
+      `SELECT value #>> '{}' AS value FROM app_settings WHERE key = 'ruleset.active_version_id'`,
+    );
+    const version = await db.query<{ id: string }>(
+      `SELECT id FROM ruleset_versions WHERE version = 'builtin-1'`,
+    );
+
+    expect(setting).toHaveLength(1);
+    expect(setting[0]?.value).toBe(version[0]?.id);
   });
 });
 

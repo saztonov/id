@@ -25,7 +25,15 @@ import {
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
 const MIGRATIONS_DIR = join(REPO_ROOT, 'migrations');
-const SEED_FILE = '0032_seed_analysis_prompts.sql';
+/**
+ * Сверяется ПОСЛЕДНЯЯ редакция сида, а не первая.
+ *
+ * 0032 засеяла две стадии из трёх и защищена контрольной суммой мигратора:
+ * применённый файл правке не подлежит. Появление `page_classify` означало новый
+ * файл, и предмет сверки переехал на него — сверять надо то, что описывает
+ * нынешний набор дефолтов, а не исторический.
+ */
+const SEED_FILE = '0043_seed_analysis_prompts_v2.sql';
 
 describe('seed промптов анализа не отстаёт от дефолтов', () => {
   it('совпадает с текущим выводом generateAnalysisPromptsSeedSql()', async () => {
@@ -39,12 +47,19 @@ describe('seed промптов анализа не отстаёт от дефо
     ).toBe(checksumOf(generateAnalysisPromptsSeedSql(prompts)));
   }, 180_000);
 
-  it('заводит ровно две стадии, и код совпадает со стадией', async () => {
+  it('заводит все три стадии анализа, и код совпадает со стадией', async () => {
     // Совпадение `code` и `stage` — решение, а не случайность: у портала на
     // стадию один код, и разъехавшись, они дали бы «опубликованного промта
     // стадии нет» при заведённом промте (см. `PAGE_CLASSIFY_STAGE`).
+    //
+    // Три, а не две: `page_classify` не сеяла ни одна миграция с S8, и увидеть
+    // текст, которым портал классифицирует страницы, в админ-консоли было негде.
     const prompts = await loadAnalysisPrompts();
-    expect(prompts.map((prompt) => prompt.stage).sort()).toEqual(['check', 'extract']);
+    expect(prompts.map((prompt) => prompt.stage).sort()).toEqual([
+      'check',
+      'extract',
+      'page_classify',
+    ]);
     for (const prompt of prompts) {
       expect(prompt.code).toBe(prompt.stage);
       expect(prompt.system.length).toBeGreaterThan(200);

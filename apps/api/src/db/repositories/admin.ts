@@ -1037,6 +1037,16 @@ export interface RulesetVersionRow {
   readonly version: string;
   readonly publishedAt: string | null;
   readonly publishedBy: string | null;
+  /**
+   * Кто набор опубликовал: администратор (`manual`) или поставка портала
+   * (`builtin`).
+   *
+   * Нужно ровно затем, чтобы `published_by = NULL` у опубликованной версии
+   * читалось как факт, а не как потеря автора. Встроенный набор (0044) публикуют
+   * миграцией, и подставить туда чью-то учётную запись было нельзя: столбец
+   * `published_by` читают как ДОКАЗАТЕЛЬСТВО решения человека.
+   */
+  readonly origin: string;
   readonly notes: string | null;
   readonly createdAt: string;
   readonly ruleCount: number;
@@ -1047,6 +1057,7 @@ const RULESET_SELECTION = {
   version: rulesetVersions.version,
   publishedAt: isoUtc<string | null>(rulesetVersions.publishedAt, 'published_at_iso'),
   publishedBy: rulesetVersions.publishedBy,
+  origin: rulesetVersions.origin,
   notes: rulesetVersions.notes,
   createdAt: isoUtc<string>(rulesetVersions.createdAt, 'created_at_iso'),
   // Внешняя колонка написана ТЕКСТОМ, а не через `${rulesetVersions.id}`: в

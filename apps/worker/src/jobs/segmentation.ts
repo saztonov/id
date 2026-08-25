@@ -126,12 +126,23 @@ export type LlmTextStage =
 export const LLM_REVIEW_STAGE = 'check';
 
 /**
- * Опубликованный промт стадии.
+ * Промт стадии: опубликованный, иначе встроенный (S27).
  *
- * `null` — опубликованного промта нет, и это ШТАТНОЕ состояние: §10 требует
+ * Опубликованной версии может не быть, и это ШТАТНОЕ состояние: §10 требует
  * цикла `draft → test → publish` с аудитом, а публикация — действие
  * администратора, не миграции. Сеять `published`-строку миграцией значило бы
  * подделать `published_by` в журнале, который читают как доказательство.
+ *
+ * Но выключать из-за этого LLM-ступень оказалось неверно: сид-миграция 0032
+ * кладёт промты черновиками и ГЕНЕРИРУЕТСЯ из констант в коде, то есть
+ * «неопубликованный черновик» и «встроенный текст» — одна и та же строка.
+ * Ступени не выполнялись никогда, а причина лежала в консоли. Теперь при пустом
+ * каталоге берётся встроенный текст с `version: 0`, и ноль в
+ * `ai_runs.prompt_version` прямо говорит, чем работала модель.
+ *
+ * `null` остался ровно для одного случая: у стадии нет ни опубликованной
+ * версии, ни встроенного текста. Тогда пропуск с названной причиной — законный
+ * исход.
  */
 export interface PublishedPrompt {
   readonly code: string;
@@ -214,7 +225,7 @@ export interface SegmentationDeps {
   }): Promise<{ readonly created: boolean; readonly occurrences: number }>;
 
   /** Опубликованный промт стадии; `null` — стадия модели пропускается. */
-  publishedPrompt(stage: LlmTextStage): Promise<PublishedPrompt | null>;
+  stagePrompt(stage: LlmTextStage): Promise<PublishedPrompt | null>;
 
   /**
    * Вызов модели. `null` — провайдер не подключён.
@@ -416,12 +427,16 @@ export function createClassifyPagesHandler(
     const undecided = pagesNeedingLlm(phase1);
     llmStats.considered = undecided.length;
 
-    const prompt = undecided.length > 0 ? await deps.publishedPrompt(PAGE_CLASSIFY_STAGE) : null;
+    const prompt = undecided.length > 0 ? await deps.stagePrompt(PAGE_CLASSIFY_STAGE) : null;
     if (undecided.length > 0) {
       if (deps.callLlm === null) {
         llmStats.skippedReason = 'провайдер модели не подключён';
       } else if (prompt === null) {
-        llmStats.skippedReason = 'опубликованного промта стадии page_classify нет';
+        // Недостижимо, пока у стадии есть встроенный текст: отсутствие
+        // ОПУБЛИКОВАННОЙ версии ступень больше не выключает. Ветка оставлена
+        // для стадии, у которой встроенного текста нет вовсе, — и говорит
+        // именно это, а не «опубликуйте промт».
+        llmStats.skippedReason = 'у стадии page_classify нет ни опубликованного, ни встроенного промта';
       }
     }
 
@@ -875,9 +890,11 @@ export function createExtractFieldsHandler(
     }
 
     // Промт стадии читается ОДИН раз на прогон, а не на документ: он один и тот
-    // же, а `publishedPrompt` ходит в базу. `null` — опубликованного промта нет,
-    // и LLM-ступень пропускается целиком; детерминированная работает как всегда.
-    const llmPrompt = await deps.publishedPrompt(FIELD_EXTRACT_STAGE);
+    // же, а `stagePrompt` ходит в базу. `null` теперь означает «встроенного
+    // текста у стадии нет вовсе» — отсутствие ОПУБЛИКОВАННОЙ версии больше не
+    // выключает ступень, иначе она не выполнялась бы никогда (сид-миграция 0032
+    // кладёт этот промт черновиком).
+    const llmPrompt = await deps.stagePrompt(FIELD_EXTRACT_STAGE);
     let llmStop: string | null = null;
 
     let written = 0;

@@ -316,6 +316,19 @@ export type {
   PromptSubstitutionContext,
   RecognitionPromptDefault,
 } from './recognition/vlm/prompts.js';
+
+/**
+ * Встроенные тексты промптов стадий АНАЛИЗА — тот же приём, что у `recognize`.
+ *
+ * Отсутствие опубликованной версии перестало выключать LLM-ступень: сид-миграция
+ * генерируется из тех же констант, поэтому «черновик» и «встроенный текст» —
+ * одна строка.
+ */
+export {
+  analysisPromptDefaultByStage,
+  ANALYSIS_PROMPT_STAGES,
+} from './prompts/analysis-defaults.js';
+export type { AnalysisPromptDefault, AnalysisPromptStage } from './prompts/analysis-defaults.js';
 export { schemaHash } from './recognition/vlm/schemas.js';
 export { recognizeBlock } from './recognition/vlm/recognize-block.js';
 export type {

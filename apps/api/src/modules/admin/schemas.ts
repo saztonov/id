@@ -598,6 +598,15 @@ export const rulesetVersionResponseSchema = z.object({
   state: z.enum(['draft', 'published']),
   publishedAt: isoDateTimeSchema.nullable(),
   publishedBy: uuidSchema.nullable(),
+  /**
+   * Кем опубликован набор: администратором (`manual`) или поставкой портала
+   * (`builtin`, миграция 0044).
+   *
+   * Без этого поля опубликованная версия с пустым `publishedBy` читалась бы как
+   * «автор потерялся». Подставить туда учётную запись было нельзя: столбец
+   * читают как доказательство решения человека.
+   */
+  origin: z.enum(['manual', 'builtin']),
   notes: z.string().nullable(),
   createdAt: isoDateTimeSchema,
   ruleCount: z.int().nonnegative(),

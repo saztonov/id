@@ -1058,6 +1058,10 @@ function toRulesetResponse(row: RulesetVersionRow, activeVersionId: string | nul
     state: row.publishedAt === null ? ('draft' as const) : ('published' as const),
     publishedAt: row.publishedAt,
     publishedBy: row.publishedBy,
+    // Приведение к закрытому перечислению: значение держит CHECK 0044, и
+    // расширить его можно только миграцией. Неизвестное значение читается как
+    // `manual` — набор, заведённый человеком, это состояние по умолчанию.
+    origin: row.origin === 'builtin' ? ('builtin' as const) : ('manual' as const),
     notes: row.notes,
     createdAt: row.createdAt,
     ruleCount: row.ruleCount,

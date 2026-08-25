@@ -123,3 +123,117 @@ ON CONFLICT (code) DO UPDATE SET
 export function generateRuleSeedSql(specs: readonly RuleSpec[] = RULE_CATALOG): string {
   return `${HEADER}\n${generateRuleSeedStatements(specs).join(';\n\n')};\n`;
 }
+
+// =====================================================================
+// Встроенный набор правил
+// =====================================================================
+
+/** Имя миграции встроенного набора — один источник для скрипта и теста дрейфа. */
+export const BUILTIN_RULESET_MIGRATION = '0044_builtin_ruleset';
+
+/** Номер версии встроенного набора в `ruleset_versions.version`. */
+export const BUILTIN_RULESET_VERSION = 'builtin-1';
+
+const BUILTIN_HEADER = `-- Встроенный набор правил и его активация (§3.7, §9.6).
+--
+-- Файл сгенерирован generateBuiltinRulesetSql() из RULE_CATALOG. Править вручную
+-- бессмысленно: следующая генерация вернёт содержимое каталога.
+-- Перегенерировать: pnpm rules:seed:generate.
+--
+-- ## Что было неверно
+--
+-- Реестр правил (rule_definitions) сеялся миграциями с S4, а НАБОР — версия с
+-- неизменяемым снимком поведения — не сеялся никогда, и указатель
+-- ruleset.active_version_id по умолчанию NULL. Прогон правил из-за этого не
+-- начинался вовсе: checks.run отказывал «активная версия набора правил не
+-- назначена», и замечаний у комплекта не появлялось НИ ОДНОГО ни при каких
+-- данных. Портал, вся работа которого — проверка комплекта, из коробки не
+-- проверял ничего, и сказано об этом было только в консоли воркера.
+--
+-- ## Почему набор помечен origin='builtin', а не опубликован от чьего-то имени
+--
+-- ruleset_versions_published_chk требовал published_by у любой опубликованной
+-- версии, и обойти его можно было бы, подставив встроенного администратора.
+-- Так делать нельзя по той же причине, по которой сид промптов не сеет
+-- published-строку: published_by читают как ДОКАЗАТЕЛЬСТВО решения человека, и
+-- подделка в этом столбце обесценивает журнал целиком. Поэтому заведена третья
+-- возможность: набор, опубликованный не человеком, а поставкой портала, — и она
+-- названа своим словом в колонке origin.
+--
+-- ## Почему порядок операторов именно такой
+--
+-- Триггер ruleset_rules_published_immutable (0008) запрещает ВСТАВКУ строк в
+-- снимок уже опубликованной версии — правило, добавленное после публикации,
+-- меняет результат прогона так же, как изменённое. Отсюда единственно
+-- возможный порядок: версия с published_at IS NULL, затем снимок, затем
+-- публикация. Обратный порядок дал бы отказ триггера посреди миграции.
+--
+-- ## Что миграция НЕ делает
+--
+-- Не трогает уже назначенную активную версию: ON CONFLICT (key) DO NOTHING.
+-- Администратор, опубликовавший свой набор, остаётся на нём.
+`;
+
+/**
+ * SQL встроенного набора правил: колонка `origin`, версия, снимок, активация.
+ *
+ * Снимок берётся из `defaultSnapshotRows` — того же экспорта, из которого его
+ * строят администратор при первой публикации и тест прогона. Четвёртая копия
+ * умолчаний разошлась бы с остальными молча, а разойтись ей нельзя: снимок
+ * определяет, что именно проверял прогон месячной давности.
+ */
+export function generateBuiltinRulesetSql(specs: readonly RuleSpec[] = RULE_CATALOG): string {
+  const rows = defaultSnapshotRows(specs)
+    .map(
+      (row) =>
+        `    (${sqlLiteral(row.ruleCode)}, ${String(row.isEnabled)}, ` +
+        `${sqlLiteral(row.severity)}, ${String(row.isBlocking)}, ` +
+        `${sqlLiteral(JSON.stringify(row.params))}::jsonb)`,
+    )
+    .join(',\n');
+
+  const version = sqlLiteral(BUILTIN_RULESET_VERSION);
+
+  return `${BUILTIN_HEADER}
+ALTER TABLE ruleset_versions
+  ADD COLUMN origin text NOT NULL DEFAULT 'manual';
+
+ALTER TABLE ruleset_versions
+  ADD CONSTRAINT ruleset_versions_origin_chk CHECK (origin IN ('manual', 'builtin'));
+
+ALTER TABLE ruleset_versions DROP CONSTRAINT ruleset_versions_published_chk;
+ALTER TABLE ruleset_versions ADD CONSTRAINT ruleset_versions_published_chk
+  CHECK (published_at IS NULL OR published_by IS NOT NULL OR origin = 'builtin');
+
+-- 1. Версия — НЕОПУБЛИКОВАННАЯ: пока published_at пуст, снимок можно набирать.
+INSERT INTO ruleset_versions (version, origin, notes)
+SELECT ${version}, $ruleset$builtin$ruleset$,
+       $ruleset$Набор по умолчанию из каталога правил портала. Опубликован поставкой, а не человеком.$ruleset$
+ WHERE NOT EXISTS (SELECT 1 FROM ruleset_versions WHERE version = ${version});
+
+-- 2. Снимок поведения: severity, is_blocking и params из умолчаний каталога.
+--
+-- Условие published_at IS NULL — не украшение: триггер запрещает вставку в
+-- снимок опубликованной версии и сработал бы РАНЬШЕ, чем ON CONFLICT успел бы
+-- признать строку дублем. Так оператор остаётся безвредным при повторе.
+INSERT INTO ruleset_rules (ruleset_version_id, rule_code, is_enabled, severity, is_blocking, params)
+SELECT v.id, x.rule_code, x.is_enabled, x.severity, x.is_blocking, x.params
+  FROM ruleset_versions v
+  CROSS JOIN (VALUES
+${rows}
+  ) AS x(rule_code, is_enabled, severity, is_blocking, params)
+ WHERE v.version = ${version} AND v.published_at IS NULL
+ON CONFLICT (ruleset_version_id, rule_code) DO NOTHING;
+
+-- 3. Публикация — последним оператором, после набора снимка.
+UPDATE ruleset_versions
+   SET published_at = now()
+ WHERE version = ${version} AND published_at IS NULL;
+
+-- 4. Активация. DO NOTHING: осознанный выбор администратора не затирается.
+INSERT INTO app_settings (key, value)
+SELECT $ruleset$ruleset.active_version_id$ruleset$, to_jsonb(id::text)
+  FROM ruleset_versions WHERE version = ${version}
+ON CONFLICT (key) DO NOTHING;
+`;
+}

@@ -34,7 +34,20 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const API_DIR = join(ROOT, 'apps', 'api');
-export const TARGET = join(ROOT, 'migrations', '0032_seed_analysis_prompts.sql');
+/**
+ * Цель генерации — ПОСЛЕДНЯЯ редакция сида, а не первая.
+ *
+ * До S27 здесь стояла 0032, засеявшая `extract` и `check`. Применённый файл
+ * защищён контрольной суммой мигратора и правке не подлежит, поэтому появление
+ * третьей стадии (`page_classify`) означает новый файл, а цель сверки на дрейф
+ * переезжает на него: сверять надо то, что описывает НЫНЕШНИЙ набор дефолтов.
+ *
+ * Новая редакция повторяет и первые две стадии — `ON CONFLICT (code, version)
+ * DO NOTHING` делает их вставку безвредным no-op на базах, где 0032 уже
+ * применена. Так один файл описывает весь набор целиком, и «какие стадии
+ * засеяны» не приходится собирать из истории миграций.
+ */
+export const TARGET = join(ROOT, 'migrations', '0043_seed_analysis_prompts_v2.sql');
 
 const TAG_BASE = 'prompt';
 
@@ -51,17 +64,35 @@ export function sqlLiteral(value) {
   return `$${tag}$${value}$${tag}$`;
 }
 
-const HEADER = `-- Seed промптов стадий анализа: extract и check (§8.4, §9.1, S21).
+const HEADER = `-- Seed промптов стадий анализа: page_classify, extract и check (§8.4, §9.1).
 --
--- Файл сгенерирован generateAnalysisPromptsSeedSql() из FIELD_EXTRACT_PROMPT
--- (apps/api/src/segmentation/prompts.ts) и LLM_REVIEW_PROMPT
+-- Файл сгенерирован generateAnalysisPromptsSeedSql() из PAGE_CLASSIFY_PROMPT и
+-- FIELD_EXTRACT_PROMPT (apps/api/src/segmentation/prompts.ts) и LLM_REVIEW_PROMPT
 -- (apps/api/src/checks/llm-review-prompt.ts). Править вручную бессмысленно:
 -- следующая генерация вернёт содержимое дефолтов.
 -- Перегенерировать: pnpm analysis-prompts:seed:generate.
 --
--- state='draft': публикация — ручное действие администратора с записью в
--- аудит. Обе стадии без опубликованного промта пропускают себя с названной
--- причиной; детерминированная работа конвейера от этого не зависит (§0.5).
+-- ## Почему вторая редакция (S27)
+--
+-- Первая (0032) засеяла две стадии из трёх: промт page_classify не сеяла ни одна
+-- миграция с S8, и в админ-консоли этой стадии не существовало. Увидеть текст,
+-- которым портал классифицирует страницы, было негде, а поправить — тем более.
+--
+-- extract и check повторены здесь намеренно: ON CONFLICT делает их вставку
+-- безвредным no-op там, где 0032 уже применена, зато один файл описывает весь
+-- набор целиком, и «какие стадии засеяны» не приходится собирать из истории.
+--
+-- ## Что state='draft' теперь значит
+--
+-- Публикация остаётся ручным действием администратора с записью в аудит: сеять
+-- published-строку миграцией значило бы подделать published_by в журнале,
+-- который читают как доказательство.
+--
+-- Но черновик БОЛЬШЕ НЕ ОЗНАЧАЕТ, что стадия пропускается. Тексты промптов
+-- лежат в коде, и сид генерируется из них же, поэтому «неопубликованный
+-- черновик» и «встроенный текст» — одна и та же строка; конвейер берёт
+-- встроенную версию (analysisPromptDefaultByStage) и помечает её нулём в
+-- ai_runs.prompt_version. Опубликованная версия по-прежнему в приоритете.
 --
 -- output_schema = NULL: ответ этих стадий проверяется zod на нашей стороне, а
 -- не response_format шлюза (в отличие от стадии recognize, 0020).
@@ -115,7 +146,15 @@ export async function loadAnalysisPrompts() {
     pathToFileURL(join(API_DIR, 'dist', 'checks', 'llm-review-prompt.js')).href
   );
 
+  // Порядок — конвейерный: классификация, извлечение, проверка. Он же порядок
+  // операторов в файле, и по нему миграция читается как описание стадий.
   return [
+    {
+      code: 'page_classify',
+      stage: 'page_classify',
+      system: segmentation.PAGE_CLASSIFY_PROMPT.system,
+      user: segmentation.PAGE_CLASSIFY_PROMPT.user,
+    },
     {
       code: 'extract',
       stage: 'extract',

@@ -33,7 +33,12 @@ execFileSync(process.execPath, [tsc, '-p', join(RULES_DIR, 'tsconfig.build.json'
 });
 
 const dist = pathToFileURL(join(RULES_DIR, 'dist', 'index.js')).href;
-const { RULE_SEED_BATCHES, generateRuleSeedSql } = await import(dist);
+const {
+  RULE_SEED_BATCHES,
+  generateRuleSeedSql,
+  generateBuiltinRulesetSql,
+  BUILTIN_RULESET_MIGRATION,
+} = await import(dist);
 
 for (const batch of RULE_SEED_BATCHES) {
   const target = join(MIGRATIONS_DIR, `${batch.migration}.sql`);
@@ -60,5 +65,37 @@ for (const batch of RULE_SEED_BATCHES) {
     console.log(
       `${shortPath}: ${previous === null ? 'создан' : 'обновлён'} (${batch.rules.length} правил).`,
     );
+  }
+}
+
+/**
+ * Встроенный набор правил — отдельным файлом, не партией.
+ *
+ * Партии сеют РЕЕСТР (`rule_definitions`, что за правила существуют), а это —
+ * НАБОР (`ruleset_versions` + снимок, как они настроены и какой из них
+ * действует). Разные таблицы, разный жизненный цикл: партия добавляется с
+ * каждым новым правилом, набор публикуется один раз и дальше живёт версиями.
+ *
+ * Файл при этом генерируется из того же каталога и тем же скриптом: снимок
+ * обязан соответствовать умолчаниям правил, и второе место, где он собирается
+ * руками, разошлось бы с первым молча.
+ */
+{
+  const target = join(MIGRATIONS_DIR, `${BUILTIN_RULESET_MIGRATION}.sql`);
+  const sql = generateBuiltinRulesetSql();
+  const shortPath = relative(ROOT, target).replaceAll('\\', '/');
+
+  let previous = null;
+  try {
+    previous = readFileSync(target, 'utf8');
+  } catch {
+    // Файла ещё нет — первая генерация.
+  }
+
+  if (previous === sql) {
+    console.log(`${shortPath}: без изменений.`);
+  } else {
+    writeFileSync(target, sql, 'utf8');
+    console.log(`${shortPath}: ${previous === null ? 'создан' : 'обновлён'}.`);
   }
 }

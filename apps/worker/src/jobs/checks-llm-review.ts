@@ -61,7 +61,7 @@ export interface ChecksLlmReviewDeps {
   }): Promise<{ readonly removed: number; readonly written: number }>;
 
   /** Опубликованный промт стадии; `null` — проверка пропускается. */
-  publishedPrompt(stage: LlmTextStage): Promise<PublishedPrompt | null>;
+  stagePrompt(stage: LlmTextStage): Promise<PublishedPrompt | null>;
 
   /** Вызов модели. `null` — провайдер не подключён. */
   callLlm:
@@ -101,13 +101,13 @@ export function createChecksLlmReviewHandler(
   return async (ctx: JobContext<'checks.llm_review'>) => {
     const { revisionId, validationRunId } = ctx.payload;
 
-    const prompt = await deps.publishedPrompt(LLM_REVIEW_STAGE);
+    const prompt = await deps.stagePrompt(LLM_REVIEW_STAGE);
     if (prompt === null || deps.callLlm === null) {
       // Штатное состояние, а не отказ: см. шапку. Причина названа, чтобы
       // «модель не позвали» не выглядело как «модель ничего не нашла».
       const reason =
         prompt === null
-          ? 'опубликованного промта стадии check нет'
+          ? 'у стадии check нет ни опубликованного, ни встроенного промта'
           : 'провайдер модели не подключён';
       ctx.logger.info({ event: 'llm_review_skipped', reason }, 'ИИ-проверка пропущена');
       await ctx.emit('checks.llm_review_skipped', { validationRunId, reason });

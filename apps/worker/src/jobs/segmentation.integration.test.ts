@@ -248,7 +248,7 @@ const FILE_B_PAGES = PAGE_TEXTS.length - FILE_A_PAGES;
  * отдельный тест затем доказывает, что тот же вход даёт тот же хэш.
  */
 const recordedByHash = new Map<string, RecordedBehaviour>();
-const llmSeen: { hash: string; userPrompt: string; effective: string }[] = [];
+const llmSeen: { hash: string; stage: string; userPrompt: string; effective: string }[] = [];
 
 function behaviourFor(request: LlmRequest): RecordedBehaviour {
   const prompt = request.userPrompt;
@@ -332,9 +332,13 @@ function fixtureStatements(
     // аудитом, поэтому в бою его публикует администратор. Здесь та же строка
     // заводится напрямую — важно, что публикатор настоящий пользователь, а не
     // выдуманный идентификатор.
+    //
+    // Версия 2, а не 1: первую занял сид (0043) черновиком, и предмет теста от
+    // номера не зависит — важно, что ОПУБЛИКОВАННАЯ версия существует и что
+    // берётся именно она, а не встроенный текст.
     `INSERT INTO prompt_templates (code, version, stage, state, system_prompt, user_template,
                                    published_at, published_by)
-       VALUES ('page_classify', 1, 'page_classify', 'published',
+       VALUES ('page_classify', 2, 'page_classify', 'published',
                'Ты классифицируешь страницы исполнительной документации.',
                'Коды видов: {{DOC_TYPE_CODES}}. Порядковый номер: {{ORDINAL}}. Поворот: {{ROTATION}}. Блоки: {{BLOCKS}}.
 Предыдущая страница: {{BEFORE}}
@@ -433,6 +437,7 @@ beforeAll(async () => {
       // а прежняя проверка её не видела вовсе.
       llmSeen.push({
         hash,
+        stage: request.stage,
         userPrompt: request.userPrompt,
         effective: buildEffectivePrompt({ ...request, model: LLM_MODEL }),
       });
@@ -860,8 +865,12 @@ describe('провайдер модели', () => {
       const found = findSectionMarkers(entry.effective);
       expect(found, `промт намекает на раздел работ: ${found.join(', ')}`).toEqual([]);
       // Системная часть действительно попала в скан — иначе проверка
-      // доказывала бы, что пуст `userPrompt`.
-      expect(entry.effective).toContain('классифицируешь');
+      // доказывала бы, что пуст `userPrompt`. Слово берётся по стадии: с S27
+      // модель зовёт не только классификация, но и извлечение реквизитов —
+      // прежде оно молча пропускалось из-за неопубликованного промта.
+      expect(entry.effective).toContain(
+        entry.stage === 'page_classify' ? 'классифицируешь' : 'извлекаешь',
+      );
       expect(entry.effective.length).toBeGreaterThan(entry.userPrompt.length);
     }
   });

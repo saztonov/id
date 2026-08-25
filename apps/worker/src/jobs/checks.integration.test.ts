@@ -561,9 +561,13 @@ function configurationStatements(): readonly string[] {
   );
 
   statements.push(
+    // ON CONFLICT: с миграции 0044 указатель уже занят встроенным набором, и
+    // фикстура обязана перевести его на СВОЙ — иначе прогон пошёл бы по чужому
+    // снимку правил, а тест утверждал бы не то, что проверяет.
     `INSERT INTO app_settings (key, value, updated_by)
        VALUES ('ruleset.active_version_id', ${lit(JSON.stringify(RULESET_VERSION))}::jsonb,
-               '${USER_ADMIN}')`,
+               '${USER_ADMIN}')
+     ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_by = excluded.updated_by`,
   );
 
   return statements;
@@ -1289,7 +1293,8 @@ describe('задача честно отказывает вместо «заме
     await testDb.query(
       `INSERT INTO app_settings (key, value, updated_by)
          VALUES ('ruleset.active_version_id', ${lit(JSON.stringify(RULESET_VERSION))}::jsonb,
-                 '${USER_ADMIN}')`,
+                 '${USER_ADMIN}')
+       ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_by = excluded.updated_by`,
     );
   });
 
