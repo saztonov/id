@@ -1220,7 +1220,7 @@ export const jobs = pgTable("jobs", {
 	index("ix_jobs_claim").using("btree", table.priority.desc().nullsFirst().op("int4_ops"), table.nextRunAt.asc().nullsLast().op("timestamptz_ops")).where(sql`(status = 'queued'::text)`),
 	index("ix_jobs_lease").using("btree", table.lockedUntil.asc().nullsLast().op("timestamptz_ops")).where(sql`(status = 'running'::text)`),
 	index("ix_jobs_status_next_run").using("btree", table.status.asc().nullsLast().op("timestamptz_ops"), table.nextRunAt.asc().nullsLast().op("timestamptz_ops")),
-	uniqueIndex("ux_jobs_dedupe_key").using("btree", table.dedupeKey.asc().nullsLast().op("text_ops")).where(sql`((dedupe_key IS NOT NULL) AND (status <> 'done'::text))`),
+	uniqueIndex("ux_jobs_dedupe_key").using("btree", table.dedupeKey.asc().nullsLast().op("text_ops")).where(sql`((dedupe_key IS NOT NULL) AND (status <> ALL (ARRAY['done'::text, 'cancelled'::text])))`),
 	check("jobs_type_chk", sql`type ~ '^[a-z][a-z0-9_]*([.][a-z0-9_]+)*$'::text`),
 	check("jobs_status_chk", sql`status = ANY (ARRAY['queued'::text, 'running'::text, 'done'::text, 'failed'::text, 'cancelled'::text])`),
 	check("jobs_attempts_chk", sql`attempts >= 0`),
@@ -1258,9 +1258,9 @@ export const jobRuns = pgTable("job_runs", {
 			name: "job_runs_revision_id_fkey"
 		}),
 	check("job_runs_attempt_chk", sql`attempt > 0`),
-	check("job_runs_outcome_chk", sql`(outcome IS NULL) OR (outcome = ANY (ARRAY['succeeded'::text, 'failed'::text, 'cancelled'::text, 'lease_expired'::text]))`),
 	check("job_runs_duration_chk", sql`(duration_ms IS NULL) OR (duration_ms >= 0)`),
 	check("job_runs_finished_chk", sql`(outcome IS NOT NULL) OR (finished_at IS NULL)`),
+	check("job_runs_outcome_chk", sql`(outcome IS NULL) OR (outcome = ANY (ARRAY['succeeded'::text, 'failed'::text, 'cancelled'::text, 'lease_expired'::text, 'deferred'::text]))`),
 ]);
 
 export const outbox = pgTable("outbox", {
@@ -1302,6 +1302,38 @@ export const layoutProfiles = pgTable("layout_profiles", {
 	check("layout_profiles_period_chk", sql`(effective_to IS NULL) OR (effective_to > effective_from)`),
 ]);
 
+export const submissionArchives = pgTable("submission_archives", {
+	id: uuid().defaultRandom().primaryKey().notNull(),
+	revisionId: uuid("revision_id").notNull(),
+	objectId: uuid("object_id").notNull(),
+	contractorId: uuid("contractor_id").notNull(),
+	s3Key: text("s3_key").notNull(),
+	archiveSha256: text("archive_sha256").notNull(),
+	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
+	byteSize: bigint("byte_size", { mode: "number" }).notNull(),
+	entryCount: integer("entry_count").notNull(),
+	builderVersion: text("builder_version").notNull(),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+}, (table) => [
+	index("ix_submission_archives_contractor").using("btree", table.contractorId.asc().nullsLast().op("uuid_ops")),
+	index("ix_submission_archives_object").using("btree", table.objectId.asc().nullsLast().op("uuid_ops")),
+	foreignKey({
+			columns: [table.revisionId],
+			foreignColumns: [submissionRevisions.id],
+			name: "submission_archives_revision_id_fkey"
+		}),
+	foreignKey({
+			columns: [table.revisionId, table.objectId, table.contractorId],
+			foreignColumns: [submissionRevisions.contractorId, submissionRevisions.id, submissionRevisions.objectId],
+			name: "submission_archives_scope_fk"
+		}),
+	unique("submission_archives_revision_id_key").on(table.revisionId),
+	unique("submission_archives_s3_key_key").on(table.s3Key),
+	check("submission_archives_sha_chk", sql`archive_sha256 ~ '^[0-9a-f]{64}$'::text`),
+	check("submission_archives_size_chk", sql`byte_size > 0`),
+	check("submission_archives_entries_chk", sql`entry_count > 0`),
+]);
+
 export const logicalDocuments = pgTable("logical_documents", {
 	id: uuid().defaultRandom().primaryKey().notNull(),
 	revisionId: uuid("revision_id").notNull(),
@@ -1328,6 +1360,7 @@ export const logicalDocuments = pgTable("logical_documents", {
 	derivedPdfBuiltAt: timestamp("derived_pdf_built_at", { withTimezone: true, mode: 'string' }),
 	derivedPdfToolkit: text("derived_pdf_toolkit"),
 	derivedNoteApplied: boolean("derived_note_applied"),
+	confirmationSource: text("confirmation_source").default('human').notNull(),
 }, (table) => [
 	index("ix_logical_documents_confirmed_by").using("btree", table.confirmedBy.asc().nullsLast().op("uuid_ops")),
 	index("ix_logical_documents_contractor").using("btree", table.contractorId.asc().nullsLast().op("uuid_ops")),
@@ -1359,45 +1392,14 @@ export const logicalDocuments = pgTable("logical_documents", {
 	check("logical_documents_ordinal_chk", sql`ordinal >= 0`),
 	check("logical_documents_type_confidence_chk", sql`(type_confidence IS NULL) OR ((type_confidence >= (0)::double precision) AND (type_confidence <= (1)::double precision))`),
 	check("logical_documents_boundary_confidence_chk", sql`(boundary_confidence IS NULL) OR ((boundary_confidence >= (0)::double precision) AND (boundary_confidence <= (1)::double precision))`),
-	check("logical_documents_confirmed_chk", sql`(NOT is_confirmed) OR (confirmed_by IS NOT NULL)`),
 	check("logical_documents_derived_pdf_chk", sql`derived_pdf_blob_sha256 ~ '^[0-9a-f]{64}$'::text`),
 	check("logical_documents_version_chk", sql`version >= 0`),
 	check("logical_documents_derived_marked_chk", sql`(derived_pdf_blob_sha256 IS NULL) OR is_derived_copy`),
 	check("logical_documents_derived_confirmed_chk", sql`(derived_pdf_blob_sha256 IS NULL) OR is_confirmed`),
 	check("logical_documents_derived_provenance_chk", sql`((derived_pdf_blob_sha256 IS NULL) AND (derived_pdf_page_count IS NULL) AND (derived_pdf_bytes IS NULL) AND (derived_pdf_built_at IS NULL) AND (derived_pdf_toolkit IS NULL) AND (derived_note_applied IS NULL)) OR ((derived_pdf_blob_sha256 IS NOT NULL) AND (derived_pdf_page_count IS NOT NULL) AND (derived_pdf_bytes IS NOT NULL) AND (derived_pdf_built_at IS NOT NULL) AND (derived_pdf_toolkit IS NOT NULL) AND (derived_note_applied IS NOT NULL))`),
 	check("logical_documents_derived_sizes_chk", sql`((derived_pdf_page_count IS NULL) OR (derived_pdf_page_count > 0)) AND ((derived_pdf_bytes IS NULL) OR (derived_pdf_bytes > 0))`),
-]);
-
-export const submissionArchives = pgTable("submission_archives", {
-	id: uuid().defaultRandom().primaryKey().notNull(),
-	revisionId: uuid("revision_id").notNull(),
-	objectId: uuid("object_id").notNull(),
-	contractorId: uuid("contractor_id").notNull(),
-	s3Key: text("s3_key").notNull(),
-	archiveSha256: text("archive_sha256").notNull(),
-	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
-	byteSize: bigint("byte_size", { mode: "number" }).notNull(),
-	entryCount: integer("entry_count").notNull(),
-	builderVersion: text("builder_version").notNull(),
-	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-}, (table) => [
-	index("ix_submission_archives_contractor").using("btree", table.contractorId.asc().nullsLast().op("uuid_ops")),
-	index("ix_submission_archives_object").using("btree", table.objectId.asc().nullsLast().op("uuid_ops")),
-	foreignKey({
-			columns: [table.revisionId],
-			foreignColumns: [submissionRevisions.id],
-			name: "submission_archives_revision_id_fkey"
-		}),
-	foreignKey({
-			columns: [table.revisionId, table.objectId, table.contractorId],
-			foreignColumns: [submissionRevisions.contractorId, submissionRevisions.id, submissionRevisions.objectId],
-			name: "submission_archives_scope_fk"
-		}),
-	unique("submission_archives_revision_id_key").on(table.revisionId),
-	unique("submission_archives_s3_key_key").on(table.s3Key),
-	check("submission_archives_sha_chk", sql`archive_sha256 ~ '^[0-9a-f]{64}$'::text`),
-	check("submission_archives_size_chk", sql`byte_size > 0`),
-	check("submission_archives_entries_chk", sql`entry_count > 0`),
+	check("logical_documents_confirmation_source_chk", sql`confirmation_source = ANY (ARRAY['human'::text, 'machine'::text])`),
+	check("logical_documents_confirmed_chk", sql`(NOT is_confirmed) OR (confirmation_source = 'machine'::text) OR (confirmed_by IS NOT NULL)`),
 ]);
 
 export const legalHolds = pgTable("legal_holds", {

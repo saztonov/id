@@ -61,7 +61,7 @@ import {
   LlmTimeoutError,
 } from '../llm/port.js';
 import { JobRegistry, type JobContext } from './registry.js';
-import { classifyFailure, JobRunner } from './runner.js';
+import { classifyFailure, deferralOf, JobDeferredError, JobRunner } from './runner.js';
 import { dedupeKeyFor } from './types.js';
 
 const MIGRATIONS_DIR = join(
@@ -202,6 +202,7 @@ beforeAll(async () => {
   registry.register('bundle.build', dispatch);
   registry.register('graph.build', dispatch);
   registry.register('checks.run', dispatch);
+  registry.register('doc.classify_pages', dispatch);
 
   runner = new JobRunner({
     db: app.db,
@@ -675,6 +676,96 @@ params: 1,2,3`,
 });
 
 // =====================================================================
+// Отсрочка: «работы ещё нет», а не «работа не получилась»
+// =====================================================================
+
+/**
+ * Регрессия на картину, с которой заказчик пришёл: «сразу при клике появляются
+ * ошибки… но потом распознавание проходит успешно».
+ *
+ * Поллер `vlm.finalize_run` ждал терминальности страниц броском повторяемой
+ * ошибки, а исход попытки был один — `failed`. Минута нормального ожидания
+ * давала двенадцать строк отказа, текст «Распознавание ещё идёт» в
+ * `jobs.last_error` и плашку «Обработка остановилась: отказов 12» на конвейере,
+ * который в эту секунду работал.
+ */
+describe('отложенная задача', () => {
+  it('пишет попытку исходом deferred и не оставляет текста ошибки', async () => {
+    const enqueued = await enqueueSystemJob(app.db, {
+      type: 'checks.run',
+      payload: { revisionId: REVISION_A },
+      maxAttempts: 5,
+    });
+    behaviours.set(enqueued.jobId, () =>
+      Promise.reject(new JobDeferredError('страницы ещё не дописаны')),
+    );
+
+    await runner.runOnce();
+
+    const job = await rawJob(enqueued.jobId);
+    expect(job['status']).toBe('queued');
+    expect(job['attempts']).toBe(1);
+    // Поле читается как «почему не получилось»: ожидание в нём означало бы,
+    // что идущая работа — причина неудачи.
+    expect(job['last_error']).toBeNull();
+
+    const runs = await runsOf(enqueued.jobId);
+    expect(runs).toHaveLength(1);
+    expect(runs[0]?.['outcome']).toBe('deferred');
+    // Ни класса, ни текста: сообщать не о чем, а заполненные поля утащили бы
+    // отсрочку в «последнюю ошибку» типа задачи.
+    expect(runs[0]?.['error_class']).toBeNull();
+    expect(runs[0]?.['error_message']).toBeNull();
+
+    behaviours.delete(enqueued.jobId);
+    await drainQueue();
+  });
+
+  it('на последней попытке становится настоящим отказом', async () => {
+    // Иначе задача, откладывающая себя безусловно, осталась бы в очереди
+    // навсегда, а прогон — в состоянии «идёт». Потолок и превращает «ждём» в
+    // «не дождались»: по нему обработчики закрывают свой прогон.
+    const enqueued = await enqueueSystemJob(app.db, {
+      type: 'checks.run',
+      payload: { revisionId: REVISION_A },
+      maxAttempts: 2,
+    });
+    behaviours.set(enqueued.jobId, () =>
+      Promise.reject(new JobDeferredError('условие так и не наступило')),
+    );
+
+    await runner.runOnce();
+    expect((await rawJob(enqueued.jobId))['status']).toBe('queued');
+
+    await makeRunnable(enqueued.jobId);
+    await runner.runOnce();
+
+    const job = await rawJob(enqueued.jobId);
+    expect(job['status']).toBe('failed');
+    expect(String(job['last_error'])).toContain('условие так и не наступило');
+
+    const runs = await runsOf(enqueued.jobId);
+    expect(runs.map((run) => run['outcome'])).toEqual(['deferred', 'failed']);
+  });
+
+  it('отсрочка узнаётся по форме поля, а не по классу', () => {
+    // Обработчики живут в пакете воркера, и `instanceof` через границу пакетов
+    // ломается при дублировании зависимости молча — причём в сторону «отсрочка
+    // записана как отказ», то есть ровно в ту, ради которой всё заведено.
+    expect(deferralOf({ deferred: true })).toEqual({ retryAfterMs: null });
+    expect(deferralOf({ deferred: true, retryAfterMs: 1_500 })).toEqual({ retryAfterMs: 1_500 });
+    expect(deferralOf(new JobDeferredError('ждём'))).toEqual({ retryAfterMs: null });
+
+    // Всё остальное отсрочкой не является, включая повторяемый отказ: «повторить
+    // потому что не получилось» и «повторить потому что ещё рано» — разные факты.
+    expect(deferralOf(new Error('обычная ошибка'))).toBeNull();
+    expect(deferralOf({ retriable: true })).toBeNull();
+    expect(deferralOf({ deferred: 'yes' })).toBeNull();
+    expect(deferralOf(null)).toBeNull();
+  });
+});
+
+// =====================================================================
 // Освобождение просроченной аренды
 // =====================================================================
 
@@ -903,6 +994,12 @@ describe('processing_status ревизии', () => {
     expect(byType.get('checks.run')).toMatchObject({ succeeded: 0, failed: 1, inFlight: 0 });
     expect(byType.get('graph.build')).toMatchObject({ succeeded: 0, failed: 0, inFlight: 1 });
     expect(byType.get('checks.run')?.lastErrorClass).toBe('Error');
+    // `dead` считает ЗАДАЧИ, исчерпавшие попытки, а `failed` — попытки. Плашка
+    // конвейера обязана называть виновником первое: пять неудачных попыток
+    // задачи, которая потом прошла, — это работающий конвейер.
+    expect(byType.get('checks.run')?.dead).toBe(1);
+    expect(byType.get('bundle.build')?.dead).toBe(0);
+    expect(byType.get('graph.build')?.dead).toBe(0);
 
     const byStage = new Map(inFlight.stages.map((summary) => [summary.stage, summary]));
     expect([...byStage.keys()]).toEqual(['uploaded', 'analysis', 'checks']);
@@ -942,6 +1039,69 @@ describe('processing_status ревизии', () => {
 
     await drainQueue();
   }, 30_000);
+
+  /**
+   * Две поправки, каждая — на своё враньё сводки.
+   *
+   * «Последняя ошибка» бралась как «последний непустой текст», а текст пишет и
+   * reaper, закрывая попытку исходом `lease_expired`: настоящая причина отказа
+   * пряталась за словами «аренда истекла: воркер не завершил задачу». С
+   * появлением отсрочек то же условие подставляло бы «Распознавание ещё идёт».
+   *
+   * А сводка по типам собиралась только из `job_runs`, поэтому мёртвая задача
+   * без единой записанной попытки в неё не попадала: общая цифра `dead` росла,
+   * а тип, который умер, не назывался — плашка печатала «Обработка
+   * остановилась» и не могла сказать, на чём.
+   */
+  it('«последняя ошибка» — только настоящий отказ, а мёртвый тип назван всегда', async () => {
+    const dead = await enqueueSystemJob(app.db, {
+      type: 'doc.classify_pages',
+      payload: { revisionId: REVISION_C },
+      maxAttempts: 1,
+    });
+    behaviours.set(dead.jobId, () => Promise.reject(new Error('модель отвергла страницу')));
+    await runner.runOnce();
+
+    // Поверх настоящего отказа ложатся две попытки, отказом не являющиеся:
+    // сорванная аренда с её текстом и отсрочка.
+    await db.query(
+      `INSERT INTO job_runs (job_type, revision_id, attempt, outcome, error_class, error_message, finished_at)
+         VALUES ('doc.classify_pages', $1, 2, 'lease_expired', 'LeaseExpired',
+                 'аренда истекла: воркер не завершил задачу', now())`,
+      [REVISION_C],
+    );
+    await db.query(
+      `INSERT INTO job_runs (job_type, revision_id, attempt, outcome, finished_at)
+         VALUES ('doc.classify_pages', $1, 3, 'deferred', now())`,
+      [REVISION_C],
+    );
+
+    // Мёртвая задача БЕЗ единой попытки: так уходят в failed непригодный
+    // payload и неизвестный тип — строка `job_runs` заводится захватом.
+    await db.query(
+      `INSERT INTO jobs (type, payload, status, attempts, max_attempts, last_error)
+         VALUES ('doc.extract_fields', $1::jsonb, 'failed', 0, 3, 'payload не прошёл схему')`,
+      [JSON.stringify({ revisionId: REVISION_C })],
+    );
+
+    const status = await computeProcessingStatus(app.db, ADMIN_SCOPE, REVISION_C);
+    const byType = new Map((status?.jobTypes ?? []).map((row) => [row.jobType, row]));
+
+    const classify = byType.get('doc.classify_pages');
+    expect(classify?.failed).toBe(1);
+    expect(classify?.deferred).toBe(1);
+    expect(classify?.leaseExpired).toBe(1);
+    expect(classify?.lastErrorMessage).toContain('модель отвергла страницу');
+    expect(classify?.lastErrorMessage).not.toContain('аренда истекла');
+
+    // Тип есть в сводке, хотя попыток у него ноль.
+    expect(byType.get('doc.extract_fields')).toMatchObject({ attempts: 0, dead: 1 });
+
+    await db.query(`UPDATE jobs SET status = 'cancelled' WHERE payload->>'revisionId' = $1`, [
+      REVISION_C,
+    ]);
+    await drainQueue();
+  });
 
   it('не отдаётся за пределы области видимости', async () => {
     expect(await computeProcessingStatus(app.db, CONTRACTOR_A_SCOPE, REVISION_C)).not.toBeNull();

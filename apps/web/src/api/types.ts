@@ -553,10 +553,18 @@ export interface ProcessingStatus {
     jobType: string;
     stage: ProcessingStage | null;
     attempts: number;
-    succeeded: number;
+    /** ПОПЫТКИ, окончившиеся неудачей. Задача при этом могла потом пройти. */
     failed: number;
+    succeeded: number;
+    /** Попытки, окончившиеся ожиданием: «условие ещё не наступило». */
+    deferred: number;
     leaseExpired: number;
     inFlight: number;
+    /**
+     * ЗАДАЧИ, исчерпавшие попытки. Именно это, а не `failed`, означает, что
+     * конвейер стоит и ждёт человека.
+     */
+    dead: number;
     totalDurationMs: number;
     firstStartedAt: string | null;
     lastFinishedAt: string | null;

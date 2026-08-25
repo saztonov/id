@@ -174,6 +174,10 @@ export function PipelineBar({ revisionId, editable }: PipelineBarProps): ReactNo
   const queued = data?.queued ?? 0;
   const running = data?.running ?? 0;
   const dead = data?.dead ?? 0;
+  // Отсрочки суммируются по типам: сводного счётчика у ревизии нет, и заводить
+  // его незачем — «кто-то ждёт» отвечается сложением тех же строк, по которым
+  // считается и виновник остановки.
+  const deferred = (data?.jobTypes ?? []).reduce((total, row) => total + row.deferred, 0);
   const busy = isBusy(stage, queued, running);
   const canRun = editable && can('pipeline.run');
 
@@ -224,6 +228,8 @@ export function PipelineBar({ revisionId, editable }: PipelineBarProps): ReactNo
               stage,
               queued,
               running,
+              deferred,
+              dead,
               busy,
               dryRun,
               progress: progress.data ?? null,
@@ -267,10 +273,10 @@ export function PipelineBar({ revisionId, editable }: PipelineBarProps): ReactNo
           message="Портал в режиме сравнения провайдеров: результат не публикуется"
           description={
             <Typography.Text>
-              Распознавание выполняется и проверяется, но в комплект не попадает: ни
-              распознанного текста, ни документов, ни замечаний после него не появится. Это
-              настройка «ai.dry_run_only» в администрировании — выключите её, чтобы прогон
-              доходил до проверок.
+              Распознавание выполняется и проверяется, но в комплект не попадает: ни распознанного
+              текста, ни документов, ни замечаний после него не появится. Это настройка
+              «ai.dry_run_only» в администрировании — выключите её, чтобы прогон доходил до
+              проверок.
             </Typography.Text>
           }
         />
@@ -334,6 +340,8 @@ interface StateInput {
   readonly stage: string | null;
   readonly queued: number;
   readonly running: number;
+  readonly deferred: number;
+  readonly dead: number;
   readonly busy: boolean;
   readonly dryRun: boolean;
   readonly progress: { readonly pagesTotal: number } | null;
@@ -341,7 +349,7 @@ interface StateInput {
 
 /** Одна фраза о том, что происходит прямо сейчас. */
 function describeState(input: StateInput): string {
-  const { stage, queued, running, busy, dryRun, progress } = input;
+  const { stage, queued, running, deferred, dead, busy, dryRun, progress } = input;
 
   if (stage === null) return 'конвейер не запускался';
   if (!busy) {
@@ -355,6 +363,11 @@ function describeState(input: StateInput): string {
     return `последняя стадия: ${stageLabel(stage)}`;
   }
 
+  // Сборщик ждёт, пока допишутся страницы: это работа, а не затор. Пока
+  // ожидание записывалось отказом, эта же секунда показывалась как «Обработка
+  // остановилась» — и человек шёл разбираться с исправным конвейером.
+  if (deferred > 0 && dead === 0) return 'идёт: ждём, пока допишутся страницы';
+
   // Прогон создан, но страниц ещё нет: между постановкой в очередь и первой
   // страницей проходят десятки секунд, и молчание здесь читается как зависание.
   if (stage === 'recognition' && running > 0 && (progress === null || progress.pagesTotal === 0)) {
@@ -367,18 +380,26 @@ function describeState(input: StateInput): string {
 }
 
 /**
- * Причина остановки: что упало и что при этом сказал сервер.
+ * Причина остановки: КТО умер и что при этом сказал сервер.
  *
- * Берётся тип задач с наибольшим числом отказов, а не первый попавшийся: в
- * сводке одновременно могут висеть старый единичный отказ и свежая серия, и
- * назвать надо ту, из-за которой всё встало.
+ * Выбирается тип с мёртвыми задачами, а не с наибольшим числом отказавших
+ * попыток, и это разные вопросы. `failed` считает попытки: пять неудач одной
+ * задачи, которая на шестой прошла, — это работающий конвейер. `dead` считает
+ * задачи, которым повторять больше нечем, — только это и означает остановку.
+ *
+ * Прежний выбор по `failed` давал на стенде худший из возможных ответов:
+ * поллер финализации записывал каждое ожидание страниц как отказ, набирал
+ * двенадцать за минуту и ЗАСЛОНЯЛ собой единственную задачу, которая
+ * действительно исчерпала попытки. Плашка называла виновником того, кто
+ * нормально работал.
  */
 function failureOf(
   data:
     | {
         jobTypes: readonly {
           jobType: string;
-          failed: number;
+          attempts: number;
+          dead: number;
           lastErrorClass: string | null;
           lastErrorMessage: string | null;
         }[];
@@ -387,9 +408,7 @@ function failureOf(
 ): { what: string; reason: string } | null {
   if (data === undefined) return null;
 
-  const worst = [...data.jobTypes]
-    .filter((row) => row.failed > 0)
-    .sort((a, b) => b.failed - a.failed)[0];
+  const worst = [...data.jobTypes].filter((row) => row.dead > 0).sort((a, b) => b.dead - a.dead)[0];
   if (worst === undefined) return null;
 
   const reason =
@@ -398,8 +417,11 @@ function failureOf(
       ? 'Сервер не назвал причину; подробности — в журнале задач.'
       : `Класс ошибки: ${worst.lastErrorClass}.`);
 
+  const attempts =
+    worst.attempts > 0 ? `, попыток ${String(worst.attempts)}` : ', ни одной попытки не выполнено';
+
   return {
-    what: `задача «${worst.jobType}», отказов ${String(worst.failed)}`,
+    what: `задача «${worst.jobType}» исчерпала попытки${attempts}`,
     reason,
   };
 }

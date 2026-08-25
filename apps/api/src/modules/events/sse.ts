@@ -90,8 +90,12 @@ const jobTypeSummarySchema = z.object({
   attempts: z.int(),
   succeeded: z.int(),
   failed: z.int(),
+  /** Попытки, окончившиеся ожиданием: условие ещё не наступило. */
+  deferred: z.int(),
   leaseExpired: z.int(),
   inFlight: z.int(),
+  /** Задачи этого типа, исчерпавшие попытки. Не попытки, а задачи. */
+  dead: z.int(),
   totalDurationMs: z.int(),
   firstStartedAt: z.string().nullable(),
   lastFinishedAt: z.string().nullable(),

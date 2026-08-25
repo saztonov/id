@@ -72,6 +72,7 @@ import { join } from 'node:path';
 import {
   classifyFailure,
   computeBlocksHash,
+  JobDeferredError,
   RASTER_DPI,
   redactAbsoluteUrls,
   type ArtifactKind,
@@ -578,12 +579,22 @@ export class VlmRecognitionCoverageError extends Error {
 }
 
 /**
- * «Ещё идёт» — единственный класс здесь с `retriable:true`: пока страницы не
- * терминальны, повтор — это и есть план (аналог `RdWebError` в
- * `rd.poll_recognition`). Исчерпание `maxAttempts` (60) закрывает прогон
- * `failed` через `withVlmRunTermination` тем же общим правилом.
+ * «Ещё идёт» — не отказ, а ОТСРОЧКА: страницы не терминальны, работы пока нет.
+ *
+ * Наследуется от `JobDeferredError`, и это меняет запись попытки, а не логику
+ * ожидания: `job_runs.outcome` становится `deferred` вместо `failed`,
+ * `jobs.last_error` остаётся пустым, журнал ошибок и лента ревизии молчат.
+ * Прежде минута нормального ожидания давала двенадцать строк отказа, текст
+ * «Распознавание ещё идёт» в поле «почему не получилось» и плашку «Обработка
+ * остановилась: отказов 12» — на конвейере, который в эту секунду работал.
+ *
+ * `retriable: true` сохранён намеренно, хотя движок до него теперь не доходит:
+ * на ПОСЛЕДНЕЙ попытке отсрочка становится настоящим отказом (иначе задача
+ * осталась бы в очереди навсегда), и там ответ на вопрос «повторять ли» снова
+ * спрашивают. Исчерпание `maxAttempts` закрывает прогон `failed` через
+ * `withVlmRunTermination` тем же общим правилом, что и раньше.
  */
-export class VlmRecognitionPendingError extends Error {
+export class VlmRecognitionPendingError extends JobDeferredError {
   readonly retriable = true;
   constructor(message: string) {
     super(message);

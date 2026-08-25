@@ -58,7 +58,14 @@ export {
   tracePayload,
 } from './observability/context.js';
 
-export { classifyFailure, JobRunner, JobTimeoutError, LeaseLostError } from './jobs/runner.js';
+export {
+  classifyFailure,
+  deferralOf,
+  JobDeferredError,
+  JobRunner,
+  JobTimeoutError,
+  LeaseLostError,
+} from './jobs/runner.js';
 export type { JobRunnerOptions } from './jobs/runner.js';
 export { createMaintenanceRegistry, JobRegistry } from './jobs/registry.js';
 export type { JobContext, JobHandler } from './jobs/registry.js';

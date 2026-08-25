@@ -12,7 +12,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import {
-  RdWebError,
+  JobDeferredError,
   type JobContext,
   type RdWebPort,
   type ReconcileLayoutResult,
@@ -216,7 +216,10 @@ describe('задача 10: цикл сверки', () => {
       }),
     );
 
-    await expect(handler(makeContext(sink))).rejects.toBeInstanceOf(RdWebError);
+    // Отсрочка, а не отказ RD WEB: их сервис ответил исправно, просто сверка
+    // ещё не сошлась. Прежний `RdWebError` записывал каждый круг цикла исходом
+    // `failed` и обвинял в этом чужой сервис.
+    await expect(handler(makeContext(sink))).rejects.toBeInstanceOf(JobDeferredError);
     expect(sink.enqueued).toEqual([]);
   });
 

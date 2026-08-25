@@ -481,6 +481,58 @@ export async function failJob(db: Database, params: FailJobParams): Promise<Fail
   });
 }
 
+export interface DeferJobParams extends FinishJobParams {
+  /** Через сколько спрашивать снова. Считает `runner` по `DEFERRAL_BACKOFF`. */
+  readonly retryDelayMs: number;
+}
+
+/**
+ * Отсрочка попытки: условие ещё не наступило, работы пока нет.
+ *
+ * Пара к `failJob`, и различия с ней — весь смысл функции.
+ *
+ * `last_error = NULL`, а не текст ожидания: `jobs.last_error` читается как
+ * «почему не получилось», и «Распознавание ещё идёт» в этом поле означало бы,
+ * что идущее распознавание — причина неудачи. `job_runs` пишется исходом
+ * `deferred` без `error_class` и `error_message`: сообщать не о чем, а
+ * заполненные поля утащили бы отсрочку в диагностику отказов — по ним же
+ * `computeProcessingStatus` выбирает «последнюю ошибку» типа задачи.
+ *
+ * Статус всегда `queued`, потолок попыток здесь не проверяется, и это не
+ * упущение: решение «отсрочка исчерпана» принимает `runner` ДО вызова — он
+ * один знает номер текущей попытки и обязан на последней перевести отсрочку в
+ * настоящий отказ, чтобы задача не осталась в очереди навсегда, а прогон — в
+ * `running`.
+ *
+ * `attempts` не откатывается: счётчик остаётся предохранителем. Ожидание,
+ * которое не кончается, обязано однажды кончиться.
+ */
+export async function deferJob(db: Database, params: DeferJobParams): Promise<boolean> {
+  return db.transaction(async (tx) => {
+    const updated = await tx.execute<{ id: string }>(sql`
+      update ${jobs}
+         set status = 'queued',
+             next_run_at = now() + ${params.retryDelayMs}::int * interval '1 millisecond',
+             locked_by = null,
+             locked_until = null,
+             last_error = null,
+             updated_at = now()
+       where ${jobs.id} = ${params.jobId} and ${jobs.lockedBy} = ${params.workerId}
+      returning id
+    `);
+
+    await tx.execute(sql`
+      update ${jobRuns}
+         set finished_at = now(),
+             duration_ms = ${params.durationMs},
+             outcome = 'deferred'
+       where ${jobRuns.id} = ${params.runId} and ${jobRuns.outcome} is null
+    `);
+
+    return updated.rows.length > 0;
+  });
+}
+
 /**
  * Продление аренды выполняющейся задачи (сердцебиение воркера).
  *
@@ -1082,8 +1134,26 @@ export interface JobTypeSummary {
   readonly attempts: number;
   readonly succeeded: number;
   readonly failed: number;
+  /**
+   * Попытки, окончившиеся ожиданием: «условие ещё не наступило».
+   *
+   * Отдельно от `failed` намеренно — см. `jobOutcomeSchema`. Пока значение было
+   * одно, поллер финализации на минуте ожидания давал `failed: 12`, и плашка
+   * конвейера объявляла остановку на работающем конвейере.
+   */
+  readonly deferred: number;
   readonly leaseExpired: number;
   readonly inFlight: number;
+  /**
+   * Задачи этого типа, исчерпавшие попытки (`jobs.status = 'failed'`).
+   *
+   * Не то же, что `failed`: тот считает ПОПЫТКИ, а эта — ЗАДАЧИ, которым
+   * повторять больше нечем. Пять неудачных попыток одной задачи, которая потом
+   * прошла, дают `failed: 5, dead: 0` — конвейер жив; одна задача, исчерпавшая
+   * лимит, даёт `failed: 1, dead: 1` — конвейер стоит. Красная плашка обязана
+   * реагировать на второе, а реагировала на первое.
+   */
+  readonly dead: number;
   readonly totalDurationMs: number;
   readonly firstStartedAt: string | null;
   readonly lastFinishedAt: string | null;
@@ -1145,6 +1215,7 @@ export async function computeProcessingStatus(
     attempts: number;
     succeeded: number;
     failed: number;
+    deferred: number;
     lease_expired: number;
     in_flight: number;
     total_duration_ms: number;
@@ -1157,15 +1228,23 @@ export async function computeProcessingStatus(
            count(*)::int as attempts,
            count(*) filter (where outcome = 'succeeded')::int as succeeded,
            count(*) filter (where outcome = 'failed')::int as failed,
+           count(*) filter (where outcome = 'deferred')::int as deferred,
            count(*) filter (where outcome = 'lease_expired')::int as lease_expired,
            count(*) filter (where outcome is null)::int as in_flight,
            coalesce(sum(duration_ms), 0)::int as total_duration_ms,
            ${sql.raw(ISO('min(started_at)'))} as first_started_at,
            ${sql.raw(ISO('max(finished_at)'))} as last_finished_at,
+           -- Фильтр по ИСХОДУ, а не по «текст непуст». Прежнее условие
+           -- подхватывало сообщение любой закрытой не успехом попытки, и
+           -- «последней ошибкой» типа задачи становилось «аренда истекла:
+           -- воркер не завершил задачу» — текст, который пишет reaper, закрывая
+           -- попытку исходом lease_expired. Настоящая причина отказа при этом
+           -- пряталась за словами о сорванной аренде. С появлением отсрочек то
+           -- же условие подхватывало бы «Распознавание ещё идёт».
            (array_agg(error_class order by started_at desc)
-              filter (where error_class is not null))[1] as last_error_class,
+              filter (where outcome = 'failed'))[1] as last_error_class,
            (array_agg(error_message order by started_at desc)
-              filter (where error_message is not null))[1] as last_error_message
+              filter (where outcome = 'failed'))[1] as last_error_message
       from ${jobRuns}
      where ${jobRuns.revisionId} = ${revisionId}
      group by job_type
@@ -1179,34 +1258,55 @@ export async function computeProcessingStatus(
      group by 1, 2
   `);
 
-  const jobTypes: JobTypeSummary[] = runRows.rows.map((row) => ({
-    jobType: row.job_type,
-    stage: isJobType(row.job_type) ? stageOf(row.job_type) : null,
-    attempts: row.attempts,
-    succeeded: row.succeeded,
-    failed: row.failed,
-    leaseExpired: row.lease_expired,
-    inFlight: row.in_flight,
-    totalDurationMs: row.total_duration_ms,
-    firstStartedAt: row.first_started_at,
-    lastFinishedAt: row.last_finished_at,
-    lastErrorClass: row.last_error_class,
-    lastErrorMessage: row.last_error_message,
-  }));
-
   let queued = 0;
   let running = 0;
   let dead = 0;
+  const deadByType = new Map<string, number>();
   const pendingByStage = new Map<ProcessingStage, number>();
   for (const row of pendingRows.rows) {
     if (row.status === 'queued') queued += row.count;
     if (row.status === 'running') running += row.count;
-    if (row.status === 'failed') dead += row.count;
+    if (row.status === 'failed') {
+      dead += row.count;
+      deadByType.set(row.type, (deadByType.get(row.type) ?? 0) + row.count);
+    }
     const stage = isJobType(row.type) ? stageOf(row.type) : null;
     if (stage !== null && row.status !== 'failed') {
       pendingByStage.set(stage, (pendingByStage.get(stage) ?? 0) + row.count);
     }
   }
+
+  /**
+   * Ключи ОБЪЕДИНЯЮТСЯ, а не берутся из журнала попыток.
+   *
+   * Сводка собиралась только по `job_runs`, и мёртвая задача без единой
+   * записанной попытки в неё не попадала вовсе. Такие есть: `UnknownJobType` и
+   * `InvalidPayload` объявляются `permanent` и переводят задачу в `failed`
+   * сразу, а строка попытки заводится захватом — то есть общая цифра `dead`
+   * росла, а тип, который умер, не назывался. Плашка в этом случае печатала
+   * «Обработка остановилась» и не могла сказать, на чём.
+   */
+  const jobTypes: JobTypeSummary[] = [
+    ...new Set([...runRows.rows.map((row) => row.job_type), ...deadByType.keys()]),
+  ].map((jobType) => {
+    const row = runRows.rows.find((candidate) => candidate.job_type === jobType);
+    return {
+      jobType,
+      stage: isJobType(jobType) ? stageOf(jobType) : null,
+      attempts: row?.attempts ?? 0,
+      succeeded: row?.succeeded ?? 0,
+      failed: row?.failed ?? 0,
+      deferred: row?.deferred ?? 0,
+      leaseExpired: row?.lease_expired ?? 0,
+      inFlight: row?.in_flight ?? 0,
+      dead: deadByType.get(jobType) ?? 0,
+      totalDurationMs: row?.total_duration_ms ?? 0,
+      firstStartedAt: row?.first_started_at ?? null,
+      lastFinishedAt: row?.last_finished_at ?? null,
+      lastErrorClass: row?.last_error_class ?? null,
+      lastErrorMessage: row?.last_error_message ?? null,
+    };
+  });
 
   const stages: StageSummary[] = STAGE_ORDER.map((stage) => {
     const own = jobTypes.filter((summary) => summary.stage === stage);

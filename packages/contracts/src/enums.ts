@@ -287,8 +287,27 @@ export type AutonomyLevel = z.infer<typeof autonomyLevelSchema>;
  * «будет повторено» здесь нет. `lease_expired` ставит reaper, когда воркер
  * умер, не закрыв аренду, — такую попытку нельзя считать ни успехом, ни
  * прикладной ошибкой.
+ *
+ * `deferred` и `failed` — РАЗНЫЕ факты, и различие не косметическое.
+ * `failed` означает «работа не получилась»; `deferred` — «работы ещё нет,
+ * условие не наступило»: так ждут поллеры (`vlm.finalize_run` — терминальности
+ * страниц прогона, `rd.poll_recognition` — окончания OCR, `rd.wait_pages` —
+ * рендера). Пока значение было одно, минута нормального ожидания давала
+ * двенадцать строк `failed`, текст «Распознавание ещё идёт» в `jobs.last_error`
+ * и плашку «Обработка остановилась: отказов 12» на живом конвейере — причём
+ * заслоняя собой задачу, которая действительно умерла.
+ *
+ * Отсрочка не несёт ни `error_class`, ни `error_message`: сообщать не о чем.
+ * Счётчик попыток она не откатывает — ожидание, не кончающееся никогда, обязано
+ * однажды стать отказом.
  */
-export const jobOutcomeSchema = z.enum(['succeeded', 'failed', 'cancelled', 'lease_expired']);
+export const jobOutcomeSchema = z.enum([
+  'succeeded',
+  'failed',
+  'cancelled',
+  'lease_expired',
+  'deferred',
+]);
 export type JobOutcome = z.infer<typeof jobOutcomeSchema>;
 
 /**

@@ -62,9 +62,9 @@ import type { JobContext, JobHandler } from '@id/api';
 import {
   classifyFailure,
   computeBlocksHash,
+  JobDeferredError,
   matchBlocks,
   parseExportMarkdown,
-  RdWebError,
   readZipEntries,
   redactAbsoluteUrls,
   requireEntry,
@@ -441,9 +441,11 @@ export function createReconcileHandler(deps: RecognitionDeps): JobHandler<'layou
       );
     }
 
-    throw new RdWebError('Цикл сверки разметки ещё не сошёлся, требуется повтор', {
-      operation: 'reconcile_layout',
-    });
+    // Отсрочка, а не отказ: RD WEB ничего не сломал, сверка просто ещё не
+    // сошлась. `RdWebError` здесь означал бы, что виноват их сервис, и писал бы
+    // попытку исходом `failed` — то есть считал бы нормальный ход дела серией
+    // отказов и заслонял бы ими настоящие.
+    throw new JobDeferredError('Цикл сверки разметки ещё не сошёлся, требуется повтор');
   });
 }
 
@@ -654,7 +656,10 @@ export function createPollRecognitionHandler(
       );
     }
 
-    throw new RdWebError('Распознавание ещё идёт', { operation: 'poll_recognition' });
+    // «Ещё идёт» — отсрочка. Ветка выше уже перевела исчерпание попыток в
+    // настоящий отказ с закрытием прогона, поэтому здесь остаётся только
+    // ожидание, и записывать его как неудачу нечем.
+    throw new JobDeferredError('Распознавание ещё идёт');
   });
 }
 

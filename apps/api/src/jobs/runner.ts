@@ -51,6 +51,7 @@ import type { Metrics } from '../observability/metrics.js';
 import {
   claimJobs,
   completeJob,
+  deferJob,
   enqueueSystemJob,
   failJob,
   publishOutboxBatch,
@@ -73,6 +74,7 @@ import {
   type JobQueue,
   type JobType,
   DEFAULT_BACKOFF,
+  DEFERRAL_BACKOFF,
 } from './types.js';
 
 /** Аренда на момент захвата: сердцебиение сразу переставит её под тип задачи. */
@@ -102,6 +104,49 @@ export class LeaseLostError extends Error {
     super('аренда задачи потеряна: её подобрал другой воркер');
     this.name = 'LeaseLost';
   }
+}
+
+/**
+ * Не отказ, а отсрочка: «работы ещё нет, условие не наступило».
+ *
+ * Три задачи конвейера — поллеры, и ожидание у них штатное: `vlm.finalize_run`
+ * ждёт терминальности страниц прогона, `rd.poll_recognition` — окончания OCR,
+ * `rd.wait_pages` — рендера страниц. Выразить это было нечем: единственным
+ * способом попросить повтор был бросок повторяемой ошибки, а единственным
+ * исходом попытки — `failed`. Минута нормального ожидания давала двенадцать
+ * строк отказа и плашку «Обработка остановилась» на живом конвейере.
+ *
+ * Класс объявлен здесь, но движок его НЕ УЗНАЁТ по имени: проверка идёт по
+ * форме поля (`deferralOf`), тем же приёмом и по той же причине, что и
+ * `retriable` ниже. Обработчики живут в пакете воркера, а `instanceof` через
+ * границу пакетов ломается при дублировании зависимости молча — и сломался бы
+ * в сторону «отсрочка записана как отказ», то есть ровно в ту, ради которой
+ * всё это заведено.
+ */
+export class JobDeferredError extends Error {
+  readonly deferred = true;
+  /** Через сколько спрашивать снова. Не задано — политика `DEFERRAL_BACKOFF`. */
+  readonly retryAfterMs?: number | undefined;
+
+  constructor(message: string, options?: { readonly retryAfterMs?: number | undefined }) {
+    super(message);
+    this.name = 'JobDeferred';
+    this.retryAfterMs = options?.retryAfterMs;
+  }
+}
+
+/** Форма отсрочки: см. шапку `JobDeferredError` о том, почему не `instanceof`. */
+interface DeferrableFailure {
+  readonly deferred: boolean;
+  readonly retryAfterMs?: number | undefined;
+}
+
+export function deferralOf(error: unknown): { readonly retryAfterMs: number | null } | null {
+  if (typeof error !== 'object' || error === null) return null;
+  const candidate = error as Partial<DeferrableFailure>;
+  if (candidate.deferred !== true) return null;
+  const delay = candidate.retryAfterMs;
+  return { retryAfterMs: typeof delay === 'number' && Number.isFinite(delay) ? delay : null };
 }
 
 /**
@@ -686,6 +731,24 @@ export class JobRunner {
           logger.info({ event: 'job_done', duration_ms: durationMs }, 'задача выполнена');
           await this.#emitLifecycle(job, logger, 'job.succeeded', { durationMs });
         } catch (error) {
+          /**
+           * Отсрочка спрашивается ПЕРВОЙ и только пока попытки не исчерпаны.
+           *
+           * На последней попытке ожидание обязано стать настоящим отказом:
+           * `deferJob` возвращает задачу в очередь безусловно, и отсрочка без
+           * потолка оставила бы её там навсегда, а прогон — в `running`. Именно
+           * потолок и превращает «ждём» в «не дождались», а обработчики
+           * (`withVlmRunTermination`) закрывают по нему свой прогон.
+           */
+          const deferral = deferralOf(error);
+          if (deferral !== null && job.attempt < job.maxAttempts) {
+            await this.#finishDeferred(job, startedAt, logger, {
+              message: normalizeErrorMessage(messageOfChain(error)),
+              retryAfterMs: deferral.retryAfterMs,
+            });
+            return;
+          }
+
           const { errorClass, permanent } = classifyFailure(error);
           await this.#finishFailed(job, startedAt, logger, {
             errorClass,
@@ -786,6 +849,58 @@ export class JobRunner {
     } finally {
       if (timer !== null) clearTimeout(timer);
     }
+  }
+
+  /**
+   * Попытка окончена ожиданием, а не неудачей.
+   *
+   * Три вещи, которых здесь НЕТ, и каждая отсутствует по своей причине.
+   *
+   * `errorReporter.report` не вызывается: журнал ошибок (§11) дедуплицирует по
+   * отпечатку и отвечает на вопрос «сколько раз это уже падало». Ожидание,
+   * попав туда, дало бы «vlm.finalize_run: 240 раз» в списке проблем портала —
+   * то есть заслонило бы настоящие отказы собственной нормальной работой.
+   *
+   * Событие ревизии не пишется: лента показывается человеку, и «задача не
+   * удалась» раз в минуту всю дорогу распознавания — это не информирование, а
+   * шум, в котором тонет единственное сообщение, которое стоило прочесть.
+   *
+   * Журнал — `info`, а не `warn`: предупреждать не о чем.
+   */
+  async #finishDeferred(
+    job: ClaimedJob,
+    startedAt: number,
+    logger: Logger,
+    deferral: { readonly message: string; readonly retryAfterMs: number | null },
+  ): Promise<void> {
+    const durationMs = Date.now() - startedAt;
+    const retryDelayMs = deferral.retryAfterMs ?? backoffDelayMs(job.attempt, DEFERRAL_BACKOFF);
+
+    await deferJob(this.#options.db, {
+      jobId: job.jobId,
+      runId: job.runId,
+      workerId: this.#options.workerId,
+      durationMs,
+      retryDelayMs,
+    });
+
+    this.#options.metrics.observeJobRun({
+      jobType: job.type,
+      outcome: 'deferred',
+      durationMs,
+    });
+
+    logger.info(
+      {
+        event: 'job_deferred',
+        duration_ms: durationMs,
+        attempt: job.attempt,
+        max_attempts: job.maxAttempts,
+        retry_in_ms: retryDelayMs,
+        reason: deferral.message,
+      },
+      'условие задачи ещё не наступило, попытка отложена',
+    );
   }
 
   async #finishFailed(

@@ -38,6 +38,7 @@ import type { AttentionFlag, BlockType, ShapeType } from '@id/contracts';
 import type { JobContext, JobHandler } from '@id/api';
 import {
   analyzePages,
+  JobDeferredError,
   RdWebError,
   type AnalyzedPage,
   type DetectedBlockInput,
@@ -527,9 +528,10 @@ export function createWaitPagesHandler(
       return;
     }
 
-    throw new RdWebError('RD WEB ещё не отрендерил страницы рабочего документа', {
-      operation: 'wait_pages',
-    });
+    // Отсрочка, а не отказ: рендер идёт, спрашиваем снова. Прежний `RdWebError`
+    // писал каждую проверку исходом `failed`, и ожидание рендера выглядело в
+    // сводке обработки как серия отказов внешнего сервиса.
+    throw new JobDeferredError('RD WEB ещё не отрендерил страницы рабочего документа');
   };
 }
 
