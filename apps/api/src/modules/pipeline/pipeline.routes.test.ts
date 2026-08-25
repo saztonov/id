@@ -65,6 +65,9 @@ const REVISION_OTHER = id(15);
 /** Комплект с ЧЕРНОВОЙ разметкой и МЁРТВОЙ задачей детекции: кнопка не заперта. */
 const WORK_STUCK = id(16);
 const REVISION_STUCK = id(17);
+/** Комплект для проверки shadow-режима: dry-run отказывает, а не молчит. */
+const WORK_DRY = id(18);
+const REVISION_DRY = id(19);
 
 const USER_A = id(20);
 const USER_B = id(21);
@@ -84,12 +87,18 @@ const BLOCK_READY = id(52);
 const BUNDLE_STUCK = id(53);
 const LAYOUT_STUCK = id(54);
 const BLOCK_STUCK = id(55);
+const FILE_DRY = id(34);
+const PAGE_DRY = id(44);
+const BUNDLE_DRY = id(56);
+const LAYOUT_DRY = id(57);
+const BLOCK_DRY = id(58);
 
 const SHA_READY = 'a'.repeat(64);
 const SHA_WORKING = 'b'.repeat(64);
 const SHA_BARE = 'c'.repeat(64);
 const SHA_OTHER = 'd'.repeat(64);
 const SHA_STUCK = 'e'.repeat(64);
+const SHA_DRY = 'f'.repeat(64);
 
 /** Коды промптов стадии recognize: без них распознавание не запускается. */
 const RECOGNIZE_PROMPTS = [
@@ -221,6 +230,19 @@ beforeAll(async () => {
     `INSERT INTO source_pages (id, revision_id, source_file_id, file_page_index, revision_ordinal, width_px, height_px, rotation)
        VALUES ('${PAGE_STUCK}', '${REVISION_STUCK}', '${FILE_STUCK}', 0, 0, 1654, 2339, 0)`,
 
+    // --- Комплект для проверки shadow-режима ---
+    `INSERT INTO works
+       (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
+       VALUES ('${WORK_DRY}', '${OBJECT}', '${ORG_A}', '${ORG_A}', 'roofing', DATE '2026-01-01', 'Комплект для shadow-режима', '${USER_A}')`,
+    `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
+       VALUES ('${REVISION_DRY}', '${WORK_DRY}', '${OBJECT}', '${ORG_A}', 1, 'draft')`,
+    `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
+       VALUES ('${SHA_DRY}', 'blobs/${SHA_DRY}', 1024, 'application/pdf')`,
+    `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order, verify_state)
+       VALUES ('${FILE_DRY}', '${REVISION_DRY}', '${SHA_DRY}', 'Теневой.pdf', 0, 'ok')`,
+    `INSERT INTO source_pages (id, revision_id, source_file_id, file_page_index, revision_ordinal, width_px, height_px, rotation)
+       VALUES ('${PAGE_DRY}', '${REVISION_DRY}', '${FILE_DRY}', 0, 0, 1654, 2339, 0)`,
+
     // Распознавание — через VLM: у ветки RD WEB нет RD-документа, и прогон
     // отказал бы по причине, к этим маршрутам отношения не имеющей.
     `INSERT INTO app_settings (key, value) VALUES ('recognition.provider', '"openrouter_vlm"')`,
@@ -272,6 +294,27 @@ beforeAll(async () => {
        VALUES ('${BLOCK_STUCK}', '${LAYOUT_STUCK}', '${REVISION_STUCK}', '${BUNDLE_STUCK}', '${PAGE_STUCK}', 0,
                '${OBJECT}', 'text', 'rectangle', 0.1, 0.1, 0.9, 0.4, 0, 'auto', 'rf_detr')`,
   );
+  // Тот же комплект для проверки shadow-режима.
+  await db.query(
+    `INSERT INTO processing_bundles (id, revision_id, aggregate_manifest_hash, working_pdf_blob_sha256, builder_version)
+       VALUES ('${BUNDLE_DRY}', '${REVISION_DRY}', '${manifestHash(SHA_DRY)}', '${SHA_WORKING}', 'bundle/1+pdf-lib')`,
+  );
+  await db.query(
+    `INSERT INTO processing_bundle_pages (bundle_id, revision_id, working_page_index, source_page_id)
+       VALUES ('${BUNDLE_DRY}', '${REVISION_DRY}', 0, '${PAGE_DRY}')`,
+  );
+  await db.query(
+    `INSERT INTO layout_revisions (id, revision_id, object_id, bundle_id, revision_no, state)
+       VALUES ('${LAYOUT_DRY}', '${REVISION_DRY}', '${OBJECT}', '${BUNDLE_DRY}', 1, 'draft')`,
+  );
+  await db.query(
+    `INSERT INTO layout_blocks
+       (id, layout_revision_id, revision_id, bundle_id, source_page_id, working_page_index, object_id,
+        block_type, shape_type, x0, y0, x1, y1, sort_order, source, detector_provenance)
+       VALUES ('${BLOCK_DRY}', '${LAYOUT_DRY}', '${REVISION_DRY}', '${BUNDLE_DRY}', '${PAGE_DRY}', 0,
+               '${OBJECT}', 'text', 'rectangle', 0.1, 0.1, 0.9, 0.4, 0, 'auto', 'rf_detr')`,
+  );
+
   // Пачка детекции, исчерпавшая попытки. Ровно то, что осталось в проде после
   // предыдущей заморозки: такие задачи не имеют права запереть кнопку навсегда.
   await db.query(
@@ -614,6 +657,122 @@ describe('GET /recognition-runs/{id}/progress', () => {
       `/api/v1/recognition-runs/${runs[0]?.id ?? ''}/progress`,
     );
     expect(response.statusCode).toBe(404);
+  });
+});
+
+// =====================================================================
+// Shadow-режим (ADR-0007): dry-run отказывает вслух и не запирает разметку
+// =====================================================================
+
+/**
+ * Три следствия одного дефекта, каждое проверено отдельно.
+ *
+ * Прогон в режиме `ai.dry_run_only` выполняется целиком и закрывается ЧЕСТНЫМ
+ * `done`, но публикацию пропускает: `page_text_versions` после него нет ни
+ * одной. Пока «распознано» проверялось статусом, это давало на стенде картину,
+ * из которой не было выхода: кнопка срабатывала, модель отрабатывала комплект,
+ * деньги тратились — и вкладка «Проверка» оставалась пустой, потому что анализу
+ * нечего было читать. Повторное нажатие отвечало «для повторного распознавания
+ * нужна новая ревизия разметки», а завести её нельзя: блоки после заморозки
+ * заперты триггером.
+ *
+ * Набор идёт в СТРОГОМ режиме намеренно — `done` вычисляется только при
+ * `enforceGates`, и в режиме тестирования утверждения ниже проверяли бы не то.
+ */
+describe('POST /revisions/{id}/check в shadow-режиме', () => {
+  const setDryRun = async (value: boolean): Promise<void> => {
+    await db.query(
+      `INSERT INTO app_settings (key, value) VALUES ('ai.dry_run_only', '${String(value)}'::jsonb)
+         ON CONFLICT (key) DO UPDATE SET value = excluded.value`,
+    );
+  };
+
+  it('dry-run отказывает ДО заморозки и объясняет, чем это кончится', async () => {
+    await setDryRun(true);
+
+    const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_DRY}/check`, {
+      idempotencyKey: 'check-dry-1',
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json<{ detail: string }>().detail).toContain('dry-run');
+    // Отказ обязан быть ДО заморозки: она необратима для этой ревизии разметки,
+    // и замороженная ни за что разметка правкой уже не лечится.
+    expect(await layoutStateOf(LAYOUT_DRY)).toBe('draft');
+    // И ни одного прогона: сквозной путь не начат вовсе.
+    const runs = await db.query<{ count: string | number }>(
+      `SELECT count(*) AS count FROM recognition_runs WHERE revision_id = '${REVISION_DRY}'`,
+    );
+    expect(Number(runs[0]?.count ?? 0)).toBe(0);
+  });
+
+  it('с выключенным dry-run та же кнопка проходит', async () => {
+    await setDryRun(false);
+    await finishLayoutJobs(REVISION_DRY);
+
+    const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_DRY}/check`, {
+      idempotencyKey: 'check-dry-2',
+    });
+
+    expect(response.statusCode).toBe(202);
+    expect(response.json<{ stage: string }>().stage).toBe('recognition');
+    expect(await layoutStateOf(LAYOUT_DRY)).toBe('frozen');
+  });
+
+  it('завершённый БЕЗ публикации прогон не запирает разметку', async () => {
+    // Прогон закрывается ровно так, как его закрывает финализация в dry-run:
+    // статус `done`, счётчики на месте, `page_text_versions` — ни одной.
+    await db.query(
+      `UPDATE recognition_runs SET status = 'done', finished_at = now()
+        WHERE revision_id = '${REVISION_DRY}'`,
+    );
+
+    const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_DRY}/check`, {
+      idempotencyKey: 'check-dry-3',
+    });
+
+    // Прежде здесь было 409 «для повторного распознавания нужна новая ревизия
+    // разметки» — тупик, из которого нет выхода.
+    expect(response.statusCode).toBe(202);
+    expect(response.json<{ stage: string }>().stage).toBe('recognition');
+
+    const runs = await db.query<{ count: string | number }>(
+      `SELECT count(*) AS count FROM recognition_runs WHERE revision_id = '${REVISION_DRY}'`,
+    );
+    expect(Number(runs[0]?.count ?? 0)).toBe(2);
+  });
+
+  it('опубликованный прогон стадию закрывает: следующее нажатие идёт к анализу', async () => {
+    const runs = await db.query<{ id: string }>(
+      `SELECT id FROM recognition_runs
+        WHERE revision_id = '${REVISION_DRY}' AND status = 'running' ORDER BY started_at DESC`,
+    );
+    const runId = runs[0]?.id;
+    expect(runId).toBeDefined();
+
+    // Настоящая публикация: артефакт прогона и версия текста страницы. Именно
+    // их существование, а не статус, и означает «распознано».
+    const artifact = id(90);
+    await db.query(
+      `INSERT INTO artifact_versions (id, recognition_run_id, kind, s3_key, artifact_sha256, byte_size)
+         VALUES ('${artifact}', '${runId ?? ''}', 'blocks_json', 'artifacts/dry.json', '${'1'.repeat(64)}', 128)`,
+    );
+    await db.query(
+      `INSERT INTO page_text_versions
+         (revision_id, source_page_id, recognition_run_id, artifact_version_id, text_md, text_sha256)
+         VALUES ('${REVISION_DRY}', '${PAGE_DRY}', '${runId ?? ''}', '${artifact}', 'текст', '${'2'.repeat(64)}')`,
+    );
+    await db.query(
+      `UPDATE recognition_runs SET status = 'done', finished_at = now() WHERE id = '${runId ?? ''}'`,
+    );
+
+    const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_DRY}/check`, {
+      idempotencyKey: 'check-dry-4',
+    });
+
+    expect(response.statusCode).toBe(202);
+    // Стадия распознавания пройдена — маршрут идёт к разбору документов.
+    expect(response.json<{ stage: string }>().stage).toBe('analysis');
   });
 });
 

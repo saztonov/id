@@ -75,6 +75,7 @@ import {
 import {
   finishRecognitionRun,
   findRecognitionRun,
+  hasPublishedRecognition,
   listRecognitionRuns,
   listRunPages,
 } from '../../db/repositories/recognition.js';
@@ -262,7 +263,7 @@ function registerCheckRoute(app: AppInstance): void {
          * значит нет и завершённого прогона по ней, — распознавание будет запущено
          * наверняка.
          */
-        await assertRecognitionStageReady(app.db, app.env);
+        await assertRecognitionStageReady(app.db, app.env, { requirePublication: true });
 
         /**
          * И не поверх незаконченной работы предыдущей кнопки.
@@ -340,8 +341,27 @@ function registerCheckRoute(app: AppInstance): void {
           'идущий прогон распознавания закрыт нажатием «Распознать»',
         );
       }
-      const done = enforceGates && runOfLayout.some((run) => run.status === 'done');
+      /**
+       * «Распознано» — это ОПУБЛИКОВАНО, а не «прогон закрыт со статусом done».
+       *
+       * Прогон в режиме dry-run (ADR-0007) проходит весь путь и завершается
+       * честным `done`, не опубликовав ни строки. Считая его пройденной
+       * стадией, маршрут уходил к шагу 3 — к анализу, которому нечего читать, —
+       * и цепочка обрывалась на «завершённого прогона распознавания нет» уже
+       * внутри задачи, то есть в консоли, а не на экране.
+       */
+      const done =
+        enforceGates &&
+        (await hasPublishedRecognition(app.db, scope, {
+          revisionId,
+          layoutRevisionId: layout.id,
+        }));
       if (!done) {
+        // Гейт спрашивается ЕЩЁ РАЗ и безусловно: ветка выше срабатывает только
+        // на черновой разметке, а сюда приходят и с уже замороженной — например
+        // после dry-run, который разметку заморозил, но ничего не опубликовал.
+        await assertRecognitionStageReady(app.db, app.env, { requirePublication: true });
+
         if (!enforceGates && runOfLayout.length > 0) {
           // Прежние результаты по этой разметке больше не описывают то, что
           // получится сейчас: сносим их до старта, а не «поверх».

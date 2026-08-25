@@ -155,6 +155,63 @@ export async function listRecognitionRuns(
   return rows.map(toView);
 }
 
+/**
+ * Опубликовал ли прогон хоть одну страницу текста.
+ *
+ * ## Почему статуса `done` недостаточно
+ *
+ * Прогон в режиме dry-run (`ai.dry_run_only`, ADR-0007) проходит весь путь,
+ * пишет canonical-артефакт и завершается ЧЕСТНЫМ `done` — но публикацию
+ * пропускает: ни `page_text_versions`, ни указателя `current_block_result`
+ * после него нет. Downstream-конвейер такой прогон видеть не должен вовсе, и
+ * именно это shadow-режим и означает.
+ *
+ * Пока «распознано» проверялось статусом, dry-run выдавал себя за настоящее
+ * распознавание сразу в трёх местах: маршрут «Проверить» считал стадию
+ * пройденной и уходил к анализу, которому нечего читать; сегментация выбирала
+ * этот прогон и получала страницы без текста; а `startRecognitionRun`
+ * отказывался создавать новый прогон по той же разметке — то есть завершённый
+ * dry-run запирал разметку НАВСЕГДА, и выйти из этого можно было только новой
+ * ревизией разметки. Заказчик увидел это как пустой экран «Проверка», из
+ * которого нет выхода.
+ *
+ * `page_text_versions` — правильный признак не по удобству, а по смыслу: это
+ * ровно то, ради чего распознавание существует, и ровно то, чего у dry-run
+ * нет. Прогон, не опубликовавший ни строки, распознаванием не является, каким
+ * бы ни был его статус.
+ *
+ * `layoutRevisionId` необязателен: маршрут спрашивает про конкретную разметку
+ * («можно ли считать ЭТУ стадию пройденной»), сегментация — про ревизию
+ * целиком.
+ */
+export async function hasPublishedRecognition(
+  db: Database,
+  scope: AuthScope,
+  input: { readonly revisionId: string; readonly layoutRevisionId?: string | undefined },
+): Promise<boolean> {
+  const rows = await db
+    .select({ id: recognitionRuns.id })
+    .from(recognitionRuns)
+    .innerJoin(submissionRevisions, eq(recognitionRuns.revisionId, submissionRevisions.id))
+    .where(
+      withScope(
+        scope,
+        REVISION_SCOPE,
+        eq(recognitionRuns.revisionId, input.revisionId),
+        eq(recognitionRuns.status, 'done'),
+        ...(input.layoutRevisionId === undefined
+          ? []
+          : [eq(recognitionRuns.layoutRevisionId, input.layoutRevisionId)]),
+        sql`exists (
+          select 1 from ${pageTextVersions}
+           where ${pageTextVersions.recognitionRunId} = ${recognitionRuns.id}
+        )`,
+      ),
+    )
+    .limit(1);
+  return rows.length > 0;
+}
+
 /** Прогон конкретной ревизии разметки: их не больше одного незавершённого. */
 export async function findRunForLayout(
   db: Database,
@@ -244,13 +301,29 @@ export async function startRecognitionRun(
     );
   }
   if (!input.requireRdDocument && existing !== null && existing.status === 'done') {
-    // Зеркало легаси-дисциплины: у RD WEB повторный прогон done-разметки
-    // запирает закрытый документ, у VLM запирать нечем — запрет явный.
-    // Результаты неизменяемы, повторное распознавание = новая ревизия разметки.
-    throw conflict(
-      'Прогон по этой ревизии разметки уже завершён успешно: ' +
-        'для повторного распознавания нужна новая ревизия разметки.',
-    );
+    /**
+     * Зеркало легаси-дисциплины: у RD WEB повторный прогон done-разметки
+     * запирает закрытый документ, у VLM запирать нечем — запрет явный.
+     * Результаты неизменяемы, повторное распознавание = новая ревизия разметки.
+     *
+     * Спрашивается при этом не статус, а ПУБЛИКАЦИЯ. Запрет защищает
+     * неизменяемость результатов, поэтому там, где результатов нет, защищать
+     * нечего: прогон в режиме dry-run завершается честным `done`, не
+     * опубликовав ни строки, — и, считая его успешным, запрет запирал разметку
+     * навсегда за прогон, который ничего не оставил. Выйти из этого было
+     * нельзя: новая ревизия разметки требует правки блоков, а блоки после
+     * заморозки заперты триггером.
+     */
+    const published = await hasPublishedRecognition(db, scope, {
+      revisionId: found.revisionId,
+      layoutRevisionId: input.layoutRevisionId,
+    });
+    if (published) {
+      throw conflict(
+        'Прогон по этой ревизии разметки уже завершён успешно: ' +
+          'для повторного распознавания нужна новая ревизия разметки.',
+      );
+    }
   }
 
   let rdRunDocumentId: string | null = null;

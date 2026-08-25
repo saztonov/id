@@ -177,6 +177,13 @@ export function PipelineBar({ revisionId, editable }: PipelineBarProps): ReactNo
   const busy = isBusy(stage, queued, running);
   const canRun = editable && can('pipeline.run');
 
+  // Shadow-режим виден по снимку ПОСЛЕДНЕГО прогона, а не по настройке: снимок
+  // пиннится на старте (ADR-0007), и прогон, начатый до переключения, идёт по
+  // своему режиму, а не по текущему значению настройки. Спрашивать настройку
+  // значило бы обещать про идущий прогон то, чего он не делает.
+  const lastRun = (runs.data ?? []).at(-1) ?? null;
+  const dryRun = isDryRun(lastRun?.settingsSnapshot);
+
   // Отказ показывается и когда сводная стадия уже уехала дальше: упавшая задача
   // остаётся упавшей, даже если следующая стадия успела начаться.
   const failure = dead > 0 || stage === 'failed' ? failureOf(data) : null;
@@ -213,7 +220,14 @@ export function PipelineBar({ revisionId, editable }: PipelineBarProps): ReactNo
         */}
         <span aria-live="polite" data-testid="pipeline-state">
           <Typography.Text type="secondary">
-            {describeState({ stage, queued, running, busy, progress: progress.data ?? null })}
+            {describeState({
+              stage,
+              queued,
+              running,
+              busy,
+              dryRun,
+              progress: progress.data ?? null,
+            })}
           </Typography.Text>
         </span>
 
@@ -243,6 +257,24 @@ export function PipelineBar({ revisionId, editable }: PipelineBarProps): ReactNo
           </Space>
         )}
       </Space>
+
+      {dryRun && (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 12 }}
+          data-testid="pipeline-dry-run"
+          message="Портал в режиме сравнения провайдеров: результат не публикуется"
+          description={
+            <Typography.Text>
+              Распознавание выполняется и проверяется, но в комплект не попадает: ни
+              распознанного текста, ни документов, ни замечаний после него не появится. Это
+              настройка «ai.dry_run_only» в администрировании — выключите её, чтобы прогон
+              доходил до проверок.
+            </Typography.Text>
+          }
+        />
+      )}
 
       {failure !== null && (
         <Alert
@@ -285,20 +317,39 @@ function isBusy(stage: string | null, queued: number, running: number): boolean 
   return queued > 0 || running > 0;
 }
 
+/**
+ * Идёт ли прогон в shadow-режиме — по его собственному снимку настроек.
+ *
+ * Снимок — единственный честный источник: он пиннится на старте (ADR-0007), и
+ * прогон, начатый до переключения настройки, идёт по своему режиму. Форма
+ * снимка объявлена как `unknown`, потому что версий у него две; читается ровно
+ * одно поле, и отсутствие его означает «не dry-run», а не «неизвестно».
+ */
+function isDryRun(snapshot: unknown): boolean {
+  if (typeof snapshot !== 'object' || snapshot === null) return false;
+  return (snapshot as { dryRun?: unknown }).dryRun === true;
+}
+
 interface StateInput {
   readonly stage: string | null;
   readonly queued: number;
   readonly running: number;
   readonly busy: boolean;
+  readonly dryRun: boolean;
   readonly progress: { readonly pagesTotal: number } | null;
 }
 
 /** Одна фраза о том, что происходит прямо сейчас. */
 function describeState(input: StateInput): string {
-  const { stage, queued, running, busy, progress } = input;
+  const { stage, queued, running, busy, dryRun, progress } = input;
 
   if (stage === null) return 'конвейер не запускался';
   if (!busy) {
+    // «Готово» о прогоне, который ничего не опубликовал, — это неправда:
+    // распознавание состоялось, а комплект после него ровно там же, где был.
+    if (dryRun && (stage === 'ready' || stage === 'recognition')) {
+      return 'распознано, но не опубликовано';
+    }
     if (stage === 'ready') return 'готово';
     if (stage === 'failed') return 'обработка остановлена отказом';
     return `последняя стадия: ${stageLabel(stage)}`;

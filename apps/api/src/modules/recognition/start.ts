@@ -34,12 +34,35 @@ import { tracePayload } from '../../observability/context.js';
  * отказ после заморозки оставил бы ревизию с необратимо замороженной разметкой
  * ни за что — правкой это уже не лечится, только новой ревизией разметки.
  *
- * Ветка RD WEB проверок не имеет: ни модели, ни промптов стадии recognize у неё нет.
+ * `requirePublication` различает двух вызывающих, и различие существенное.
+ * Сквозной прогон обещает довести комплект до замечаний, поэтому в shadow-режиме
+ * он обязан отказаться: выполнить его целиком означало бы потратить деньги и
+ * время на результат, который никуда не поедет по построению, и оставить
+ * человека перед пустым экраном без единого слова о причине. Гранулярный
+ * маршрут ручного пути ничего подобного не обещает — он и есть инструмент
+ * shadow-сравнения, и запрещать ему dry-run значило бы запретить сам режим.
+ *
+ * Ветка RD WEB проверок конфигурации не имеет: ни модели, ни промптов стадии
+ * recognize у неё нет. Dry-run её тоже не касается — публикацию пропускает
+ * финализация VLM-прогона, у RD WEB такой развилки нет вовсе.
  */
-export async function assertRecognitionStageReady(db: Database, env: Env): Promise<void> {
+export async function assertRecognitionStageReady(
+  db: Database,
+  env: Env,
+  options: { readonly requirePublication: boolean },
+): Promise<void> {
   const recognition = await readRecognitionSettings(db);
   if (recognition.provider !== 'openrouter_vlm') return;
   assertVlmStageReady(env, recognition);
+  if (options.requirePublication && (await readAiDryRunOnly(db))) {
+    throw conflict(
+      'Портал в режиме dry-run: распознавание выполнится, но результат никуда не ' +
+        'поедет — ни распознанного текста, ни документов, ни замечаний после него не ' +
+        'появится. Выключите «ai.dry_run_only» в администрировании, либо запускайте ' +
+        'распознавание отдельной кнопкой на вкладке «Разметка», если сравниваете ' +
+        'провайдеров сознательно.',
+    );
+  }
 }
 
 /**
@@ -90,6 +113,15 @@ export interface StartRecognitionResult {
   readonly created: boolean;
   readonly jobId: string;
   readonly jobCreated: boolean;
+  /**
+   * Пойдёт ли прогон в shadow-режиме, то есть без публикации результата.
+   *
+   * Возвращается, потому что ручной путь обязан сказать, чем кончится: у
+   * гранулярного маршрута гейта на dry-run нет намеренно, и без этого признака
+   * «распознавание запущено» означало бы разное в двух режимах, не отличаясь ни
+   * одним словом. У ветки RD WEB развилки публикации нет — всегда `false`.
+   */
+  readonly dryRun: boolean;
 }
 
 /**
@@ -121,17 +153,19 @@ export async function startRecognition(
   const recognition = await readRecognitionSettings(db);
   let settingsSnapshot: Record<string, unknown>;
   let firstJobType: 'layout.reconcile' | 'vlm.start_recognition';
+  let dryRun = false;
 
   if (recognition.provider === 'openrouter_vlm') {
     assertVlmStageReady(env, recognition);
 
+    dryRun = await readAiDryRunOnly(db);
     settingsSnapshot = {
       version: 2,
       provider: 'openrouter_vlm',
       model: recognition.vlmModel,
       // Промпты, растеризатор и crop policy дополняет vlm.start_recognition:
       // они известны воркеру, а не роуту.
-      dryRun: await readAiDryRunOnly(db),
+      dryRun,
     };
     firstJobType = 'vlm.start_recognition';
   } else {
@@ -174,5 +208,5 @@ export async function startRecognition(
     dedupeKey: dedupeKeyFor(firstJobType, run.id, input.idempotencyKey),
   });
 
-  return { recognitionRunId: run.id, created, jobId, jobCreated };
+  return { recognitionRunId: run.id, created, jobId, jobCreated, dryRun };
 }

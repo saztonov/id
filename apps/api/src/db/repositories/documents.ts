@@ -629,7 +629,9 @@ export interface SegmentationInput {
  *
  * Отсутствие завершённого прогона — не исключение, а `recognitionRunId: null` с
  * пустым списком: «распознавания ещё не было» и «страниц нет» — разные факты, и
- * вызывающая задача обязана их различать.
+ * вызывающая задача обязана их различать. Прогон, не опубликовавший ни строки
+ * (shadow-режим ADR-0007), завершённым здесь не считается — см. условие в
+ * запросе.
  */
 export async function loadSegmentationPages(
   db: Database,
@@ -653,6 +655,24 @@ export async function loadSegmentationPages(
         REVISION_SCOPE,
         eq(recognitionRuns.revisionId, revisionId),
         eq(recognitionRuns.status, 'done'),
+        /**
+         * Прогон обязан быть ОПУБЛИКОВАННЫМ, а не просто завершённым.
+         *
+         * Прогон в режиме dry-run (`ai.dry_run_only`, ADR-0007) выполняется
+         * целиком и закрывается честным `done`, но публикацию пропускает —
+         * `page_text_versions` после него нет ни одной. Выбранный «как
+         * последний завершённый», он давал сегментации ревизию, у которой текст
+         * есть только у прежнего, настоящего прогона: соединение по
+         * `pageTextVersions` ниже отдало бы `null` на КАЖДОЙ странице, и
+         * комплект выглядел бы нераспознанным при живом распознавании под ним.
+         *
+         * Условие подзапросом, а не соединением: строка нужна одна, и `exists`
+         * останавливается на первой найденной версии текста.
+         */
+        sql`exists (
+          select 1 from ${pageTextVersions} ptv
+           where ptv.recognition_run_id = ${recognitionRuns.id}
+        )`,
       ),
     )
     .orderBy(sql`${recognitionRuns.finishedAt} desc nulls last`)
