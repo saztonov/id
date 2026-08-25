@@ -261,6 +261,10 @@ function deps(overrides: Partial<VlmRecognitionDeps> = {}): VlmRecognitionDeps {
   };
 
   const base: VlmRecognitionDeps = {
+    // `null` — «строки задачи нет», и тогда решение о продолжении цепочки
+    // остаётся за payload. Так набор ведёт себя ровно как до появления порта:
+    // тесты, проверяющие сквозной прогон, задают его признаком в payload.
+    readAutoContinue: async () => null,
     loadRun: async () => runTarget(),
     loadFrozenBlocks: async () => DEFAULT_FROZEN,
     loadPageGeometry: async () => GEOMETRY,

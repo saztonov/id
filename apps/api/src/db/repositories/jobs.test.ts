@@ -45,7 +45,12 @@ import {
 import { loadMigrations } from '@id/migrator';
 
 import { HttpProblem } from '../../lib/problem.js';
-import { appendRevisionEvent, cancelJobsOfRevision, enqueueSystemJob } from './jobs.js';
+import {
+  appendRevisionEvent,
+  cancelJobsOfRevision,
+  enqueueSystemJob,
+  readJobAutoContinue,
+} from './jobs.js';
 import { resetPipelineForRevision } from './purge.js';
 import type { Database } from './users.js';
 
@@ -409,6 +414,45 @@ describe('enqueueSystemJob: какие состояния держат dedupe_ke
     });
     expect(after.created).toBe(true);
     expect(after.jobId).not.toBe(before.jobId);
+  });
+
+  it('сквозной прогон не отменяется дедупликацией и виден свежим чтением', async () => {
+    // Payload найденной задачи побеждал по построению — `do nothing`
+    // выбрасывает входящий целиком. Поэтому задача, поставленная ручной кнопкой
+    // БЕЗ autoContinue, съедала нажатие «2. Распознать», сделанное следом:
+    // цепочка доходила до своего звена и молча вставала.
+    const key = `doc.classify_pages:${REVISION}:auto`;
+    const manual = await enqueueSystemJob(db, {
+      type: 'doc.classify_pages',
+      payload: { revisionId: REVISION },
+      dedupeKey: key,
+    });
+    expect(await readJobAutoContinue(db, manual.jobId)).toBe(false);
+
+    const throughRun = await enqueueSystemJob(db, {
+      type: 'doc.classify_pages',
+      payload: { revisionId: REVISION, autoContinue: true },
+      dedupeKey: key,
+    });
+    expect(throughRun.jobId).toBe(manual.jobId);
+    expect(throughRun.created).toBe(false);
+    expect(await readJobAutoContinue(db, manual.jobId)).toBe(true);
+
+    // Флаг МОНОТОНЕН: обратно не снимается. Сквозной прогон — заказ, который
+    // однажды сделан, и отменять его повторным нажатием ручной кнопки было бы
+    // неверно в другую сторону.
+    await enqueueSystemJob(db, {
+      type: 'doc.classify_pages',
+      payload: { revisionId: REVISION },
+      dedupeKey: key,
+    });
+    expect(await readJobAutoContinue(db, manual.jobId)).toBe(true);
+  });
+
+  it('исчезнувшая задача даёт null, а не выдуманный ответ', async () => {
+    // Вызывающий тогда остаётся при значении из payload: других сведений о
+    // заказе нет, и подставлять `false` значило бы тихо отменить прогон.
+    expect(await readJobAutoContinue(db, id(999))).toBeNull();
   });
 
   it('предикат ON CONFLICT совпадает с индексом: оператор не отказывает', async () => {

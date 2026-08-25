@@ -87,6 +87,7 @@ export {
   appendRevisionEvent,
   computeProcessingStatus,
   enqueueSystemJob,
+  readJobAutoContinue,
   publishOutboxBatch,
   queueSnapshot,
   reapExpiredLeases,

@@ -34,6 +34,7 @@ import {
   analysisPromptDefaultByStage,
   assembleRecognitionResult,
   insertBlockResultIdempotent,
+  readJobAutoContinue,
   listRunBlockEnvelopes,
   listRunBlockIds,
   listRunPages,
@@ -1353,6 +1354,10 @@ function vlmRecognitionDeps(options: PipelineJobsOptions): VlmRecognitionDeps {
     // приёмник пустой — запуск без БД не обязан вести набор данных, и
     // отсутствующий приёмник честнее записи в никуда.
     feedback: options.feedback ?? new NoopProcessingFeedbackSink(),
+
+    // Свежий заказ сквозного прогона: снимок payload, взятый при захвате, у
+    // поллера финализации отстаёт на минуты и до 240 попыток.
+    readAutoContinue: async (jobId) => readJobAutoContinue(db, jobId),
   };
 }
 

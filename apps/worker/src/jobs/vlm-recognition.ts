@@ -526,6 +526,18 @@ export interface VlmRecognitionDeps {
    */
   readonly feedback: ProcessingFeedbackSink;
 
+  /**
+   * Свежий заказ «доведи до конца» у СТРОКИ задачи; `null` — строки уже нет.
+   *
+   * Как wired: `readJobAutoContinue(db, jobId)`.
+   *
+   * Портом, а не чтением `ctx.db`, по правилу этого модуля: обработчики здесь
+   * написаны на зависимостях и в базу сами не ходят — иначе их нельзя выполнить
+   * в тесте, не подняв всю схему, и граница «что задача делает» против «чем это
+   * сделано» размывается на первом же прямом запросе.
+   */
+  readAutoContinue(jobId: string): Promise<boolean | null>;
+
   /** Как wired: `sha256Hex`. */
   sha256(bytes: Uint8Array): string;
 }
@@ -1800,7 +1812,7 @@ export function createVlmFinalizeHandler(deps: VlmRecognitionDeps): JobHandler<'
     );
     await ctx.emit('recognition.export_stored', { recognitionRunId: run.runId, ...finalCounts });
 
-    await continueWithAnalysis(ctx);
+    await continueWithAnalysis(deps, ctx);
   });
 }
 
@@ -1817,9 +1829,25 @@ export function createVlmFinalizeHandler(deps: VlmRecognitionDeps): JobHandler<'
  * «завершённого прогона распознавания нет» на прогоне, который вот-вот
  * завершится. Dry-run (`ai.dry_run_only`) сюда не доходит вовсе — он выходит
  * раньше, ничего не опубликовав, и анализировать ему нечего.
+ *
+ * ## Почему заказ перечитывается, а не берётся из `ctx.payload`
+ *
+ * `ctx.payload` — снимок, сделанный при ЗАХВАТЕ попытки. Финализация же
+ * поллер: между захватом первой попытки и решением проходят минуты и до 240
+ * попыток, и всё это время человек может нажать «2. Распознать» — тогда
+ * `enqueueSystemJob` поднимет флаг у уже стоящей задачи, а снимок этого не
+ * увидит. Прогон закончился бы успешно и встал, ничего не сказав.
+ *
+ * Чтение одной строки в момент решения стоит одного запроса и закрывает окно
+ * целиком. Значение из payload остаётся запасным: строки задачи может уже не
+ * быть, и тогда других сведений о заказе нет.
  */
-async function continueWithAnalysis(ctx: JobContext<'vlm.finalize_run'>): Promise<void> {
-  if (ctx.payload.autoContinue !== true) return;
+async function continueWithAnalysis(
+  deps: VlmRecognitionDeps,
+  ctx: JobContext<'vlm.finalize_run'>,
+): Promise<void> {
+  const fresh = await deps.readAutoContinue(ctx.jobId);
+  if (!(fresh ?? ctx.payload.autoContinue === true)) return;
   await ctx.enqueue({
     type: 'doc.classify_pages',
     payload: { revisionId: ctx.payload.revisionId, autoContinue: true },

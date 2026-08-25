@@ -268,7 +268,65 @@ export async function enqueueSystemJob<K extends JobType>(
     // очереди; вызывающий ставит задачу заново, если она всё ещё нужна.
     throw conflict('Задача с таким ключом только что завершилась. Повторите постановку.');
   }
+
+  /**
+   * Сквозной прогон не отменяется дедупликацией.
+   *
+   * Payload найденной задачи побеждал по построению: `do nothing` выбрасывает
+   * входящий целиком. Значит, задача, поставленная ручной кнопкой БЕЗ
+   * `autoContinue`, съедала нажатие «2. Распознать», сделанное следом: цепочка
+   * доходила до своего звена и молча вставала, потому что заказ «доведи до
+   * конца» никуда не записался.
+   *
+   * Флаг поэтому монотонный: `false → true` возможно, обратно — нет. Сквозной
+   * прогон — это заказ, который однажды сделан; отменить его повторным
+   * нажатием ручной кнопки было бы неверно в другую сторону.
+   *
+   * Обновляется только незавершённая задача: у `done` payload — часть
+   * законченной истории.
+   */
+  if (autoContinueOf(parsed.payload)) {
+    await db.execute(sql`
+      update ${jobs}
+         set payload = payload || '{"autoContinue":true}'::jsonb, updated_at = now()
+       where ${jobs.id} = ${found.id}
+         and ${jobs.status} not in ('done', 'cancelled')
+         and coalesce((${jobs.payload} ->> 'autoContinue')::boolean, false) = false
+    `);
+  }
+
   return { jobId: found.id, created: false };
+}
+
+/** Заказан ли сквозной прогон. Отсутствие поля равно `false` (см. `autoContinue`). */
+function autoContinueOf(payload: unknown): boolean {
+  if (typeof payload !== 'object' || payload === null) return false;
+  return (payload as { autoContinue?: unknown }).autoContinue === true;
+}
+
+/**
+ * Свежее значение флага сквозного прогона у СТРОКИ задачи.
+ *
+ * Нужна потому, что `ctx.payload` — снимок, сделанный при захвате, а решение
+ * «продолжать ли цепочку» принимается в конце попытки. У поллера финализации
+ * между этими моментами проходят минуты и сотни попыток, и заказ «доведи до
+ * конца», пришедший в середине (`enqueueSystemJob` поднимает флаг у уже стоящей
+ * задачи), до снимка не доезжает вовсе.
+ *
+ * Чтение одной строки в момент решения закрывает окно целиком и не требует ни
+ * миграции, ни второго места хранения намерения.
+ *
+ * `null` — строки задачи больше нет (сборка мусора, отмена): тогда вызывающий
+ * остаётся при значении из payload, потому что других сведений о заказе нет.
+ */
+export async function readJobAutoContinue(db: JobExecutor, jobId: string): Promise<boolean | null> {
+  const rows = await db.execute<{ auto_continue: boolean | null }>(sql`
+    select coalesce((${jobs.payload} ->> 'autoContinue')::boolean, false) as auto_continue
+      from ${jobs}
+     where ${jobs.id} = ${jobId}
+  `);
+  const row = rows.rows[0];
+  return row === undefined ? null : row.auto_continue === true;
 }
 
 // =====================================================================
