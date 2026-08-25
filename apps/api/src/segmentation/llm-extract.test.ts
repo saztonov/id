@@ -16,6 +16,7 @@ import { describe, expect, it } from 'vitest';
 import { LlmError } from '../llm/port.js';
 import {
   EXTRACT_QUOTE_NOT_MAPPED,
+  EXTRACT_VALUE_NOT_TYPED,
   extractFieldsWithLlm,
   llmFieldsFor,
   type ExtractPage,
@@ -56,7 +57,28 @@ describe('llmFieldsFor', () => {
   it('типо-специфичную схему подмешивает только при уверенном типе', () => {
     const unsure = llmFieldsFor({ docTypeCode: 'aosr', typeConfident: false }).map((f) => f.code);
     const sure = llmFieldsFor({ docTypeCode: 'aosr', typeConfident: true }).map((f) => f.code);
-    expect(sure.length).toBeGreaterThanOrEqual(unsure.length);
+    expect(unsure).toContain('issuer');
+    expect(sure).toContain('p1_works');
+  });
+
+  it('у АКТА не спрашивает реквизиты продукции', () => {
+    // Безусловная подмешка базовой схемы заставляла модель искать в бланке
+    // освидетельствования изготовителя и продукцию — вопрос, на который честный
+    // ответ всегда `null`, а нечестный уходит в правила наравне с прочитанным.
+    const codes = llmFieldsFor({ docTypeCode: 'aosr', typeConfident: true }).map((f) => f.code);
+
+    expect(codes).not.toContain('product_name');
+    expect(codes).not.toContain('manufacturer');
+    expect(codes).not.toContain('issuer');
+  });
+
+  it('у документа НЕИЗВЕСТНОГО вида базовая схема остаётся', () => {
+    // §8.4: номер, даты и продукция извлекаются и у незнакомого вида — именно
+    // это позволяет работать на разделе, которого система не видела.
+    const codes = llmFieldsFor({ docTypeCode: null, typeConfident: false }).map((f) => f.code);
+
+    expect(codes).toContain('product_name');
+    expect(codes).toContain('manufacturer');
   });
 });
 
@@ -139,7 +161,17 @@ describe('extractFieldsWithLlm', () => {
     expect(outcome.problems[0]).toContain('не запрашивалось');
   });
 
-  it('пустое значение — ответ, а не значение: строка в field_values не пишется', async () => {
+  /**
+   * Пустое значение с отобразившейся цитатой — НАБЛЮДЕНИЕ, и оно записывается.
+   *
+   * До S27 такой ответ отбрасывался, и «модель прочитала графу и нашла её
+   * пустой» становилось неотличимо от «до реквизита извлечение не дошло».
+   * Правилам это различие нужно: первое — дефект бумаги (`fail`), второе —
+   * состояние конвейера (`undetermined`), §9.1 требует по ним разных вердиктов.
+   * Разница выражена формой строки: все колонки значения пусты, но цитата
+   * указывает проверяемое место в документе.
+   */
+  it('пустое значение с цитатой пишется строкой без значения', async () => {
     const outcome = await extractFieldsWithLlm(
       input,
       respond({
@@ -150,8 +182,33 @@ describe('extractFieldsWithLlm', () => {
       PROMPT,
     );
 
-    expect(outcome.fields).toEqual([]);
     expect(outcome.problems).toEqual([]);
+    expect(outcome.fields).toHaveLength(1);
+    const [field] = outcome.fields;
+    expect(field?.fieldCode).toBe('applicant');
+    expect(field?.valueText).toBeNull();
+    expect(field?.valueDate).toBeNull();
+    expect(field?.valueNum).toBeNull();
+    expect(field?.valueJson).toBeNull();
+    // Именно цитата отличает наблюдение от отсутствия ответа.
+    expect(field?.evidence?.quote).toBe('Продукция:');
+  });
+
+  it('пустое значение с ВЫДУМАННОЙ цитатой не пишется вовсе', async () => {
+    // Без отображения на текст утверждение «графа пуста» ничем не подтверждено
+    // и неотличимо от «модель не читала страницу».
+    const outcome = await extractFieldsWithLlm(
+      input,
+      respond({
+        values: [
+          { code: 'applicant', value: null, items: [], confidence: 0.8, quote: 'такой строки нет' },
+        ],
+      }),
+      PROMPT,
+    );
+
+    expect(outcome.fields).toEqual([]);
+    expect(outcome.problems[0]).toContain(EXTRACT_QUOTE_NOT_MAPPED);
   });
 
   it('ответ не по схеме не роняет документ', async () => {
@@ -204,5 +261,143 @@ describe('clipDocumentText', () => {
     // честно сообщит о противоречии, которого в бумаге нет.
     const clipped = clipDocumentText('A'.repeat(400), 50);
     expect(clipped).toContain('[середина документа пропущена]');
+  });
+});
+
+/**
+ * Значение раскладывается по типу реквизита из каталога.
+ *
+ * До S27 модуль клал `valueDate: null` безусловно, а дату записывал строкой в
+ * `valueText`. Правила `DATE.*` читают `value_date` и на текст не смотрят —
+ * значит НИ ОДНА дата, извлечённая моделью, до них не доезжала. Правка промта
+ * этого не чинит в принципе: сколько ни требуй формат, значение ложится не в ту
+ * колонку.
+ */
+describe('типизация значения по схеме каталога', () => {
+  const DATE_PAGE: ExtractPage = {
+    pageTextVersionId: '00000000-0000-4000-8000-000000000002',
+    text: 'Реестр передачи исполнительной документации\nДата передачи: «27» сентября 2024 г.\nНомер папки: 27',
+  };
+
+  // Вид с реквизитами `date` и `text`, извлекаемыми моделью: в бланке акта
+  // даты детерминированные, и через них тип не проверить.
+  const actInput = {
+    docTypeCode: 'transfer_registry',
+    typeConfident: true,
+    documentId: 'doc-1',
+    pages: [DATE_PAGE],
+  };
+
+  it('дата в записи документа попадает в valueDate, а не в текст', async () => {
+    const outcome = await extractFieldsWithLlm(
+      actInput,
+      respond({
+        values: [
+          {
+            code: 'transfer_date',
+            value: '«27» сентября 2024 г.',
+            items: [],
+            confidence: 0.9,
+            quote: 'Дата передачи: «27» сентября 2024 г.',
+          },
+        ],
+      }),
+      PROMPT,
+    );
+
+    expect(outcome.problems).toEqual([]);
+    const [field] = outcome.fields;
+    expect(field?.valueDate).toBe('2024-09-27');
+    expect(field?.valueText).toBeNull();
+  });
+
+  it('ISO от модели принимается тем же разбором', async () => {
+    const outcome = await extractFieldsWithLlm(
+      actInput,
+      respond({
+        values: [
+          {
+            code: 'transfer_date',
+            value: '27.09.2024',
+            items: [],
+            confidence: 0.9,
+            quote: 'Дата передачи',
+          },
+        ],
+      }),
+      PROMPT,
+    );
+
+    expect(outcome.fields[0]?.valueDate).toBe('2024-09-27');
+  });
+
+  it('несуществующая дата отбрасывается, а не пишется текстом', async () => {
+    // 31 сентября в календаре нет. Записать такое строкой значило бы подменить
+    // тип реквизита молча, а правило прочитало бы `value_date = null` и объявило
+    // дату нераспознанной — то есть скрыло бы ошибку модели.
+    const outcome = await extractFieldsWithLlm(
+      actInput,
+      respond({
+        values: [
+          {
+            code: 'transfer_date',
+            value: '31.09.2024',
+            items: [],
+            confidence: 0.9,
+            quote: 'Дата передачи',
+          },
+        ],
+      }),
+      PROMPT,
+    );
+
+    expect(outcome.fields).toEqual([]);
+    expect(outcome.problems[0]).toContain(EXTRACT_VALUE_NOT_TYPED);
+  });
+
+  it('список принимается и одной строкой, и массивом', async () => {
+    // Базовый реквизит типа : у документа неизвестного вида базовая
+    // схема применяется целиком.
+    const listInput = {
+      docTypeCode: null,
+      typeConfident: false,
+      documentId: 'doc-2',
+      pages: [PAGE],
+    };
+    const asItems = await extractFieldsWithLlm(
+      listInput,
+      respond({
+        values: [
+          {
+            code: 'product_marks',
+            value: null,
+            items: ['А500С', 'А240'],
+            confidence: 0.9,
+            quote: 'Продукция: арматура класса А500С',
+          },
+        ],
+      }),
+      PROMPT,
+    );
+    const asText = await extractFieldsWithLlm(
+      listInput,
+      respond({
+        values: [
+          {
+            code: 'product_marks',
+            value: 'А500С',
+            items: [],
+            confidence: 0.9,
+            quote: 'Продукция: арматура класса А500С',
+          },
+        ],
+      }),
+      PROMPT,
+    );
+
+    expect(asItems.fields[0]?.valueJson).toEqual(['А500С', 'А240']);
+    // Бланк печатает перечень в одну графу: дробить его — работа читателя,
+    // а не отвечающего.
+    expect(asText.fields[0]?.valueJson).toEqual(['А500С']);
   });
 });

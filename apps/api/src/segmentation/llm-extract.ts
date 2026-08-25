@@ -41,6 +41,7 @@ import { BASE_EVIDENCE_FIELDS, DOC_TYPES, fieldsForType } from '@id/doc-types';
 import type { FieldDefinition } from '@id/doc-types';
 
 import { LlmError } from '../llm/port.js';
+import { toIsoDate } from './extract.js';
 import { locateQuote } from './llm-classify.js';
 import type { ExtractedField } from './types.js';
 
@@ -116,9 +117,22 @@ export function llmFieldsFor(input: {
     input.typeConfident && input.docTypeCode !== null
       ? (DOC_TYPES.find((type) => type.code === input.docTypeCode) ?? null)
       : null;
-  const specific =
-    definition === null ? [] : fieldsForType(definition.fieldSchema, definition.kind);
-  const all = [...BASE_EVIDENCE_FIELDS, ...specific];
+
+  // `fieldsForType` УЖЕ знает, какие типы имеют базовые реквизиты: у `primary`
+  // (акт) и `registry` (реестр приложений) их нет, потому что ни изготовителя,
+  // ни продукции, ни срока действия у них не бывает. Безусловная подмешка
+  // базовой схемы отменяла это знание и заставляла модель искать в АКТЕ
+  // `product_name`, `manufacturer` и `issuer` — то есть платить за вопрос, на
+  // который честный ответ всегда `null`, и получать натянутый, когда модель
+  // всё же что-нибудь найдёт.
+  //
+  // Базовая схема остаётся для документа, тип которого НЕ определён: §8.4
+  // требует, чтобы номер, даты и продукция извлекались и у незнакомого вида, —
+  // именно это позволяет работать на разделе, которого система не видела.
+  const all =
+    definition === null
+      ? BASE_EVIDENCE_FIELDS
+      : fieldsForType(definition.fieldSchema, definition.kind);
 
   const seen = new Set<string>();
   const result: FieldDefinition[] = [];
@@ -217,30 +231,51 @@ export async function extractFieldsWithLlm(
       continue;
     }
 
-    // Модель прочитала и не нашла — это ответ, а не значение. Пустая строка
-    // в `field_values` выглядела бы прочитанным пустым реквизитом.
-    if (value.value === null && (value.items ?? []).length === 0) {
-      taken.add(value.code);
-      continue;
-    }
-
     const evidence = locateAcrossPages(input.pages, value.quote);
     if (evidence === null) {
       problems.push(`${value.code}: ${EXTRACT_QUOTE_NOT_MAPPED}`);
       continue;
     }
 
+    const empty = value.value === null && (value.items ?? []).length === 0;
+    if (empty) {
+      // НАБЛЮДАЕМОЕ ПУСТОЕ ЗНАЧЕНИЕ, а не отсутствие ответа.
+      //
+      // До S27 такой ответ просто отбрасывался, и «модель прочитала графу и
+      // нашла её пустой» становилось неотличимо от «до реквизита извлечение не
+      // дошло». Правилам это различие нужно: первое — дефект бумаги, второе —
+      // состояние конвейера, и §9.1 требует по ним РАЗНЫХ вердиктов (`fail`
+      // против `undetermined`). Разница выражена формой строки: все значения
+      // пусты, но цитата отобразилась на текст — то есть место в документе, где
+      // реквизита нет, указано и проверяемо.
+      taken.add(value.code);
+      fields.push({
+        fieldCode: value.code,
+        valueText: null,
+        valueDate: null,
+        valueNum: null,
+        valueJson: null,
+        confidence: value.confidence,
+        extractedBy: 'llm',
+        evidence,
+      });
+      continue;
+    }
+
+    const typed = typedValue(definition, value.value, value.items ?? []);
+    if (typed === null) {
+      // Значение не разобралось в свой тип: дата не существует в календаре,
+      // число не число. Записать его как достоверное нельзя — оно уйдёт в
+      // правила §9 наравне с прочитанным, — а записать текстом значило бы
+      // подменить тип реквизита молча.
+      problems.push(`${value.code}: ${EXTRACT_VALUE_NOT_TYPED} (${definition.type})`);
+      continue;
+    }
+
     taken.add(value.code);
-    const items = value.items ?? [];
     fields.push({
       fieldCode: value.code,
-      valueText: definition.type === 'list' ? null : (value.value?.trim() ?? null),
-      valueDate: null,
-      valueNum: null,
-      valueJson:
-        definition.type === 'list'
-          ? items.map((item) => item.trim()).filter((item) => item.length > 0)
-          : null,
+      ...typed,
       confidence: value.confidence,
       extractedBy: 'llm',
       evidence,
@@ -248,6 +283,71 @@ export async function extractFieldsWithLlm(
   }
 
   return { fields, problems };
+}
+
+/** Дословная формулировка отказа по типу: на неё опираются тест и журнал. */
+export const EXTRACT_VALUE_NOT_TYPED = 'значение не разобралось в тип реквизита';
+
+/** Разложенное по колонкам значение: ровно то, что принимает `field_values`. */
+type TypedValue = Pick<ExtractedField, 'valueText' | 'valueDate' | 'valueNum' | 'valueJson'>;
+
+/**
+ * Значение модели, разложенное по типу реквизита из КАТАЛОГА.
+ *
+ * ## Что здесь чинится
+ *
+ * До S27 модуль клал `valueDate: null` безусловно, а дату записывал строкой в
+ * `valueText`. Правила `DATE.*` читают `value_date` и не смотрят на текст —
+ * значит НИ ОДНА дата, извлечённая моделью, до них не доезжала. Правка промта
+ * этого не чинит в принципе: сколько ни требуй формат `ГГГГ-ММ-ДД`, значение
+ * ложится не в ту колонку.
+ *
+ * ## Почему разбор ДАТЫ терпим к записи, а не требует ISO
+ *
+ * Модель отвечает тем, что напечатано, и «12.05.2026» — законный ответ на
+ * просьбу процитировать документ дословно. Требовать ISO значило бы просить её
+ * ПРЕОБРАЗОВАТЬ значение, а преобразование — это место, где ошибка становится
+ * неотличимой от чтения. Поэтому разбирается любая наблюдаемая запись, тем же
+ * `toIsoDate`, что и в детерминированном извлечении: одна реализация на оба
+ * пути, иначе они разойдутся молча.
+ *
+ * `null` означает «в свой тип не разобралось» — вызывающий обязан отбросить
+ * значение с названной причиной, а не записать его текстом.
+ */
+function typedValue(
+  definition: FieldDefinition,
+  raw: string | null,
+  items: readonly string[],
+): TypedValue | null {
+  if (definition.type === 'list') {
+    const list = items.map((item) => item.trim()).filter((item) => item.length > 0);
+    // Модель вправе ответить на список одной строкой: бланк печатает перечень
+    // в одну графу, и дробить его — работа читателя, а не отвечающего.
+    const fromValue = raw === null || raw.trim() === '' ? [] : [raw.trim()];
+    const merged = list.length > 0 ? list : fromValue;
+    return merged.length === 0
+      ? null
+      : { valueText: null, valueDate: null, valueNum: null, valueJson: merged };
+  }
+
+  const text = raw === null ? null : raw.trim();
+  if (text === null || text === '') return null;
+
+  if (definition.type === 'date') {
+    const iso = toIsoDate(text);
+    return iso === null
+      ? null
+      : { valueText: null, valueDate: iso, valueNum: null, valueJson: null };
+  }
+
+  if (definition.type === 'number') {
+    // Запятая как десятичный разделитель: в документах она чаще точки.
+    const normalized = text.replace(/\s+/gu, '').replace(',', '.');
+    if (!/^-?\d+(?:\.\d+)?$/u.test(normalized)) return null;
+    return { valueText: null, valueDate: null, valueNum: normalized, valueJson: null };
+  }
+
+  return { valueText: text, valueDate: null, valueNum: null, valueJson: null };
 }
 
 /**

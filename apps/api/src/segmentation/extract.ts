@@ -190,8 +190,15 @@ function toIso(day: number, month: number, year: number): string | null {
   return `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
 }
 
-/** ISO-дата из любой наблюдаемой записи; `null` — дата не существует в календаре. */
-function toIsoDate(value: string): string | null {
+/**
+ * ISO-дата из любой наблюдаемой записи; `null` — дата не существует в календаре.
+ *
+ * Экспортируется ради LLM-ступени (`llm-extract.ts`): она получает дату в том
+ * виде, в каком та напечатана, и обязана разобрать её ТЕМ ЖЕ кодом. Вторая
+ * реализация разошлась бы с первой молча — ровно так на S4 разъехались две
+ * реализации контрольных сумм.
+ */
+export function toIsoDate(value: string): string | null {
   return isoFromNumeric(value.trim()) ?? isoFromVerbal(value);
 }
 
