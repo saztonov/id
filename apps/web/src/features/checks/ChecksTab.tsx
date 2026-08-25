@@ -141,34 +141,41 @@ export function ChecksTab({ revisionId }: { revisionId: string }): ReactNode {
       <Typography.Title level={3} style={{ fontSize: 16, marginTop: 8 }}>
         Ошибки на страницах
       </Typography.Title>
-      <Table<Finding>
-        rowKey="id"
-        size="middle"
-        pagination={false}
-        dataSource={[...sections.onPages]}
-        data-testid="findings-by-page"
-        locale={{ emptyText: 'Ошибок, привязанных к страницам, нет' }}
-        columns={[
-          {
-            title: 'Страница',
-            key: 'page',
-            width: 170,
-            render: (_value, row) => <PageCell revisionId={revisionId} finding={row} />,
-          },
-          {
-            title: 'Что за документ',
-            key: 'document',
-            width: '32%',
-            render: (_value, row) => <SubjectCell finding={row} />,
-          },
-          {
-            title: 'Что не так',
-            key: 'text',
-            render: (_value, row) => <FindingCell finding={row} />,
-          },
-          actionColumn,
-        ]}
-      />
+      {/*
+        Метка на обёртке, а не на `Table`: прокидывает ли antd произвольные
+        `data-*` до узла контейнера — её внутреннее дело, и завязывать на это
+        контракт прогонов значит получить отказ сценария на обновлении
+        библиотеки, а не на изменении портала.
+      */}
+      <div data-testid="findings-by-page">
+        <Table<Finding>
+          rowKey="id"
+          size="middle"
+          pagination={false}
+          dataSource={[...sections.onPages]}
+          locale={{ emptyText: 'Ошибок, привязанных к страницам, нет' }}
+          columns={[
+            {
+              title: 'Страница',
+              key: 'page',
+              width: 170,
+              render: (_value, row) => <PageCell revisionId={revisionId} finding={row} />,
+            },
+            {
+              title: 'Что за документ',
+              key: 'document',
+              width: '32%',
+              render: (_value, row) => <SubjectCell finding={row} />,
+            },
+            {
+              title: 'Что не так',
+              key: 'text',
+              render: (_value, row) => <FindingCell finding={row} />,
+            },
+            actionColumn,
+          ]}
+        />
+      </div>
 
       {sections.onBundle.length > 0 && (
         <>
@@ -178,59 +185,60 @@ export function ChecksTab({ revisionId }: { revisionId: string }): ReactNode {
           <Typography.Paragraph type="secondary">
             У этих замечаний нет страницы: они о том, чего в комплекте не хватает.
           </Typography.Paragraph>
-          <Table<Finding>
-            rowKey="id"
-            size="middle"
-            pagination={false}
-            dataSource={[...sections.onBundle]}
-            data-testid="findings-by-bundle"
-            columns={[
-              {
-                title: 'Чего это касается',
-                key: 'target',
-                width: '38%',
-                render: (_value, row) => <SubjectCell finding={row} />,
-              },
-              {
-                title: 'Что не так',
-                key: 'text',
-                render: (_value, row) => <FindingCell finding={row} />,
-              },
-              actionColumn,
-            ]}
-          />
+          <div data-testid="findings-by-bundle">
+            <Table<Finding>
+              rowKey="id"
+              size="middle"
+              pagination={false}
+              dataSource={[...sections.onBundle]}
+              columns={[
+                {
+                  title: 'Чего это касается',
+                  key: 'target',
+                  width: '38%',
+                  render: (_value, row) => <SubjectCell finding={row} />,
+                },
+                {
+                  title: 'Что не так',
+                  key: 'text',
+                  render: (_value, row) => <FindingCell finding={row} />,
+                },
+                actionColumn,
+              ]}
+            />
+          </div>
         </>
       )}
 
       {sections.waived.length > 0 && (
-        <Collapse
-          style={{ marginTop: 24 }}
-          data-testid="findings-waived"
-          items={[
-            {
-              key: 'waived',
-              label: `Снятые замечания (${String(sections.waived.length)})`,
-              children: (
-                <Space direction="vertical" size={8} style={{ width: '100%' }}>
-                  {/*
+        <div data-testid="findings-waived" style={{ marginTop: 24 }}>
+          <Collapse
+            items={[
+              {
+                key: 'waived',
+                label: `Снятые замечания (${String(sections.waived.length)})`,
+                children: (
+                  <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                    {/*
                     Снятое руководителем решение юридически значимо: оно
                     записано в `review_actions` и в аудит, и на экране обязано
                     оставаться видимым — свёрнутым, но не исчезнувшим.
                   */}
-                  {sections.waived.map((row) => (
-                    <div key={row.id}>
-                      <Typography.Text>{row.text}</Typography.Text>{' '}
-                      <Typography.Text type="secondary">
-                        — {row.target.label}
-                        {row.page === null ? '' : `, страница ${String(row.page.number)}`}
-                      </Typography.Text>
-                    </div>
-                  ))}
-                </Space>
-              ),
-            },
-          ]}
-        />
+                    {sections.waived.map((row) => (
+                      <div key={row.id}>
+                        <Typography.Text>{row.text}</Typography.Text>{' '}
+                        <Typography.Text type="secondary">
+                          — {row.target.label}
+                          {row.page === null ? '' : `, страница ${String(row.page.number)}`}
+                        </Typography.Text>
+                      </div>
+                    ))}
+                  </Space>
+                ),
+              },
+            ]}
+          />
+        </div>
       )}
 
       {/*
@@ -384,7 +392,9 @@ function FindingCell({ finding }: { finding: Finding }): ReactNode {
         )}
       </Space>
       {quote !== null && (
-        <Typography.Text type="secondary">в документе написано: «{truncate(quote)}»</Typography.Text>
+        <Typography.Text type="secondary">
+          в документе написано: «{truncate(quote)}»
+        </Typography.Text>
       )}
       {finding.hint !== null && <Typography.Text type="secondary">{finding.hint}</Typography.Text>}
       <Typography.Text type="secondary" style={{ fontSize: 12 }}>
