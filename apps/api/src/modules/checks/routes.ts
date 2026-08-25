@@ -22,7 +22,12 @@ import { notFound } from '../../lib/problem.js';
 import { currentAuth } from '../../middleware/require-auth.js';
 import { requirePermission } from '../../middleware/require-permission.js';
 import { tracePayload, updateContext } from '../../observability/context.js';
-import { listFindings, listValidationRuns } from '../../db/repositories/checks.js';
+import {
+  countFindings,
+  listFindingsView,
+  listValidationRuns,
+  loadChecksCoverage,
+} from '../../db/repositories/checks.js';
 import { enqueueJob } from '../../db/repositories/jobs.js';
 import { findRevisionForFiles } from '../../db/repositories/files.js';
 import { dedupeKeyFor } from '../../jobs/types.js';
@@ -100,11 +105,29 @@ export function registerCheckRoutes(app: AppInstance): void {
     },
     async (request) => {
       const { scope } = currentAuth(request);
-      const items = await listFindings(app.db, scope, {
-        revisionId: request.params.revisionId,
+      const { revisionId } = request.params;
+      const view = await listFindingsView(app.db, scope, {
+        revisionId,
         validationRunId: request.query.validationRunId,
       });
-      return { items: items.map((item) => ({ ...item })) };
+      const coverage = await loadChecksCoverage(app.db, scope, revisionId);
+
+      // Счётчики считаются по уже загруженному списку, а не отдельным запросом:
+      // второй запрос считал бы то же самое в другой момент, и число в сводке
+      // могло бы разойтись со списком под ней. По этому расхождению
+      // пользователь решал бы, все ли ошибки он увидел.
+      return {
+        items: view.items.map((item) => ({
+          ...item,
+          evidence: item.evidence.map((quote) => ({ ...quote })),
+        })),
+        summary: {
+          latestRun: view.latestRun === null ? null : { ...view.latestRun },
+          shownRunId: view.shownRunId,
+          coverage: { ...coverage, unassignedPageNumbers: [...coverage.unassignedPageNumbers] },
+          counts: countFindings(view.items),
+        },
+      };
     },
   );
 

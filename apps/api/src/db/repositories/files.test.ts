@@ -34,7 +34,12 @@ import { loadMigrations } from '@id/migrator';
 import type { SignatureProbe } from '@id/contracts';
 
 import type { AuthScope } from '../../auth/scope.js';
-import { listSourceFiles, saveFileVerdict } from './files.js';
+import {
+  listSourceFiles,
+  replaceSourceFile,
+  saveFileVerdict,
+  type SourceFileView,
+} from './files.js';
 import type { Database } from './users.js';
 
 const MIGRATIONS_DIR = join(
@@ -231,5 +236,120 @@ describe('saveFileVerdict у файла без страниц', () => {
       ['akt.pdf', 2],
       ['sertifikat.pdf', 2],
     ]);
+  });
+});
+
+// =====================================================================
+// Замена файла (S27)
+// =====================================================================
+
+/**
+ * Замена — ОДНА транзакция, и это её главное свойство.
+ *
+ * Клиентская последовательность «удалить → загрузить → переставить» непригодна
+ * по построению: первый её шаг сносит файл вместе со всем производным по
+ * ревизии, и любой отказ дальше оставляет комплект вообще без файла. Поменять
+ * шаги местами нельзя — приём файла отвергается, пока собран рабочий документ.
+ *
+ * Здесь проверяется не «функция отработала», а последствия: позиция файла,
+ * снятые подтверждения, снесённое производное и один аудит вместо двух.
+ */
+describe('replaceSourceFile', () => {
+  const SHA_NEW = 'c'.repeat(64);
+  const ACTOR = { emailHmac: null, ip: null, requestId: null };
+
+  /** Тесты идут по одной базе подряд, поэтому заменяемый файл называется явно. */
+  async function replaceOne(fileId: string, fileName: string): Promise<SourceFileView> {
+    return replaceSourceFile(
+      db,
+      ADMIN,
+      {
+        revisionId: REVISION,
+        replacedFileId: fileId,
+        fileName,
+        sha256: SHA_NEW,
+        sizeBytes: 4096,
+        mime: 'application/pdf',
+        storageKey: `blobs/${SHA_NEW}`,
+        verifyState: 'ok',
+        verifyError: null,
+        signatureProbe: PROBE,
+        pages: [{ widthPx: 595, heightPx: 842, rotation: 0 }],
+      },
+      ACTOR,
+    );
+  }
+
+  it('новый файл встаёт на место старого, а не в конец списка', async () => {
+    // Иначе он молча перенумеровал бы страницы всего комплекта — а вместе с
+    // ними номера в списке ошибок, по которым человек ищет листы в папке.
+    const stored = await replaceOne(FILE_UPLOADED, 'akt-ispravlennyj.pdf');
+    expect(stored.fileName).toBe('akt-ispravlennyj.pdf');
+    expect(stored.sortOrder).toBe(0);
+
+    const files = await listSourceFiles(db, ADMIN, REVISION);
+    expect(files.map((file) => file.fileName)).toEqual([
+      'akt-ispravlennyj.pdf',
+      'sertifikat.pdf',
+    ]);
+
+    // Страницы пересчитаны по всей ревизии: у нового файла одна страница,
+    // и страницы второго файла сдвинулись за ней.
+    expect(await pagesOf(stored.id)).toEqual([{ index: 0, ordinal: 0 }]);
+    expect(await pagesOf(FILE_BARE)).toEqual([
+      { index: 0, ordinal: 1 },
+      { index: 1, ordinal: 2 },
+    ]);
+  });
+
+  it('замена сносит разбор и пишет ОДИН аудит вместо «удалил» плюс «загрузил»', async () => {
+    // Замена — одно намерение пользователя. Разложенная на два действия, она
+    // в журнале читается как случайное совпадение по времени.
+    await testDb.query(
+      `INSERT INTO logical_documents (id, revision_id, object_id, contractor_id, ordinal,
+                                      is_confirmed, confirmation_source, confirmed_by, confirmed_at)
+         VALUES ('${id(90)}', '${REVISION}', '${OBJECT}', '${ORG_CONTRACTOR}', 0,
+                 true, 'human', '${USER}', now())`,
+    );
+
+    const stored = await replaceOne(FILE_BARE, 'sertifikat-novyj.pdf');
+
+    const documents = await testDb.query<{ n: number | string }>(
+      `SELECT count(*)::int AS n FROM logical_documents WHERE revision_id = '${REVISION}'`,
+    );
+    expect(Number(documents[0]?.n)).toBe(0);
+
+    const audit = await testDb.query<{ action: string; payload: Record<string, unknown> }>(
+      `SELECT action, payload FROM audit_log
+        WHERE entity_id = '${stored.id}' ORDER BY at DESC LIMIT 1`,
+    );
+    expect(audit[0]?.action).toBe('source_file.replaced');
+    // Число снятых подтверждений названо: молчать о стёртом решении человека
+    // нельзя, даже когда стереть его правильно.
+    expect(audit[0]?.payload.confirmationsReleased).toBe(1);
+    expect(audit[0]?.payload.replacedFileName).toBe('sertifikat.pdf');
+  });
+
+  it('чужой файл не заменяется под видом своего', async () => {
+    await expect(
+      replaceSourceFile(
+        db,
+        ADMIN,
+        {
+          revisionId: REVISION,
+          replacedFileId: id(777),
+          fileName: 'chuzhoj.pdf',
+          sha256: 'd'.repeat(64),
+          sizeBytes: 1,
+          mime: 'application/pdf',
+          storageKey: `blobs/${'d'.repeat(64)}`,
+          verifyState: 'ok',
+          verifyError: null,
+          signatureProbe: PROBE,
+          pages: [],
+        },
+        ACTOR,
+      ),
+    ).rejects.toMatchObject({ status: 404 });
   });
 });

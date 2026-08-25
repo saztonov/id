@@ -26,7 +26,23 @@ export const bundleSchema = z.object({
   pageCount: z.number().int().nonnegative(),
 });
 
-export const bundleListSchema = z.object({ items: z.array(bundleSchema) });
+/**
+ * Список рабочих документов ревизии с признаком актуальности состава.
+ *
+ * `matchesCurrentFiles` считает сервер — он и так считает это сравнение в
+ * `POST /markup` и в `POST /bundle`. Признак нужен именно ДОГРУЗКЕ файла:
+ * удаление и замена сносят разметку, распознавание и замечания сами, а догрузка
+ * не сносит ничего, и прежний разбор продолжает описывать состав, которого
+ * больше нет. Без признака экран проверки молча показывал бы ошибки не того
+ * комплекта.
+ *
+ * В сравнении участвует только манифест состава: версия сборщика — забота
+ * воркера, который пересоберёт документ сам, а пользователю о ней сказать
+ * нечего.
+ */
+export const bundleListSchema = z.object({
+  items: z.array(bundleSchema.extend({ matchesCurrentFiles: z.boolean() })),
+});
 
 export const bundlePageSchema = z.object({
   workingPageIndex: z.number().int().nonnegative(),

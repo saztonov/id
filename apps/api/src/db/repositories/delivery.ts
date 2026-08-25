@@ -35,6 +35,7 @@ import {
 import type { AuthScope } from '../../auth/scope.js';
 import { conflict, notFound } from '../../lib/problem.js';
 import { withScope, type ScopeTarget } from '../scoped.js';
+import { LATEST_VALIDATION_RUN } from './checks.js';
 import type { Database } from './users.js';
 
 const REVISION_SCOPE: ScopeTarget = {
@@ -406,11 +407,22 @@ export async function loadArchivePlan(
     .where(withScope(scope, REVISION_SCOPE, eq(sourceFiles.revisionId, revisionId)))
     .orderBy(asc(sourceFiles.sortOrder));
 
+  // Только авторитетный прогон (S27): `saveFindings` заменяет строки лишь
+  // своего прогона, поэтому сумма по всей ревизии считала бы каждое замечание
+  // столько раз, сколько было проверок, и манифест архива называл бы числа,
+  // которых на экране никто не видел.
   const counts = await db
     .select({ state: findings.state, value: sql<number>`count(*)::int` })
     .from(findings)
     .innerJoin(submissionRevisions, eq(submissionRevisions.id, findings.revisionId))
-    .where(withScope(scope, REVISION_SCOPE, eq(findings.revisionId, revisionId)))
+    .where(
+      withScope(
+        scope,
+        REVISION_SCOPE,
+        eq(findings.revisionId, revisionId),
+        sql`${findings.validationRunId} = ${LATEST_VALIDATION_RUN}`,
+      ),
+    )
     .groupBy(findings.state);
 
   return {

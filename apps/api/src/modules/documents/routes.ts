@@ -38,6 +38,7 @@ import { dedupeKeyFor } from '../../jobs/types.js';
 import { tracePayload, updateContext } from '../../observability/context.js';
 import {
   confirmDocument,
+  unconfirmDocument,
   deleteManualPageLabel,
   findLogicalDocument,
   listDocumentRelations,
@@ -393,6 +394,65 @@ function registerConfirmRoute(app: AppInstance): void {
         });
     },
   );
+
+  /**
+   * Снятие подтверждения границ.
+   *
+   * Существует не ради кнопки — её в портале нет, — а ради того, чтобы отказ
+   * пересегментации («Снимите подтверждение явным действием») и HINT триггера
+   * `logical_documents_confirmed_lock` перестали называть действие, которого
+   * не существует. Без него один вызов `POST …/confirm` навсегда закрывал
+   * повторную обработку комплекта.
+   *
+   * Объявлен через `app.route`, как остальные DELETE портала: eslint-правило,
+   * запрещающее запросы к БД вне `db/repositories/`, ищет вызовы `.delete()` по
+   * имени метода и не различает `db.delete` от `app.delete`.
+   */
+  app.route({
+    method: 'DELETE',
+    url: `${PREFIX}/documents/:documentId/confirm`,
+    preHandler: editDocuments,
+    schema: {
+      params: documentIdParamSchema,
+      response: { 200: documentDetailSchema },
+    },
+    handler: async (request, reply) => {
+      const { scope, user } = currentAuth(request);
+      const expectedVersion = requireIfMatch(request, 'документа');
+
+      const document = await unconfirmDocument(app.db, scope, {
+        documentId: request.params.documentId,
+        actorUserId: user.id,
+        expectedVersion,
+        actor: auditActor(app, request),
+      });
+      updateContext({ revisionId: document.revisionId, objectId: document.objectId });
+
+      const assignments = await listPageAssignments(app.db, scope, document.revisionId);
+      const relations = await listDocumentRelations(app.db, scope, document.revisionId);
+
+      return withVersion(reply, document.version)
+        .code(200)
+        .send({
+          ...toView(document),
+          pages: assignments
+            .filter((page) => page.documentId === document.id)
+            .map((page) => ({
+              sourcePageId: page.sourcePageId,
+              revisionOrdinal: page.revisionOrdinal,
+              sortOrder: page.sortOrder,
+              pageRoleCode: page.pageRoleCode,
+              needsReview: page.needsReview,
+            })),
+          relations: relations
+            .filter(
+              (edge) =>
+                edge.parentDocumentId === document.id || edge.childDocumentId === document.id,
+            )
+            .map((edge) => ({ ...edge })),
+        });
+    },
+  });
 }
 
 // =====================================================================

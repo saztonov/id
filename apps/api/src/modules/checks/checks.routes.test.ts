@@ -83,6 +83,32 @@ const RUN_B = id(41);
 const FINDING_A = id(50);
 const FINDING_B = id(51);
 
+// Разбор комплекта А: файл, страницы, рабочий документ, документ и текст.
+// Нужен целиком, потому что подпись строки «Страница 5 — сертификат
+// соответствия — просрочена дата» собирается из пяти таблиц, и фикстура без
+// любой из них проверяла бы не выдачу, а её вырожденный случай.
+const FILE_A = id(60);
+const PAGE_A0 = id(61);
+const PAGE_A1 = id(62);
+const PAGE_A2 = id(63);
+const BUNDLE_A = id(64);
+const LAYOUT_A = id(65);
+const RUN_DOC_A = id(66);
+const RECOGNITION_A = id(67);
+const ARTIFACT_A = id(68);
+const TEXT_A0 = id(69);
+const DOCUMENT_A = id(70);
+
+/** Ревизия с двумя прогонами: авторитетный тот, что новее. */
+const SUBMISSION_C = id(80);
+const REVISION_C = id(81);
+const RUN_C_OLD = id(82);
+const RUN_C_NEW = id(83);
+const FINDING_C_OLD = id(84);
+const FINDING_C_NEW = id(85);
+
+const SHA = (letter: string): string => letter.repeat(64);
+
 /** Код из реестра правил (seed 0017): `findings.rule_code` — внешний ключ. */
 const RULE_CODE = 'AOSR.ACT.030';
 
@@ -143,14 +169,68 @@ const FIXTURE: readonly string[] = [
      VALUES ('${SUBMISSION_A}', '${OBJECT}', '${ORG_A}', '${ORG_A}', 'roofing', DATE '2026-01-01', 'Поставка А', '${USER_A}')`,
   `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
      VALUES ('${REVISION_A}', '${SUBMISSION_A}', '${OBJECT}', '${ORG_A}', 1, 'draft')`,
+  // Разбор комплекта А. Три страницы: две отнесены к сертификату, третья
+  // осталась непривязанной с названной причиной — именно её считает сводка
+  // покрытия, а не пустое `v_unaccounted_pages`.
+  `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
+     VALUES ('${SHA('a')}', 'blobs/${SHA('a')}', 2048, 'application/pdf')`,
+  `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
+     VALUES ('${SHA('b')}', 'blobs/${SHA('b')}', 4096, 'application/pdf')`,
+  `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order, verify_state)
+     VALUES ('${FILE_A}', '${REVISION_A}', '${SHA('a')}', 'komplekt.pdf', 0, 'ok')`,
+  `INSERT INTO source_pages (id, revision_id, source_file_id, file_page_index, revision_ordinal, width_px, height_px, rotation)
+     VALUES ('${PAGE_A0}', '${REVISION_A}', '${FILE_A}', 0, 0, 1654, 2339, 0)`,
+  `INSERT INTO source_pages (id, revision_id, source_file_id, file_page_index, revision_ordinal, width_px, height_px, rotation)
+     VALUES ('${PAGE_A1}', '${REVISION_A}', '${FILE_A}', 1, 1, 1654, 2339, 0)`,
+  `INSERT INTO source_pages (id, revision_id, source_file_id, file_page_index, revision_ordinal, width_px, height_px, rotation)
+     VALUES ('${PAGE_A2}', '${REVISION_A}', '${FILE_A}', 2, 2, 1654, 2339, 0)`,
+  `INSERT INTO processing_bundles (id, revision_id, aggregate_manifest_hash, working_pdf_blob_sha256, builder_version)
+     VALUES ('${BUNDLE_A}', '${REVISION_A}', '${SHA('e')}', '${SHA('b')}', 'bundle/1+pdf-lib')`,
+  `INSERT INTO processing_bundle_pages (bundle_id, revision_id, working_page_index, source_page_id)
+     VALUES ('${BUNDLE_A}', '${REVISION_A}', 0, '${PAGE_A0}')`,
+  `INSERT INTO processing_bundle_pages (bundle_id, revision_id, working_page_index, source_page_id)
+     VALUES ('${BUNDLE_A}', '${REVISION_A}', 1, '${PAGE_A1}')`,
+  `INSERT INTO processing_bundle_pages (bundle_id, revision_id, working_page_index, source_page_id)
+     VALUES ('${BUNDLE_A}', '${REVISION_A}', 2, '${PAGE_A2}')`,
+  `INSERT INTO layout_revisions (id, revision_id, object_id, bundle_id, revision_no, state)
+     VALUES ('${LAYOUT_A}', '${REVISION_A}', '${OBJECT}', '${BUNDLE_A}', 1, 'draft')`,
+  // Заморозка отдельным UPDATE: `layout_revisions_frozen_chk` требует хэш и
+  // отметку времени вместе с состоянием, и одной вставкой это не выражается.
+  `UPDATE layout_revisions SET state = 'frozen', blocks_hash = '${SHA('7')}', frozen_at = now()
+     WHERE id = '${LAYOUT_A}'`,
+  `INSERT INTO rd_run_documents (id, layout_revision_id, rd_document_id, rd_project_id)
+     VALUES ('${RUN_DOC_A}', '${LAYOUT_A}', 'doc_a', 'prj-portal')`,
+  `INSERT INTO recognition_runs (id, revision_id, layout_revision_id, rd_run_document_id,
+                                 local_layout_hash, working_pdf_sha256, status, finished_at)
+     VALUES ('${RECOGNITION_A}', '${REVISION_A}', '${LAYOUT_A}', '${RUN_DOC_A}',
+             '${SHA('7')}', '${SHA('b')}', 'done', now())`,
+  `INSERT INTO artifact_versions (id, recognition_run_id, kind, s3_key, artifact_sha256, byte_size)
+     VALUES ('${ARTIFACT_A}', '${RECOGNITION_A}', 'md', 'artifacts/a.md', '${SHA('4')}', 20)`,
+  `INSERT INTO page_text_versions (id, revision_id, source_page_id, recognition_run_id,
+                                   artifact_version_id, text_md, text_sha256)
+     VALUES ('${TEXT_A0}', '${REVISION_A}', '${PAGE_A0}', '${RECOGNITION_A}', '${ARTIFACT_A}',
+             'СЕРТИФИКАТ СООТВЕТСТВИЯ действителен до 12.03.2024', '${SHA('6')}')`,
+  `INSERT INTO logical_documents (id, revision_id, object_id, contractor_id, doc_type_code, ordinal, title)
+     VALUES ('${DOCUMENT_A}', '${REVISION_A}', '${OBJECT}', '${ORG_A}', 'cert_conformity', 0, 'Сертификат № 42')`,
+  `INSERT INTO page_assignments (revision_id, source_page_id, document_id, sort_order)
+     VALUES ('${REVISION_A}', '${PAGE_A0}', '${DOCUMENT_A}', 0)`,
+  `INSERT INTO page_assignments (revision_id, source_page_id, document_id, sort_order)
+     VALUES ('${REVISION_A}', '${PAGE_A1}', '${DOCUMENT_A}', 1)`,
+  `INSERT INTO page_assignments (revision_id, source_page_id, reason)
+     VALUES ('${REVISION_A}', '${PAGE_A2}', 'вид документа не определён')`,
+
   `INSERT INTO validation_runs (id, revision_id, ruleset_version_id, finished_at, counts)
      VALUES ('${RUN_A}', '${REVISION_A}', '${RULESET_VERSION}', now(),
              '{"error": 1, "warning": 0}'::jsonb)`,
+  // Замечание уровня ДОКУМЕНТА и без страницы: страницу выдача обязана вывести
+  // из первой страницы документа и честно назвать это приблизительным.
   `INSERT INTO findings (id, validation_run_id, revision_id, object_id, contractor_id, rule_code,
                          severity, state, origin, is_blocking, target_type, target_id, message, hint)
      VALUES ('${FINDING_A}', '${RUN_A}', '${REVISION_A}', '${OBJECT}', '${ORG_A}', '${RULE_CODE}',
-             'error', 'open', 'deterministic', true, 'revision', '${REVISION_A}',
+             'error', 'open', 'deterministic', true, 'document', '${DOCUMENT_A}',
              'Номер акта не соответствует шаблону объекта.', 'Проверьте нумерацию актов.')`,
+  `INSERT INTO finding_evidence (finding_id, page_text_version_id, char_span, quote)
+     VALUES ('${FINDING_A}', '${TEXT_A0}', int4range(24, 51), 'действителен до 12.03.2024')`,
 
   // --- Поставка Б: те же сущности, но с маркером -----------------------------
   `INSERT INTO object_contractors (object_id, contractor_id)
@@ -168,6 +248,33 @@ const FIXTURE: readonly string[] = [
      VALUES ('${FINDING_B}', '${RUN_B}', '${REVISION_B}', '${OBJECT}', '${ORG_B}', '${RULE_CODE}',
              'error', 'open', 'deterministic', true, 'revision', '${REVISION_B}',
              '${SECRET}', 'Подсказка поставки Б.')`,
+
+  // --- Поставка В: два прогона, второй новее -------------------------------
+  //
+  // `saveFindings` заменяет строки только своего прогона, поэтому в базе
+  // законно лежат замечания обоих. Выдача обязана показывать один — иначе
+  // второе нажатие «Распознать» удваивало бы список.
+  `INSERT INTO works
+       (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
+     VALUES ('${SUBMISSION_C}', '${OBJECT}', '${ORG_A}', '${ORG_A}', 'roofing', DATE '2026-02-01', 'Поставка В', '${USER_A}')`,
+  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
+     VALUES ('${REVISION_C}', '${SUBMISSION_C}', '${OBJECT}', '${ORG_A}', 1, 'draft')`,
+  `INSERT INTO validation_runs (id, revision_id, ruleset_version_id, started_at, finished_at)
+     VALUES ('${RUN_C_OLD}', '${REVISION_C}', '${RULESET_VERSION}',
+             now() - interval '2 hours', now() - interval '2 hours')`,
+  `INSERT INTO validation_runs (id, revision_id, ruleset_version_id, started_at, finished_at)
+     VALUES ('${RUN_C_NEW}', '${REVISION_C}', '${RULESET_VERSION}',
+             now() - interval '1 hour', now() - interval '1 hour')`,
+  `INSERT INTO findings (id, validation_run_id, revision_id, object_id, contractor_id, rule_code,
+                         severity, state, origin, is_blocking, target_type, target_id, message)
+     VALUES ('${FINDING_C_OLD}', '${RUN_C_OLD}', '${REVISION_C}', '${OBJECT}', '${ORG_A}', '${RULE_CODE}',
+             'error', 'open', 'deterministic', true, 'revision', '${REVISION_C}',
+             'Замечание прошлого прогона.')`,
+  `INSERT INTO findings (id, validation_run_id, revision_id, object_id, contractor_id, rule_code,
+                         severity, state, origin, is_blocking, target_type, target_id, message)
+     VALUES ('${FINDING_C_NEW}', '${RUN_C_NEW}', '${REVISION_C}', '${OBJECT}', '${ORG_A}', '${RULE_CODE}',
+             'warning', 'open', 'deterministic', false, 'revision', '${REVISION_C}',
+             'Замечание последнего прогона.')`,
 ];
 
 const STORAGE_DIR = mkdtempSync(join(tmpdir(), 'id-checks-routes-'));
@@ -281,6 +388,45 @@ function items(response: LightMyRequestResponse): readonly Record<string, unknow
   return response.json<ItemsOf>().items;
 }
 
+/** Формы обогащённой выдачи: то же, что видит браузер. */
+interface EnrichedFinding {
+  readonly sourcePageId: string | null;
+  readonly page: { number: number; workingPageIndex: number | null; basis: string } | null;
+  readonly document: { id: string; docTypeCode: string | null; label: string } | null;
+  readonly target: { kind: string; label: string; detail: string | null };
+  readonly evidence: readonly {
+    quote: string;
+    charSpan: { start: number; end: number };
+  }[];
+}
+
+interface ChecksSummaryOf {
+  readonly summary: {
+    readonly latestRun: { id: string; startedAt: string; finishedAt: string | null } | null;
+    readonly shownRunId: string | null;
+    readonly coverage: {
+      pagesTotal: number;
+      pagesRecognized: number;
+      pagesAssigned: number;
+      pagesUnassigned: number;
+      unassignedPageNumbers: number[];
+      documentsTotal: number;
+      documentsUnknownType: number;
+    };
+    readonly counts: {
+      openErrors: number;
+      openWarnings: number;
+      openInfo: number;
+      undetermined: number;
+      waived: number;
+    };
+  };
+}
+
+function summaryOf(response: LightMyRequestResponse): ChecksSummaryOf['summary'] {
+  return response.json<ChecksSummaryOf>().summary;
+}
+
 /**
  * Ключ дедупликации, который строит роут: `checks.run:<ревизия>:<заголовок>`.
  *
@@ -389,6 +535,145 @@ describe('GET /api/v1/revisions/{id}/findings', () => {
     // Положительный контроль: те же URL под инженером с объектом непусты.
     const scoped = await as(KC.engineer, 'GET', `/api/v1/revisions/${REVISION_B}/findings`);
     expect(items(scoped)).toHaveLength(1);
+  });
+
+  it('время чужого прогона не утекает в сводку', async () => {
+    // Утечка тоньше, чем «видно чужое замечание»: список пуст, а `latestRun`
+    // рассказывал бы, что проверка соседа шла вчера в 14:20. Это тот же класс
+    // сведения о чужой работе, что счётчики чужой папки (§16).
+    const foreign = await as(KC.a, 'GET', `/api/v1/revisions/${REVISION_B}/findings`);
+    expect(summaryOf(foreign).latestRun).toBeNull();
+
+    const own = await as(KC.b, 'GET', `/api/v1/revisions/${REVISION_B}/findings`);
+    expect(summaryOf(own).latestRun).not.toBeNull();
+  });
+});
+
+// =====================================================================
+// Подпись строки: «Страница N — вид документа — что не так»
+// =====================================================================
+
+describe('обогащение замечаний', () => {
+  it('называет вид документа из справочника, а не код типа', async () => {
+    const response = await as(KC.a, 'GET', `/api/v1/revisions/${REVISION_A}/findings`);
+    const finding = items(response)[0] as unknown as EnrichedFinding;
+
+    expect(finding.document?.docTypeCode).toBe('cert_conformity');
+    // Название приходит из `doc_types`, а не из каталога в коде: администратор
+    // заводит и переименовывает виды в портале, и второй источник разъехался бы.
+    expect(finding.document?.label).toBe('Сертификат соответствия');
+    expect(finding.target.kind).toBe('document');
+  });
+
+  it('выводит страницу из начала документа и НАЗЫВАЕТ это приблизительным', async () => {
+    const response = await as(KC.a, 'GET', `/api/v1/revisions/${REVISION_A}/findings`);
+    const finding = items(response)[0] as unknown as EnrichedFinding;
+
+    // У замечания нет своей страницы: `source_page_id` пуст. Без вывода из
+    // документа половина списка осталась бы без номера и форма «Страница N —
+    // вид — что не так» не собралась бы вовсе.
+    expect(finding.sourcePageId).toBeNull();
+    expect(finding.page?.number).toBe(1);
+    // Доказательство точнее начала документа: цитата лежит на первой странице,
+    // и приоритет обязан выбрать её, а не запасной вариант.
+    expect(finding.page?.basis).toBe('evidence');
+    // Номер страницы рабочего документа — для ссылки на разметку.
+    expect(finding.page?.workingPageIndex).toBe(0);
+  });
+
+  it('отдаёт цитату доказательства — она заменяет удалённый раздел «Реквизиты»', async () => {
+    const response = await as(KC.a, 'GET', `/api/v1/revisions/${REVISION_A}/findings`);
+    const finding = items(response)[0] as unknown as EnrichedFinding;
+
+    expect(finding.evidence).toHaveLength(1);
+    expect(finding.evidence[0]?.quote).toBe('действителен до 12.03.2024');
+    expect(finding.evidence[0]?.charSpan).toEqual({ start: 24, end: 51 });
+  });
+
+  it('сводка различает распознанное, разобранное и непривязанное', async () => {
+    const response = await as(KC.a, 'GET', `/api/v1/revisions/${REVISION_A}/findings`);
+    const { coverage, counts } = summaryOf(response);
+
+    expect(coverage.pagesTotal).toBe(3);
+    expect(coverage.pagesRecognized).toBe(1);
+    expect(coverage.pagesAssigned).toBe(2);
+    // Непривязанная страница — это `page_assignments` с пустым документом, а
+    // НЕ `v_unaccounted_pages`: последнее после успешной сегментации пусто по
+    // построению, потому что её транзакция откатывается на непустом.
+    expect(coverage.pagesUnassigned).toBe(1);
+    expect(coverage.unassignedPageNumbers).toEqual([3]);
+    expect(coverage.documentsTotal).toBe(1);
+
+    expect(counts.openErrors).toBe(1);
+    expect(counts.openWarnings).toBe(0);
+    expect(counts.undetermined).toBe(0);
+  });
+
+  it('цель, исчезнувшая после пересборки, названа словами, а не пустой ячейкой', async () => {
+    // Пустая подпись читалась бы как дефект вёрстки, а это свойство данных:
+    // прогон описывал документы, которых больше нет.
+    await db.exec(
+      `UPDATE findings SET target_id = '${id(999)}' WHERE id = '${FINDING_A}'`,
+    );
+    try {
+      const response = await as(KC.a, 'GET', `/api/v1/revisions/${REVISION_A}/findings`);
+      const finding = items(response)[0] as unknown as EnrichedFinding;
+      expect(finding.target.kind).toBe('gone');
+      expect(finding.target.label).toContain('пересобран');
+    } finally {
+      await db.exec(
+        `UPDATE findings SET target_id = '${DOCUMENT_A}' WHERE id = '${FINDING_A}'`,
+      );
+    }
+  });
+});
+
+// =====================================================================
+// Авторитетный прогон
+// =====================================================================
+
+describe('прогон, который показывается', () => {
+  it('показывает последний прогон, а не сумму всех', async () => {
+    // Ровно тот дефект, из-за которого второе нажатие «Распознать» удваивало
+    // список: `saveFindings` заменяет строки только своего прогона, а выдача
+    // читала всю ревизию.
+    const response = await as(KC.a, 'GET', `/api/v1/revisions/${REVISION_C}/findings`);
+    expect(items(response)).toHaveLength(1);
+    expect(items(response)[0]?.id).toBe(FINDING_C_NEW);
+    expect(summaryOf(response).shownRunId).toBe(RUN_C_NEW);
+  });
+
+  it('идущая проверка не гасит прежний результат, но видна отдельно', async () => {
+    await db.exec(`UPDATE validation_runs SET finished_at = NULL WHERE id = '${RUN_C_NEW}'`);
+    try {
+      const response = await as(KC.a, 'GET', `/api/v1/revisions/${REVISION_C}/findings`);
+      const summary = summaryOf(response);
+
+      // Авторитетный — новый и незавершённый: по нему запирается согласование.
+      expect(summary.latestRun?.id).toBe(RUN_C_NEW);
+      expect(summary.latestRun?.finishedAt).toBeNull();
+      // Показан предыдущий завершённый: гасить экран значило бы вернуть ту
+      // пустоту, из-за которой вкладку и переделывали.
+      expect(summary.shownRunId).toBe(RUN_C_OLD);
+      expect(items(response)[0]?.id).toBe(FINDING_C_OLD);
+    } finally {
+      await db.exec(
+        `UPDATE validation_runs SET finished_at = now() - interval '1 hour' WHERE id = '${RUN_C_NEW}'`,
+      );
+    }
+  });
+
+  it('явный прогон задаёт и список, и счётчики', async () => {
+    // Иначе ответ был бы внутренне противоречив: items одной проверки, сводка
+    // другой, и по нему нельзя понять, что именно проверяли.
+    const response = await as(
+      KC.a,
+      'GET',
+      `/api/v1/revisions/${REVISION_C}/findings?validationRunId=${RUN_C_OLD}`,
+    );
+    expect(items(response)[0]?.id).toBe(FINDING_C_OLD);
+    expect(summaryOf(response).shownRunId).toBe(RUN_C_OLD);
+    expect(summaryOf(response).counts.openErrors).toBe(1);
   });
 });
 

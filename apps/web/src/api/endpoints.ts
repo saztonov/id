@@ -44,7 +44,7 @@ import type {
   DocTypeCandidate,
   DocumentDetail,
   FieldValue,
-  Finding,
+  FindingList,
   FreezeResult,
   JobRunView,
   JobView,
@@ -178,6 +178,27 @@ export const files = {
       body: { uploadId },
       idempotencyKey: newIdempotencyKey('upload'),
     }).then((r) => r.data),
+
+  /**
+   * Замена файла — своя пара маршрутов, а не «удалить плюс загрузить».
+   *
+   * Талон подписан другим ключом (`UploadPurpose = 'revision-file-replacement'`),
+   * поэтому предъявить его обычному `complete` невозможно: подпись не сойдётся.
+   * Порядок файлов держит сервер, отдельный `reorder` не нужен.
+   */
+  initReplacement: (revisionId: string, fileId: string, fileName: string, sizeBytes: number) =>
+    request<UploadTicket>(
+      'POST',
+      `${V1}/revisions/${revisionId}/files/${fileId}/replacement/init`,
+      { body: { fileName, sizeBytes } },
+    ).then((r) => r.data),
+
+  completeReplacement: (revisionId: string, fileId: string, uploadId: string) =>
+    request<SourceFile>(
+      'POST',
+      `${V1}/revisions/${revisionId}/files/${fileId}/replacement/complete`,
+      { body: { uploadId }, idempotencyKey: newIdempotencyKey('replace') },
+    ).then((r) => r.data),
 
   reorder: (revisionId: string, fileIds: readonly string[]) =>
     request<{ items: SourceFile[] }>('PUT', `${V1}/revisions/${revisionId}/files/order`, {
@@ -468,10 +489,17 @@ export const checks = {
   runs: (revisionId: string) =>
     get<{ items: ValidationRun[] }>(`${V1}/revisions/${revisionId}/checks`).then((r) => r.items),
 
+  /**
+   * Замечания одного прогона вместе со сводкой экрана.
+   *
+   * Тело возвращается целиком, а не `items`: сводка описывает ТОТ ЖЕ прогон, из
+   * которого пришёл список, и разносить их по двум вызовам значило бы дать
+   * экрану возможность показать число из одной проверки над списком из другой.
+   */
   findings: (revisionId: string, validationRunId?: string) =>
-    get<{ items: Finding[] }>(`${V1}/revisions/${revisionId}/findings`, {
+    get<FindingList>(`${V1}/revisions/${revisionId}/findings`, {
       query: validationRunId === undefined ? {} : { validationRunId },
-    }).then((r) => r.items),
+    }),
 
   ruleCatalog: () =>
     get<{ items: RuleCatalogEntry[] }>(`${V1}/admin/rule-catalog`).then((r) => r.items),

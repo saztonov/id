@@ -29,7 +29,7 @@ import { type ReactNode } from 'react';
 import { Button, Select, Space, Typography } from 'antd';
 import type { DocType, PageClassification } from '../../api/types.js';
 import { ToneTag } from '../../shared/tags.js';
-import { useManualLabel } from '../documents/useManualLabel.js';
+import { useManualLabel } from './useManualLabel.js';
 
 /**
  * Ширина выпадающего списка видов ИД.

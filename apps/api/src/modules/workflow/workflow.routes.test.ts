@@ -572,7 +572,21 @@ describe('POST /revisions/{id}/approve', () => {
     expect(response.statusCode).toBe(409);
     const detail = (response.json() as { detail: string }).detail;
     expect(detail).toContain('прогон проверок');
-    expect(detail).toContain('логического документа');
+    expect(detail).toContain('не собрал ни одного документа');
+  });
+
+  it('препятствия говорят о работе портала, а не требуют ручной сборки', async () => {
+    // Утверждение-негатив (S27). Подтверждение границ отменено: их
+    // подтверждает конвейер, иначе не поедет нарезка. Строка «документов без
+    // подтверждения границ» просила бы сделать то, что уже сделано, — и просила
+    // бы это на экране, где такой кнопки больше нет.
+    const state = await as(KC.engineer, 'GET', `/api/v1/revisions/${REVISION_A}/workflow`);
+    const blockers = (state.json() as { approveBlockers: string[] }).approveBlockers;
+
+    expect(blockers.join(' ')).not.toContain('подтвержд');
+    // А вот отсутствие документов запирать обязано: согласовать сорвавшуюся
+    // сегментацию значит собрать архив ни о чём.
+    expect(blockers.some((line) => line.includes('не собрал ни одного документа'))).toBe(true);
   });
 
   it('открытое блокирующее замечание закрывает согласование', async () => {

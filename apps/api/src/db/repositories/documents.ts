@@ -842,6 +842,12 @@ export async function applySegmentation(
       // Шаг 0. Подтверждение — решение человека, и пересегментация его не
       // отменяет. Счёт возвращается в тексте отказа: «переписала бы 3 из 12»
       // говорит инженеру, что именно он потеряет, а «нельзя» — не говорит.
+      //
+      // Смотрим на `confirmation_source`, а не на один `is_confirmed` (S27):
+      // границы, собранные конвейером, он же и подтверждает — иначе не поедет
+      // нарезка, — и запрещать пересборку собственной работы значило бы
+      // запретить её вообще после первого же прогона. Запирает только решение
+      // человека; тот же фильтр стоит в триггере `logical_documents_confirmed_lock`.
       const confirmed = await tx
         .select({ id: logicalDocuments.id, ordinal: logicalDocuments.ordinal })
         .from(logicalDocuments)
@@ -849,6 +855,7 @@ export async function applySegmentation(
           and(
             eq(logicalDocuments.revisionId, input.revisionId),
             eq(logicalDocuments.isConfirmed, true),
+            eq(logicalDocuments.confirmationSource, 'human'),
           ),
         );
       if (confirmed.length > 0) {
@@ -929,6 +936,33 @@ export async function applySegmentation(
         pagesUnassigned += 1;
       }
 
+      // Границы, собранные конвейером, подтверждает конвейер (S27).
+      //
+      // Прежде подтверждение было ручным шагом §12 между сегментацией и
+      // нарезкой. На практике шаг оказался тупиком: подтверждённый документ
+      // запрещает пересегментацию, а маршрута снятия в портале не было — один
+      // клик закрывал повторную обработку комплекта навсегда. Заказчик отменил
+      // сам шаг: «не нужно ничего собирать, документ уже есть — это загруженный
+      // комплект».
+      //
+      // Отметка обязательна, а не косметична: и `logical_documents_derived_
+      // confirmed_chk`, и веер `doc.materialize_pdf` требуют `is_confirmed`, и
+      // без неё нарезка не поехала бы никогда.
+      //
+      // ОТДЕЛЬНЫМ оператором, а не полем в `.values()` выше: `confirmation_
+      // source` относится не к содержимому документа, а к тому, кто решил, что
+      // границы верны, — и читается на месте, где это сказано словами. Умолчание
+      // колонки — `'human'` (намеренно строгое), поэтому значение ставится явно.
+      await tx
+        .update(logicalDocuments)
+        .set({
+          isConfirmed: true,
+          confirmationSource: 'machine',
+          confirmedBy: null,
+          confirmedAt: sql`now()`,
+        })
+        .where(eq(logicalDocuments.revisionId, input.revisionId));
+
       // НЕ ДЕГРАДИРУЕМЫЙ РУБЕЖ §1.6. Проверка идёт по представлению и внутри
       // транзакции: за её пределами это было бы наблюдением за уже сохранённой
       // потерей страницы.
@@ -991,6 +1025,15 @@ export interface LogicalDocumentView {
   readonly boundaryConfidence: number | null;
   readonly needsReview: boolean;
   readonly isConfirmed: boolean;
+  /**
+   * Кто подтвердил границы: конвейер или человек.
+   *
+   * Отдельно от `confirmedBy`, потому что читается предикатом, а не для показа:
+   * пересегментацию, удаление документа и удаление файла запирает только
+   * `'human'`. Признак, выводимый из отсутствия автора, забыл бы первый же
+   * новый вызывающий.
+   */
+  readonly confirmationSource: 'human' | 'machine';
   readonly confirmedBy: string | null;
   readonly confirmedAt: string | null;
   readonly version: number;
@@ -1010,6 +1053,7 @@ const DOCUMENT_SELECTION = {
   boundaryConfidence: logicalDocuments.boundaryConfidence,
   needsReview: logicalDocuments.needsReview,
   isConfirmed: logicalDocuments.isConfirmed,
+  confirmationSource: logicalDocuments.confirmationSource,
   confirmedBy: logicalDocuments.confirmedBy,
   confirmedAt: isoAt(logicalDocuments.confirmedAt, 'confirmed_at_iso'),
   version: logicalDocuments.version,
@@ -1692,6 +1736,10 @@ export async function confirmDocument(
         .update(logicalDocuments)
         .set({
           isConfirmed: true,
+          // Явно, а не умолчанием колонки: документ мог быть подтверждён
+          // конвейером, и без этой строки решение человека осталось бы помечено
+          // машинным — то есть перестало бы запирать пересегментацию.
+          confirmationSource: 'human',
           confirmedBy: input.actorUserId,
           confirmedAt: sql`now()`,
           updatedAt: sql`now()`,
@@ -1734,6 +1782,103 @@ export async function confirmDocument(
         revisionId: document.revisionId,
         eventType: 'documents.confirmed',
         payload: { documentId: input.documentId, docTypeCode: input.docTypeCode ?? null },
+      });
+    }),
+  );
+
+  const fresh = await findLogicalDocument(db, scope, input.documentId);
+  if (fresh === null) throw internal({ logDetail: 'документ не читается сразу после записи' });
+  return fresh;
+}
+
+export interface UnconfirmDocumentInput {
+  readonly documentId: string;
+  readonly actorUserId: string;
+  readonly expectedVersion: number;
+  readonly actor: AuditActor;
+}
+
+/**
+ * Снятие подтверждения границ.
+ *
+ * ## Почему маршрут существует, хотя кнопки в портале нет
+ *
+ * Текст отказа пересегментации — «Снимите подтверждение явным действием» — и
+ * HINT триггера `logical_documents_confirmed_lock` называли действие, которого
+ * в портале не было ни в каком виде. Один вызов `POST …/confirm` (маршрут
+ * остаётся, ADR-0014: «убраны кнопки, а не возможности») закрывал повторную
+ * обработку комплекта навсегда, и выйти из этого состояния было нечем.
+ *
+ * ## Нарезка обнуляется вместе с подтверждением
+ *
+ * Это не уборка «на всякий случай», а требование схемы, и оно записано прямо в
+ * миграции 0018: `logical_documents_derived_confirmed_chk` не примет
+ * неподтверждённый документ с непустой нарезкой, а
+ * `logical_documents_derived_provenance_chk` требует, чтобы весь блок
+ * `derived_pdf_*` был либо заполнен целиком, либо пуст целиком. Смысл за
+ * ограничением тот же: границы снова под вопросом, а прежний PDF описывает уже
+ * не тот документ.
+ *
+ * Байты нарезки в хранилище не трогаются — это дело `storage.gc`, как и у
+ * удаления файла.
+ */
+export async function unconfirmDocument(
+  db: Database,
+  scope: AuthScope,
+  input: UnconfirmDocumentInput,
+): Promise<LogicalDocumentView> {
+  const document = await findLogicalDocument(db, scope, input.documentId);
+  if (document === null) throw notFound('Логический документ не найден.');
+  await requireMutableRevision(db, scope, document.revisionId);
+
+  await guardWrites(() =>
+    db.transaction(async (tx) => {
+      const updated = await tx
+        .update(logicalDocuments)
+        .set({
+          isConfirmed: false,
+          confirmationSource: 'human',
+          confirmedBy: null,
+          confirmedAt: null,
+          derivedPdfBlobSha256: null,
+          derivedPdfPageCount: null,
+          derivedPdfBytes: null,
+          derivedPdfBuiltAt: null,
+          derivedPdfToolkit: null,
+          derivedNoteApplied: null,
+          updatedAt: sql`now()`,
+          version: sql`${logicalDocuments.version} + 1`,
+        })
+        .where(
+          and(
+            eq(logicalDocuments.id, input.documentId),
+            eq(logicalDocuments.version, input.expectedVersion),
+          ),
+        )
+        .returning({ id: logicalDocuments.id });
+
+      if (updated.length === 0) {
+        throw preconditionFailed(
+          'Документ изменён другим пользователем: перечитайте карточку и повторите.',
+        );
+      }
+
+      await appendAudit(tx, scope, {
+        ...input.actor,
+        action: 'document.unconfirmed',
+        entityType: 'logical_document',
+        entityId: input.documentId,
+        objectId: document.objectId,
+        payload: {
+          previousVersion: input.expectedVersion,
+          previousSource: document.confirmationSource,
+        },
+      });
+
+      await appendRevisionEvent(tx, {
+        revisionId: document.revisionId,
+        eventType: 'documents.unconfirmed',
+        payload: { documentId: input.documentId },
       });
     }),
   );

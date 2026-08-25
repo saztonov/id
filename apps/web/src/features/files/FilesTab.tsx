@@ -36,13 +36,15 @@ import { Alert, App as AntApp, Button, Space, Table, Tag, Typography } from 'ant
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { bundles, files, layout } from '../../api/endpoints.js';
 import { revisionKeys, layoutKeys } from '../../api/keys.js';
-import { describeError, describeUploadFailure } from '../../api/problem.js';
+import { describeError } from '../../api/problem.js';
 import type { SourceFile } from '../../api/types.js';
 import { useSession } from '../../app/session.js';
 import { ErrorState, LoadingState } from '../../shared/ui.js';
 import { VERIFY_STATE_LABELS } from '../../shared/labels.js';
 import { ConfirmIconAction, IconAction, RowActions } from '../../shared/RowActions.js';
 import { MoveDownIcon, MoveUpIcon, OpenIcon, TrashIcon } from '../../shared/icons.js';
+import { ReplaceFileAction } from './ReplaceFileAction.js';
+import { uploadFile } from './upload.js';
 
 export interface FilesTabProps {
   readonly revisionId: string;
@@ -79,28 +81,9 @@ export function FilesTab({ revisionId, editable }: FilesTabProps): ReactNode {
     await queryClient.invalidateQueries({ queryKey: revisionKeys.bundles(revisionId) });
   };
 
-  /** Три шага приёма одного файла. */
+  /** Три шага приёма одного файла; сама последовательность — в `upload.ts`. */
   const uploadOne = async (file: File): Promise<void> => {
-    const ticket = await files.initUpload(revisionId, file.name, file.size);
-    let put: Response;
-    try {
-      put = await fetch(ticket.uploadUrl, {
-        method: ticket.method,
-        headers: ticket.headers,
-        body: file,
-        // Драйвер `local` живёт на нашем origin, боевой S3 — на чужом.
-        // `same-origin` не мешает первому и не отправляет cookie второму.
-        credentials: 'same-origin',
-      });
-    } catch (error) {
-      // `TypeError` здесь — это чаще всего непройденный preflight, а не сеть:
-      // `Failed to fetch` без объяснения отправляет искать проблему не туда.
-      throw new Error(describeUploadFailure(error), { cause: error });
-    }
-    if (!put.ok) {
-      throw new Error(`Хранилище не приняло байты: HTTP ${String(put.status)}`);
-    }
-    const stored = await files.completeUpload(revisionId, ticket.uploadId);
+    const stored = await uploadFile(revisionId, file);
     if (stored.verifyState === 'quarantined') {
       message.warning(
         `Файл «${stored.fileName}» помещён в карантин: ${stored.verifyError ?? 'причина не указана'}`,
@@ -194,6 +177,10 @@ export function FilesTab({ revisionId, editable }: FilesTabProps): ReactNode {
   // рабочий документ целиком (разметка ложится на его страницы), а вместе с ним
   // — разметку и всё распознанное по ней. Молчаливое удаление выглядело бы
   // дешёвым действием, а стоит оно всего конвейера по этому комплекту.
+  //
+  // Разобранные документы и найденные ошибки названы отдельно (S27): прежний
+  // текст молчал о них, хотя `purgeDerivedForRevision` сносит и то и другое, —
+  // а именно за ними человек и приходит на вкладку «Проверка».
   const layoutCount = (layoutList.data ?? []).filter((item) => item.state !== 'superseded').length;
   const deletionWarning =
     bundle === null ? (
@@ -202,8 +189,8 @@ export function FilesTab({ revisionId, editable }: FilesTabProps): ReactNode {
       <>
         Вместе с файлом будет удалён рабочий документ ({bundle.pageCount}{' '}
         {plural(bundle.pageCount, 'страница', 'страницы', 'страниц')})
-        {layoutCount > 0 && ' и разметка с результатами распознавания по ней'}. Разметить и
-        распознать комплект придётся заново.
+        {layoutCount > 0 && ' и разметка с распознанным текстом по ней'}, разобранные документы и
+        все найденные ошибки. Разметить и распознать комплект придётся заново.
       </>
     );
 
@@ -351,6 +338,18 @@ export function FilesTab({ revisionId, editable }: FilesTabProps): ReactNode {
                   icon={<OpenIcon />}
                   label={`Открыть «${row.fileName}» в новой вкладке`}
                   href={files.contentUrl(row.id)}
+                />
+                <ReplaceFileAction
+                  revisionId={revisionId}
+                  file={row}
+                  disabled={!canUpload}
+                  {...(canUpload
+                    ? {}
+                    : {
+                        disabledReason: editable
+                          ? 'нет права на загрузку файлов'
+                          : 'состав ревизии заперт, исправление вносится новой ревизией',
+                      })}
                 />
                 <ConfirmIconAction
                   icon={<TrashIcon />}

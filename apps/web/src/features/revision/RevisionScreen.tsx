@@ -43,18 +43,19 @@ const TABS = ['files', 'markup', 'checks', 'history'] as const;
 type TabKey = (typeof TABS)[number];
 
 /**
- * Прежние вкладки, ставшие секциями «Проверки» (S24).
+ * Прежние вкладки «Документы» и «Реквизиты».
  *
- * Адреса `?tab=documents` и `?tab=fields` обязаны продолжать работать: по ним
- * ходят ссылки «finding → evidence» из таблицы замечаний — переход к
- * доказательству, отдельный пункт приёмки §16, — и любые ссылки, которые люди
- * успели сохранить. Молча открывать вместо них «Файлы» значило бы сломать
- * навигацию, оставив её на вид исправной.
+ * На S24 они стали секциями «Проверки», на S27 удалены вместе с ней
+ * (ADR-0016): портал больше не просит собирать документы и подтверждать
+ * границы руками. Адреса при этом обязаны продолжать работать — по ним ходят
+ * сохранённые ссылки и прежние переходы «finding → evidence», — но теперь ведут
+ * на голую «Проверку»: секции, которую можно было бы раскрыть, больше нет.
+ *
+ * Переход сопровождается уведомлением. Молча открыть другой экран значило бы
+ * сделать вид, что ссылка привела куда просили, и человек искал бы дерево
+ * документов на вкладке, где его нет.
  */
-const MOVED_TO_CHECKS: Readonly<Record<string, 'documents' | 'fields'>> = {
-  documents: 'documents',
-  fields: 'fields',
-};
+const REMOVED_TABS: readonly string[] = ['documents', 'fields'];
 
 /** Терминальные состояния: производное содержимое заперто (§3.9). */
 const TERMINAL = ['returned', 'approved', 'superseded'];
@@ -187,23 +188,24 @@ function RevisionWorkspace({ revisionId }: { revisionId: string }): ReactNode {
   const navigate = useNavigate();
   const { immutabilityEnforced } = useSession();
   const requested = useQueryParam('tab');
-  const moved = requested === null ? undefined : MOVED_TO_CHECKS[requested];
-  const tab: TabKey =
-    moved !== undefined
-      ? 'checks'
-      : TABS.includes(requested as TabKey)
-        ? (requested as TabKey)
-        : 'files';
+  const { message } = AntApp.useApp();
+  const moved = requested !== null && REMOVED_TABS.includes(requested);
+  const tab: TabKey = moved
+    ? 'checks'
+    : TABS.includes(requested as TabKey)
+      ? (requested as TabKey)
+      : 'files';
 
   // Старый адрес переписывается на новый, а не просто открывает «Проверку»:
   // иначе строка в браузере продолжала бы обещать вкладку, которой нет, и
   // копирование ссылки из адресной строки воспроизводило бы устаревший вид.
-  // `section` раскрывает нужную секцию — ссылка обязана вести к содержимому, а
-  // не к свёрнутому заголовку.
   useEffect(() => {
-    if (moved === undefined) return;
-    navigate(`/ids/revisions/${revisionId}?tab=checks&section=${moved}`, { replace: true });
-  }, [moved, navigate, revisionId]);
+    if (!moved) return;
+    navigate(`/ids/revisions/${revisionId}?tab=checks`, { replace: true });
+    message.info(
+      'Разделы «Документы» и «Реквизиты» удалены: портал больше не просит собирать документы вручную.',
+    );
+  }, [message, moved, navigate, revisionId]);
 
   const state = useQuery({
     queryKey: revisionKeys.workflow(revisionId),

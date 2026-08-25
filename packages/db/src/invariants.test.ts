@@ -883,8 +883,40 @@ describe('выключатель неизменяемости (§3.9, режим
     ).rejects.toThrow(/подтверждён человеком/u);
   });
 
-  it('режим тестирования пропускает удаление подтверждённого документа', async () => {
+  /**
+   * Машинное подтверждение (0038) не запирает НИЧЕГО, даже в строгом режиме.
+   *
+   * Границы, собранные конвейером, он же и подтверждает: иначе не поедет
+   * нарезка. Если бы триггер смотрел на один `is_confirmed`, эта отметка
+   * запирала бы `purgeDerivedForRevision` на каждом разобранном комплекте —
+   * то есть портал запретил бы пользователю перезалить файл из-за признака,
+   * который сам себе и поставил.
+   *
+   * Проверяется именно в строгом режиме: в тестовом пропускает вообще всё, и
+   * утверждение выродилось бы в проверку выключателя.
+   */
+  it('строгий режим пропускает удаление машинно подтверждённого документа', async () => {
+    await setMode(true);
+    await db.query(
+      `UPDATE logical_documents SET is_confirmed = true, confirmation_source = 'machine',
+              confirmed_by = NULL, confirmed_at = now()
+        WHERE id = '${ID.document2}'`,
+    );
+    await db.query(`DELETE FROM logical_documents WHERE id = '${ID.document2}'`);
+    const rows = await db.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM logical_documents WHERE id = '${ID.document2}'`,
+    );
+    expect(rows[0]?.n).toBe(0);
+  });
+
+  it('режим тестирования пропускает удаление подтверждённого человеком документа', async () => {
     await setMode(false);
+    await db.query(
+      `INSERT INTO logical_documents (id, revision_id, object_id, contractor_id, ordinal,
+                                      is_confirmed, confirmation_source, confirmed_by, confirmed_at)
+         VALUES ('${ID.document2}', '${ID.revision}', '${ID.object}', '${ID.contractor}', 5,
+                 true, 'human', '${ID.user}', now())`,
+    );
     await db.query(`DELETE FROM logical_documents WHERE id = '${ID.document2}'`);
     const rows = await db.query<{ n: number }>(
       `SELECT count(*)::int AS n FROM logical_documents WHERE id = '${ID.document2}'`,

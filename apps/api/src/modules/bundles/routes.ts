@@ -161,8 +161,23 @@ function registerListRoute(app: AppInstance): void {
       const items = await listBundles(app.db, scope, request.params.revisionId);
       // Пустой список чужой ревизии неотличим от пустого списка своей: наличие
       // рабочего документа — это факт о чужой поставке (§16).
-      if (items.length === 0) await requireVisibleRevision(app, request, request.params.revisionId);
-      return reply.code(200).send({ items: [...items] });
+      if (items.length === 0) {
+        await requireVisibleRevision(app, request, request.params.revisionId);
+        return reply.code(200).send({ items: [] });
+      }
+
+      // Отвечает ли документ ТЕКУЩЕМУ составу файлов. План читается один раз на
+      // запрос: манифест — функция от набора файлов, а не от конкретного
+      // документа, и считать его в цикле значило бы платить за один и тот же
+      // ответ столько раз, сколько сборок было у ревизии.
+      const plan = await loadBundlePlan(app.db, scope, request.params.revisionId);
+      return reply.code(200).send({
+        items: items.map((bundle) => ({
+          ...bundle,
+          matchesCurrentFiles:
+            plan !== null && bundle.aggregateManifestHash === plan.aggregateManifestHash,
+        })),
+      });
     },
   );
 }

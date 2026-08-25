@@ -57,6 +57,7 @@ function document(
     boundaryConfidence: null,
     needsReview: false,
     isConfirmed: false,
+    confirmationSource: 'human',
     confirmedBy: null,
     confirmedAt: null,
     version: 0,

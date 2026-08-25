@@ -64,6 +64,7 @@ import {
   listSourceFiles,
   recordUploadedFile,
   reorderSourceFiles,
+  replaceSourceFile,
   requireEditableRevision,
 } from '../../db/repositories/files.js';
 import { readImmutabilityEnforced } from '../../config/portal-settings.js';
@@ -106,13 +107,17 @@ export function registerFileRoutes(app: AppInstance): void {
   // Ключ подписи талонов один на процесс. Вне продакшна `CSRF_SECRET`
   // необязателен, и тогда талоны не переживают перезапуск — для незавершённой
   // загрузки это корректно, повторный `init` дешевле хранимого состояния.
-  const ticketKey = deriveTicketKey(
-    app.env.CSRF_SECRET ?? randomBytes(32).toString('hex'),
-    'revision-file',
-  );
+  const secret = app.env.CSRF_SECRET ?? randomBytes(32).toString('hex');
+  const ticketKey = deriveTicketKey(secret, 'revision-file');
+  // Замена подписывается ДРУГИМ ключом, а не тем же с полем-признаком внутри:
+  // талон обычного приёма нельзя предъявить замене и наоборот — подпись не
+  // сойдётся, — и это свойство не зависит от того, забыли ли где-то проверить
+  // поле. Тот же довод разводит приём файла ревизии и импорт справочника.
+  const replacementTicketKey = deriveTicketKey(secret, 'revision-file-replacement');
 
   registerListRoute(app);
   registerUploadRoutes(app, ticketKey);
+  registerReplacementRoutes(app, replacementTicketKey);
   registerOrderRoute(app);
   registerDeleteRoute(app);
   registerContentRoute(app);
@@ -314,28 +319,7 @@ function registerUploadRoutes(app: AppInstance, ticketKey: Buffer): void {
       const revision = await requireEditableRevision(app.db, scope, ticket.targetId);
       updateContext({ revisionId: revision.id, objectId: revision.objectId });
 
-      const maxBytes = app.env.MAX_UPLOAD_BYTES;
-      const staged = await app.storage.headObject(ticket.key);
-      if (staged === null) {
-        throw conflict(
-          'Файл не найден в хранилище: загрузка не была завершена или уже принята. ' +
-            'Обновите список файлов ревизии.',
-        );
-      }
-      if (staged.sizeBytes > maxBytes) {
-        await discardStaged(app, request, ticket.key);
-        throw tooLarge(maxBytes);
-      }
-
-      const verified = await readAndVerify(app, request, ticket.key, maxBytes);
-
-      // Дедупликация по содержимому: если объект с таким sha256 уже лежит,
-      // второй копии не появляется (§3.3). Ключ детерминирован от хэша,
-      // поэтому «уже лежит» — это ровно те же байты.
-      const target = blobKey(verified.sha256);
-      if ((await app.storage.headObject(target)) === null) {
-        await app.storage.copyObject(ticket.key, target, verified.mime);
-      }
+      const received = await receiveUploadedBytes(app, request, ticket.key);
 
       const file = await recordUploadedFile(
         app.db,
@@ -343,14 +327,14 @@ function registerUploadRoutes(app: AppInstance, ticketKey: Buffer): void {
         {
           revisionId: revision.id,
           fileName: ticket.fileName,
-          sha256: verified.sha256,
-          sizeBytes: verified.sizeBytes,
-          mime: verified.mime,
-          storageKey: target,
-          verifyState: verified.state,
-          verifyError: verified.error,
-          signatureProbe: verified.signatureProbe,
-          pages: verified.pages,
+          sha256: received.sha256,
+          sizeBytes: received.sizeBytes,
+          mime: received.mime,
+          storageKey: received.storageKey,
+          verifyState: received.state,
+          verifyError: received.error,
+          signatureProbe: received.signatureProbe,
+          pages: received.pages,
         },
         auditActor(app, request),
       );
@@ -358,6 +342,209 @@ function registerUploadRoutes(app: AppInstance, ticketKey: Buffer): void {
       await discardStaged(app, request, ticket.key);
       await startFilePipeline(app, request, revision.id, file.id);
       return reply.code(201).send(file);
+    },
+  );
+}
+
+/**
+ * Приём байтов: наличие, размер, проверка содержимого, переезд в блоб.
+ *
+ * Вынесено из `complete`, потому что вызывающих стало два — обычный приём и
+ * замена файла. Копия этого кода во втором маршруте разошлась бы с первым на
+ * первой же правке лимита или дедупликации, а расхождение здесь означает файл,
+ * принятый по одним правилам и учтённый по другим.
+ */
+type VerifiedUpload = Awaited<ReturnType<typeof verifyUploadedObject>>;
+
+interface ReceivedUpload extends VerifiedUpload {
+  /** Постоянный адрес блоба: `uploads/{uuid}` уже не при чём. */
+  readonly storageKey: string;
+}
+
+async function receiveUploadedBytes(
+  app: AppInstance,
+  request: FastifyRequest,
+  stagedKey: string,
+): Promise<ReceivedUpload> {
+  const maxBytes = app.env.MAX_UPLOAD_BYTES;
+  const staged = await app.storage.headObject(stagedKey);
+  if (staged === null) {
+    throw conflict(
+      'Файл не найден в хранилище: загрузка не была завершена или уже принята. ' +
+        'Обновите список файлов ревизии.',
+    );
+  }
+  if (staged.sizeBytes > maxBytes) {
+    await discardStaged(app, request, stagedKey);
+    throw tooLarge(maxBytes);
+  }
+
+  const verified = await readAndVerify(app, request, stagedKey, maxBytes);
+
+  // Дедупликация по содержимому: если объект с таким sha256 уже лежит,
+  // второй копии не появляется (§3.3). Ключ детерминирован от хэша,
+  // поэтому «уже лежит» — это ровно те же байты.
+  const target = blobKey(verified.sha256);
+  if ((await app.storage.headObject(target)) === null) {
+    await app.storage.copyObject(stagedKey, target, verified.mime);
+  }
+
+  return { ...verified, storageKey: target };
+}
+
+// =====================================================================
+// Замена файла
+// =====================================================================
+
+/**
+ * Замена — своя пара маршрутов, а не «удалить плюс загрузить».
+ *
+ * Клиентская последовательность непригодна по построению: удаление первым же
+ * шагом сносит файл вместе со всем производным по ревизии, и любой отказ
+ * дальше оставляет комплект без файла; а поменять шаги местами нельзя —
+ * `requireEditableRevision` отвергает приём файла, пока собран рабочий
+ * документ, то есть всегда после кнопки «Выделить блоки».
+ *
+ * ## Назначение талона, а не поле внутри него
+ *
+ * Талон замены подписан ДРУГИМ ключом (`UploadPurpose = 'revision-file-replacement'`),
+ * поэтому предъявить его обычному `complete` невозможно вовсе — подпись не
+ * сойдётся. Это тот же довод, по которому разведены приём файла ревизии и
+ * импорт справочника: признак назначения, лежащий полем внутри подписанного
+ * тела, работает ровно до первой забытой проверки этого поля.
+ *
+ * `targetId` талона — заменяемый ФАЙЛ; ревизия проверяется по адресу.
+ *
+ * ## Карантин отменяет замену
+ *
+ * Обычный приём кладёт непрошедший проверку файл в список с пометкой: там это
+ * сообщение подрядчику, и терять при этом нечего. Здесь потеря есть — годный
+ * файл, — и обменивать его на негодный нельзя. Поэтому при `quarantined`
+ * транзакция не начинается вовсе.
+ */
+function registerReplacementRoutes(app: AppInstance, ticketKey: Buffer): void {
+  app.post(
+    `${PREFIX}/revisions/:revisionId/files/:fileId/replacement/init`,
+    {
+      preHandler: uploadFiles,
+      schema: {
+        params: revisionFileParamSchema,
+        body: uploadInitBodySchema,
+        response: { 201: uploadInitResponseSchema },
+      },
+    },
+    async (request, reply) => {
+      const { scope, user } = currentAuth(request);
+      const { revisionId, fileId } = request.params;
+
+      // Собранный рабочий документ не мешает замене — она сама его и снесёт.
+      const revision = await requireEditableRevision(app.db, scope, revisionId, {
+        allowBuiltBundle: true,
+      });
+      updateContext({ revisionId: revision.id, objectId: revision.objectId });
+
+      // Проверка до заливки, а не после: узнать, что заменять нечего, после
+      // двухсот мегабайт по плохому каналу — это отказ, выданный слишком поздно.
+      const files = await listSourceFiles(app.db, scope, revisionId);
+      if (!files.some((file) => file.id === fileId)) {
+        throw notFound('Заменяемый файл не найден в этой ревизии.');
+      }
+
+      const maxBytes = app.env.MAX_UPLOAD_BYTES;
+      if (request.body.sizeBytes > maxBytes) throw tooLarge(maxBytes);
+
+      const uploadId = randomUUID();
+      const key = uploadKey(uploadId);
+      const presigned = await app.storage.presignPut({
+        key,
+        expiresInSeconds: UPLOAD_TTL_SECONDS,
+        maxBytes,
+      });
+
+      const ticket = signUploadTicket(ticketKey, {
+        uploadId,
+        targetId: fileId,
+        userId: user.id,
+        fileName: request.body.fileName,
+        key,
+        expiresAt: Date.parse(presigned.expiresAt),
+      });
+
+      return reply.code(201).send({
+        uploadId: ticket,
+        uploadUrl: presigned.url,
+        method: 'PUT',
+        headers: presigned.headers,
+        expiresAt: presigned.expiresAt,
+        maxBytes,
+      });
+    },
+  );
+
+  app.post(
+    `${PREFIX}/revisions/:revisionId/files/:fileId/replacement/complete`,
+    {
+      preHandler: uploadFiles,
+      schema: {
+        params: revisionFileParamSchema,
+        body: uploadCompleteBodySchema,
+        response: { 200: sourceFileViewSchema },
+      },
+    },
+    async (request, reply) => {
+      const { scope, user } = currentAuth(request);
+      const { revisionId, fileId } = request.params;
+
+      const ticket = verifyUploadTicket(ticketKey, request.body.uploadId);
+      if (ticket === null) {
+        throw badRequest('Загрузка недействительна или истекла. Начните замену заново.');
+      }
+      if (ticket.targetId !== fileId || ticket.userId !== user.id) {
+        throw forbidden('Загрузка относится к другому файлу или к другому пользователю.');
+      }
+
+      const revision = await requireEditableRevision(app.db, scope, revisionId, {
+        allowBuiltBundle: true,
+      });
+      updateContext({ revisionId: revision.id, objectId: revision.objectId });
+
+      const received = await receiveUploadedBytes(app, request, ticket.key);
+
+      if (received.state !== 'ok') {
+        // Ничего не меняем: старый файл и весь разбор по нему остаются на
+        // месте. Обменять годный файл на непрошедший проверку — это ровно та
+        // потеря, ради предотвращения которой замена и сделана серверной.
+        await discardStaged(app, request, ticket.key);
+        throw conflict(
+          `Новый файл не прошёл проверку: ${received.error ?? 'причина не указана'}. ` +
+            'Замена отменена, прежний файл остался в комплекте.',
+        );
+      }
+
+      const enforceImmutability = await readImmutabilityEnforced(app.db);
+      const file = await replaceSourceFile(
+        app.db,
+        scope,
+        {
+          revisionId,
+          replacedFileId: fileId,
+          fileName: ticket.fileName,
+          sha256: received.sha256,
+          sizeBytes: received.sizeBytes,
+          mime: received.mime,
+          storageKey: received.storageKey,
+          verifyState: received.state,
+          verifyError: received.error,
+          signatureProbe: received.signatureProbe,
+          pages: received.pages,
+        },
+        auditActor(app, request),
+        { enforceImmutability },
+      );
+
+      await discardStaged(app, request, ticket.key);
+      await startFilePipeline(app, request, revisionId, file.id);
+      return reply.code(200).send(file);
     },
   );
 }

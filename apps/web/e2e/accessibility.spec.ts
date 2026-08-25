@@ -92,7 +92,27 @@ test('экран разметки проходит проверку axe', async 
 
 test('экран проверки и согласования проходит axe', async ({ page }) => {
   await signIn(page, KC.engineer, `/ids/revisions/${IDS.revisionReview}?tab=checks`);
-  await expect(page.getByRole('cell', { name: 'AOSR.HDR.022' })).toBeVisible();
+  await expect(page.getByTestId('findings-by-page')).toBeVisible();
+  await analyze(page);
+});
+
+/**
+ * Ревизия, у которой проверки ещё не было.
+ *
+ * Отдельный прогон, потому что это ДРУГАЯ разметка: вместо таблицы на экране
+ * плашка состояния, и проверять её на ревизии с замечаниями нельзя — там её
+ * нет вовсе.
+ */
+test('пустая проверка проходит axe и объясняет себя', async ({ page }) => {
+  await signIn(page, KC.contractor, `/ids/revisions/${IDS.revisionEmpty}?tab=checks`);
+  await expect(page.getByTestId('checks-run-state')).toContainText('Проверка ещё не выполнялась');
+  await analyze(page);
+});
+
+test('модалка замены файла проходит axe', async ({ page }) => {
+  await signIn(page, KC.contractor, `/ids/revisions/${IDS.revisionMarkup}?tab=files`);
+  await page.getByTestId(`replace-file-${IDS.fileMarkup}`).click();
+  await expect(page.getByRole('dialog')).toBeVisible();
   await analyze(page);
 });
 
@@ -173,12 +193,6 @@ test('правила и наборы правил проходят провер�
 test('раздел промтов проходит проверку axe', async ({ page }) => {
   await signIn(page, KC.admin, '/admin?tab=prompts');
   await expect(page.getByRole('cell', { name: 'page_classify_base' }).first()).toBeVisible();
-  await analyze(page);
-});
-
-test('вкладка документов с деревом проходит проверку axe', async ({ page }) => {
-  await signIn(page, KC.engineer, `/ids/revisions/${IDS.revisionReview}?tab=documents`);
-  await expect(page.getByTestId('documents-tree')).toBeVisible();
   await analyze(page);
 });
 

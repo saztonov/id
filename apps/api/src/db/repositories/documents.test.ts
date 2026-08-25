@@ -59,6 +59,7 @@ import {
   savePageClassifications,
   saveRegistryMatches,
   saveRegistryRows,
+  unconfirmDocument,
 } from './documents.js';
 import type { Database } from './users.js';
 
@@ -953,6 +954,77 @@ describe('пересегментация не переписывает подт�
     const outcome = await applySegmentation(db, ADMIN, FULL_SEGMENTATION);
     expect(outcome.documentsCreated).toBe(2);
     expect(outcome.documentsReplaced).toBeGreaterThan(0);
+    expect(await listUnaccountedPages(db, ADMIN, REVISION_A)).toEqual([]);
+  });
+
+  it('свои, машинные подтверждения пересегментацию не запирают', async () => {
+    // Границы, собранные конвейером, он же и подтверждает — иначе не поедет
+    // нарезка (`logical_documents_derived_confirmed_chk`). Если бы охранник
+    // смотрел на один `is_confirmed`, портал запретил бы себе пересобирать
+    // собственную работу после первого же прогона, и повторное распознавание
+    // стало бы невозможным. Ровно это заказчик увидел как «непонятные ошибки
+    // после пересборки».
+    const documents = await listLogicalDocuments(db, ADMIN, REVISION_A);
+    expect(documents.length).toBeGreaterThan(0);
+    expect(documents.every((document) => document.isConfirmed)).toBe(true);
+    expect(documents.every((document) => document.confirmationSource === 'machine')).toBe(true);
+    expect(documents.every((document) => document.confirmedBy === null)).toBe(true);
+
+    const outcome = await applySegmentation(db, ADMIN, FULL_SEGMENTATION);
+    expect(outcome.documentsReplaced).toBeGreaterThan(0);
+  });
+
+  it('триггер пропускает удаление машинно подтверждённого документа', async () => {
+    // Иначе автоподтверждение заперло бы удаление и замену файла:
+    // `logical_documents` входит в `DERIVED_DELETES`, и purge падал бы на
+    // каждом разобранном комплекте.
+    const documents = await listLogicalDocuments(db, ADMIN, REVISION_A);
+    const victim = documents.at(-1)?.id ?? '';
+    await testDb.query(`DELETE FROM page_assignments WHERE document_id = '${victim}'`);
+    await testDb.query(`DELETE FROM logical_documents WHERE id = '${victim}'`);
+
+    const rest = await listLogicalDocuments(db, ADMIN, REVISION_A);
+    expect(rest.map((document) => document.id)).not.toContain(victim);
+
+    // Учёт страниц восстанавливается пересегментацией: тест не оставляет за
+    // собой ревизию с потерянными страницами.
+    await applySegmentation(db, ADMIN, FULL_SEGMENTATION);
+    expect(await listUnaccountedPages(db, ADMIN, REVISION_A)).toEqual([]);
+  });
+
+  it('снятие подтверждения обнуляет нарезку вместе с ним', async () => {
+    // Требование схемы, а не уборка: `logical_documents_derived_confirmed_chk`
+    // не примет неподтверждённый документ с непустой нарезкой, а
+    // `..._derived_provenance_chk` требует, чтобы провенанс был полон или пуст
+    // целиком. Смысл тот же: границы снова под вопросом, и прежний PDF
+    // описывает уже не тот документ.
+    const [target] = await listLogicalDocuments(db, ADMIN, REVISION_A);
+    if (target === undefined) throw new Error('фикстура пуста');
+
+    await testDb.query(
+      `UPDATE logical_documents
+          SET derived_pdf_blob_sha256 = '${SHA('c')}', derived_pdf_page_count = 1,
+              derived_pdf_bytes = 512, derived_pdf_built_at = now(),
+              derived_pdf_toolkit = 'qpdf/11', derived_note_applied = true
+        WHERE id = '${target.id}'`,
+    );
+
+    const fresh = await unconfirmDocument(db, ADMIN, {
+      documentId: target.id,
+      actorUserId: USER,
+      expectedVersion: target.version,
+      actor: ACTOR,
+    });
+
+    expect(fresh.isConfirmed).toBe(false);
+    expect(fresh.confirmedBy).toBeNull();
+    const rows = await testDb.query<{ derived_pdf_blob_sha256: string | null }>(
+      `SELECT derived_pdf_blob_sha256 FROM logical_documents WHERE id = '${target.id}'`,
+    );
+    expect(rows[0]?.derived_pdf_blob_sha256).toBeNull();
+
+    // И пересегментация снова возможна — ровно то, что обещает текст отказа.
+    await applySegmentation(db, ADMIN, FULL_SEGMENTATION);
     expect(await listUnaccountedPages(db, ADMIN, REVISION_A)).toEqual([]);
   });
 });

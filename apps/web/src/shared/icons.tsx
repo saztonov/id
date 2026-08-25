@@ -127,6 +127,24 @@ export function OpenIcon({ size = 16 }: IconProps = {}): ReactNode {
 }
 
 /** Переместить выше. */
+/**
+ * «Заменить»: круговые стрелки.
+ *
+ * Не корзина и не скрепка: замена — это не удаление и не добавление, а одно
+ * действие вместо двух, и глиф обязан отличаться от обоих соседей в строке.
+ */
+export function ReplaceIcon({ size = 16 }: IconProps = {}): ReactNode {
+  return frame(
+    size,
+    <>
+      <path d="M4 10a8 8 0 0 1 13.7-5.6L20 7" />
+      <path d="M20 3v4h-4" />
+      <path d="M20 14a8 8 0 0 1-13.7 5.6L4 17" />
+      <path d="M4 21v-4h4" />
+    </>,
+  );
+}
+
 export function MoveUpIcon({ size = 16 }: IconProps = {}): ReactNode {
   return frame(size, <path d="M12 19V6M6 12l6-6 6 6" />);
 }

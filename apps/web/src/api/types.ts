@@ -125,6 +125,15 @@ export interface Bundle {
   builderVersion: string;
   createdAt: string;
   pageCount: number;
+  /**
+   * Отвечает ли документ текущему составу файлов.
+   *
+   * Считает сервер, а не экран: сравнение состава — это хэш манифеста, который
+   * знает только он. Признак значим при ДОГРУЗКЕ файла: удаление и замена
+   * сносят разметку и замечания сами, а догрузка не сносит ничего, и прежний
+   * разбор продолжает описывать состав, которого больше нет.
+   */
+  matchesCurrentFiles: boolean;
 }
 
 export interface BundlePage {
@@ -431,6 +440,51 @@ export interface ValidationRun {
   counts: Record<string, unknown>;
 }
 
+/**
+ * Страница замечания.
+ *
+ * `number` — сквозной номер по комплекту, тот же, которым подписаны страницы в
+ * бумажной папке. `workingPageIndex` — позиция в рабочем документе, нужна
+ * только адресу разметки и существует, лишь пока документ собран.
+ *
+ * `basis` говорит, ОТКУДА номер: `document` означает «это начало документа, а
+ * не место ошибки», и экран обязан сказать это словами. Срок действия может
+ * стоять на любом листе, и выдавать первую страницу за точный адрес — врать
+ * точностью.
+ */
+export interface FindingPage {
+  number: number;
+  workingPageIndex: number | null;
+  basis: 'finding' | 'evidence' | 'field' | 'document';
+}
+
+export interface FindingDocument {
+  id: string;
+  docTypeCode: string | null;
+  label: string;
+}
+
+/** Объект замечания: документ, материал, партия, строка реестра, комплект. */
+export interface FindingTarget {
+  kind:
+    | 'document'
+    | 'material'
+    | 'batch'
+    | 'registry_row'
+    | 'page'
+    | 'field'
+    | 'revision'
+    | 'gone';
+  label: string;
+  detail: string | null;
+}
+
+export interface FindingEvidence {
+  quote: string;
+  pageTextVersionId: string;
+  charSpan: { start: number; end: number };
+}
+
 export interface Finding {
   id: string;
   validationRunId: string;
@@ -445,6 +499,46 @@ export interface Finding {
   blockId: string | null;
   message: string;
   hint: string | null;
+  /** Текст строки списка: короткая формулировка правила либо `message`. */
+  text: string;
+  page: FindingPage | null;
+  document: FindingDocument | null;
+  target: FindingTarget;
+  evidence: FindingEvidence[];
+}
+
+/**
+ * Сводка экрана проверки.
+ *
+ * `latestRun` — самый новый прогон: по нему видно, идёт ли проверка сейчас.
+ * `shownRunId` — прогон, из которого пришли `items` и `counts`. Расходятся они
+ * ровно в одном случае: пока идёт повторная проверка, показан результат
+ * предыдущей.
+ */
+export interface ChecksSummary {
+  latestRun: { id: string; startedAt: string; finishedAt: string | null } | null;
+  shownRunId: string | null;
+  coverage: {
+    pagesTotal: number;
+    pagesRecognized: number;
+    pagesAssigned: number;
+    pagesUnassigned: number;
+    unassignedPageNumbers: number[];
+    documentsTotal: number;
+    documentsUnknownType: number;
+  };
+  counts: {
+    openErrors: number;
+    openWarnings: number;
+    openInfo: number;
+    undetermined: number;
+    waived: number;
+  };
+}
+
+export interface FindingList {
+  items: Finding[];
+  summary: ChecksSummary;
 }
 
 export interface RuleCatalogEntry {

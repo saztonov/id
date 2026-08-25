@@ -88,3 +88,58 @@ test('сборка рабочего документа ставит задачу
     })
     .toBe('true');
 });
+
+/**
+ * Замена файла (S27).
+ *
+ * Проверяется главное свойство серверной транзакции: пока новый файл не принят
+ * и не проверен, комплект не меняется. Клиентская последовательность «удалить →
+ * загрузить» этого свойства не имеет по построению — первый её шаг уже снёс бы
+ * файл вместе со всем разбором.
+ */
+test('замена ставит новый файл на место старого и говорит, что уйдёт', async ({ page }) => {
+  await signIn(page, KC.contractor, `/ids/revisions/${IDS.revisionEmpty}?tab=files`);
+
+  const before = await page.request.get(`/api/v1/revisions/${IDS.revisionEmpty}/files`);
+  const item = ((await before.json()) as { items: { id: string; sortOrder: number }[] }).items[0];
+  expect(item, 'предыдущий сценарий обязан был оставить файл').toBeDefined();
+
+  await page.getByTestId(`replace-file-${item?.id ?? ''}`).click();
+
+  // Модалка перечисляет последствия ДО выбора файла: предупреждение о сбросе
+  // принадлежит намерению «перезаливаю», а не намерению «удаляю».
+  const dialog = page.getByRole('dialog');
+  await expect(dialog).toContainText('разметка, распознанный текст, разобранные документы');
+  await expect(dialog).toContainText('Ревизий портал при этом не заводит');
+
+  await dialog.getByRole('button', { name: 'Выбрать новый файл' }).click();
+  await page.locator('input[type="file"]:not([data-testid])').setInputFiles({
+    name: 'Замена.pdf',
+    mimeType: 'application/pdf',
+    buffer: readFileSync(FIXTURE),
+  });
+
+  await expect(page.getByRole('cell', { name: 'Замена.pdf', exact: true })).toBeVisible({
+    timeout: 30_000,
+  });
+
+  // Последствие в базе: файл один, на прежней позиции, и это НОВЫЙ файл.
+  const after = await page.request.get(`/api/v1/revisions/${IDS.revisionEmpty}/files`);
+  const items = ((await after.json()) as {
+    items: { id: string; fileName: string; sortOrder: number }[];
+  }).items;
+  expect(items).toHaveLength(1);
+  expect(items[0]?.fileName).toBe('Замена.pdf');
+  expect(items[0]?.sortOrder).toBe(item?.sortOrder);
+  expect(items[0]?.id).not.toBe(item?.id);
+});
+
+test('замена сбрасывает проверку, и экран об этом говорит', async ({ page }) => {
+  await signIn(page, KC.contractor, `/ids/revisions/${IDS.revisionEmpty}?tab=checks`);
+
+  // Прогонов у этой ревизии не было, а после замены и подавно: экран обязан
+  // сказать это словами, а не молчать пустым списком — молчание неотличимо от
+  // поломки, и именно его заказчик увидел как «никаких данных».
+  await expect(page.getByTestId('checks-run-state')).toContainText('Проверка ещё не выполнялась');
+  await expect(page.getByTestId('checks-summary')).toBeVisible();
+});

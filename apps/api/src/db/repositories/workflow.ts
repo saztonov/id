@@ -41,6 +41,7 @@ import type { AuthScope } from '../../auth/scope.js';
 import { conflict, isHttpProblem, notFound, preconditionFailed } from '../../lib/problem.js';
 import { withScope, type ScopeTarget } from '../scoped.js';
 import { appendAudit, type AuditActor } from './audit.js';
+import { LATEST_VALIDATION_RUN } from './checks.js';
 import { appendRevisionEvent } from './jobs.js';
 import type { Database } from './users.js';
 
@@ -154,6 +155,8 @@ export interface RevisionReadiness {
   readonly unmaterializedDocuments: number;
   readonly openBlockingFindings: number;
   readonly finishedValidationRuns: number;
+  /** Самый новый прогон проверок ещё не закончился. */
+  readonly latestRunUnfinished: boolean;
 }
 
 /**
@@ -185,8 +188,16 @@ export async function loadRevisionReadiness(
       documentCount: sql<number>`(select count(*)::int from ${logicalDocuments} d where d.revision_id = submission_revisions.id)`,
       unconfirmedDocuments: sql<number>`(select count(*)::int from ${logicalDocuments} d where d.revision_id = submission_revisions.id and not d.is_confirmed)`,
       unmaterializedDocuments: sql<number>`(select count(*)::int from ${logicalDocuments} d where d.revision_id = submission_revisions.id and d.derived_pdf_blob_sha256 is null)`,
-      openBlockingFindings: sql<number>`(select count(*)::int from ${findings} f where f.revision_id = submission_revisions.id and f.is_blocking and f.state = 'open')`,
+      // Только авторитетный прогон (S27). Прежде считались findings ВСЕЙ
+      // ревизии, а `saveFindings` заменяет строки лишь своего прогона —
+      // значит замечание, снятое повторной проверкой, продолжало запирать
+      // согласование навсегда, и число здесь расходилось с числом на экране.
+      openBlockingFindings: sql<number>`(select count(*)::int from ${findings} f where f.revision_id = submission_revisions.id and f.validation_run_id = ${LATEST_VALIDATION_RUN} and f.is_blocking and f.state = 'open')`,
       finishedValidationRuns: sql<number>`(select count(*)::int from ${validationRuns} v where v.revision_id = submission_revisions.id and v.finished_at is not null)`,
+      // Идёт ли проверка прямо сейчас. Согласование по завершённому прогону,
+      // поверх которого уже запущен следующий, — это решение по проверке,
+      // которую сам портал считает устаревшей.
+      latestRunUnfinished: sql<boolean>`exists (select 1 from ${validationRuns} v where v.id = ${LATEST_VALIDATION_RUN} and v.finished_at is null)`,
     })
     .from(submissionRevisions)
     .where(withScope(scope, REVISION_SCOPE, eq(submissionRevisions.id, revisionId)))
@@ -224,19 +235,26 @@ export function submitBlockers(
 /**
  * Препятствия согласованию (§9.6).
  *
- * Список намеренно строгий в трёх местах, и каждое — требование плана, а не
- * осторожность:
+ * Список строгий там, где строгость защищает решение, и молчит там, где она
+ * требовала бы от человека работы портала.
  *
- * * прогон проверок обязан быть (§9): согласование без единого прогона — это
- *   решение, принятое без методики;
+ * * прогон проверок обязан быть И быть завершённым (§9): согласование без
+ *   прогона — решение без методики, а согласование поверх идущей проверки —
+ *   решение по данным, которые сам портал уже считает устаревшими;
  * * блокирующее открытое замечание закрывает approve, и снять его может только
  *   руководитель обоснованным override (§9.6). Иначе роль `revision.override`
  *   не имела бы смысла;
- * * документы обязаны быть подтверждены И нарезаны. Первое — §8.2 («ручная
- *   разметка приоритетна»), второе — §12: нарезка идёт после подтверждения
- *   границ, а после approve содержимое ревизии заперто, и нарезать станет
- *   нечем. Архив согласованной ревизии без её документов был бы архивом ни о
- *   чём.
+ * * документы обязаны БЫТЬ и быть нарезанными. Пустой набор документов — это
+ *   сорвавшаяся сегментация, и согласовать его значило бы собрать архив ни о
+ *   чём; после approve содержимое заперто, и нарезать станет нечем.
+ *
+ * ## Чего здесь больше нет
+ *
+ * «Документов без подтверждения границ» (S27). Ручное подтверждение отменено:
+ * границы, собранные конвейером, он же и подтверждает, иначе не поедет
+ * нарезка. Счётчик после этого всегда ноль, и строка либо не появлялась бы
+ * вовсе, либо — при подтверждении человеком — просила бы сделать то, что уже
+ * сделано. Сам счётчик в `readiness` остался: его читает диагностика.
  */
 export function approveBlockers(
   revision: RevisionWorkflowView,
@@ -248,17 +266,18 @@ export function approveBlockers(
   }
   if (readiness.finishedValidationRuns === 0) {
     blockers.push('по ревизии не завершён ни один прогон проверок');
+  } else if (readiness.latestRunUnfinished) {
+    blockers.push('проверка ещё выполняется — дождитесь её окончания');
   }
   if (readiness.documentCount === 0) {
-    blockers.push('в ревизии не собрано ни одного логического документа');
-  }
-  if (readiness.unconfirmedDocuments > 0) {
-    blockers.push(`документов без подтверждения границ: ${readiness.unconfirmedDocuments}`);
+    blockers.push(
+      'портал не собрал ни одного документа из комплекта — распознайте комплект заново',
+    );
   }
   if (readiness.unmaterializedDocuments > 0) {
     blockers.push(
-      `документов без нарезки: ${readiness.unmaterializedDocuments} ` +
-        '(нарезка выполняется фоновой задачей после подтверждения границ)',
+      `портал ещё готовит документы к выдаче: осталось ${readiness.unmaterializedDocuments} ` +
+        '(обновите страницу через минуту)',
     );
   }
   if (readiness.openBlockingFindings > 0) {

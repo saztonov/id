@@ -700,6 +700,7 @@ export async function deleteSourceFile(
     // сдвигает нумерацию страниц у всех остальных и обесценивает цепочку целиком.
     // Выборочная чистка оставила бы разметку, указывающую на страницы с другими
     // номерами, — то есть данные, которые выглядят целыми и врут.
+    const released = await releaseHumanConfirmations(tx, revisionId);
     await purgeDerivedForRevision(tx, revisionId);
 
     // Страницы раньше файла: FK не каскадный намеренно, чтобы удаление
@@ -716,12 +717,17 @@ export async function deleteSourceFile(
       entityType: 'source_file',
       entityId: fileId,
       objectId: revision.objectId,
-      payload: { revisionId, fileName: target.fileName, derivedPurged: true },
+      payload: {
+        revisionId,
+        fileName: target.fileName,
+        derivedPurged: true,
+        confirmationsReleased: released,
+      },
     });
     await appendRevisionEvent(tx, {
       revisionId,
       eventType: 'file.deleted',
-      payload: { fileId, fileName: target.fileName },
+      payload: { fileId, fileName: target.fileName, confirmationsReleased: released },
     });
 
     return true;
@@ -729,8 +735,221 @@ export async function deleteSourceFile(
 }
 
 // =====================================================================
+// Замена файла
+// =====================================================================
+
+export interface ReplaceSourceFileInput extends RecordUploadInput {
+  /** Файл, который занимает место в ревизии и уступает его новому. */
+  readonly replacedFileId: string;
+}
+
+/**
+ * Замена файла ревизии — ОДНА транзакция, а не последовательность вызовов.
+ *
+ * ## Почему это нельзя было сделать на клиенте
+ *
+ * Напрашивающаяся последовательность «удалить → загрузить → переставить»
+ * непригодна: первый же её шаг сносит файл вместе со всем производным по
+ * ревизии, и любой отказ дальше — сорвавшийся PUT, битый PDF, карантин —
+ * оставляет комплект вообще без файла. Переставить шаги местами тоже нельзя:
+ * `requireEditableRevision` в приёме файла отвергает загрузку, пока собран
+ * рабочий документ, то есть всегда после кнопки «Выделить блоки».
+ *
+ * Поэтому байты проверяются ДО транзакции (маршрут), а всё, что меняет базу,
+ * происходит здесь и целиком: либо новый файл встал на место старого, либо не
+ * изменилось ничего.
+ *
+ * ## Почему подтверждения снимаются молча
+ *
+ * Замена означает согласие потерять весь разбор — интерфейс перечисляет это
+ * до нажатия. Подтверждённый человеком документ иначе отверг бы `purge`
+ * триггером `logical_documents_confirmed_lock`, и пользователь получил бы
+ * отказ, снять который в портале нечем. Число снятых уходит в аудит: молчать о
+ * том, что стёрли решение человека, нельзя, даже когда стереть его правильно.
+ *
+ * ## Порядок сохраняется без перестановки
+ *
+ * Новый файл встаёт на `sort_order` старого, освобождённый в этой же
+ * транзакции. Отдельный `reorder` не нужен, `compactFileOrder` — тоже:
+ * количество файлов не изменилось, дырок в нумерации не возникает.
+ */
+export async function replaceSourceFile(
+  db: Database,
+  scope: AuthScope,
+  input: ReplaceSourceFileInput,
+  actor: AuditActor,
+  options: DeleteSourceFileOptions = {},
+): Promise<SourceFileView> {
+  return db.transaction(async (tx) => {
+    const revision = await requireEditableRevision(tx, scope, input.revisionId, {
+      ...(options.enforceImmutability === undefined
+        ? {}
+        : { enforceImmutability: options.enforceImmutability }),
+      allowBuiltBundle: true,
+    });
+
+    const [target] = await tx
+      .select({
+        id: sourceFiles.id,
+        fileName: sourceFiles.fileName,
+        sortOrder: sourceFiles.sortOrder,
+        sha256: sourceFiles.blobSha256,
+      })
+      .from(sourceFiles)
+      .where(
+        and(eq(sourceFiles.id, input.replacedFileId), eq(sourceFiles.revisionId, input.revisionId)),
+      )
+      .limit(1);
+    if (target === undefined) throw notFound('Заменяемый файл не найден в этой ревизии.');
+
+    const released = await releaseHumanConfirmations(tx, input.revisionId);
+    await purgeDerivedForRevision(tx, input.revisionId);
+
+    await tx.delete(sourcePages).where(eq(sourcePages.sourceFileId, target.id));
+    await tx.delete(sourceFiles).where(eq(sourceFiles.id, target.id));
+
+    await tx
+      .insert(storedBlobs)
+      .values({
+        sha256: input.sha256,
+        s3Key: input.storageKey,
+        sizeBytes: input.sizeBytes,
+        mime: input.mime,
+      })
+      .onConflictDoNothing({ target: storedBlobs.sha256 });
+
+    const [created] = await tx
+      .insert(sourceFiles)
+      .values({
+        revisionId: input.revisionId,
+        blobSha256: input.sha256,
+        fileName: input.fileName,
+        // Место старого файла свободно в этой же транзакции, поэтому
+        // `source_files_order_uq` не нарушается и перестановка не нужна.
+        sortOrder: target.sortOrder,
+        verifyState: input.verifyState,
+        verifyError: input.verifyError,
+        signatureProbe: sql`${JSON.stringify(input.signatureProbe)}::jsonb`,
+      })
+      .returning({ id: sourceFiles.id });
+
+    if (created === undefined) {
+      throw conflict('Файл не удалось зарегистрировать. Повторите загрузку.');
+    }
+
+    if (input.pages.length > 0) {
+      // Тот же приём, что в приёме файла: временный ординал берётся НАД
+      // существующими, иначе сдвиг в `renumberPages` столкнётся с занятыми
+      // значениями внутри одного UPDATE.
+      const [ordinalRow] = await tx
+        .select({ next: sql<number>`coalesce(max(${sourcePages.revisionOrdinal}) + 1, 0)` })
+        .from(sourcePages)
+        .where(eq(sourcePages.revisionId, input.revisionId));
+      const firstOrdinal = Number(ordinalRow?.next ?? 0);
+
+      await tx.insert(sourcePages).values(
+        input.pages.map((page, index) => ({
+          revisionId: input.revisionId,
+          sourceFileId: created.id,
+          filePageIndex: index,
+          revisionOrdinal: firstOrdinal + index,
+          widthPx: page.widthPx,
+          heightPx: page.heightPx,
+          rotation: page.rotation,
+          attentionFlags: [],
+        })),
+      );
+    }
+    await renumberPages(tx, input.revisionId);
+
+    // ОДНА запись аудита на всю операцию, а не «удалил» плюс «загрузил»: замена
+    // — одно намерение пользователя, и разложенная на два действия она в
+    // журнале читается как случайное совпадение по времени.
+    await appendAudit(tx, scope, {
+      ...actor,
+      action: 'source_file.replaced',
+      entityType: 'source_file',
+      entityId: created.id,
+      objectId: revision.objectId,
+      payload: {
+        revisionId: input.revisionId,
+        replacedFileId: target.id,
+        replacedFileName: target.fileName,
+        replacedSha256: target.sha256,
+        fileName: input.fileName,
+        sha256: input.sha256,
+        sizeBytes: input.sizeBytes,
+        pages: input.pages.length,
+        derivedPurged: true,
+        confirmationsReleased: released,
+      },
+    });
+
+    await appendRevisionEvent(tx, {
+      revisionId: input.revisionId,
+      eventType: 'file.replaced',
+      payload: {
+        fileId: created.id,
+        fileName: input.fileName,
+        replacedFileId: target.id,
+        replacedFileName: target.fileName,
+        pageCount: input.pages.length,
+        confirmationsReleased: released,
+      },
+    });
+
+    const [view] = await selectFiles(tx, scope, eq(sourceFiles.id, created.id));
+    if (view === undefined) {
+      throw conflict('Файл зарегистрирован, но недоступен для чтения.');
+    }
+    return view;
+  });
+}
+
+// =====================================================================
 // Внутреннее
 // =====================================================================
+
+/**
+ * Снять подтверждения границ, поставленные человеком, вместе с нарезкой.
+ *
+ * Нужно перед `purgeDerivedForRevision`: удаление подтверждённого человеком
+ * документа отвергает триггер `logical_documents_confirmed_lock`, и без этого
+ * шага удаление или замена файла падали бы отказом, снять который в портале
+ * нечем — раздела «Документы» больше нет.
+ *
+ * Машинные подтверждения не трогаются: их триггер и так пропускает, а лишний
+ * `UPDATE` по всем документам ревизии перед их же удалением — работа впустую.
+ *
+ * Блок `derived_pdf_*` обнуляется целиком, потому что этого требуют
+ * `logical_documents_derived_confirmed_chk` (нарезка только у подтверждённого)
+ * и `logical_documents_derived_provenance_chk` (провенанс полон или пуст
+ * целиком). Смысл ограничений тот же: границы снова под вопросом, а прежний
+ * файл описывает уже не тот документ.
+ *
+ * Возвращает число снятых — оно уходит в аудит: молчать о стёртом решении
+ * человека нельзя, даже когда стереть его правильно.
+ */
+async function releaseHumanConfirmations(executor: Executor, revisionId: string): Promise<number> {
+  const released = await executor.execute<{ id: string }>(
+    sql`update logical_documents
+           set is_confirmed = false,
+               confirmed_by = null,
+               confirmed_at = null,
+               derived_pdf_blob_sha256 = null,
+               derived_pdf_page_count = null,
+               derived_pdf_bytes = null,
+               derived_pdf_built_at = null,
+               derived_pdf_toolkit = null,
+               derived_note_applied = null,
+               updated_at = now()
+         where revision_id = ${revisionId}::uuid
+           and is_confirmed
+           and confirmation_source = 'human'
+       returning id`,
+  );
+  return released.rows.length;
+}
 
 async function selectFiles(
   executor: Executor,

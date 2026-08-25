@@ -18,6 +18,27 @@
  *   и переход approve.
  */
 import { createHash } from 'node:crypto';
+import { dirname, join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+
+/**
+ * Хэш состава файлов берётся у ПОРТАЛА, а не считается здесь заново.
+ *
+ * Признак «рабочий документ отвечает текущему составу» сервер вычисляет
+ * сравнением этого хэша, и экран проверки по нему решает, показывать ли плашку
+ * «комплект изменился». Вторая реализация канонической формы разошлась бы с
+ * первой на первой же правке, и стенд молча показывал бы плашку всегда — то
+ * есть проверял бы не поведение портала, а свою собственную опечатку.
+ *
+ * Импорт из `apps/api/dist` — тем же приёмом, что `buildApp` в `serve.mjs`:
+ * карта экспортов пакета закрывает подпути, а требование «`pnpm -r build` до
+ * прогона» у стенда и так есть.
+ */
+const { computeAggregateManifestHash } = await import(
+  pathToFileURL(
+    join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'api', 'dist', 'index.js'),
+  ).href
+);
 
 /** Идентификаторы фиксированные: тест ссылается на них по имени. */
 export function id(n) {
@@ -290,7 +311,9 @@ export function fixtureSql(pdfSha) {
                    ${page.index === 2 ? `ARRAY['no_blocks','blank_page_candidate']::text[]` : `ARRAY[]::text[]`})`,
     ),
     `INSERT INTO processing_bundles (id, revision_id, aggregate_manifest_hash, working_pdf_blob_sha256, builder_version)
-       VALUES ('${IDS.bundleMarkup}', '${IDS.revisionMarkup}', '${'e'.repeat(64)}', '${workingSha}', 'bundle/1+qpdf')`,
+       VALUES ('${IDS.bundleMarkup}', '${IDS.revisionMarkup}',
+               '${computeAggregateManifestHash([{ blobSha256: pdfSha.sha, sortOrder: 0 }])}',
+               '${workingSha}', 'bundle/1+qpdf')`,
     ...PAGES.map(
       (page) =>
         `INSERT INTO processing_bundle_pages (bundle_id, revision_id, working_page_index, source_page_id)
@@ -344,7 +367,9 @@ export function fixtureSql(pdfSha) {
                                width_px, height_px, rotation)
        VALUES ('${IDS.pageReview}', '${IDS.revisionReview}', '${IDS.fileReview}', 0, 0, 595, 842, 0)`,
     `INSERT INTO processing_bundles (id, revision_id, aggregate_manifest_hash, working_pdf_blob_sha256, builder_version)
-       VALUES ('${IDS.bundleReview}', '${IDS.revisionReview}', '${'f'.repeat(64)}', '${reviewSha}', 'bundle/1+qpdf')`,
+       VALUES ('${IDS.bundleReview}', '${IDS.revisionReview}',
+               '${computeAggregateManifestHash([{ blobSha256: reviewSha, sortOrder: 0 }])}',
+               '${reviewSha}', 'bundle/1+qpdf')`,
     `INSERT INTO processing_bundle_pages (bundle_id, revision_id, working_page_index, source_page_id)
        VALUES ('${IDS.bundleReview}', '${IDS.revisionReview}', 0, '${IDS.pageReview}')`,
     // Документ подтверждён И нарезан: оба условия approve (§9.6).

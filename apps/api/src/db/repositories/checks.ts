@@ -35,6 +35,8 @@ import {
   batches,
   constructionObjects,
   counterparties,
+  docTypeOverrides,
+  docTypes,
   documentRelations,
   fieldValues,
   findingEvidence,
@@ -45,6 +47,8 @@ import {
   materials,
   pageAssignments,
   pageTextVersions,
+  processingBundlePages,
+  processingBundles,
   rdDocuments,
   registryRows,
   ruleDefinitions,
@@ -84,6 +88,9 @@ const REVISION_SCOPE: ScopeTarget = {
   objectId: submissionRevisions.objectId,
   contractorId: submissionRevisions.contractorId,
 };
+
+/** То же, что в остальных репозиториях: одинаково подходит и базе, и транзакции. */
+type Executor = Pick<Database, 'select' | 'insert' | 'update' | 'delete' | 'execute'>;
 
 /**
  * Порог уверенности типа, ниже которого тип считается неуверенным.
@@ -967,50 +974,799 @@ export interface FindingView {
   readonly blockId: string | null;
   readonly message: string;
   readonly hint: string | null;
+  /** Текст строки списка: `summary` правила, пока его нет — `message`. */
+  readonly text: string;
+  readonly page: FindingPageView | null;
+  readonly document: FindingDocumentView | null;
+  readonly target: FindingTargetView;
+  readonly evidence: readonly FindingEvidenceView[];
 }
 
+export interface FindingPageView {
+  /** Сквозной номер страницы по комплекту: `source_pages.revision_ordinal + 1`. */
+  readonly number: number;
+  /** Страница рабочего документа — только для ссылки на разметку. */
+  readonly workingPageIndex: number | null;
+  /** Откуда взят номер. `document` — приблизительно, начало документа. */
+  readonly basis: 'finding' | 'evidence' | 'field' | 'document';
+}
+
+export interface FindingDocumentView {
+  readonly id: string;
+  readonly docTypeCode: string | null;
+  /** Название вида ИД либо заголовок документа, если вид не определён. */
+  readonly label: string;
+}
+
+export interface FindingTargetView {
+  readonly kind:
+    | 'document'
+    | 'material'
+    | 'batch'
+    | 'registry_row'
+    | 'page'
+    | 'field'
+    | 'revision'
+    | 'gone';
+  readonly label: string;
+  readonly detail: string | null;
+}
+
+export interface FindingEvidenceView {
+  readonly quote: string;
+  readonly pageTextVersionId: string;
+  readonly charSpan: { readonly start: number; readonly end: number };
+}
+
+/**
+ * Текст строки списка замечаний.
+ *
+ * Одна функция вместо выражения по месту вызова — точка встречи с потоком,
+ * который добавляет колонку `findings.summary` (короткая формулировка «что не
+ * так» без имени документа и номера страницы). Когда колонка появится, здесь
+ * станет `summary ?? message`, и правка будет ровно одна. Сослаться на неё
+ * раньше нельзя: запрос упал бы на несуществующей колонке.
+ */
+function findingText(row: { readonly message: string }): string {
+  return row.message;
+}
+
+/**
+ * Авторитетный прогон ревизии — САМЫЙ НОВЫЙ, завершён он или нет.
+ *
+ * «Самый новый завершённый» было бы удобнее для экрана и неверно для решения:
+ * согласование по завершённому прогону, поверх которого уже идёт следующий, —
+ * это решение по проверке, которую сам портал считает устаревшей. Поэтому
+ * авторитетность и показываемость разведены: здесь — кто главный, в
+ * `resolveShownRun` — что показать, пока главный не закончил.
+ *
+ * Второй ключ сортировки нужен: `started_at` двух прогонов, поставленных одной
+ * пачкой, совпадает с точностью до микросекунды далеко не всегда, но совпасть
+ * может, и тогда порядок без второго ключа не определён.
+ */
+/**
+ * Подзапрос «авторитетный прогон» для коррелирующих счётчиков.
+ *
+ * Ревизия названа ТЕКСТОМ (`submission_revisions.id`), поэтому фрагмент годится
+ * только внутри запроса, который сам выбирает из `submission_revisions`. Это не
+ * ограничение, а условие корректности: в запросе без джойнов Drizzle рендерит
+ * колонку без имени таблицы, и коррелирующее условие связалось бы с
+ * одноимённой колонкой внутренней таблицы — счётчик молча вернул бы ноль (тем
+ * же способом много этапов подряд был сломан `hasBundle` в `files.ts`).
+ *
+ * Читают его `loadRevisionReadiness` (блокеры согласования) и счётчики архива.
+ */
+export const LATEST_VALIDATION_RUN = sql`(
+  select v.id from validation_runs v
+   where v.revision_id = submission_revisions.id
+   order by v.started_at desc, v.id desc
+   limit 1)`;
+
+export interface ChecksRunView {
+  readonly id: string;
+  readonly startedAt: string;
+  readonly finishedAt: string | null;
+}
+
+/**
+ * Замечания копятся по прогонам, и это дефект выдачи, а не хранения.
+ *
+ * `saveFindings` заменяет строки ТОЛЬКО своего прогона — история проверок ради
+ * того и существует. Но выдача читала findings всей ревизии без фильтра, и
+ * второе нажатие «Распознать» показывало каждое замечание дважды. Заказчик:
+ * «вести историю ошибок не нужно» — пользователю показывается один прогон.
+ *
+ * Прошлые прогоны остаются в базе техническим следом и доступны явным
+ * `validationRunId`; в блокерах согласования и в сводке архива они больше не
+ * участвуют.
+ */
+async function resolveShownRun(
+  db: Executor,
+  scope: AuthScope,
+  revisionId: string,
+  requested: string | undefined,
+): Promise<{ readonly latest: ChecksRunView | null; readonly shownRunId: string | null }> {
+  // Область видимости обязательна и здесь, хотя findings ниже отбираются ею
+  // повторно. Время прогона — тоже факт о чужой поставке (§16): «проверка
+  // соседа шла вчера в 14:20» получается арифметикой из ответа, в котором нет
+  // ни одного его замечания.
+  const rows = await db
+    .select({
+      id: validationRuns.id,
+      startedAt: sql<string>`to_char(${validationRuns.startedAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`,
+      finishedAt: sql<
+        string | null
+      >`to_char(${validationRuns.finishedAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`,
+    })
+    .from(validationRuns)
+    .innerJoin(submissionRevisions, eq(validationRuns.revisionId, submissionRevisions.id))
+    .where(withScope(scope, REVISION_SCOPE, eq(validationRuns.revisionId, revisionId)))
+    .orderBy(desc(validationRuns.startedAt), desc(validationRuns.id))
+    .limit(2);
+
+  const latest = rows[0] ?? null;
+
+  // Явный прогон — диагностический просмотр. Он задаёт И список, И счётчики:
+  // items одного прогона со сводкой другого были бы внутренне противоречивым
+  // ответом, по которому нельзя понять, что именно проверяли.
+  //
+  // Принадлежность проверяется, а не предполагается: идентификатор приходит от
+  // клиента, и прогон чужой ревизии обязан дать пустой ответ, а не список,
+  // отфильтрованный где-то ниже по случайному совпадению условий.
+  if (requested !== undefined) {
+    const owned = await db
+      .select({ id: validationRuns.id })
+      .from(validationRuns)
+      .innerJoin(submissionRevisions, eq(validationRuns.revisionId, submissionRevisions.id))
+      .where(
+        withScope(
+          scope,
+          REVISION_SCOPE,
+          eq(validationRuns.id, requested),
+          eq(validationRuns.revisionId, revisionId),
+        ),
+      )
+      .limit(1);
+    return { latest, shownRunId: owned.length === 0 ? null : requested };
+  }
+
+  if (latest === null) return { latest: null, shownRunId: null };
+  if (latest.finishedAt !== null) return { latest, shownRunId: latest.id };
+
+  // Идёт новая проверка. Гасить список нельзя: результат предыдущего прогона —
+  // правда о ТОМ ЖЕ комплекте (состав не может измениться, не снеся прогоны:
+  // `validation_runs` входит в `DERIVED_DELETES`). Экран покажет его с явной
+  // подписью, что идёт новая проверка, а согласование по нему не пройдёт —
+  // блокер смотрит на `latest`.
+  const previous = rows[1];
+  return { latest, shownRunId: previous?.finishedAt != null ? previous.id : null };
+}
+
+/**
+ * Сводка экрана проверки.
+ *
+ * Одним запросом с коррелирующими подзапросами — по образцу
+ * `loadRevisionReadiness`, включая его урок: внешняя таблица названа ТЕКСТОМ
+ * (`submission_revisions.id`), потому что в запросе без джойнов Drizzle
+ * рендерит колонку без имени таблицы и коррелирующее условие связывается с
+ * одноимённой колонкой внутренней таблицы — каждый счётчик молча вернул бы ноль.
+ *
+ * `v_unaccounted_pages` здесь НЕ используется, хотя выглядит подходящим:
+ * `applySegmentation` проверяет его пустоту в своей же транзакции и
+ * откатывается при непустом результате, то есть после успешной сегментации оно
+ * пусто по построению. Непривязанная страница — это `page_assignments` с
+ * `document_id IS NULL` и названной причиной, и считать надо именно её.
+ */
+export interface ChecksCoverage {
+  readonly pagesTotal: number;
+  readonly pagesRecognized: number;
+  readonly pagesAssigned: number;
+  readonly pagesUnassigned: number;
+  /**
+   * Номера непривязанных страниц, первые двадцать.
+   *
+   * Число без номеров непроверяемо: «портал не разобрал 2 страницы» не говорит,
+   * какие, и человеку нечего открыть. Список ограничен, потому что на комплекте,
+   * где не разобралось ничего, он совпал бы со всем комплектом.
+   */
+  readonly unassignedPageNumbers: readonly number[];
+  readonly documentsTotal: number;
+  /**
+   * Документы, вид которых не определён либо резервный.
+   *
+   * Тоже заявление о полноте, а не замечание: типо-специфичные правила по таким
+   * документам не исполняются вовсе, и человек обязан знать, что пустой список
+   * ошибок по ним ничего не доказывает. Замечанием это было бы неверно —
+   * подрядчику нечего с ним делать, вид определяет портал.
+   */
+  readonly documentsUnknownType: number;
+}
+
+/** Сколько номеров непривязанных страниц уходит на экран. */
+const UNASSIGNED_PAGES_SHOWN = 20;
+
+export async function loadChecksCoverage(
+  db: Executor,
+  scope: AuthScope,
+  revisionId: string,
+): Promise<ChecksCoverage> {
+  const rows = await db
+    .select({
+      pagesTotal: sql<number>`(select count(*)::int from ${sourcePages} p where p.revision_id = submission_revisions.id)`,
+      pagesRecognized: sql<number>`(select count(distinct t.source_page_id)::int from ${pageTextVersions} t where t.revision_id = submission_revisions.id)`,
+      pagesAssigned: sql<number>`(select count(*)::int from ${pageAssignments} a where a.revision_id = submission_revisions.id and a.document_id is not null)`,
+      pagesUnassigned: sql<number>`(select count(*)::int from ${pageAssignments} a where a.revision_id = submission_revisions.id and a.document_id is null)`,
+      unassignedPageNumbers: sql<number[]>`(
+        select coalesce(array_agg(p.revision_ordinal + 1 order by p.revision_ordinal), '{}'::int[])
+          from ${pageAssignments} a
+          join ${sourcePages} p on p.id = a.source_page_id
+         where a.revision_id = submission_revisions.id and a.document_id is null)`,
+      documentsTotal: sql<number>`(select count(*)::int from ${logicalDocuments} d where d.revision_id = submission_revisions.id)`,
+      documentsUnknownType: sql<number>`(
+        select count(*)::int from ${logicalDocuments} d
+         left join ${docTypes} t on t.code = d.doc_type_code
+         where d.revision_id = submission_revisions.id
+           and (d.doc_type_code is null or t.is_fallback))`,
+    })
+    .from(submissionRevisions)
+    .where(withScope(scope, REVISION_SCOPE, eq(submissionRevisions.id, revisionId)))
+    .limit(1);
+
+  const row = rows[0];
+  // Ревизия вне области видимости даёт НУЛИ, а не отказ. Маршрут замечаний —
+  // список, и по решению модуля список чужой ревизии это 200 с пустым
+  // содержимым, а не 404: иначе клиент учится различать «нет прав» и «нет
+  // данных» по коду ответа. Нули одинаковы для чужой и для несуществующей
+  // ревизии, поэтому сводка не сообщает о чужой поставке ничего (§16).
+  if (row === undefined) {
+    return {
+      pagesTotal: 0,
+      pagesRecognized: 0,
+      pagesAssigned: 0,
+      pagesUnassigned: 0,
+      unassignedPageNumbers: [],
+      documentsTotal: 0,
+      documentsUnknownType: 0,
+    };
+  }
+  return {
+    ...row,
+    unassignedPageNumbers: row.unassignedPageNumbers.slice(0, UNASSIGNED_PAGES_SHOWN),
+  };
+}
+
+export interface ChecksCounts {
+  readonly openErrors: number;
+  readonly openWarnings: number;
+  readonly openInfo: number;
+  readonly undetermined: number;
+  readonly waived: number;
+}
+
+/**
+ * Счётчики сводки — по УЖЕ загруженному списку, а не отдельным запросом.
+ *
+ * Второй запрос считал бы то же самое в другой момент времени и по другому
+ * условию, и число в сводке могло бы разойтись со списком под ней. Расхождение
+ * здесь — не косметика: по нему пользователь решает, все ли ошибки он увидел.
+ *
+ * Важность считается только у открытых: `undetermined` — это «данных для вывода
+ * нет», и складывать его с ошибками значит утверждать дефект там, где методика
+ * его не установила.
+ */
+export function countFindings(items: readonly FindingView[]): ChecksCounts {
+  const openOf = (severity: FindingSeverity): number =>
+    items.filter((item) => item.state === 'open' && item.severity === severity).length;
+  return {
+    openErrors: openOf('error'),
+    openWarnings: openOf('warning'),
+    openInfo: openOf('info'),
+    undetermined: items.filter((item) => item.state === 'undetermined').length,
+    waived: items.filter((item) => item.state === 'waived').length,
+  };
+}
+
+export interface FindingListView {
+  readonly items: readonly FindingView[];
+  readonly latestRun: ChecksRunView | null;
+  readonly shownRunId: string | null;
+}
+
+/**
+ * Замечания одного прогона, готовые к печати строкой «Страница — вид — что не так».
+ *
+ * Номер страницы и вид документа живут только в БД, и собирать подпись обязан
+ * сервер: клиент добывал номер вторым и третьим запросом через карту
+ * `processing_bundle_pages`, а вида документа не знал вовсе. Прецедент —
+ * `submitBlockers`, приходящие готовыми русскими фразами.
+ *
+ * Обогащение сделано КАРТАМИ, а не полудюжиной left join'ов: фиксированное
+ * число запросов независимо от числа замечаний (образец — `loadFields` выше).
+ * Все они идут одной транзакцией: в READ COMMITTED пересегментация посреди
+ * чтения дала бы ответ, часть которого описывает старые замечания, а часть —
+ * уже новые документы.
+ */
 export async function listFindings(
   db: Database,
   scope: AuthScope,
   input: { readonly revisionId: string; readonly validationRunId?: string | undefined },
 ): Promise<readonly FindingView[]> {
-  const conditions =
-    input.validationRunId === undefined
-      ? [eq(findings.revisionId, input.revisionId)]
-      : [
+  const view = await listFindingsView(db, scope, input);
+  return view.items;
+}
+
+export async function listFindingsView(
+  db: Database,
+  scope: AuthScope,
+  input: { readonly revisionId: string; readonly validationRunId?: string | undefined },
+): Promise<FindingListView> {
+  return db.transaction(async (tx) => {
+    const { latest, shownRunId } = await resolveShownRun(
+      tx,
+      scope,
+      input.revisionId,
+      input.validationRunId,
+    );
+    if (shownRunId === null) return { items: [], latestRun: latest, shownRunId: null };
+
+    const rows = await tx
+      .select({
+        id: findings.id,
+        validationRunId: findings.validationRunId,
+        ruleCode: findings.ruleCode,
+        severity: findings.severity,
+        state: findings.state,
+        origin: findings.origin,
+        isBlocking: findings.isBlocking,
+        targetType: findings.targetType,
+        targetId: findings.targetId,
+        sourcePageId: findings.sourcePageId,
+        blockId: findings.blockId,
+        message: findings.message,
+        hint: findings.hint,
+      })
+      .from(findings)
+      .innerJoin(submissionRevisions, eq(findings.revisionId, submissionRevisions.id))
+      .where(
+        withScope(
+          scope,
+          REVISION_SCOPE,
           eq(findings.revisionId, input.revisionId),
-          eq(findings.validationRunId, input.validationRunId),
-        ];
+          eq(findings.validationRunId, shownRunId),
+        ),
+      )
+      .orderBy(asc(findings.ruleCode), asc(findings.createdAt));
 
-  const rows = await db
+    if (rows.length === 0) return { items: [], latestRun: latest, shownRunId };
+
+    const context = await loadFindingContext(
+      tx,
+      input.revisionId,
+      rows.map((row) => row.id),
+    );
+
+    // Приведение к закрытым перечислениям: значения держат CHECK-ограничения
+    // 0006, и расширять их можно только миграцией.
+    const items = rows.map((row) => {
+      const severity = row.severity as FindingSeverity;
+      const state = row.state as FindingView['state'];
+      const evidence = context.evidence.get(row.id) ?? [];
+      const resolved = resolveSubject(row, context, evidence);
+      return {
+        ...row,
+        severity,
+        state,
+        origin: row.origin as FindingOrigin,
+        text: findingText(row),
+        page: resolved.page,
+        document: resolved.document,
+        target: resolved.target,
+        evidence,
+      };
+    });
+
+    return { items: orderForScreen(items), latestRun: latest, shownRunId };
+  });
+}
+
+/**
+ * Порядок задаёт сервер, а не разметка.
+ *
+ * Сначала замечания со страницей — по её номеру: человек читает список,
+ * листая комплект сверху вниз. Внутри страницы — по важности, потом по коду
+ * правила, чтобы порядок был устойчив между обновлениями. Замечания без
+ * страницы идут следом: это «чего в комплекте не хватает», и место им в конце.
+ */
+const SEVERITY_RANK: Record<FindingSeverity, number> = { error: 0, warning: 1, info: 2 };
+
+function orderForScreen(items: readonly FindingView[]): readonly FindingView[] {
+  return [...items].sort((a, b) => {
+    if ((a.page === null) !== (b.page === null)) return a.page === null ? 1 : -1;
+    if (a.page !== null && b.page !== null && a.page.number !== b.page.number) {
+      return a.page.number - b.page.number;
+    }
+    const bySeverity = SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity];
+    if (bySeverity !== 0) return bySeverity;
+    return a.ruleCode.localeCompare(b.ruleCode, 'ru');
+  });
+}
+
+// =====================================================================
+// Обогащение замечаний: страница, документ, объект, доказательство
+// =====================================================================
+
+interface PageFacts {
+  readonly number: number;
+  readonly workingPageIndex: number | null;
+  readonly documentId: string | null;
+}
+
+interface DocumentFacts {
+  readonly label: string;
+  readonly docTypeCode: string | null;
+  readonly firstPageId: string | null;
+}
+
+interface FindingContext {
+  readonly pages: ReadonlyMap<string, PageFacts>;
+  readonly documents: ReadonlyMap<string, DocumentFacts>;
+  readonly fields: ReadonlyMap<string, { documentId: string; fieldCode: string; pageId: string | null }>;
+  readonly materials: ReadonlyMap<string, string>;
+  readonly batches: ReadonlyMap<string, { material: string; detail: string | null }>;
+  readonly registryRows: ReadonlyMap<string, { label: string; detail: string | null }>;
+  readonly evidence: ReadonlyMap<string, readonly FindingEvidenceView[]>;
+  readonly evidencePageOf: ReadonlyMap<string, string>;
+}
+
+async function loadFindingContext(
+  db: Executor,
+  revisionId: string,
+  findingIds: readonly string[],
+): Promise<FindingContext> {
+  // 1. Страницы ревизии вместе с их местом в рабочем документе и документом,
+  //    к которому они отнесены. Карта страниц берётся у ПОСЛЕДНЕГО бандла: на
+  //    неё ссылается только адрес разметки, и адрес по устаревшей карте вёл бы
+  //    не туда.
+  const pageRows = await db
     .select({
-      id: findings.id,
-      validationRunId: findings.validationRunId,
-      ruleCode: findings.ruleCode,
-      severity: findings.severity,
-      state: findings.state,
-      origin: findings.origin,
-      isBlocking: findings.isBlocking,
-      targetType: findings.targetType,
-      targetId: findings.targetId,
-      sourcePageId: findings.sourcePageId,
-      blockId: findings.blockId,
-      message: findings.message,
-      hint: findings.hint,
+      id: sourcePages.id,
+      revisionOrdinal: sourcePages.revisionOrdinal,
+      workingPageIndex: processingBundlePages.workingPageIndex,
+      documentId: pageAssignments.documentId,
     })
-    .from(findings)
-    .innerJoin(submissionRevisions, eq(findings.revisionId, submissionRevisions.id))
-    .where(withScope(scope, REVISION_SCOPE, ...conditions))
-    .orderBy(asc(findings.ruleCode), asc(findings.createdAt));
+    .from(sourcePages)
+    .leftJoin(
+      pageAssignments,
+      and(
+        eq(pageAssignments.revisionId, sourcePages.revisionId),
+        eq(pageAssignments.sourcePageId, sourcePages.id),
+      ),
+    )
+    .leftJoin(
+      processingBundlePages,
+      and(
+        eq(processingBundlePages.sourcePageId, sourcePages.id),
+        eq(
+          processingBundlePages.bundleId,
+          sql`(select b.id from ${processingBundles} b
+                where b.revision_id = ${revisionId}
+                order by b.created_at desc limit 1)`,
+        ),
+      ),
+    )
+    .where(eq(sourcePages.revisionId, revisionId));
 
-  // Приведение к закрытым перечислениям: значения держат CHECK-ограничения
-  // 0006, и расширять их можно только миграцией.
-  return rows.map((row) => ({
-    ...row,
-    severity: row.severity as FindingSeverity,
-    state: row.state as FindingView['state'],
-    origin: row.origin as FindingOrigin,
-  }));
+  const pages = new Map<string, PageFacts>();
+  for (const row of pageRows) {
+    pages.set(row.id, {
+      number: row.revisionOrdinal + 1,
+      workingPageIndex: row.workingPageIndex,
+      documentId: row.documentId,
+    });
+  }
+
+  // 2. Документы с ЭФФЕКТИВНЫМ названием вида. Название берётся из БД, а не из
+  //    каталога в коде: администратор заводит новые виды в портале и
+  //    переименовывает существующие через `doc_type_overrides`, и второй
+  //    источник названия разошёлся бы с первым на первой же правке.
+  const documentRows = await db
+    .select({
+      id: logicalDocuments.id,
+      docTypeCode: logicalDocuments.docTypeCode,
+      title: logicalDocuments.title,
+      typeName: sql<
+        string | null
+      >`coalesce(${docTypeOverrides.name}, ${docTypes.name})`,
+      firstPageId: sql<string | null>`(
+        select a.source_page_id from ${pageAssignments} a
+         where a.document_id = ${logicalDocuments.id}
+         order by a.sort_order asc nulls last
+         limit 1)`,
+    })
+    .from(logicalDocuments)
+    .leftJoin(docTypes, eq(docTypes.code, logicalDocuments.docTypeCode))
+    .leftJoin(docTypeOverrides, eq(docTypeOverrides.docTypeCode, logicalDocuments.docTypeCode))
+    .where(eq(logicalDocuments.revisionId, revisionId));
+
+  const documents = new Map<string, DocumentFacts>();
+  for (const row of documentRows) {
+    documents.set(row.id, {
+      // Заголовок документа — запасной вариант, а не основной: он взят из
+      // скана и может быть чем угодно, тогда как вид ИД — это то слово,
+      // которым инженер документ и называет.
+      label: row.typeName ?? row.title ?? 'Вид документа не определён',
+      docTypeCode: row.docTypeCode,
+      firstPageId: row.firstPageId,
+    });
+  }
+
+  // 3. Реквизиты: у замечания на реквизит документ поднимается по нему, а
+  //    страница — тем же двухступенчатым запасом, что в `loadFields`.
+  const fieldRows = await db
+    .select({
+      id: fieldValues.id,
+      documentId: fieldValues.documentId,
+      fieldCode: fieldValues.fieldCode,
+      blockPageId: layoutBlocks.sourcePageId,
+      textPageId: pageTextVersions.sourcePageId,
+    })
+    .from(fieldValues)
+    .leftJoin(layoutBlocks, eq(fieldValues.sourceBlockId, layoutBlocks.id))
+    .leftJoin(pageTextVersions, eq(fieldValues.pageTextVersionId, pageTextVersions.id))
+    .where(eq(fieldValues.revisionId, revisionId));
+
+  const fields = new Map<string, { documentId: string; fieldCode: string; pageId: string | null }>();
+  for (const row of fieldRows) {
+    fields.set(row.id, {
+      documentId: row.documentId,
+      fieldCode: row.fieldCode,
+      pageId: row.blockPageId ?? row.textPageId ?? null,
+    });
+  }
+
+  // 4. Материалы, партии и строки реестра — объекты замечаний, у которых
+  //    документа может не быть вовсе.
+  const materialRows = await db
+    .select({ id: materials.id, nameRaw: materials.nameRaw })
+    .from(materials)
+    .where(eq(materials.revisionId, revisionId));
+  const materialNames = new Map(materialRows.map((row) => [row.id, row.nameRaw]));
+
+  const batchRows = await db
+    .select({
+      id: batches.id,
+      materialId: batches.materialId,
+      batchNo: batches.batchNo,
+      heatNo: batches.heatNo,
+    })
+    .from(batches)
+    .innerJoin(materials, eq(batches.materialId, materials.id))
+    .where(eq(materials.revisionId, revisionId));
+  const batchFacts = new Map<string, { material: string; detail: string | null }>();
+  for (const row of batchRows) {
+    const parts: string[] = [];
+    if (row.batchNo !== null) parts.push(`партия № ${row.batchNo}`);
+    if (row.heatNo !== null) parts.push(`плавка № ${row.heatNo}`);
+    batchFacts.set(row.id, {
+      material: materialNames.get(row.materialId) ?? 'Материал',
+      detail: parts.length > 0 ? parts.join(', ') : null,
+    });
+  }
+
+  const registryRowFacts = new Map<string, { label: string; detail: string | null }>();
+  const registryRowRows = await db
+    .select({
+      id: registryRows.id,
+      docNameRaw: registryRows.docNameRaw,
+      docNoRaw: registryRows.docNoRaw,
+    })
+    .from(registryRows)
+    .where(eq(registryRows.revisionId, revisionId));
+  for (const row of registryRowRows) {
+    registryRowFacts.set(row.id, {
+      label: row.docNameRaw,
+      detail: row.docNoRaw === null ? null : `№ ${row.docNoRaw}`,
+    });
+  }
+
+  // 5. Доказательства. Таблица заполняется с S9 и до сих пор не читалась ни
+  //    одним маршрутом; это компенсация удаляемого раздела «Реквизиты»:
+  //    «просрочена дата» становится «просрочена дата — в документе написано
+  //    „действителен до 12.03.2024“».
+  const evidence = new Map<string, FindingEvidenceView[]>();
+  const evidencePageOf = new Map<string, string>();
+  if (findingIds.length > 0) {
+    const evidenceRows = await db
+      .select({
+        findingId: findingEvidence.findingId,
+        pageTextVersionId: findingEvidence.pageTextVersionId,
+        charSpan: findingEvidence.charSpan,
+        quote: findingEvidence.quote,
+        sourcePageId: pageTextVersions.sourcePageId,
+      })
+      .from(findingEvidence)
+      .innerJoin(pageTextVersions, eq(findingEvidence.pageTextVersionId, pageTextVersions.id))
+      .where(inArray(findingEvidence.findingId, [...findingIds]))
+      .orderBy(asc(findingEvidence.findingId), asc(findingEvidence.charSpan));
+
+    for (const row of evidenceRows) {
+      const list = evidence.get(row.findingId);
+      const node: FindingEvidenceView = {
+        quote: row.quote,
+        pageTextVersionId: row.pageTextVersionId,
+        charSpan: { start: row.charSpan.start, end: row.charSpan.end },
+      };
+      // Не больше трёх цитат на замечание: экран показывает первую, остальные
+      // нужны поддержке, а неограниченный список раздувает ответ на пустом месте.
+      if (list === undefined) evidence.set(row.findingId, [node]);
+      else if (list.length < EVIDENCE_PER_FINDING) list.push(node);
+      if (!evidencePageOf.has(row.findingId)) evidencePageOf.set(row.findingId, row.sourcePageId);
+    }
+  }
+
+  return {
+    pages,
+    documents,
+    fields,
+    materials: materialNames,
+    batches: batchFacts,
+    registryRows: registryRowFacts,
+    evidence,
+    evidencePageOf,
+  };
+}
+
+const EVIDENCE_PER_FINDING = 3;
+
+interface SubjectRow {
+  readonly id: string;
+  readonly targetType: string;
+  readonly targetId: string | null;
+  readonly sourcePageId: string | null;
+}
+
+interface ResolvedSubject {
+  readonly page: FindingPageView | null;
+  readonly document: FindingDocumentView | null;
+  readonly target: FindingTargetView;
+}
+
+/**
+ * Страница, документ и объект замечания.
+ *
+ * ## Откуда берётся страница
+ *
+ * Приоритет: явная страница замечания → страница доказательства → страница
+ * реквизита → ПЕРВАЯ страница документа. Последняя ступень нужна: замечание
+ * уровня документа («просрочена дата») страницы не имеет, а без неё половина
+ * списка выпала бы из формы «Страница N — вид — что не так».
+ *
+ * Но выдавать начало документа за точное место ошибки нельзя — срок действия
+ * может стоять на любом листе. Поэтому ступень названа в `basis`, и экран
+ * пишет «Документ со стр. N», а не «Страница N». Врать точностью хуже, чем
+ * признать приблизительность.
+ *
+ * ## Почему документ и объект разделены
+ *
+ * `target` бывает не документом: материал, партия, строка реестра. Колонка «Что
+ * за документ», в которую положили бы имя материала, называлась бы неправдой.
+ */
+function resolveSubject(
+  row: SubjectRow,
+  context: FindingContext,
+  evidence: readonly FindingEvidenceView[],
+): ResolvedSubject {
+  const target = describeTarget(row, context);
+  const documentId = documentIdOf(row, context);
+  const facts = documentId === null ? null : (context.documents.get(documentId) ?? null);
+  const document: FindingDocumentView | null =
+    documentId === null || facts === null
+      ? null
+      : { id: documentId, docTypeCode: facts.docTypeCode, label: facts.label };
+
+  const evidencePageId = evidence.length > 0 ? (context.evidencePageOf.get(row.id) ?? null) : null;
+  const fieldPageId =
+    row.targetType === 'field_value' && row.targetId !== null
+      ? (context.fields.get(row.targetId)?.pageId ?? null)
+      : null;
+
+  const candidates: readonly (readonly [string | null, FindingPageView['basis']])[] = [
+    [row.sourcePageId, 'finding'],
+    [evidencePageId, 'evidence'],
+    [fieldPageId, 'field'],
+    [facts?.firstPageId ?? null, 'document'],
+  ];
+
+  for (const [pageId, basis] of candidates) {
+    if (pageId === null) continue;
+    const page = context.pages.get(pageId);
+    if (page === undefined) continue;
+    return {
+      page: { number: page.number, workingPageIndex: page.workingPageIndex, basis },
+      document,
+      target,
+    };
+  }
+
+  return { page: null, document, target };
+}
+
+function documentIdOf(row: SubjectRow, context: FindingContext): string | null {
+  if (row.targetType === 'document') return row.targetId;
+  if (row.targetType === 'field_value' && row.targetId !== null) {
+    return context.fields.get(row.targetId)?.documentId ?? null;
+  }
+  if (row.targetType === 'registry_row' && row.targetId !== null) {
+    // Строка реестра принадлежит документу-реестру, но замечание о ней — про
+    // отсутствующее приложение, а не про сам реестр. Документ здесь не
+    // подставляется намеренно.
+    return null;
+  }
+  // Замечание на страницу: документ у неё есть, если страница отнесена.
+  if (row.sourcePageId !== null) {
+    return context.pages.get(row.sourcePageId)?.documentId ?? null;
+  }
+  return null;
+}
+
+function describeTarget(row: SubjectRow, context: FindingContext): FindingTargetView {
+  const gone: FindingTargetView = {
+    kind: 'gone',
+    label: 'Объект замечания пересобран после проверки',
+    detail: null,
+  };
+
+  switch (row.targetType) {
+    case 'revision':
+      return { kind: 'revision', label: 'Комплект целиком', detail: null };
+    case 'document': {
+      if (row.targetId === null) return gone;
+      const facts = context.documents.get(row.targetId);
+      return facts === undefined
+        ? gone
+        : { kind: 'document', label: facts.label, detail: null };
+    }
+    case 'field_value': {
+      if (row.targetId === null) return gone;
+      const field = context.fields.get(row.targetId);
+      if (field === undefined) return gone;
+      const document = context.documents.get(field.documentId);
+      return {
+        kind: 'field',
+        label: document?.label ?? 'Документ комплекта',
+        detail: `реквизит «${field.fieldCode}»`,
+      };
+    }
+    case 'material': {
+      if (row.targetId === null) return gone;
+      const name = context.materials.get(row.targetId);
+      return name === undefined ? gone : { kind: 'material', label: name, detail: null };
+    }
+    case 'batch': {
+      if (row.targetId === null) return gone;
+      const facts = context.batches.get(row.targetId);
+      return facts === undefined
+        ? gone
+        : { kind: 'batch', label: facts.material, detail: facts.detail };
+    }
+    case 'registry_row': {
+      if (row.targetId === null) return gone;
+      const facts = context.registryRows.get(row.targetId);
+      return facts === undefined
+        ? gone
+        : { kind: 'registry_row', label: facts.label, detail: facts.detail };
+    }
+    case 'source_page': {
+      const page = row.sourcePageId === null ? undefined : context.pages.get(row.sourcePageId);
+      return page === undefined
+        ? gone
+        : { kind: 'page', label: `Страница ${String(page.number)}`, detail: null };
+    }
+    default:
+      // Открытый мир §0.5: незнакомый код цели обязан быть виден, а не
+      // подменяться прочерком, за которым не отличить новое от пустого.
+      return { kind: 'gone', label: row.targetType, detail: null };
+  }
 }
 
 /**
