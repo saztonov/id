@@ -267,6 +267,17 @@ export interface JobRunnerOptions {
     | undefined;
   readonly pruneIntervalMs?: number | undefined;
   readonly backoff?: BackoffPolicy | undefined;
+  /**
+   * Политика повторов для ОТСРОЧЕК — отдельная ручка, как и сама политика.
+   *
+   * Инъекцией по той же причине, что и `backoff`: тест, которому нужно увидеть
+   * второй заход поллера, не должен ждать секунды настоящей паузы. Без этой
+   * ручки отсрочки жили бы по константе, а отказы — по внедрённой политике, и
+   * набор, уменьшивший `backoff` до миллисекунд, всё равно спотыкался бы о
+   * пятисекундную паузу — причём необъяснимо, потому что в его настройках такого
+   * числа нет.
+   */
+  readonly deferralBackoff?: BackoffPolicy | undefined;
   readonly shutdownTimeoutMs?: number | undefined;
 }
 
@@ -296,6 +307,7 @@ export class JobRunner {
   readonly #queues = new Map<JobQueue, QueueState>();
   #running: RunningJob[] = [];
   readonly #backoff: BackoffPolicy;
+  readonly #deferralBackoff: BackoffPolicy;
   readonly #pollIntervalMs: number;
   #reaperTimer: NodeJS.Timeout | null = null;
   #outboxTimer: NodeJS.Timeout | null = null;
@@ -306,6 +318,7 @@ export class JobRunner {
   constructor(options: JobRunnerOptions) {
     this.#options = options;
     this.#backoff = options.backoff ?? DEFAULT_BACKOFF;
+    this.#deferralBackoff = options.deferralBackoff ?? DEFERRAL_BACKOFF;
     this.#pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
 
     for (const queue of JOB_QUEUES) {
@@ -874,7 +887,8 @@ export class JobRunner {
     deferral: { readonly message: string; readonly retryAfterMs: number | null },
   ): Promise<void> {
     const durationMs = Date.now() - startedAt;
-    const retryDelayMs = deferral.retryAfterMs ?? backoffDelayMs(job.attempt, DEFERRAL_BACKOFF);
+    const retryDelayMs =
+      deferral.retryAfterMs ?? backoffDelayMs(job.attempt, this.#deferralBackoff);
 
     await deferJob(this.#options.db, {
       jobId: job.jobId,

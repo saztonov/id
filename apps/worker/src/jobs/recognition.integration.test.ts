@@ -1031,13 +1031,31 @@ describe('нулевой и неполный экспорт не даёт усп
     );
     expect(outcome.warnings).toContainEqual(expect.objectContaining({ code: 'export_incomplete' }));
 
-    // Отдельный класс ошибки: недобор покрытия — это не сетевой сбой и не
-    // расхождение доказательств, и по `job_runs` это обязано быть различимо.
-    const failed = await testDb.query<{ error_class: string }>(
-      `SELECT error_class FROM job_runs
-        WHERE job_type = 'rd.fetch_export_once' AND outcome <> 'succeeded'
-        ORDER BY started_at DESC LIMIT 1`,
+    /**
+     * Отдельный класс ошибки: недобор покрытия — это не сетевой сбой и не
+     * расхождение доказательств, и по `job_runs` это обязано быть различимо.
+     *
+     * Попытки отбираются по СВОЕМУ прогону. Прежний запрос брал последнюю
+     * неуспешную попытку `rd.fetch_export_once` во ВСЕЙ базе, а её пишут и
+     * соседние наборы этого файла: `exhaustFetchAttempts` доводит задачу до
+     * повтора поверх уже закрытого прогона, и та честно отказывает
+     * `RecognitionStateError`. Пока порядок по `started_at` разводил эти строки,
+     * утверждение держалось на совпадении — и разъезжалось под нагрузкой, когда
+     * соседний пакет занимает процессор и метки времени сходятся. `attempt` во
+     * втором ключе сортировки закрывает и ничью по метке.
+     */
+    const failed = await testDb.query<{ error_class: string; attempt: number }>(
+      `SELECT r.error_class, r.attempt FROM job_runs r
+         JOIN jobs j ON j.id = r.job_id
+        WHERE r.job_type = 'rd.fetch_export_once'
+          AND j.payload->>'recognitionRunId' = '${runId}'
+          AND r.outcome <> 'succeeded'
+        ORDER BY r.started_at DESC, r.attempt DESC`,
     );
+    expect(
+      failed.map((row) => row.error_class),
+      'все неуспешные попытки забора у ЭТОГО прогона',
+    ).not.toHaveLength(0);
     expect(failed[0]?.error_class).toBe('ExportCoverageError');
     // Частичный результат в базу НЕ попадает: проверка стоит до записи.
     expect(await countOf('page_text_versions', runId)).toBe(0);
