@@ -37,8 +37,12 @@ import type { FindingTargetType, IdentifierCheck } from '@id/contracts';
 import { checkInn, checkOgrn, normalizeDocNo } from '@id/contracts';
 
 import {
+  ACT_FIELDS,
   ACT_TYPES,
   REGISTRY_TYPE,
+  actField,
+  actListOf,
+  actTextOf,
   categoryInProfile,
   digitsOf,
   documentById,
@@ -77,34 +81,24 @@ import type {
 /**
  * Коды реквизитов, которые читают правила этого файла.
  *
- * Собраны в одном месте и экспортированы намеренно: экстрактор (§8.4) и
- * правила обязаны называть поле одинаково, а разъехавшиеся строковые литералы
- * в двух пакетах дают молчаливый отказ — правило исправно работает и никогда
- * ничего не находит. Базовые коды — из `base-fields.ts`, типовые — из
- * `apps/api/src/segmentation/extract.ts`, поля бланка АОСР согласованы с
- * экстрактором отдельно.
+ * ## Почему это теперь ре-экспорт, а не собственная таблица
+ *
+ * Собственная таблица прожила до S27 и всё это время называла семь реквизитов
+ * именами, которых нет ни в каталоге, ни в одном экстракторе: `date_start`,
+ * `date_end`, `work_name`, `p4_annexes`, `rd_cipher`, `signers`,
+ * `contractor_*`. Правила исправно работали и никогда ничего не находили —
+ * ровно тот молчаливый отказ, о котором предупреждал комментарий над таблицей.
+ * Предупреждение не помогло, потому что второй список всё равно оставался
+ * вторым списком.
+ *
+ * Теперь имя реквизита акта живёт в одном месте (`helpers.ts`, `ACT_FIELDS`) и
+ * сверяется тестом со схемой типа `aosr` в каталоге и со списком реализованных
+ * экстракторов. Здесь остаётся ре-экспорт под прежним именем: `AOSR_FIELDS`
+ * читает офлайн-харнес, и переименование ради переименования — правка чужого
+ * кода.
  */
 export const AOSR_FIELDS = {
-  objectName: 'object_name',
-  actNumber: 'act_number',
-  actDate: 'act_date',
-  dateStart: 'date_start',
-  dateEnd: 'date_end',
-  /** Наименование работ п. 1; синонимы перечислены в `WORK_NAME_FIELDS`. */
-  workName: 'work_name',
-  workNameAlt: 'p1_work_name',
-  workNameLegacy: 'p1_works',
-  workLocation: 'p1_location',
-  rdCipher: 'rd_cipher',
-  materials: 'p3_materials',
-  registryRef: 'p3_registry_ref',
-  annexes: 'p4_annexes',
-  nextWorks: 'p7_next_works',
-  signers: 'signers',
-  contractorName: 'contractor_name',
-  contractorInn: 'contractor_inn',
-  contractorOgrn: 'contractor_ogrn',
-  worksPerformedBy: 'works_performed_by',
+  ...ACT_FIELDS,
   /** Базовые реквизиты доказательных документов (`base-fields.ts`). */
   number: 'number',
   manufacturer: 'manufacturer',
@@ -112,13 +106,6 @@ export const AOSR_FIELDS = {
   /** Типовой реквизит (`extract.ts`). */
   ndReference: 'nd_reference',
 } as const;
-
-/** Наименование работ п. 1 в порядке приоритета. */
-const WORK_NAME_FIELDS: readonly string[] = [
-  AOSR_FIELDS.workName,
-  AOSR_FIELDS.workNameAlt,
-  AOSR_FIELDS.workNameLegacy,
-];
 
 /**
  * Подписанты бланка РД-11-02 и реквизиты их приказов.
@@ -245,17 +232,13 @@ function aosrActs(graph: CheckGraph): DocumentNode[] {
 }
 
 function actLabel(act: DocumentNode): string {
-  const number = textOf(act, AOSR_FIELDS.actNumber) ?? textOf(act, AOSR_FIELDS.number);
+  const number = actTextOf(act, AOSR_FIELDS.actNumber) ?? textOf(act, AOSR_FIELDS.number);
   return number === null ? `(документ ${String(act.ordinal)})` : `№ ${number}`;
 }
 
-/** Поле наименования работ п. 1 по любому из согласованных кодов. */
+/** Поле наименования работ п. 1 — канонический код и его исторические имена. */
 function workNameField(act: DocumentNode): FieldNode | null {
-  for (const code of WORK_NAME_FIELDS) {
-    const value = field(act, code);
-    if (value !== null) return value;
-  }
-  return null;
+  return actField(act, AOSR_FIELDS.workName);
 }
 
 function trimmedText(value: FieldNode | null): string | null {
@@ -426,7 +409,7 @@ function evaluateObjectName(graph: CheckGraph): RuleResult {
   let checked = 0;
 
   for (const act of actList) {
-    const value = field(act, AOSR_FIELDS.objectName);
+    const value = actField(act, AOSR_FIELDS.objectName);
     const text = trimmedText(value);
     if (text === null) {
       findings.push(
@@ -465,6 +448,23 @@ function evaluateObjectName(graph: CheckGraph): RuleResult {
   return summarize(findings, checked, 'ни в одном акте не распознано наименование объекта');
 }
 
+/**
+ * Реквизиты стороны в шапке акта.
+ *
+ * ## Почему «реквизита нет» и «графа пуста» — разные вердикты
+ *
+ * До S27 правило объявляло `defect` на всякий отсутствующий реквизит и на
+ * реальном корпусе выдавало ТРИ ложные ошибки на каждый комплект: `contractor_*`
+ * не производил ни один экстрактор, и подрядчик получал обвинение в незаполненной
+ * шапке за то, что портал её не прочитал. Это ровно тот сорт замечания, который
+ * §0.5 называет разрушающим доверие быстрее пропуска.
+ *
+ * Различие выражено формой данных, а не догадкой. Узла нет вовсе — извлечение до
+ * реквизита не дошло, вердикт `undetermined`. Узел есть, значение пустое —
+ * значит реквизит ИСКАЛИ и нашли пустую графу, и это дефект бумаги. Тот же приём
+ * уже применён в `evaluateItem1` к п. 1; наблюдаемое пустое значение производит
+ * LLM-ступень извлечения (см. `llm-extract.ts`).
+ */
 function evaluateHeaderParties(graph: CheckGraph): RuleResult {
   const actList = aosrActs(graph);
   if (actList.length === 0) return notApplicable(NO_ACTS);
@@ -476,11 +476,27 @@ function evaluateHeaderParties(graph: CheckGraph): RuleResult {
   ];
 
   const findings: RuleFinding[] = [];
+  let checked = 0;
 
   for (const act of actList) {
     for (const [code, label] of required) {
-      const value = field(act, code);
+      const value = actField(act, code);
+
+      if (value === null) {
+        findings.push(
+          unknown({
+            ...anchorOfDocument(act),
+            origin: 'deterministic',
+            message: `В шапке акта ${actLabel(act)} не извлечён реквизит стороны: ${label} — проверить его заполнение нечем.`,
+            hint: 'Откройте шапку акта и введите реквизиты лица, выполнившего работы, вручную.',
+          }),
+        );
+        continue;
+      }
+
+      checked += 1;
       if (trimmedText(value) !== null) continue;
+
       findings.push(
         defect({
           ...anchorOfField(act, value),
@@ -492,7 +508,7 @@ function evaluateHeaderParties(graph: CheckGraph): RuleResult {
     }
   }
 
-  return fromFindings(findings);
+  return summarize(findings, checked, 'ни в одном акте не извлечены реквизиты стороны');
 }
 
 /**
@@ -570,9 +586,9 @@ function evaluateCounterpartyTriple(graph: CheckGraph): RuleResult {
   let checked = 0;
 
   for (const act of actList) {
-    const nameValue = field(act, AOSR_FIELDS.contractorName);
-    const innValue = field(act, AOSR_FIELDS.contractorInn);
-    const ogrnValue = field(act, AOSR_FIELDS.contractorOgrn);
+    const nameValue = actField(act, AOSR_FIELDS.contractorName);
+    const innValue = actField(act, AOSR_FIELDS.contractorInn);
+    const ogrnValue = actField(act, AOSR_FIELDS.contractorOgrn);
     const name = trimmedText(nameValue);
     const inn = trimmedText(innValue);
     const ogrn = trimmedText(ogrnValue);
@@ -675,7 +691,7 @@ function evaluateActNumberPattern(graph: CheckGraph): RuleResult {
   let checked = 0;
 
   for (const act of actList) {
-    const value = field(act, AOSR_FIELDS.actNumber) ?? field(act, AOSR_FIELDS.number);
+    const value = actField(act, AOSR_FIELDS.actNumber) ?? field(act, AOSR_FIELDS.number);
     const number = trimmedText(value);
     if (number === null) {
       findings.push(
@@ -713,9 +729,9 @@ function evaluateActDates(graph: CheckGraph): RuleResult {
   let checked = 0;
 
   for (const act of actList) {
-    const actDateValue = field(act, AOSR_FIELDS.actDate);
-    const startValue = field(act, AOSR_FIELDS.dateStart);
-    const endValue = field(act, AOSR_FIELDS.dateEnd);
+    const actDateValue = actField(act, AOSR_FIELDS.actDate);
+    const startValue = actField(act, AOSR_FIELDS.dateStart);
+    const endValue = actField(act, AOSR_FIELDS.dateEnd);
 
     const actDate = actDateValue?.valueDate ?? null;
     const start = startValue?.valueDate ?? null;
@@ -855,7 +871,7 @@ function evaluateSignerSet(graph: CheckGraph, params: RuleParams): RuleResult {
         unknown({
           ...anchorOfDocument(act),
           origin: 'deterministic',
-          message: `Подписанты акта ${actLabel(act)} не распознаны по ролям${listOf(act, AOSR_FIELDS.signers).length > 0 ? ' (в акте распознан только общий список подписантов)' : ''} — состав проверить нечем.`,
+          message: `Подписанты акта ${actLabel(act)} не распознаны по ролям — состав проверить нечем.`,
           hint: 'Заполните представителей сторон в блоке подписей акта и подтвердите реквизиты.',
         }),
       );
@@ -919,8 +935,8 @@ function evaluateInspectionOrg(graph: CheckGraph): RuleResult {
   let checked = 0;
 
   for (const act of actList) {
-    const inspectionValue = field(act, AOSR_FIELDS.worksPerformedBy);
-    const contractorValue = field(act, AOSR_FIELDS.contractorName);
+    const inspectionValue = actField(act, AOSR_FIELDS.worksPerformedBy);
+    const contractorValue = actField(act, AOSR_FIELDS.contractorName);
     const inspection = trimmedText(inspectionValue);
     const contractor = trimmedText(contractorValue);
 
@@ -965,7 +981,7 @@ function evaluateItem1(graph: CheckGraph): RuleResult {
 
   for (const act of actList) {
     const nameValue = workNameField(act);
-    const locationValue = field(act, AOSR_FIELDS.workLocation);
+    const locationValue = actField(act, AOSR_FIELDS.workLocation);
 
     // Отсутствие поля и ПУСТОЕ поле — разные вещи: первое означает, что
     // извлечение не дошло до пункта, второе — что в бланке пусто.
@@ -1034,9 +1050,14 @@ function evaluateRdRevision(graph: CheckGraph, params: RuleParams): RuleResult {
   let checked = 0;
 
   for (const act of actList) {
-    const value = field(act, AOSR_FIELDS.rdCipher);
-    const cipher = trimmedText(value);
-    if (cipher === null) {
+    const value = actField(act, AOSR_FIELDS.rdCipher);
+    // П. 2 — СПИСОК: бланк допускает несколько шифров, и номер изменения
+    // обязан стоять у каждого. Чтение одним текстом брало у списка либо
+    // склейку через «; » (детерминированный экстрактор), либо `null` (модель
+    // кладёт элементы только в `value_json`), — во втором случае правило
+    // объявляло реквизит нераспознанным на каждом акте.
+    const ciphers = actListOf(act, AOSR_FIELDS.rdCipher);
+    if (ciphers.length === 0) {
       findings.push(
         unknown({
           ...anchorOfField(act, value),
@@ -1049,16 +1070,18 @@ function evaluateRdRevision(graph: CheckGraph, params: RuleParams): RuleResult {
     }
 
     checked += 1;
-    if (revision.test(cipher)) continue;
+    for (const cipher of ciphers) {
+      if (revision.test(cipher)) continue;
 
-    findings.push(
-      defect({
-        ...anchorOfField(act, value),
-        origin: 'deterministic',
-        message: `Шифр рабочей документации «${cipher}» в п. 2 акта ${actLabel(act)} указан без номера изменения.`,
-        hint: 'Допишите к шифру номер изменения (например, «изм. 2») — без него нельзя установить, по какой редакции выполнены работы.',
-      }),
-    );
+      findings.push(
+        defect({
+          ...anchorOfField(act, value),
+          origin: 'deterministic',
+          message: `Шифр рабочей документации «${cipher}» в п. 2 акта ${actLabel(act)} указан без номера изменения.`,
+          hint: 'Допишите к шифру номер изменения (например, «изм. 2») — без него нельзя установить, по какой редакции выполнены работы.',
+        }),
+      );
+    }
   }
 
   return summarize(findings, checked, 'ни в одном акте не распознан шифр рабочей документации');
@@ -1082,9 +1105,9 @@ function evaluateRdInCatalog(graph: CheckGraph): RuleResult {
   let checked = 0;
 
   for (const act of actList) {
-    const value = field(act, AOSR_FIELDS.rdCipher);
-    const cipher = trimmedText(value);
-    if (cipher === null) {
+    const value = actField(act, AOSR_FIELDS.rdCipher);
+    const ciphers = actListOf(act, AOSR_FIELDS.rdCipher);
+    if (ciphers.length === 0) {
       findings.push(
         unknown({
           ...anchorOfField(act, value),
@@ -1097,21 +1120,23 @@ function evaluateRdInCatalog(graph: CheckGraph): RuleResult {
     }
 
     checked += 1;
-    const wanted = normalizeDocNo(cipherWithoutRevision(cipher));
-    const found = graph.rdDocuments.some((rd) => {
-      const actual = normalizeDocNo(rd.cipher);
-      return actual.normalized === wanted.normalized || actual.folded === wanted.folded;
-    });
-    if (found) continue;
+    for (const cipher of ciphers) {
+      const wanted = normalizeDocNo(cipherWithoutRevision(cipher));
+      const found = graph.rdDocuments.some((rd) => {
+        const actual = normalizeDocNo(rd.cipher);
+        return actual.normalized === wanted.normalized || actual.folded === wanted.folded;
+      });
+      if (found) continue;
 
-    findings.push(
-      defect({
-        ...anchorOfField(act, value),
-        origin: 'deterministic',
-        message: `Шифр рабочей документации «${cipher}» из п. 2 акта ${actLabel(act)} отсутствует в справочнике рабочей документации объекта.`,
-        hint: 'Заведите шифр в справочнике рабочей документации либо исправьте его в п. 2 акта.',
-      }),
-    );
+      findings.push(
+        defect({
+          ...anchorOfField(act, value),
+          origin: 'deterministic',
+          message: `Шифр рабочей документации «${cipher}» из п. 2 акта ${actLabel(act)} отсутствует в справочнике рабочей документации объекта.`,
+          hint: 'Заведите шифр в справочнике рабочей документации либо исправьте его в п. 2 акта.',
+        }),
+      );
+    }
   }
 
   return summarize(findings, checked, 'ни в одном акте не распознан шифр рабочей документации');
@@ -1170,16 +1195,16 @@ function evaluateRegistryReference(graph: CheckGraph, params: RuleParams): RuleR
   let checked = 0;
 
   for (const act of actList) {
-    const listed = listOf(act, AOSR_FIELDS.materials);
+    const listed = actListOf(act, AOSR_FIELDS.materials);
     if (listed.length === 0) continue;
 
     checked += 1;
     if (listed.length <= limit) continue;
-    if (trimmedText(field(act, AOSR_FIELDS.registryRef)) !== null) continue;
+    if (actTextOf(act, AOSR_FIELDS.registryRef) !== null) continue;
 
     findings.push(
       defect({
-        ...anchorOfField(act, field(act, AOSR_FIELDS.materials)),
+        ...anchorOfField(act, actField(act, AOSR_FIELDS.materials)),
         origin: 'deterministic',
         message: `В п. 3 акта ${actLabel(act)} перечислено ${String(listed.length)} документов (больше ${String(limit)}), но ссылки на реестр приложений нет.`,
         hint: 'Замените перечисление в п. 3 ссылкой на реестр приложений либо добавьте её к перечню.',
@@ -1198,11 +1223,16 @@ function evaluateAnnexesPresent(graph: CheckGraph): RuleResult {
   let checked = 0;
 
   for (const act of actList) {
-    const annexes = listOf(act, AOSR_FIELDS.annexes);
-    if (annexes.length === 0) continue;
+    // Правило про ПУНКТ 4 — «предъявлены документы, подтверждающие
+    // соответствие работ». Блок «Приложения» в подвале бланка перечисляет
+    // другое (исполнительные схемы, протоколы) и живёт под своим кодом
+    // `annexes`; смешивать их значило бы требовать наличия схемы по номеру,
+    // которого у схемы не бывает.
+    const documents = actListOf(act, AOSR_FIELDS.documents);
+    if (documents.length === 0) continue;
 
-    const anchor = anchorOfField(act, field(act, AOSR_FIELDS.annexes));
-    for (const entry of annexes) {
+    const anchor = anchorOfField(act, actField(act, AOSR_FIELDS.documents));
+    for (const entry of documents) {
       const docNo = docNoOf(entry);
       if (docNo === null) {
         findings.push(
@@ -1264,7 +1294,14 @@ function evaluateSchemeConsistency(graph: CheckGraph): RuleResult {
   for (const act of actList) {
     const workValue = workNameField(act);
     const workText = trimmedText(workValue);
-    const schemeTexts = [...listOf(act, AOSR_FIELDS.annexes), ...schemeTitles];
+    // Схема называется и в п. 4, и в блоке «Приложения» — объединение, а не
+    // выбор: бланки заполняют по-разному, и количественный признак может
+    // оказаться в любом из двух.
+    const schemeTexts = [
+      ...actListOf(act, AOSR_FIELDS.documents),
+      ...actListOf(act, AOSR_FIELDS.attachments),
+      ...schemeTitles,
+    ];
 
     const inWork = quantitiesOf(workText === null ? [] : [workText]);
     const inScheme = quantitiesOf(schemeTexts);
@@ -1312,7 +1349,7 @@ function evaluateNextWorks(graph: CheckGraph): RuleResult {
 
   for (const act of actList) {
     const workValue = workNameField(act);
-    const nextValue = field(act, AOSR_FIELDS.nextWorks);
+    const nextValue = actField(act, AOSR_FIELDS.nextWorks);
     const work = trimmedText(workValue);
     const next = trimmedText(nextValue);
 
@@ -1728,7 +1765,7 @@ function evaluateDuplicateActs(graph: CheckGraph): RuleResult {
   let checked = 0;
 
   for (const act of actList) {
-    const value = field(act, AOSR_FIELDS.actNumber) ?? field(act, AOSR_FIELDS.number);
+    const value = actField(act, AOSR_FIELDS.actNumber) ?? field(act, AOSR_FIELDS.number);
     const number = trimmedText(value);
     if (number === null) continue;
     checked += 1;
@@ -1792,7 +1829,7 @@ function evaluateSro(graph: CheckGraph): RuleResult {
     seen.set(digitsOf(contractor.inn), anchorOf('revision', graph.revision.id));
   }
   for (const act of aosrActs(graph)) {
-    const value = field(act, AOSR_FIELDS.contractorInn);
+    const value = actField(act, AOSR_FIELDS.contractorInn);
     const text = trimmedText(value);
     if (text === null) continue;
     const digits = digitsOf(text);
@@ -1862,12 +1899,6 @@ function evaluateNrs(graph: CheckGraph, params: RuleParams): RuleResult {
       const key = personKey(name);
       if (key !== '' && !signers.has(key)) {
         signers.set(key, { name, anchor: anchorOfField(act, value) });
-      }
-    }
-    for (const name of listOf(act, AOSR_FIELDS.signers)) {
-      const key = personKey(name);
-      if (key !== '' && !signers.has(key)) {
-        signers.set(key, { name, anchor: anchorOfField(act, field(act, AOSR_FIELDS.signers)) });
       }
     }
   }

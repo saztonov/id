@@ -293,10 +293,40 @@ describe('AOSR.HDR.020 — реквизиты сторон', () => {
     expect(verdictOf('AOSR.HDR.020', actGraph(healthyActFields()))).toBe('pass');
   });
 
-  it('отсутствие ИНН в шапке даёт fail', () => {
+  /**
+   * Пара тестов на различие, ради которого правило переписано на S27.
+   *
+   * До неё правило объявляло `fail` в обоих случаях и на реальном корпусе
+   * выдавало три ложные ошибки на каждый комплект: `contractor_*` не выдавал
+   * ни один экстрактор, и подрядчик получал обвинение в незаполненной шапке за
+   * то, что портал её не прочитал.
+   */
+  it('реквизит не извлечён — undetermined, а не обвинение подрядчика', () => {
     const graph = actGraph(without(healthyActFields(), AOSR_FIELDS.contractorInn));
+    expect(verdictOf('AOSR.HDR.020', graph)).toBe('undetermined');
+    expect(messagesOf('AOSR.HDR.020', graph).join(' ')).toContain('не извлечён реквизит стороны');
+  });
+
+  it('графа наблюдалась пустой — fail', () => {
+    // Узел есть, значение пустое, цитата отобразилась: реквизит ИСКАЛИ и нашли
+    // пустую графу. Такую строку производит LLM-ступень извлечения.
+    const graph = actGraph(
+      replacing(healthyActFields(), text(AOSR_FIELDS.contractorInn, '', { quote: 'ИНН' })),
+    );
     expect(verdictOf('AOSR.HDR.020', graph)).toBe('fail');
     expect(messagesOf('AOSR.HDR.020', graph).join(' ')).toContain('ИНН лица, выполнившего работы');
+  });
+
+  it('ни один реквизит стороны не извлечён — правило неприменимо', () => {
+    const graph = actGraph(
+      without(
+        healthyActFields(),
+        AOSR_FIELDS.contractorName,
+        AOSR_FIELDS.contractorInn,
+        AOSR_FIELDS.contractorOgrn,
+      ),
+    );
+    expect(verdictOf('AOSR.HDR.020', graph)).toBe('undetermined');
   });
 
   it('без актов правило неприменимо', () => {
@@ -677,7 +707,7 @@ describe('AOSR.P4.080 — приложения присутствуют в ко�
       documents: [
         makeAct([
           ...healthyActFields(),
-          listField(AOSR_FIELDS.annexes, ['Паспорт качества № 16005']),
+          listField(AOSR_FIELDS.documents, ['Паспорт качества № 16005']),
         ]),
         quality,
       ],
@@ -688,7 +718,7 @@ describe('AOSR.P4.080 — приложения присутствуют в ко�
   it('приложение с чужим номером не найдено — fail', () => {
     const graph = makeGraph({
       documents: [
-        makeAct([...healthyActFields(), listField(AOSR_FIELDS.annexes, ['Паспорт № 99999'])]),
+        makeAct([...healthyActFields(), listField(AOSR_FIELDS.documents, ['Паспорт № 99999'])]),
         quality,
       ],
     });
@@ -699,7 +729,10 @@ describe('AOSR.P4.080 — приложения присутствуют в ко�
   it('приложение без номера даёт undetermined, а акт без перечня — n_a', () => {
     const graph = makeGraph({
       documents: [
-        makeAct([...healthyActFields(), listField(AOSR_FIELDS.annexes, ['Исполнительная схема'])]),
+        makeAct([
+          ...healthyActFields(),
+          listField(AOSR_FIELDS.documents, ['Исполнительная схема']),
+        ]),
       ],
     });
     expect(verdictOf('AOSR.P4.080', graph)).toBe('undetermined');
@@ -1176,7 +1209,7 @@ describe('AOSR.P4.081 — дефект №6 корпуса: 2 слоя в п. 1 
   function schemeGraph(workName: string, schemeName: string | null): CheckGraph {
     const fields = [
       ...replacing(healthyActFields(), text(AOSR_FIELDS.workName, workName)),
-      ...(schemeName === null ? [] : [listField(AOSR_FIELDS.annexes, [schemeName])]),
+      ...(schemeName === null ? [] : [listField(AOSR_FIELDS.documents, [schemeName])]),
     ];
     return actGraph(fields);
   }

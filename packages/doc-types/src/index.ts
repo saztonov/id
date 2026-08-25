@@ -29,6 +29,17 @@ export { BASE_EVIDENCE_FIELDS, fieldsForType } from './base-fields.js';
 export { PAGE_ROLES } from './page-roles.js';
 
 export {
+  KNOWN_TYPE_MIN_CONFIDENCE,
+  codesOfGroup,
+  groupOf,
+  isAnalysisAnchor,
+  isFallbackCode,
+  isQualityDocCode,
+  isRegistryCode,
+  kindOf,
+} from './kinds.js';
+
+export {
   DEFAULT_HEADING_LINES,
   matchDocTypes,
   matchPageRoles,

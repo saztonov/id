@@ -23,7 +23,7 @@
  * ошибка подсказки обязана приводить к `n_a`, а не к ложному замечанию.
  */
 import { MATERIAL_CATEGORIES, type MaterialCategoryCode } from '@id/contracts';
-import { QUALITY_TYPES, foldHomoglyphs, isFallbackCode } from './helpers.js';
+import { foldHomoglyphs, isFallbackCode, isQualityDocCode } from './helpers.js';
 import type { BatchNode, DocumentNode, MaterialNode } from './types.js';
 
 /** Реквизиты, из которых собирается материал. */
@@ -153,7 +153,7 @@ export function deriveMaterials(
     // а не продукцию, и его наименование, попав сюда, породило бы материал
     // «Устройство гидроизоляции» без единого документа подтверждения.
     const code = document.docTypeCode;
-    if (code === null || isFallbackCode(code) || !QUALITY_TYPES.test(code)) continue;
+    if (code === null || isFallbackCode(code) || !isQualityDocCode(code)) continue;
 
     const productName = firstText(document, FIELD_PRODUCT_NAME);
     if (productName === null) continue;

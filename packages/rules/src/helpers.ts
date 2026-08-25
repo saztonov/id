@@ -20,30 +20,40 @@ import type {
 // Виды документов
 // ---------------------------------------------------------------------------
 
-/** Акт освидетельствования скрытых работ и его родственники. */
+/**
+ * Принадлежность вида документа выводится из КАТАЛОГА, а не из регулярки.
+ *
+ * До S27 здесь жили три регулярных выражения — `QUALITY_TYPES`,
+ * `PRIMARY_TYPES`, `PROTOCOL_TYPES`, — и такие же копии лежали в задаче
+ * построения графа и в офлайн-харнесе. Копии уже разошлись: в здешней не было
+ * `other_quality_docs`, то есть «иной документ о качестве» для правил
+ * документом о качестве не являлся, а для графа являлся. Каталог объявляет
+ * группу полем `group`, и один источник дешевле трёх согласованных.
+ *
+ * Предикаты ре-экспортируются под прежними именами: их читают правила, тесты и
+ * харнес, и переименование ради переименования — правка чужого кода.
+ */
+export { isAnalysisAnchor, isFallbackCode, isQualityDocCode } from '@id/doc-types';
+
+/** Акт освидетельствования — якорь проверки комплекта. */
 export const ACT_TYPES = /^aosr/u;
 
 /** Реестр приложений. */
 export const REGISTRY_TYPE = 'annex_registry';
 
-/** Протоколы испытаний и акты отбора проб. */
-export const PROTOCOL_TYPES = /^lab_protocol_|^sampling_act$|^protocol_/u;
-
-/** Документы о качестве материалов (§8.1, группа «Документы качества»). */
-export const QUALITY_TYPES =
-  /^cert_conformity$|^declaration$|^quality_passport$|^technical_passport$|^mill_certificate$|^mix_quality_doc$|^fire_certificate$|^refusal_letter$|^equipment_passport$|^ttn$/u;
-
 /**
- * Резервные коды каталога (§8.1).
+ * Протоколы испытаний и акты отбора проб.
  *
- * Определяются по суффиксу и по общему коду, а не списком: группы резервных
- * типов заводятся эксплуатацией, и закрытый список в коде превратил бы
- * появление инженерных сетей в задачу на разработку.
+ * Единственное из трёх прежних выражений, которое ОСТАЛОСЬ выражением, и это
+ * решение, а не недоделка: «испытательный протокол» каталог группой не
+ * моделирует. Группа `tests_conclusions` шире с одной стороны — в неё входят
+ * экспертные и санитарные заключения, испытаний не проводившие, — и уже с
+ * другой: `protocol_grounding` и `protocol_insulation_resistance` лежат в
+ * группе `networks`. Замена на группу сдвинула бы область правила `DATE.372`
+ * в обе стороны сразу, и на корпусе это видно: три пакета получили
+ * «экспертное заключение не связано с актом» там, где протокола нет вовсе.
  */
-export function isFallbackCode(code: string | null): boolean {
-  if (code === null) return false;
-  return code === 'unknown_document' || code.startsWith('other_');
-}
+export const PROTOCOL_TYPES = /^lab_protocol_|^sampling_act$|^protocol_/u;
 
 // ---------------------------------------------------------------------------
 // Выборки из графа
@@ -113,6 +123,147 @@ export function textOf(document: DocumentNode, fieldCode: string): string | null
   const value = field(document, fieldCode);
   const text = value?.valueText ?? null;
   return text === null || text.trim() === '' ? null : text;
+}
+
+// ---------------------------------------------------------------------------
+// Реквизиты акта: канонические коды и группы совместимости
+// ---------------------------------------------------------------------------
+
+/**
+ * Коды реквизитов акта — РОВНО коды каталога.
+ *
+ * ## Зачем таблица, если код можно написать строкой по месту
+ *
+ * До S27 правила называли семь реквизитов акта именами, которых нет ни в
+ * каталоге, ни в одном экстракторе: `date_start`, `date_end`, `work_name`,
+ * `p4_annexes`, `rd_cipher`, `signers` — и весь чек-лист АОСР честно отвечал
+ * «не распознано» на любом комплекте. Тесты этого не ловили, потому что сами
+ * клали в граф те же несуществующие коды: тест доказывал согласованность теста
+ * с правилом, а не с конвейером.
+ *
+ * Поэтому таблица здесь, а не в `aosr.ts`: её читают и правила акта, и правила
+ * дат (`worksDateOf`), и офлайн-харнес, а `field-codes.test.ts` сверяет каждый
+ * код со схемой типа `aosr` в каталоге и со списком реализованных экстракторов.
+ */
+export const ACT_FIELDS = {
+  objectName: 'object_name',
+  actNumber: 'act_number',
+  actDate: 'act_date',
+  /** п. 5, начало работ. */
+  dateStart: 'p5_date_start',
+  /** п. 5, окончание работ. */
+  dateEnd: 'p5_date_end',
+  /** п. 1, наименование предъявленных к освидетельствованию работ. */
+  workName: 'p1_works',
+  /** п. 1, привязка: оси, отметки, захватки. */
+  workLocation: 'p1_location',
+  /** п. 2, проектная документация и номер изменения. СПИСОК. */
+  rdCipher: 'p2_project_docs',
+  /** п. 3, применённые материалы. СПИСОК. */
+  materials: 'p3_materials',
+  /** п. 3, ссылка на реестр приложений. */
+  registryRef: 'p3_registry_ref',
+  /** п. 4, предъявленные подтверждающие документы. СПИСОК. */
+  documents: 'p4_documents',
+  /** Блок «Приложения» в подвале бланка — не то же, что п. 4. СПИСОК. */
+  attachments: 'annexes',
+  /** п. 7, разрешённые последующие работы. */
+  nextWorks: 'p7_next_works',
+  contractorName: 'contractor_name',
+  contractorInn: 'contractor_inn',
+  contractorOgrn: 'contractor_ogrn',
+  worksPerformedBy: 'works_performed_by',
+} as const;
+
+/**
+ * Исторические коды: читаются, но не производятся.
+ *
+ * ## Почему это НЕ синонимы
+ *
+ * Синоним — это второе имя того же поля, и он обязан быть именем, которого
+ * больше ни у кого нет. `p2_project_docs` и `p4_documents` синонимами быть не
+ * могли бы: оба объявлены в схеме акта как самостоятельные реквизиты, и
+ * «читать одно как другое» дало бы два значения одного смысла с выбором по
+ * уверенности — то есть монетку.
+ *
+ * Здесь перечислены коды, которые в схеме типа `aosr` НЕ объявлены: они либо
+ * остались в уже записанных `field_values` от прежних прогонов, либо жили
+ * только в правилах. Ни один из них не является живым кодом схемы акта, и это
+ * проверяется тестом. Привязка к типу существенна: `date_start` и `date_end` —
+ * живые коды у `aosr_responsible_structures` и `aosr_networks`, и там читать их
+ * как исторические было бы неверно.
+ */
+const ACT_FIELD_LEGACY: Readonly<Record<string, readonly string[]>> = {
+  [ACT_FIELDS.dateStart]: ['date_start'],
+  [ACT_FIELDS.dateEnd]: ['date_end'],
+  [ACT_FIELDS.workName]: ['work_name', 'p1_work_name'],
+  [ACT_FIELDS.rdCipher]: ['rd_cipher'],
+  [ACT_FIELDS.documents]: ['p4_annexes'],
+};
+
+/** Канонический код и его исторические имена, в порядке предпочтения. */
+export function actFieldCodes(code: string): readonly string[] {
+  return [code, ...(ACT_FIELD_LEGACY[code] ?? [])];
+}
+
+/** Все канонические коды акта — вход теста и генератора списка полей. */
+export const ACT_FIELD_CODES: readonly string[] = Object.values(ACT_FIELDS);
+
+/** Все исторические коды акта. */
+export const ACT_LEGACY_FIELD_CODES: readonly string[] = Object.values(ACT_FIELD_LEGACY).flat();
+
+/**
+ * Значение реквизита акта с учётом исторических имён.
+ *
+ * Порядок разрешения: подтверждённое человеком значение под ЛЮБЫМ из имён,
+ * затем канонический код, затем исторические. Правка инженера приоритетна
+ * независимо от того, под каким именем она сохранена, — иначе переименование
+ * кода обесценило бы уже сделанную работу.
+ */
+export function actField(document: DocumentNode, code: string): FieldNode | null {
+  const codes = actFieldCodes(code);
+
+  for (const candidate of codes) {
+    const verified = document.fields.find(
+      (value) => value.fieldCode === candidate && value.isVerified,
+    );
+    if (verified !== undefined) return verified;
+  }
+
+  for (const candidate of codes) {
+    const value = field(document, candidate);
+    if (value !== null) return value;
+  }
+
+  return null;
+}
+
+/** Текст реквизита акта; пустая строка читается как отсутствие значения. */
+export function actTextOf(document: DocumentNode, code: string): string | null {
+  const text = actField(document, code)?.valueText ?? null;
+  return text === null || text.trim() === '' ? null : text.trim();
+}
+
+/**
+ * Список реквизита акта.
+ *
+ * Отдельно от `listOf`, потому что список у акта приходит двумя формами:
+ * детерминированный экстрактор кладёт элементы и в `value_json`, и склейкой в
+ * `value_text`, а модель — только в `value_json`. Правило, читающее список
+ * через `textOf`, на ответе модели получило бы `null` и объявило реквизит
+ * нераспознанным.
+ */
+export function actListOf(document: DocumentNode, code: string): string[] {
+  const value = actField(document, code);
+  if (value === null) return [];
+  if (Array.isArray(value.valueJson)) {
+    return value.valueJson
+      .filter((item): item is string => typeof item === 'string')
+      .map((item) => item.trim())
+      .filter((item) => item !== '');
+  }
+  const text = value.valueText;
+  return text === null || text.trim() === '' ? [] : [text.trim()];
 }
 
 export function numberOf(document: DocumentNode, fieldCode: string): number | null {
@@ -255,7 +406,7 @@ export function relevantDateFor(
   if (basis === 'application' || candidates.length > 0) {
     // Применение — это выполнение работ, освидетельствованных актом.
     if (act !== null) {
-      const end = field(act, 'date_end');
+      const end = actField(act, ACT_FIELDS.dateEnd);
       if (isIsoDate(end?.valueDate ?? null)) {
         return {
           date: end?.valueDate as string,
@@ -263,7 +414,7 @@ export function relevantDateFor(
           source: end,
         };
       }
-      const actDate = field(act, 'act_date');
+      const actDate = actField(act, ACT_FIELDS.actDate);
       if (isIsoDate(actDate?.valueDate ?? null)) {
         return {
           date: actDate?.valueDate as string,

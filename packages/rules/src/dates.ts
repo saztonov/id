@@ -38,8 +38,9 @@
  * законного вывода, и проверить её инженеру нечем.
  */
 import {
+  ACT_FIELDS,
   ACT_TYPES,
-  PROTOCOL_TYPES,
+  actField,
   daysBetween,
   documentById,
   documentsOfType,
@@ -50,6 +51,7 @@ import {
   formatDate,
   isIsoDate,
   parentsOf,
+  PROTOCOL_TYPES,
   relevantDateFor,
   textOf,
   threshold,
@@ -96,6 +98,19 @@ function dateRef(document: DocumentNode, fieldCode: string): DateRef {
   return { value: isIsoDate(raw) ? raw : null, source };
 }
 
+/**
+ * То же для реквизита АКТА: код канонический, исторические имена читаются.
+ *
+ * Отдельная функция, а не флаг у `dateRef`: группы совместимости привязаны к
+ * типу `aosr`, и применять их к документу качества было бы неверно —
+ * `date_start`/`date_end` там означают собственные даты бланка.
+ */
+function actDateRef(act: DocumentNode, fieldCode: string): DateRef {
+  const source = actField(act, fieldCode);
+  const raw = source?.valueDate ?? null;
+  return { value: isIsoDate(raw) ? raw : null, source };
+}
+
 /** Акт освидетельствования, к которому документ привязан ребром графа. */
 function actOf(graph: CheckGraph, document: DocumentNode): DocumentNode | null {
   return (
@@ -116,9 +131,9 @@ function actOf(graph: CheckGraph, document: DocumentNode): DocumentNode | null {
  */
 function worksDateOf(act: DocumentNode | null): DateRef {
   if (act === null) return { value: null, source: null };
-  const end = dateRef(act, 'date_end');
+  const end = actDateRef(act, ACT_FIELDS.dateEnd);
   if (end.value !== null) return end;
-  return dateRef(act, 'act_date');
+  return actDateRef(act, ACT_FIELDS.actDate);
 }
 
 /** Основание релевантной даты словами: текст замечания обязан быть проверяемым. */

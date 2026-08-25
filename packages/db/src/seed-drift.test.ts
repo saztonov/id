@@ -11,7 +11,7 @@
  * ключами, а не поверх урезанных таблиц юнит-теста генератора.
  */
 import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -22,10 +22,22 @@ import type { SqlExecutor } from '@id/migrator';
 import { applyMigrations, checksumOf, loadMigrations } from '@id/migrator';
 import { DOC_TYPES, PAGE_ROLES, generateSeedSql } from '@id/doc-types';
 
+import { TARGET } from '../../../tools/scripts/generate-seed-migration.mjs';
+
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const MIGRATIONS_DIR = join(REPO_ROOT, 'migrations');
-const SEED_FILE = '0009_seed_doc_types.sql';
-const SEED_VERSION = '0009';
+
+/**
+ * Имя файла выводится из `TARGET` генератора, а не пишется здесь константой.
+ *
+ * Каталог переезжает новой сид-миграцией при каждом изменении: применённый файл
+ * защищён контрольной суммой, и править его задним числом раннер запрещает.
+ * Константа в тесте означала бы, что после каждого такого переезда тест
+ * сравнивает генерацию с ПРЕЖНИМ файлом и краснеет по причине, к дрейфу
+ * каталога не относящейся.
+ */
+const SEED_FILE = basename(TARGET);
+const SEED_VERSION = SEED_FILE.slice(0, 4);
 
 // Переводы строк нормализуются ровно как в checksumOf(): checkout с
 // core.autocrlf=true иначе объявил бы дрейфом различие, которого в каталоге нет.
