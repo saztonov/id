@@ -51,7 +51,14 @@ import type { z } from 'zod';
 
 import type { VlmImageResponse, VlmStampResponse, VlmTextResponse } from './schemas.js';
 
-export const ADAPTER_VERSION_OPENROUTER_VLM = 'openrouter-vlm.v1';
+/**
+ * `v2` — плоская wire-схема text-фрагмента вместо `anyOf` и переписанный под неё
+ * раздел OUTPUT FORMAT промпта (см. `schemas.ts`). Канонический вид результата не
+ * изменился, но изменилось то, чем ограничена модель и что ей сказано, — значит
+ * при тех же пикселях ответ может отличаться, и старые артефакты обязаны быть
+ * отличимы от новых.
+ */
+export const ADAPTER_VERSION_OPENROUTER_VLM = 'openrouter-vlm.v2';
 
 export type CanonicalTextBlock = z.infer<typeof textBlockSchema>;
 export type CanonicalImageBlock = z.infer<typeof imageBlockSchema>;

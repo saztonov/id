@@ -447,11 +447,14 @@ describe('POST /revisions/{id}/check', () => {
    * по файлу доказывает заодно и это.
    */
   it('промпты стадии recognize остались черновиками — и это ничему не мешает', async () => {
-    const rows = await db.query<{ state: string }>(
-      `SELECT state FROM prompt_templates
+    const rows = await db.query<{ code: string; state: string }>(
+      `SELECT code, state FROM prompt_templates
         WHERE code IN (${RECOGNIZE_PROMPTS.map((code) => `'${code}'`).join(', ')})`,
     );
-    expect(rows).toHaveLength(RECOGNIZE_PROMPTS.length);
+    // Версий у кода может быть несколько: правка промпта приезжает НОВОЙ
+    // сид-миграцией (применённый файл защищён контрольной суммой мигратора).
+    // Утверждение здесь не про их число, а про то, что ни одна не опубликована.
+    expect([...new Set(rows.map((row) => row.code))].sort()).toEqual([...RECOGNIZE_PROMPTS].sort());
     expect(rows.every((row) => row.state === 'draft')).toBe(true);
   });
 

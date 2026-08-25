@@ -23,7 +23,7 @@
  * истины, который расходится молча при первой правке одного из двух мест.
  */
 import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { checksumOf, loadMigrations } from '@id/migrator';
@@ -38,7 +38,16 @@ import {
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
 const MIGRATIONS_DIR = join(REPO_ROOT, 'migrations');
-const SEED_FILE = '0020_seed_recognition_prompts.sql';
+
+/**
+ * Имя выводится из `TARGET`, а не пишется здесь.
+ *
+ * Правка промпта — это новая сид-миграция (применённый файл защищён контрольной
+ * суммой мигратора), и сверять с дефолтами надо ПОСЛЕДНЮЮ. Захардкоженное имя
+ * пришлось бы править вместе с генератором, а забытая правка дала бы тест,
+ * который сверяет историю и проходит, что бы ни лежало в коде.
+ */
+const SEED_FILE = basename(TARGET);
 
 describe('sqlLiteral', () => {
   it('подбирает тег, не встречающийся в значении', () => {

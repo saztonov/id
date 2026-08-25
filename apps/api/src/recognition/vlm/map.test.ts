@@ -51,7 +51,7 @@ describe('map: общая идентичность блока', () => {
   });
 
   it('версия адаптера VLM-пути зафиксирована', () => {
-    expect(ADAPTER_VERSION_OPENROUTER_VLM).toBe('openrouter-vlm.v1');
+    expect(ADAPTER_VERSION_OPENROUTER_VLM).toBe('openrouter-vlm.v2');
   });
 });
 

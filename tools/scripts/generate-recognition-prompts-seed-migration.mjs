@@ -3,12 +3,13 @@
  * Генератор seed-миграции промптов стадии `recognize` (ADR-0007, план v3 Ф4/Ф5).
  *
  * Источник правды — `RECOGNITION_PROMPT_DEFAULTS` в
- * `apps/api/src/recognition/vlm/prompts.ts`; в БД он попадает миграцией 0020
+ * `apps/api/src/recognition/vlm/prompts.ts`; в БД он попадает сид-миграцией
  * тремя `INSERT` (по одному на `recognition_block_text/image/stamp`),
- * `state='draft'` — публикация промптов стадии `recognize` остаётся ручным
- * действием администратора: `vlm.start_recognition` честно отказывает без
- * опубликованных промптов всех трёх кодов («опубликуйте промпты стадии
- * recognize»), см. `apps/worker/src/jobs/vlm-recognition.ts`.
+ * `state='draft'` — публикация промптов стадии `recognize` остаётся осознанным
+ * действием администратора. Отсутствие опубликованной версии при этом НЕ
+ * останавливает прогон: воркер берёт встроенный текст из тех же дефолтов
+ * (`recognitionPromptDefaultByCode`), а опубликованная версия просто имеет над
+ * ним приоритет, см. `apps/worker/src/jobs/vlm-recognition.ts`.
  *
  * Параметры генерации (`temperature`/`maxTokens`/`topK`) в `prompt_templates`
  * НЕ пишутся — их читает воркер из тех же `RECOGNITION_PROMPT_DEFAULTS` на
@@ -27,7 +28,7 @@
  * модуля) — разница только в том, что здесь путь импорта НЕ через
  * `dist/index.js` пакета, а на уровень глубже.
  *
- * Файл `migrations/0020_seed_recognition_prompts.sql` пишется байт-в-байт
+ * Файл `TARGET` (последняя сид-миграция промптов) пишется байт-в-байт
  * выводом `generateRecognitionPromptsSeedSql()`; сверка на дрейф —
  * `apps/worker/src/jobs/recognition-prompts-seed.test.ts`.
  *
@@ -41,7 +42,23 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const API_DIR = join(ROOT, 'apps', 'api');
-export const TARGET = join(ROOT, 'migrations', '0020_seed_recognition_prompts.sql');
+
+/**
+ * Правка промпта — это НОВАЯ миграция, а не перегенерация прежней.
+ *
+ * Мигратор считает контрольную сумму каждого применённого файла и отказывает
+ * на изменённом задним числом («Стандарт требует исправлять новой миграцией»).
+ * Поэтому при содержательной правке `RECOGNITION_PROMPT_DEFAULTS` здесь
+ * поднимаются ОБЕ константы разом: номер версии строки в `prompt_templates` и
+ * файл-цель. Прежние сид-миграции остаются в репозитории как есть — они
+ * описывают то, что уже применено.
+ *
+ * Сверка на дрейф (`recognition-prompts-seed.test.ts`) смотрит на `TARGET`,
+ * то есть всегда на ПОСЛЕДНЮЮ сид-миграцию: «в БД уезжает то, что лежит в коде»
+ * — утверждение про неё, а не про историю.
+ */
+export const SEED_VERSION = 2;
+export const TARGET = join(ROOT, 'migrations', '0037_reseed_recognition_prompts.sql');
 
 const BLOCK_TYPES = ['text', 'image', 'stamp'];
 const STAGE = 'recognize';
@@ -66,16 +83,20 @@ function jsonbLiteral(value) {
   return `${sqlLiteral(JSON.stringify(value))}::jsonb`;
 }
 
-const HEADER = `-- Seed промптов стадии recognize (ADR-0007, план v3 Ф4/Ф5).
+const HEADER = `-- Seed промптов стадии recognize (ADR-0007, план v3 Ф4/Ф5), версия ${SEED_VERSION}.
 --
 -- Файл сгенерирован generateRecognitionPromptsSeedSql() из
 -- RECOGNITION_PROMPT_DEFAULTS (apps/api/src/recognition/vlm/prompts.ts).
 -- Править вручную бессмысленно: следующая генерация вернёт содержимое
 -- дефолтов. Перегенерировать: pnpm prompts:seed:generate.
 --
--- state='draft': публикация — ручное действие администратора.
--- vlm.start_recognition отказывает без опубликованных промптов всех трёх
--- кодов («опубликуйте промпты стадии recognize»).
+-- Новая версия, а не правка прежней сид-миграции: применённый файл защищён
+-- контрольной суммой, и мигратор отказывает на изменённом задним числом.
+--
+-- state='draft': публикация — осознанное действие администратора. Отсутствие
+-- опубликованной версии НЕ отказ: воркер берёт встроенный текст из
+-- RECOGNITION_PROMPT_DEFAULTS, из которого сгенерирован и этот файл, —
+-- опубликованная версия лишь имеет приоритет над ним.
 --
 -- Параметры генерации (temperature/maxTokens/topK) здесь НЕ хранятся — их
 -- источник тот же RECOGNITION_PROMPT_DEFAULTS, читаемый воркером на каждом
@@ -97,7 +118,7 @@ export function generateRecognitionPromptsSeedStatements(defaults) {
 )
 VALUES (
   ${sqlLiteral(spec.code)},
-  1,
+  ${SEED_VERSION},
   ${sqlLiteral(STAGE)},
   NULL,
   ${sqlLiteral('draft')},

@@ -23,6 +23,18 @@
  * что модель ограничена одной схемой, а проверяется другой, — класс дефекта,
  * который не виден ни на одном отдельном прогоне.
  *
+ * ## Одна асимметрия двух форм — и она намеренная
+ *
+ * В JSON Schema **все** свойства попадают в `required`: этого требует strict-
+ * режим, и модель со schema-constrained decoding обязана выписать каждый ключ.
+ * В zod необязательные значения фрагмента объявлены `.nullish()`, то есть
+ * отсутствие ключа приравнено к `null`. Причина в маршрутизации OpenRouter: часть
+ * бекендов грамматику по схеме не исполняет (гвард `require_parameters` проверяет
+ * параметры запроса, а не качество их исполнения), и там модель следует ТЕКСТУ
+ * промпта, выписывая только значимые ключи. Требовать от такого ответа полный
+ * набор значило бы браковать содержательно верную транскрипцию из-за
+ * особенностей бекенда, о которых она не знает.
+ *
  * ## Отличие от канонических схем `@id/recognition`
  *
  * Формы зеркалят канонический `ContentFragment`, но БЕЗ default'ов канона: в
@@ -33,11 +45,33 @@
  * без вложенного объекта `table`) — так зафиксировано контрактом плана v3;
  * вложение в канонический вид (`{kind:'table', table:{…}}`) делает `map.ts`.
  *
- * ## Дискриминант — `enum` с одним значением, а не `const`
+ * ## Почему у text-фрагмента нет `anyOf`
  *
- * Обе формы эквивалентны по JSON Schema, но одноэлементный `enum` понимает и
- * старый парк грамматических движков; `const` появился в поддержке structured
- * outputs позже и до сих пор реализован не везде. Цена — ноль, совместимость — шире.
+ * Была: три варианта объекта под `anyOf`, по одному на вид фрагмента. Google AI
+ * Studio такую схему не компилирует и отвечает `400 INVALID_ARGUMENT`
+ * («schema at properties.fragments.items.anyOf.1 requires unspecified property
+ * "kind"»): он требует согласованного набора свойств у вариантов, а весь смысл
+ * union'а — в том, что наборы разные. Отказ приходит ДО генерации, то есть
+ * промптом не лечится и ретраями не обходится: в проде это было 16 отказов из 20
+ * на text-блоках при исправно работающих `image` и `stamp` (у них union'а нет).
+ *
+ * Поэтому wire-форма фрагмента ПЛОСКАЯ: один объект, обязательный дискриминант
+ * `kind` и шесть nullable-полей, из которых значимы те, что относятся к его виду.
+ * Дискриминированный союз никуда не делся — он остался доменной формой (`map.ts`
+ * и валидаторы работают с ней), а плоский ответ приводится к нему нормализатором
+ * `vlmTextFragmentFromWire`.
+ *
+ * Профиля «схема под Gemini» рядом с прежним `anyOf` заводить не стали: две
+ * wire-формы одного контракта разошлись бы при первой же правке, и разошлись бы
+ * молча — проверялась бы одна, а модель ограничивалась бы другой.
+ *
+ * ## Числовые и строковые `enum` в wire-форме
+ *
+ * `level` и `emphasis` в wire-схеме ограничены только типом. Google принимает
+ * `enum` исключительно для строк, поэтому `[1,…,6,null]` и `['none','strong',null]`
+ * — ровно те конструкции, которые ломают конвертацию схемы на его стороне.
+ * Диапазон заголовка и перечень выделений проверяет zod: место ограничения там,
+ * где его исполнение можно гарантировать.
  */
 import { createHash } from 'node:crypto';
 
@@ -50,10 +84,12 @@ import type { VlmJsonSchemaFormat } from '../../llm/vlm-port.js';
 // ---------------------------------------------------------------------------
 
 /**
- * Все объекты — `strictObject`: лишний ключ в ответе означает, что провайдер
- * схему не исполнял, и такой ответ обязан падать в разбор, а не молча
- * очищаться (`z.object` по умолчанию срезает неизвестные ключи — это как раз
- * тихая маскировка нарушения контракта).
+ * ДОМЕННАЯ форма фрагмента: с ней работают `map.ts` и валидаторы `postprocess.ts`.
+ *
+ * Все объекты — `strictObject`: лишний ключ означает, что нормализатор собрал
+ * не то, и такой объект обязан падать в разбор, а не молча очищаться
+ * (`z.object` по умолчанию срезает неизвестные ключи — это как раз тихая
+ * маскировка нарушения контракта).
  */
 export const vlmTextFragmentSchema = z.discriminatedUnion('kind', [
   z.strictObject({
@@ -78,9 +114,87 @@ export const vlmTextFragmentSchema = z.discriminatedUnion('kind', [
 ]);
 export type VlmTextFragment = z.infer<typeof vlmTextFragmentSchema>;
 
+/**
+ * WIRE-форма фрагмента: то, что реально приходит от провайдера (см. «Почему у
+ * text-фрагмента нет `anyOf`» в шапке файла).
+ *
+ * Обязателен только `kind` — без него фрагмент неинтерпретируем, и никакая
+ * нормализация его не восстановит. Остальные шесть полей `.nullish()`: `null`
+ * пишет модель со schema-constrained decoding, отсутствие ключа — бекенд без
+ * него. Эти два состояния означают одно и то же и различаться не должны.
+ */
+export const vlmTextFragmentWireSchema = z.strictObject({
+  kind: z.enum(['paragraph', 'heading', 'table']),
+  text: z.string().nullish(),
+  emphasis: z.string().nullish(),
+  level: z.number().int().nullish(),
+  title: z.string().nullish(),
+  header: z.array(z.string()).nullish(),
+  rows: z.array(z.array(z.string())).nullish(),
+});
+
+const HEADING_LEVELS: readonly number[] = [1, 2, 3, 4, 5, 6];
+
+/**
+ * Плоский фрагмент → доменный.
+ *
+ * Правила приведения выбраны по цене ошибки, а не по строгости ради строгости:
+ *
+ * - **текст обязателен** у `paragraph` и `heading`: фрагмент без текста — не
+ *   транскрипция, а пустое место, и принять его значило бы записать в результат
+ *   абзац, которого на кропе нет;
+ * - **`emphasis` вне перечня — это `none`**: выделение косметическое, и терять
+ *   из-за него весь блок несоразмерно;
+ * - **`level` вне 1..6 — это `null`**: ровно то же значение модель ставит, когда
+ *   не видит иерархии, то есть «уровень неизвестен» уже есть в контракте;
+ * - **`rows: null` — это `[]`**: таблица без строк законна, а `null` в каноне
+ *   для `rows` не предусмотрен.
+ *
+ * `.pipe(vlmTextFragmentSchema)` в конце — не формальность: он делает
+ * утверждение «нормализатор не может выпустить объект, который доменная схема не
+ * примет» проверяемым во время выполнения, а не обещанием типов.
+ */
+export const vlmTextFragmentFromWire = vlmTextFragmentWireSchema
+  .transform((fragment, ctx): VlmTextFragment => {
+    if (fragment.kind === 'table') {
+      return {
+        kind: 'table',
+        title: fragment.title ?? null,
+        header: fragment.header ?? null,
+        rows: fragment.rows ?? [],
+      };
+    }
+
+    const text = fragment.text ?? null;
+    if (text === null) {
+      ctx.addIssue({
+        code: 'custom',
+        message: `фрагмент «${fragment.kind}» без текста`,
+        path: ['text'],
+      });
+      return z.NEVER;
+    }
+
+    if (fragment.kind === 'paragraph') {
+      return {
+        kind: 'paragraph',
+        text,
+        emphasis: fragment.emphasis === 'strong' ? 'strong' : 'none',
+      };
+    }
+
+    const level = fragment.level ?? null;
+    return {
+      kind: 'heading',
+      text,
+      level: level !== null && HEADING_LEVELS.includes(level) ? level : null,
+    };
+  })
+  .pipe(vlmTextFragmentSchema);
+
 export const vlmTextResponseSchema = z.strictObject({
   /** Пустой массив — законный ответ на кроп без читаемого текста. */
-  fragments: z.array(vlmTextFragmentSchema),
+  fragments: z.array(vlmTextFragmentFromWire),
 });
 export type VlmTextResponse = z.infer<typeof vlmTextResponseSchema>;
 
@@ -194,37 +308,25 @@ function strictObjectSchema(properties: Record<string, JsonSchema>): JsonSchema 
 const stringSchema: JsonSchema = { type: 'string' };
 const nullableStringSchema: JsonSchema = { type: ['string', 'null'] };
 
-/** Дискриминант варианта юниона — одноэлементный enum (см. шапку файла). */
-function kindSchema(kind: string): JsonSchema {
-  return { type: 'string', enum: [kind] };
-}
-
 export const TEXT_BLOCK_RESULT_SCHEMA: JsonSchema = strictObjectSchema({
   fragments: {
     type: 'array',
-    items: {
-      anyOf: [
-        strictObjectSchema({
-          kind: kindSchema('paragraph'),
-          text: stringSchema,
-          emphasis: { type: 'string', enum: ['none', 'strong'] },
-        }),
-        strictObjectSchema({
-          kind: kindSchema('heading'),
-          // Диапазон 1..6 выражен enum'ом, а не minimum/maximum: числовые
-          // границы входят в тот же список keywords, который часть strict-
-          // бекендов отвергает; enum поддержан везде и точнее.
-          level: { type: ['integer', 'null'], enum: [1, 2, 3, 4, 5, 6, null] },
-          text: stringSchema,
-        }),
-        strictObjectSchema({
-          kind: kindSchema('table'),
-          title: nullableStringSchema,
-          header: { type: ['array', 'null'], items: stringSchema },
-          rows: { type: 'array', items: { type: 'array', items: stringSchema } },
-        }),
-      ],
-    },
+    // Один плоский объект вместо `anyOf` из трёх вариантов — см. «Почему у
+    // text-фрагмента нет `anyOf`» в шапке файла. Дискриминант — строковый enum
+    // из трёх значений: он ограничивает грамматику там, где это безопасно, и
+    // именно по нему нормализатор выбирает доменную форму.
+    items: strictObjectSchema({
+      kind: { type: 'string', enum: ['paragraph', 'heading', 'table'] },
+      text: nullableStringSchema,
+      // Ни `enum`, ни minimum/maximum: числовые границы входят в тот же список
+      // keywords, который отвергает часть strict-бекендов, а числовой `enum`
+      // не принимает Google. Перечень значений держит zod.
+      emphasis: nullableStringSchema,
+      level: { type: ['integer', 'null'] },
+      title: nullableStringSchema,
+      header: { type: ['array', 'null'], items: stringSchema },
+      rows: { type: ['array', 'null'], items: { type: 'array', items: stringSchema } },
+    }),
   },
 });
 

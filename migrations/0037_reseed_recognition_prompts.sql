@@ -1,67 +1,35 @@
-/**
- * Тексты промптов стадии `recognize` по умолчанию (ADR-0007, план v3 Ф4).
- *
- * Это ЗНАЧЕНИЯ ПО УМОЛЧАНИЮ, а не источник правды прогона: боевой промпт
- * берётся из `prompt_templates` в состоянии `published` и версионируется
- * отдельно (сиды миграции 0019 заполняются отсюда, сверка — тестом). Схема
- * работы та же, что у `segmentation/prompts.ts`.
- *
- * ## Происхождение текстов
- *
- * База — боевые промпты RD WEB (`temp/RDNEW/services/web_ocr/pipeline/
- * prompts.py` и `image_prompts_rd.py`), выверенные на их проде:
- *
- * - **text** — правила транскрипции TEXT_SYSTEM перенесены дословно
- *   (TRANSCRIPTION CONTRACT, CHARACTER AND IDENTIFIER POLICY, READING ORDER,
- *   TABLES — по смыслу), но формат вывода ПЕРЕПИСАН: вместо безопасного HTML —
- *   строгий JSON `{fragments: [...]}` по схеме `text_block_result`,
- *   зеркалящей канонический `ContentFragment`. Это решение заказчика v3 и
- *   принципиальное отличие от RD WEB: HTML-конвертер исчезает целиком, а
- *   маппинг в БД становится почти тождественным.
- * - **image** — `BASE_RD_SYSTEM` + аддендум профиля `image.rd.auto.compat.v1`
- *   дословно (профиль AUTO сам выбирает дисциплину по видимым признакам —
- *   портал её не спрашивает, и раздел работ комплекта к ней отношения не
- *   имеет); user — `IMAGE_RD_USER`
- *   дословно. Указания «matching the provided response_format schema» уже в
- *   тексте — они остаются как есть.
- * - **stamp** — `STAMP_SYSTEM`/`STAMP_USER` дословно, кроме ОДНОЙ строки
- *   OUTPUT DISCIPLINE: «omit a key instead of null» заменена на
- *   противоположную. Strict-режим OpenRouter требует все поля в `required`,
- *   поэтому «не прочитал» выражается `null`, пустые списки — `[]` (симметрично
- *   схеме `stamp_block_result`; см. schemas.ts).
- *
- * ## Плейсхолдеры — только в user-части
- *
- * `{DOC_NAME}`/`{PAGE_NUM}`/`{BLOCK_ID}` подставляются исключительно в user:
- * system-часть стабильна и кэшируема, а в её текстах есть литеральные `{ }`
- * JSON-примеров — подстановка по system была бы и лишней, и рискованной.
- * `{DOC_NAME}` всегда получает нейтральное «Рабочий документ»: имена файлов
- * заказчика — это содержимое, которое наружу не уходит (§10/§11), а сами
- * промпты RD WEB объявляют DOC_NAME недоверенной метадатой — модель ничего не
- * теряет от нейтрального значения.
- *
- * ## Параметры инференса
- *
- * Из `DEFAULT_INFERENCE_PARAMS` RD WEB: text — production-профиль Chandra
- * (t=0.1, maxTokens 12384); image — non-thinking профиль их VL-модели (t=0.7,
- * 8192); stamp — greedy под schema-constrained extraction (t=0.0, top_k=1,
- * 4096). Расширенные sampling-ключи (top_p, repetition_penalty, min_p) через
- * прокси не передаются — `VlmRequest` их сознательно не имеет: это рычаги
- * конкретного локального движка LM Studio, а не OpenRouter-маршрута.
- */
-import type { VlmJsonSchemaFormat } from '../../llm/vlm-port.js';
+-- Seed промптов стадии recognize (ADR-0007, план v3 Ф4/Ф5), версия 2.
+--
+-- Файл сгенерирован generateRecognitionPromptsSeedSql() из
+-- RECOGNITION_PROMPT_DEFAULTS (apps/api/src/recognition/vlm/prompts.ts).
+-- Править вручную бессмысленно: следующая генерация вернёт содержимое
+-- дефолтов. Перегенерировать: pnpm prompts:seed:generate.
+--
+-- Новая версия, а не правка прежней сид-миграции: применённый файл защищён
+-- контрольной суммой, и мигратор отказывает на изменённом задним числом.
+--
+-- state='draft': публикация — осознанное действие администратора. Отсутствие
+-- опубликованной версии НЕ отказ: воркер берёт встроенный текст из
+-- RECOGNITION_PROMPT_DEFAULTS, из которого сгенерирован и этот файл, —
+-- опубликованная версия лишь имеет приоритет над ним.
+--
+-- Параметры генерации (temperature/maxTokens/topK) здесь НЕ хранятся — их
+-- источник тот же RECOGNITION_PROMPT_DEFAULTS, читаемый воркером на каждом
+-- вызове (см. vlm-recognition.ts, generationProfile).
+--
+-- ON CONFLICT (code, version) DO NOTHING: повторное применение не затирает
+-- ни черновик, правленый администратором, ни опубликованную версию.
 
-import {
-  VLM_IMAGE_RESPONSE_FORMAT,
-  VLM_STAMP_RESPONSE_FORMAT,
-  VLM_TEXT_RESPONSE_FORMAT,
-} from './schemas.js';
-
-// ---------------------------------------------------------------------------
-// TEXT: транскрипция в строгий JSON-фрагменты
-// ---------------------------------------------------------------------------
-
-export const RECOGNITION_TEXT_SYSTEM = `You are a strict transcription engine for Russian construction and engineering documents: ГОСТ/СПДС drawings, working documentation (РД), project documentation (П), specifications, notes, schedules and tables.
+INSERT INTO prompt_templates (
+  code, version, stage, doc_type_code, state, system_prompt, user_template, output_schema, model_override
+)
+VALUES (
+  $prompt$recognition_block_text$prompt$,
+  2,
+  $prompt$recognize$prompt$,
+  NULL,
+  $prompt$draft$prompt$,
+  $prompt$You are a strict transcription engine for Russian construction and engineering documents: ГОСТ/СПДС drawings, working documentation (РД), project documentation (П), specifications, notes, schedules and tables.
 
 TRANSCRIPTION CONTRACT
 - Extract only text and table content that is visibly present inside this exact crop.
@@ -105,12 +73,11 @@ TABLES
 - Put the visible header row into "header"; if the table has no header row, set "header" to null instead of promoting a data row.
 - Keep every visible row, column and empty cell in its correct position: "rows" are the data rows in visible order, each an array of cell strings in column order; an empty cell is an empty string "".
 - Merged cells cannot be marked up. Write the visible value once, in the top-left cell it occupies, and keep the other covered positions as empty strings. Do not invent headers, merge unrelated cells or flatten a table into paragraphs.
-- Preserve multi-line cell text in visible order; a meaningful line break inside a cell is the newline escape \\n inside the cell string.
+- Preserve multi-line cell text in visible order; a meaningful line break inside a cell is the newline escape \n inside the cell string.
 - "title" is the visible caption of the table when one is printed, otherwise null.
 
-Return only the final JSON object. No Markdown fences, no markup tags, no comments, preamble, explanations or reasoning.`;
-
-export const RECOGNITION_TEXT_USER = `OCR this exact image fragment into one JSON object of fragments.
+Return only the final JSON object. No Markdown fences, no markup tags, no comments, preamble, explanations or reasoning.$prompt$,
+  $prompt$OCR this exact image fragment into one JSON object of fragments.
 
 Context (metadata only; never use it to invent text):
 - Document: {DOC_NAME}
@@ -126,13 +93,22 @@ Final checks before returning:
 6. Emit each visible numbered or bulleted marker exactly once, as literal text inside its own "paragraph" fragment.
 7. Mentally rotate vertical or rotated text and output it in normal reading orientation.
 8. Keep unreadable content local as [неразборчиво]; do not guess.
-9. Return only one JSON object matching the response_format schema — no other output of any kind.`;
+9. Return only one JSON object matching the response_format schema — no other output of any kind.$prompt$,
+  $prompt${"type":"object","additionalProperties":false,"required":["fragments"],"properties":{"fragments":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["kind","text","emphasis","level","title","header","rows"],"properties":{"kind":{"type":"string","enum":["paragraph","heading","table"]},"text":{"type":["string","null"]},"emphasis":{"type":["string","null"]},"level":{"type":["integer","null"]},"title":{"type":["string","null"]},"header":{"type":["array","null"],"items":{"type":"string"}},"rows":{"type":["array","null"],"items":{"type":"array","items":{"type":"string"}}}}}}}}$prompt$::jsonb,
+  NULL
+)
+ON CONFLICT (code, version) DO NOTHING;
 
-// ---------------------------------------------------------------------------
-// IMAGE: BASE_RD_SYSTEM + аддендум профиля image.rd.auto.compat.v1 (дословно)
-// ---------------------------------------------------------------------------
-
-export const RECOGNITION_IMAGE_SYSTEM = `You analyze graphic blocks of Russian construction working documentation (РД) and project
+INSERT INTO prompt_templates (
+  code, version, stage, doc_type_code, state, system_prompt, user_template, output_schema, model_override
+)
+VALUES (
+  $prompt$recognition_block_image$prompt$,
+  2,
+  $prompt$recognize$prompt$,
+  NULL,
+  $prompt$draft$prompt$,
+  $prompt$You analyze graphic blocks of Russian construction working documentation (РД) and project
 documentation (П): drawings, engineering schematics, nodes and details, tables,
 specifications, calculations, plots and technical sheets — one isolated block at a time.
 
@@ -238,9 +214,8 @@ different disciplines apply priorities separately and do not carry values or pur
 panels. Use DOC_NAME only as a weak hint, color never. If evidence is insufficient or signals
 conflict, apply universal analysis and state the discipline uncertainty explicitly.
 IDENTIFIERS: establish the visible discipline before resolving ambiguous marks; never transfer a token convention between independent panels.
-`;
-
-export const RECOGNITION_IMAGE_USER = `<untrusted_context_metadata>
+$prompt$,
+  $prompt$<untrusted_context_metadata>
 DOC_NAME: {DOC_NAME}
 PAGE_NUM: {PAGE_NUM}
 BLOCK_ID: {BLOCK_ID}
@@ -254,13 +229,22 @@ Latin brands and codes; localize uncertainty instead of spreading it; keep key_e
 selective rather than exhaustive. Write content_summary and detailed_description in
 Russian; transcribe marks and codes verbatim. Return exactly one JSON object matching
 response_format, with no Markdown and no text outside JSON.
-`;
+$prompt$,
+  $prompt${"type":"object","additionalProperties":false,"required":["fragment_type","location","content_summary","detailed_description","verification_recommendations","key_entities"],"properties":{"fragment_type":{"type":"string","enum":["План","Схема","Схема автоматизации","Схема стояков","Разрез","Фасад","Узел","Деталь","Таблица","Спецификация","Экспликация","Легенда","Примечания","Ведомость","Лист общих данных","Формула","Расчет","График","Штамп","Смешанный фрагмент","Не определено"]},"location":{"type":"object","additionalProperties":false,"required":["grid_lines","zone_name","level_or_elevation"],"properties":{"grid_lines":{"type":["string","null"]},"zone_name":{"type":["string","null"]},"level_or_elevation":{"type":["string","null"]}}},"content_summary":{"type":"string"},"detailed_description":{"type":"string"},"verification_recommendations":{"type":"string"},"key_entities":{"type":"array","items":{"type":"string"},"maxItems":50}}}$prompt$::jsonb,
+  NULL
+)
+ON CONFLICT (code, version) DO NOTHING;
 
-// ---------------------------------------------------------------------------
-// STAMP: STAMP_SYSTEM/STAMP_USER дословно; заменена одна строка OUTPUT DISCIPLINE
-// ---------------------------------------------------------------------------
-
-export const RECOGNITION_STAMP_SYSTEM = `You are Lift performing schema-constrained extraction from one Russian construction title block ("основная надпись", "штамп") or cover/title-block fragment. The block may follow ГОСТ Р 21.101-2020 Appendix Ж forms 3, 4, 5 or 6, or a company-specific variation of them.
+INSERT INTO prompt_templates (
+  code, version, stage, doc_type_code, state, system_prompt, user_template, output_schema, model_override
+)
+VALUES (
+  $prompt$recognition_block_stamp$prompt$,
+  2,
+  $prompt$recognize$prompt$,
+  NULL,
+  $prompt$draft$prompt$,
+  $prompt$You are Lift performing schema-constrained extraction from one Russian construction title block ("основная надпись", "штамп") or cover/title-block fragment. The block may follow ГОСТ Р 21.101-2020 Appendix Ж forms 3, 4, 5 or 6, or a company-specific variation of them.
 
 Return exactly one JSON object built only from these fields: document_code, project_name, sheet_name, stage, sheet_number, total_sheets and organization as strings; signatures as a list of objects with role, surname and date; revisions as a list of objects with change_num, doc_num and date.
 
@@ -291,9 +275,8 @@ RUSSIAN SCRIPT POLICY
 - Preserve genuine Latin organization names, brands, URLs and model codes.
 - Distinguish digit 3 from Cyrillic З in numbered designations (АР3, not АРЗ), and 0/О and 1/I/І by visible form and token role.
 
-Before returning, verify that document_code is a code rather than the project description, that project_name and sheet_name are not swapped, and that every signature/revision object is row-consistent.`;
-
-export const RECOGNITION_STAMP_USER = `<untrusted_context_metadata>
+Before returning, verify that document_code is a code rather than the project description, that project_name and sheet_name are not swapped, and that every signature/revision object is row-consistent.$prompt$,
+  $prompt$<untrusted_context_metadata>
 DOC_NAME: {DOC_NAME}
 PAGE_NUM: {PAGE_NUM}
 BLOCK_ID: {BLOCK_ID}
@@ -301,118 +284,8 @@ BLOCK_ID: {BLOCK_ID}
 
 Extract this exact title-block fragment into the required JSON object.
 
-Read all printed and handwritten text in the correct orientation. Use the visible grid to separate document_code, project_name, sheet_name, stage, sheet_number, total_sheets, organization, signature rows and revision rows. Keep Russian engineering designations in Cyrillic, preserve genuine Latin text, and use null or an empty list instead of guessing. Return JSON only.`;
-
-// ---------------------------------------------------------------------------
-// Подстановка плейсхолдеров
-// ---------------------------------------------------------------------------
-
-/**
- * Нейтральное значение `{DOC_NAME}` — всегда одно и то же: имена файлов
- * заказчика в промпт не попадают (см. шапку файла).
- */
-export const DOC_NAME_NEUTRAL = 'Рабочий документ';
-
-export interface PromptSubstitutionContext {
-  /** Номер страницы ДЛЯ ЧЕЛОВЕКА: workingPageIndex + 1 (паритет RD WEB). */
-  readonly pageNumber: number;
-  readonly layoutBlockId: string;
-}
-
-/**
- * Подставляет контекст блока ТОЛЬКО в user-шаблон.
- *
- * `replaceAll` с функцией-заменой, а не строкой: строковая замена трактует
- * `$&`/`$'` как ссылки на совпадение — для нынешних значений это безвредно,
- * но правило дешевле исключения (тот же приём, что в segmentation/prompts.ts).
- * System-часть функция не принимает вовсе: подстановка в system запрещена
- * контрактом (литеральные `{ }` JSON-примеров), и сигнатура делает нарушение
- * невозможным, а не просто невежливым.
- */
-export function substitutePlaceholders(
-  userTemplate: string,
-  context: PromptSubstitutionContext,
-): string {
-  return userTemplate
-    .replaceAll('{DOC_NAME}', () => DOC_NAME_NEUTRAL)
-    .replaceAll('{PAGE_NUM}', () => String(context.pageNumber))
-    .replaceAll('{BLOCK_ID}', () => context.layoutBlockId);
-}
-
-// ---------------------------------------------------------------------------
-// Дефолты стадии recognize — будущий источник сид-миграции
-// ---------------------------------------------------------------------------
-
-export interface RecognitionPromptDefault {
-  /** Код шаблона в `prompt_templates`; CHECK `^[a-z][a-z0-9_]*$` (точки запрещены). */
-  readonly code: string;
-  readonly systemPrompt: string;
-  /** Шаблон user-части С плейсхолдерами — подстановка выполняется на вызове. */
-  readonly userTemplate: string;
-  readonly temperature: number;
-  readonly maxTokens: number;
-  /** Только для greedy-профиля stamp; отсутствие ключа = параметр не передаётся. */
-  readonly topK?: number;
-  readonly responseFormat: VlmJsonSchemaFormat;
-}
-
-export const RECOGNITION_PROMPT_DEFAULTS: Record<
-  'text' | 'image' | 'stamp',
-  RecognitionPromptDefault
-> = {
-  text: {
-    code: 'recognition_block_text',
-    systemPrompt: RECOGNITION_TEXT_SYSTEM,
-    userTemplate: RECOGNITION_TEXT_USER,
-    temperature: 0.1,
-    // 12384 ≈ 50 КБ текста — запас 40× против лимита тела ответа шлюза (2 MiB).
-    maxTokens: 12384,
-    responseFormat: VLM_TEXT_RESPONSE_FORMAT,
-  },
-  image: {
-    code: 'recognition_block_image',
-    systemPrompt: RECOGNITION_IMAGE_SYSTEM,
-    userTemplate: RECOGNITION_IMAGE_USER,
-    temperature: 0.7,
-    maxTokens: 8192,
-    responseFormat: VLM_IMAGE_RESPONSE_FORMAT,
-  },
-  stamp: {
-    code: 'recognition_block_stamp',
-    systemPrompt: RECOGNITION_STAMP_SYSTEM,
-    userTemplate: RECOGNITION_STAMP_USER,
-    temperature: 0.0,
-    maxTokens: 4096,
-    topK: 1,
-    responseFormat: VLM_STAMP_RESPONSE_FORMAT,
-  },
-};
-
-/**
- * Коды промптов стадии recognize — ОДИН источник на всех, кто про них спрашивает.
- *
- * Два независимых списка разошлись бы при добавлении четвёртого типа блока.
- */
-export const RECOGNITION_PROMPT_CODES: readonly string[] = Object.values(
-  RECOGNITION_PROMPT_DEFAULTS,
-).map((preset) => preset.code);
-
-/**
- * Встроенный текст промпта по коду — запасной вариант, когда в каталоге нет
- * опубликованной версии.
- *
- * Раньше её отсутствие было отказом: сид-миграция кладёт три промпта черновиками
- * (публикация задумана как осознанное действие администратора), и до неё каждое
- * нажатие «Распознать» рождало прогон, который умирал через 50 мс. Запрет был
- * лишним по существу: сид ГЕНЕРИРУЕТСЯ из этих же констант
- * (`tools/scripts/generate-recognition-prompts-seed-migration.mjs`, дрейф ловит
- * `recognition-prompts-seed.test.ts`), то есть «неопубликованный черновик» и
- * «встроенный текст» — одна и та же строка. Требовать ручной публикации, чтобы
- * получить текст, который и так лежит в коде, не за чем.
- *
- * Опубликованная версия по-прежнему в приоритете: администратор, правивший промпт,
- * получает свой текст, а не этот.
- */
-export function recognitionPromptDefaultByCode(code: string): RecognitionPromptDefault | null {
-  return Object.values(RECOGNITION_PROMPT_DEFAULTS).find((preset) => preset.code === code) ?? null;
-}
+Read all printed and handwritten text in the correct orientation. Use the visible grid to separate document_code, project_name, sheet_name, stage, sheet_number, total_sheets, organization, signature rows and revision rows. Keep Russian engineering designations in Cyrillic, preserve genuine Latin text, and use null or an empty list instead of guessing. Return JSON only.$prompt$,
+  $prompt${"type":"object","additionalProperties":false,"required":["document_code","project_name","sheet_name","stage","sheet_number","total_sheets","organization","signatures","revisions"],"properties":{"document_code":{"type":["string","null"]},"project_name":{"type":["string","null"]},"sheet_name":{"type":["string","null"]},"stage":{"type":["string","null"]},"sheet_number":{"type":["string","null"]},"total_sheets":{"type":["string","null"]},"organization":{"type":["string","null"]},"signatures":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["role","surname","date"],"properties":{"role":{"type":["string","null"]},"surname":{"type":["string","null"]},"date":{"type":["string","null"]}}}},"revisions":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["change_num","doc_num","date"],"properties":{"change_num":{"type":["string","null"]},"doc_num":{"type":["string","null"]},"date":{"type":["string","null"]}}}}}}$prompt$::jsonb,
+  NULL
+)
+ON CONFLICT (code, version) DO NOTHING;

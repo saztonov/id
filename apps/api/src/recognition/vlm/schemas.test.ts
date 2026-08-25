@@ -7,6 +7,15 @@
  * Дополнительно закреплены strict-инварианты OpenRouter на каждом объекте wire-
  * схемы: `additionalProperties: false`, `required` = все свойства, nullable —
  * только через `{"type": [X, "null"]}`, отсутствие `minLength`/`maxLength`.
+ *
+ * Со стороны zod сверяется WIRE-форма (у text она разворачивается из `ZodPipe`
+ * нормализатора): предмет сверки — то, чем ограничена модель, а не то, во что мы
+ * её ответ приводим. Необязательность полей в zod при `required` в JSON Schema —
+ * намеренная асимметрия, см. шапку `schemas.ts`; здесь она закреплена отдельным
+ * тестом, чтобы не выглядела недосмотром.
+ *
+ * Отдельно запрещён `anyOf`: именно на нём Google AI Studio отвечал
+ * `400 INVALID_ARGUMENT` и не распознавал ни одного text-блока.
  */
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
@@ -32,18 +41,23 @@ function wireOf(value: unknown, path: string): Wire {
   return value as Wire;
 }
 
-/** Значение дискриминанта `kind` варианта wire-юниона (одноэлементный enum). */
-function wireKind(variant: Wire, path: string): string {
-  const kind = wireOf((variant['properties'] as Wire)['kind'], `${path}.kind`);
-  const values = kind['enum'];
-  expect(Array.isArray(values) && values.length === 1, `${path}: kind — одноэлементный enum`).toBe(
-    true,
-  );
-  return (values as string[])[0] as string;
-}
-
 /** Параллельный обход: каждый узел wire-схемы сверяется с узлом zod-схемы. */
 function assertAgreement(wire: Wire, zodNode: z.ZodType, path: string): void {
+  if (zodNode instanceof z.ZodPipe) {
+    // Нормализатор `wire → домен`: сверять надо ВХОД, то есть форму, которой
+    // ограничена модель. Выход — наше внутреннее представление, провайдер о нём
+    // ничего не знает.
+    assertAgreement(wire, zodNode.in as z.ZodType, path);
+    return;
+  }
+  if (zodNode instanceof z.ZodOptional) {
+    // Асимметрия по замыслу: wire требует ключ (обязательство strict-режима),
+    // zod допускает его отсутствие — бекенды без constrained decoding пишут
+    // только значимые ключи. Проверка `required` = все свойства ниже остаётся в
+    // силе, здесь снимается только обёртка.
+    assertAgreement(wire, zodNode.unwrap() as z.ZodType, path);
+    return;
+  }
   if (zodNode instanceof z.ZodNullable) {
     const type = wire['type'];
     expect(Array.isArray(type) && type.includes('null'), `${path}: nullable через type-массив`).toBe(
@@ -78,27 +92,6 @@ function assertAgreement(wire: Wire, zodNode: z.ZodType, path: string): void {
     assertAgreement(wireOf(wire['items'], `${path}[]`), zodNode.element as z.ZodType, `${path}[]`);
     return;
   }
-  if (zodNode instanceof z.ZodDiscriminatedUnion) {
-    const variants = wire['anyOf'];
-    expect(Array.isArray(variants), `${path}: юнион — anyOf (без $ref)`).toBe(true);
-    const options = zodNode.options as readonly z.ZodObject[];
-    expect((variants as unknown[]).length, `${path}: число вариантов юниона`).toBe(options.length);
-    for (const rawVariant of variants as unknown[]) {
-      const variant = wireOf(rawVariant, path);
-      const kind = wireKind(variant, path);
-      const option = options.find((candidate) => {
-        const discriminator = candidate.shape['kind'];
-        return discriminator instanceof z.ZodLiteral && discriminator.value === kind;
-      });
-      expect(option, `${path}: вариант "${kind}" известен zod-схеме`).toBeDefined();
-      assertAgreement(variant, option as z.ZodType, `${path}<${kind}>`);
-    }
-    return;
-  }
-  if (zodNode instanceof z.ZodLiteral) {
-    expect(wire['enum'], `${path}: литерал — одноэлементный enum`).toEqual([zodNode.value]);
-    return;
-  }
   if (zodNode instanceof z.ZodEnum) {
     expect(wire['type'], `${path}: тип enum-строки`).toBe('string');
     expect(wire['enum'], `${path}: значения enum совпадают`).toEqual(zodNode.options);
@@ -119,16 +112,26 @@ function assertAgreement(wire: Wire, zodNode: z.ZodType, path: string): void {
   throw new Error(`${path}: непокрытый вид zod-узла ${zodNode.constructor.name}`);
 }
 
-/** Ни одного `$ref`/`$defs` нигде в wire-схеме (требование инлайна). */
-function assertNoRefs(node: unknown, path: string): void {
+/**
+ * Ни одного `$ref`/`$defs` (требование инлайна) и ни одного `anyOf`.
+ *
+ * `anyOf` запрещён не из вкуса: Google AI Studio отказывается компилировать
+ * схему с вариантами разного набора свойств и отвечает `400 INVALID_ARGUMENT`
+ * ещё до генерации. Так весь text-путь распознавания в проде стоял мёртвым при
+ * исправных `image` и `stamp`.
+ */
+function assertInlineOnly(node: unknown, path: string): void {
   if (Array.isArray(node)) {
-    node.forEach((item, index) => assertNoRefs(item, `${path}[${index}]`));
+    node.forEach((item, index) => assertInlineOnly(item, `${path}[${index}]`));
     return;
   }
   if (node !== null && typeof node === 'object') {
     for (const [key, value] of Object.entries(node as Wire)) {
-      expect(key === '$ref' || key === '$defs', `${path}: запрещённый ключ ${key}`).toBe(false);
-      assertNoRefs(value, `${path}.${key}`);
+      expect(
+        key === '$ref' || key === '$defs' || key === 'anyOf' || key === 'oneOf',
+        `${path}: запрещённый ключ ${key}`,
+      ).toBe(false);
+      assertInlineOnly(value, `${path}.${key}`);
     }
   }
 }
@@ -179,30 +182,29 @@ describe('схемы ответов VLM', () => {
     expect(vlmStampResponseSchema.safeParse({ ...validStamp, extra: 1 }).success).toBe(false);
   });
 
-  it('отсутствующий ключ отвергается zod — паритет с required = все свойства', () => {
-    const { emphasis: _dropped, ...paragraphWithout } = {
-      kind: 'paragraph',
-      text: 'т',
-      emphasis: 'none',
-    };
-    expect(vlmTextResponseSchema.safeParse({ fragments: [paragraphWithout] }).success).toBe(false);
+  it('отсутствующий ключ отвергается zod там, где значения не подразумевается', () => {
+    // У штампа необязательных полей нет: «не прочитал» выражается явным null,
+    // и пропуск ключа означает ответ не по контракту.
     const { organization: _org, ...stampWithout } = validStamp;
     expect(vlmStampResponseSchema.safeParse(stampWithout).success).toBe(false);
+    // У фрагмента текста дискриминант обязателен так же: без него фрагмент
+    // неинтерпретируем, и никакая нормализация его не восстановит.
+    expect(vlmTextResponseSchema.safeParse({ fragments: [{ text: 'т' }] }).success).toBe(false);
   });
 
   it('text: wire-схема и zod согласованы узел в узел', () => {
     assertAgreement(TEXT_BLOCK_RESULT_SCHEMA as Wire, vlmTextResponseSchema, 'text');
-    assertNoRefs(TEXT_BLOCK_RESULT_SCHEMA, 'text');
+    assertInlineOnly(TEXT_BLOCK_RESULT_SCHEMA, 'text');
   });
 
   it('image: wire-схема и zod согласованы узел в узел', () => {
     assertAgreement(IMAGE_BLOCK_RESULT_SCHEMA as Wire, vlmImageResponseSchema, 'image');
-    assertNoRefs(IMAGE_BLOCK_RESULT_SCHEMA, 'image');
+    assertInlineOnly(IMAGE_BLOCK_RESULT_SCHEMA, 'image');
   });
 
   it('stamp: wire-схема и zod согласованы узел в узел', () => {
     assertAgreement(STAMP_BLOCK_RESULT_SCHEMA as Wire, vlmStampResponseSchema, 'stamp');
-    assertNoRefs(STAMP_BLOCK_RESULT_SCHEMA, 'stamp');
+    assertInlineOnly(STAMP_BLOCK_RESULT_SCHEMA, 'stamp');
   });
 
   it('fragment_type — ровно 21 значение RD WEB', () => {
@@ -210,11 +212,101 @@ describe('схемы ответов VLM', () => {
     expect(new Set(IMAGE_FRAGMENT_TYPES).size).toBe(21);
   });
 
-  it('уровень заголовка nullable выражен enum-ом 1..6 + null', () => {
-    const validated = vlmTextResponseSchema.safeParse({
-      fragments: [{ kind: 'heading', level: 7, text: 'x' }],
+  // -------------------------------------------------------------------------
+  // Плоский фрагмент: приведение к доменной форме
+  // -------------------------------------------------------------------------
+
+  it('плоский ответ со всеми ключами и null-ами приводится к доменной форме', () => {
+    // Ровно то, что выпишет модель под schema-constrained decoding: все семь
+    // ключей у каждого фрагмента, лишние — null.
+    const flat = {
+      fragments: [
+        {
+          kind: 'paragraph',
+          text: 'ВНИМАНИЕ',
+          emphasis: 'strong',
+          level: null,
+          title: null,
+          header: null,
+          rows: null,
+        },
+        {
+          kind: 'heading',
+          text: 'Ведомость',
+          emphasis: null,
+          level: 2,
+          title: null,
+          header: null,
+          rows: null,
+        },
+        {
+          kind: 'table',
+          text: null,
+          emphasis: null,
+          level: null,
+          title: 'Спецификация',
+          header: ['Поз.', 'Кол.'],
+          rows: [['1', '2']],
+        },
+      ],
+    };
+
+    expect(vlmTextResponseSchema.parse(flat)).toEqual({
+      fragments: [
+        { kind: 'paragraph', text: 'ВНИМАНИЕ', emphasis: 'strong' },
+        { kind: 'heading', text: 'Ведомость', level: 2 },
+        { kind: 'table', title: 'Спецификация', header: ['Поз.', 'Кол.'], rows: [['1', '2']] },
+      ],
     });
-    expect(validated.success).toBe(false);
+  });
+
+  it('«худой» ответ без незначимых ключей разбирается так же', () => {
+    // Бекенд без constrained decoding следует тексту промпта и пишет только
+    // значимые ключи. Отсутствие ключа и явный null означают одно и то же.
+    expect(
+      vlmTextResponseSchema.parse({
+        fragments: [
+          { kind: 'paragraph', text: 'т' },
+          { kind: 'table', rows: [] },
+        ],
+      }),
+    ).toEqual({
+      fragments: [
+        { kind: 'paragraph', text: 'т', emphasis: 'none' },
+        { kind: 'table', title: null, header: null, rows: [] },
+      ],
+    });
+  });
+
+  it('уровень заголовка вне 1..6 — это «уровень неизвестен», а не отказ', () => {
+    // Значение уже есть в контракте (null = иерархия не читается), и терять из-за
+    // косметики весь распознанный блок несоразмерно.
+    expect(
+      vlmTextResponseSchema.parse({ fragments: [{ kind: 'heading', text: 'x', level: 7 }] }),
+    ).toEqual({ fragments: [{ kind: 'heading', text: 'x', level: null }] });
+  });
+
+  it('выделение вне перечня — это «нет выделения»', () => {
+    expect(
+      vlmTextResponseSchema.parse({
+        fragments: [{ kind: 'paragraph', text: 'x', emphasis: 'bold' }],
+      }),
+    ).toEqual({ fragments: [{ kind: 'paragraph', text: 'x', emphasis: 'none' }] });
+  });
+
+  it('абзац и заголовок без текста отвергаются: это не транскрипция', () => {
+    expect(vlmTextResponseSchema.safeParse({ fragments: [{ kind: 'paragraph' }] }).success).toBe(
+      false,
+    );
+    expect(
+      vlmTextResponseSchema.safeParse({ fragments: [{ kind: 'heading', text: null }] }).success,
+    ).toBe(false);
+  });
+
+  it('неизвестный вид фрагмента отвергается', () => {
+    expect(
+      vlmTextResponseSchema.safeParse({ fragments: [{ kind: 'list', text: 'x' }] }).success,
+    ).toBe(false);
   });
 
   it('key_entities длиннее 50 отвергается', () => {

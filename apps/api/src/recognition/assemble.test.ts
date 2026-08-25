@@ -99,7 +99,7 @@ describe('assembleRecognitionResult: успех', () => {
     expect(result.schemaVersion).toBe('recognition.result.v2');
     expect(result.source).toEqual({
       provider: 'openrouter_vlm',
-      adapterVersion: 'openrouter-vlm.v1',
+      adapterVersion: 'openrouter-vlm.v2',
       modelId: 'actual/model',
       generatedAt: null,
     });

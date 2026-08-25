@@ -78,11 +78,40 @@ describe('промпты стадии recognize', () => {
     );
     expect(system).toContain('write 250х120х65 or 250x120x65, never 250х120x65');
     expect(system).toContain('[неразборчиво]');
-    // Правило маркеров списков: ровно один раз, как текст параграфа.
+    // Правило маркеров списков: ровно один раз, как текст параграфа. Пример
+    // выписан в ПЛОСКОЙ форме фрагмента — той же, что требует wire-схема
+    // (`schemas.ts`): пример с тремя ключами учил бы формату, которого схема не
+    // допускает, и расхождение вылезло бы только на живой модели.
     expect(system).toContain('must appear exactly once');
-    expect(system).toContain('{"kind": "paragraph", "text": "1. Текст пункта", "emphasis": "none"}');
+    expect(system).toContain(
+      '{"kind": "paragraph", "text": "1. Текст пункта", "emphasis": "none", "level": null, "title": null, "header": null, "rows": null}',
+    );
     // Правило шапки таблицы: null вместо повышения строки данных.
     expect(system).toContain('set "header" to null instead of promoting a data row');
+  });
+
+  it('text-промпт описывает плоский фрагмент со всеми семью ключами', () => {
+    const system = RECOGNITION_PROMPT_DEFAULTS.text.systemPrompt;
+
+    // Модель обязана получить ТУ ЖЕ форму, которой её ограничивает схема:
+    // прежние три варианта «ровно один из» описывали union, а union — это как
+    // раз то, на чём Google отвечал 400 и не распознавал ни одного text-блока.
+    expect(system).toContain(
+      'Every item of "fragments" has the same seven keys — "kind", "text", "emphasis", "level", "title", "header", "rows"',
+    );
+    expect(system).toContain('a key that does not apply to that "kind" is null');
+    expect(system).not.toContain('is exactly one of');
+
+    // Каждый пример — полный объект: семь ключей в одном фрагменте.
+    for (const kind of ['paragraph', 'heading', 'table']) {
+      const example = system
+        .split('\n')
+        .find((line) => line.trim().startsWith(`{"kind": "${kind}"`));
+      expect(example, `пример фрагмента «${kind}» в промпте`).toBeDefined();
+      for (const key of ['kind', 'text', 'emphasis', 'level', 'title', 'header', 'rows']) {
+        expect(example).toContain(`"${key}":`);
+      }
+    }
   });
 
   it('image-промпт — BASE_RD_SYSTEM + аддендум image.rd.auto.compat.v1', () => {

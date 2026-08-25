@@ -229,7 +229,7 @@ export function classifyFailure(rawText: string, zodError: ZodError | null): Fai
  * Добавляется через `system + '\n\n' + CORRECTIVE_INSTRUCTION[type]`.
  */
 export const CORRECTIVE_INSTRUCTION: Record<'text' | 'image' | 'stamp', string> = {
-  text: 'CRITICAL — the previous attempt returned the wrong kind of answer. Return ONLY one JSON object matching the provided response_format schema: {"fragments": [...]} with paragraph, heading and table items. No prose, no Markdown, no fences, no explanations — nothing outside the JSON object.',
+  text: 'CRITICAL — the previous attempt returned the wrong kind of answer. Return ONLY one JSON object matching the provided response_format schema: {"fragments": [...]}, where every item carries "kind" ("paragraph", "heading" or "table") together with the keys "text", "emphasis", "level", "title", "header" and "rows", and every key that does not apply to that kind is null. No prose, no Markdown, no fences, no explanations — nothing outside the JSON object.',
   image:
     'CRITICAL — the previous attempt returned the wrong kind of answer. Return ONLY one JSON object matching the provided response_format schema, with every schema field present. No prose, no Markdown, no fences, no explanations — nothing outside the JSON object.',
   stamp:
