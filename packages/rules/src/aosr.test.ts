@@ -304,7 +304,10 @@ describe('AOSR.HDR.020 — реквизиты сторон', () => {
   it('реквизит не извлечён — undetermined, а не обвинение подрядчика', () => {
     const graph = actGraph(without(healthyActFields(), AOSR_FIELDS.contractorInn));
     expect(verdictOf('AOSR.HDR.020', graph)).toBe('undetermined');
-    expect(messagesOf('AOSR.HDR.020', graph).join(' ')).toContain('не извлечён реквизит стороны');
+    const messages = messagesOf('AOSR.HDR.020', graph);
+    // ОДНА строка на акт, а не по одной на каждый неизвлечённый реквизит.
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toContain('не извлечены реквизиты лица, выполнившего работы: ИНН');
   });
 
   it('графа наблюдалась пустой — fail', () => {
@@ -314,7 +317,9 @@ describe('AOSR.HDR.020 — реквизиты сторон', () => {
       replacing(healthyActFields(), text(AOSR_FIELDS.contractorInn, '', { quote: 'ИНН' })),
     );
     expect(verdictOf('AOSR.HDR.020', graph)).toBe('fail');
-    expect(messagesOf('AOSR.HDR.020', graph).join(' ')).toContain('ИНН лица, выполнившего работы');
+    expect(messagesOf('AOSR.HDR.020', graph).join(' ')).toContain(
+      'не заполнен реквизит лица, выполнившего работы: ИНН',
+    );
   });
 
   it('ни один реквизит стороны не извлечён — правило неприменимо', () => {

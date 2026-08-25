@@ -464,33 +464,42 @@ function evaluateObjectName(graph: CheckGraph): RuleResult {
  * значит реквизит ИСКАЛИ и нашли пустую графу, и это дефект бумаги. Тот же приём
  * уже применён в `evaluateItem1` к п. 1; наблюдаемое пустое значение производит
  * LLM-ступень извлечения (см. `llm-extract.ts`).
+ *
+ * ## Почему неизвлечённое — ОДНА строка, а не три
+ *
+ * Наименование, ИНН и ОГРН извлекаются одной ступенью и по одной шапке: если
+ * она не отработала, не будет ни одного из трёх. Три строки «не проверено» на
+ * один и тот же факт — это утроение шума, а не утроение сведений, и на корпусе
+ * из семи пакетов оно давало восемнадцать строк вместо шести.
+ *
+ * Строка при этом остаётся: в отличие от нарезки страниц, реквизит шапки
+ * инженер может проверить глазами, открыв лист. Именно поэтому здесь
+ * `undetermined`, а не молчание, — но ровно одно на акт.
+ *
+ * Незаполненные графы, наоборот, перечисляются по одной: каждая — свой дефект
+ * бумаги со своей цитатой, и подрядчику надо знать, какую именно дозаполнить.
  */
 function evaluateHeaderParties(graph: CheckGraph): RuleResult {
   const actList = aosrActs(graph);
   if (actList.length === 0) return notApplicable(NO_ACTS);
 
   const required: readonly (readonly [string, string])[] = [
-    [AOSR_FIELDS.contractorName, 'наименование лица, выполнившего работы'],
-    [AOSR_FIELDS.contractorInn, 'ИНН лица, выполнившего работы'],
-    [AOSR_FIELDS.contractorOgrn, 'ОГРН лица, выполнившего работы'],
+    [AOSR_FIELDS.contractorName, 'наименование'],
+    [AOSR_FIELDS.contractorInn, 'ИНН'],
+    [AOSR_FIELDS.contractorOgrn, 'ОГРН'],
   ];
 
   const findings: RuleFinding[] = [];
   let checked = 0;
 
   for (const act of actList) {
+    const missing: string[] = [];
+
     for (const [code, label] of required) {
       const value = actField(act, code);
 
       if (value === null) {
-        findings.push(
-          unknown({
-            ...anchorOfDocument(act),
-            origin: 'deterministic',
-            message: `В шапке акта ${actLabel(act)} не извлечён реквизит стороны: ${label} — проверить его заполнение нечем.`,
-            hint: 'Откройте шапку акта и введите реквизиты лица, выполнившего работы, вручную.',
-          }),
-        );
+        missing.push(label);
         continue;
       }
 
@@ -501,8 +510,19 @@ function evaluateHeaderParties(graph: CheckGraph): RuleResult {
         defect({
           ...anchorOfField(act, value),
           origin: 'deterministic',
-          message: `В шапке акта ${actLabel(act)} не заполнен реквизит стороны: ${label}.`,
+          message: `В шапке акта ${actLabel(act)} не заполнен реквизит лица, выполнившего работы: ${label}.`,
           hint: 'Дозаполните реквизиты сторон в шапке акта: наименование, ИНН и ОГРН лица, выполнившего работы.',
+        }),
+      );
+    }
+
+    if (missing.length > 0) {
+      findings.push(
+        unknown({
+          ...anchorOfDocument(act),
+          origin: 'deterministic',
+          message: `В шапке акта ${actLabel(act)} не извлечены реквизиты лица, выполнившего работы: ${missing.join(', ')} — проверить их заполнение нечем.`,
+          hint: 'Откройте шапку акта и сверьте реквизиты лица, выполнившего работы, глазами.',
         }),
       );
     }
