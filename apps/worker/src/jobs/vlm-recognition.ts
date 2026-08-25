@@ -86,7 +86,7 @@ import {
   type VlmPort,
   type VlmResponse,
 } from '@id/api';
-import type { BlockType } from '@id/contracts';
+import type { BlockType, DetectorProvenance } from '@id/contracts';
 import {
   PAGE_TEXT_RENDER_VERSION,
   recognitionBlockSchema,
@@ -96,7 +96,12 @@ import {
   type RecognitionResult,
 } from '@id/recognition';
 
-import { CROP_POLICY_VERSION, type CropBlockInput, type CropBlockResult } from '../vlm/crop.js';
+import {
+  CROP_POLICY_VERSION,
+  FULL_PAGE_MAX_LONG_EDGE_PX,
+  type CropBlockInput,
+  type CropBlockResult,
+} from '../vlm/crop.js';
 
 /** Конверт `content_json` результата блока — тег форматa, не версия схемы канона. */
 export const RECOGNITION_BLOCK_RESULT_ENVELOPE = 'recognition.block_result.v1';
@@ -134,6 +139,14 @@ export interface VlmFrozenBlock {
   readonly sortOrder: number;
   /** Точки нормализованы к ВСЕЙ странице (как `layout_block_points`); `null` — прямоугольник. */
   readonly polygon: readonly (readonly [number, number])[] | null;
+  /**
+   * Чем блок появился. Нужен ровно для одного решения — потолка кропа.
+   *
+   * `full_page` означает блок на весь лист, поставленный заплаткой пустой
+   * страницы: общий потолок 2048 px сжал бы A4@300dpi в 1.7 раза и сделал бы
+   * мелкий шрифт нечитаемым там, где другого текста у страницы нет вовсе.
+   */
+  readonly detectorProvenance: DetectorProvenance;
 }
 
 /** Геометрия страницы рабочего документа — карта страниц bundle, БЕЗ рендера. */
@@ -1235,6 +1248,13 @@ export function createVlmRecognizePageHandler(
             pageHeightPx: rendered.heightPx,
             coordsNorm: block.coordsNorm,
             polygon: block.shapeType === 'polygon' ? block.polygon : null,
+            // Блок на весь лист получает свой потолок: общий (2048 px) сжал бы
+            // A4@300dpi в 1.7 раза, и мелкий шрифт сертификата стал бы
+            // нечитаем — а такие блоки ставит заплатка ровно там, где другого
+            // текста у страницы нет.
+            ...(block.detectorProvenance === 'full_page'
+              ? { maxLongEdgePx: FULL_PAGE_MAX_LONG_EDGE_PX }
+              : {}),
           });
 
           if ('degenerate' in cropResult) {

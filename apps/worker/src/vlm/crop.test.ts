@@ -13,7 +13,9 @@ async function solidPage(
   height: number,
   color: { r: number; g: number; b: number },
 ): Promise<Buffer> {
-  return sharp({ create: { width, height, channels: 3, background: color } }).png().toBuffer();
+  return sharp({ create: { width, height, channels: 3, background: color } })
+    .png()
+    .toBuffer();
 }
 
 interface RawImage {
@@ -35,7 +37,14 @@ function pixelAt(image: RawImage, x: number, y: number): readonly number[] {
 
 describe('CROP_POLICY_VERSION', () => {
   it('версия политики зафиксирована', () => {
-    expect(CROP_POLICY_VERSION).toBe('crop.v1');
+    // Значение уезжает в провенанс КАЖДОГО распознанного блока и в снимок
+    // прогона: по нему потом отвечают на вопрос «чем именно готовилась
+    // картинка». Поэтому оно закреплено тестом — молча измениться не должно, а
+    // изменившись осознанно, обязано поменяться и здесь.
+    //
+    // v2 — появился отдельный потолок длинной стороны для полностраничных
+    // блоков (S27): общий 2048 px сжимал A4@300dpi в 1.7 раза.
+    expect(CROP_POLICY_VERSION).toBe('crop.v2');
   });
 });
 

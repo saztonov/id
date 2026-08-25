@@ -333,6 +333,30 @@ export const storedBlobs = pgTable("stored_blobs", {
 	check("stored_blobs_size_chk", sql`size_bytes >= 0`),
 ]);
 
+export const processingBundles = pgTable("processing_bundles", {
+	id: uuid().defaultRandom().primaryKey().notNull(),
+	revisionId: uuid("revision_id").notNull(),
+	aggregateManifestHash: text("aggregate_manifest_hash").notNull(),
+	workingPdfBlobSha256: text("working_pdf_blob_sha256").notNull(),
+	builderVersion: text("builder_version").notNull(),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+}, (table) => [
+	index("ix_processing_bundles_blob").using("btree", table.workingPdfBlobSha256.asc().nullsLast().op("text_ops")),
+	foreignKey({
+			columns: [table.revisionId],
+			foreignColumns: [submissionRevisions.id],
+			name: "processing_bundles_revision_id_fkey"
+		}),
+	foreignKey({
+			columns: [table.workingPdfBlobSha256],
+			foreignColumns: [storedBlobs.sha256],
+			name: "processing_bundles_working_pdf_blob_sha256_fkey"
+		}),
+	unique("processing_bundles_manifest_uq").on(table.aggregateManifestHash, table.builderVersion, table.revisionId),
+	unique("processing_bundles_revision_id_uq").on(table.id, table.revisionId),
+	check("processing_bundles_manifest_hash_chk", sql`aggregate_manifest_hash ~ '^[0-9a-f]{64}$'::text`),
+]);
+
 export const sourcePages = pgTable("source_pages", {
 	id: uuid().defaultRandom().primaryKey().notNull(),
 	revisionId: uuid("revision_id").notNull(),
@@ -369,31 +393,7 @@ export const sourcePages = pgTable("source_pages", {
 	check("source_pages_width_chk", sql`width_px > 0`),
 	check("source_pages_height_chk", sql`height_px > 0`),
 	check("source_pages_rotation_chk", sql`rotation = ANY (ARRAY[0, 90, 180, 270])`),
-	check("source_pages_attention_flags_chk", sql`attention_flags <@ ARRAY['no_blocks'::text, 'low_coverage'::text, 'suspicious_overlap'::text, 'bbox_out_of_page'::text, 'degenerate_geometry'::text, 'tiny_block'::text, 'neighbor_mismatch'::text, 'blank_page_candidate'::text, 'missing_expected_stamp'::text, 'layout_hash_mismatch'::text]`),
-]);
-
-export const processingBundles = pgTable("processing_bundles", {
-	id: uuid().defaultRandom().primaryKey().notNull(),
-	revisionId: uuid("revision_id").notNull(),
-	aggregateManifestHash: text("aggregate_manifest_hash").notNull(),
-	workingPdfBlobSha256: text("working_pdf_blob_sha256").notNull(),
-	builderVersion: text("builder_version").notNull(),
-	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-}, (table) => [
-	index("ix_processing_bundles_blob").using("btree", table.workingPdfBlobSha256.asc().nullsLast().op("text_ops")),
-	foreignKey({
-			columns: [table.revisionId],
-			foreignColumns: [submissionRevisions.id],
-			name: "processing_bundles_revision_id_fkey"
-		}),
-	foreignKey({
-			columns: [table.workingPdfBlobSha256],
-			foreignColumns: [storedBlobs.sha256],
-			name: "processing_bundles_working_pdf_blob_sha256_fkey"
-		}),
-	unique("processing_bundles_manifest_uq").on(table.aggregateManifestHash, table.builderVersion, table.revisionId),
-	unique("processing_bundles_revision_id_uq").on(table.id, table.revisionId),
-	check("processing_bundles_manifest_hash_chk", sql`aggregate_manifest_hash ~ '^[0-9a-f]{64}$'::text`),
+	check("source_pages_attention_flags_chk", sql`attention_flags <@ ARRAY['no_blocks'::text, 'low_coverage'::text, 'suspicious_overlap'::text, 'bbox_out_of_page'::text, 'degenerate_geometry'::text, 'tiny_block'::text, 'neighbor_mismatch'::text, 'blank_page_candidate'::text, 'missing_expected_stamp'::text, 'layout_hash_mismatch'::text, 'text_fallback_applied'::text]`),
 ]);
 
 export const layoutRevisions = pgTable("layout_revisions", {

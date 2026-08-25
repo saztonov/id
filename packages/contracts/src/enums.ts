@@ -109,6 +109,15 @@ export const attentionFlagSchema = z.enum([
   'blank_page_candidate',
   'missing_expected_stamp',
   'layout_hash_mismatch',
+  /**
+   * Страница ушла на распознавание ЦЕЛИКОМ: детекция ничего на ней не нашла
+   * либо покрыла слишком мало (`applyTextCoverageFallback`).
+   *
+   * Не ошибка и не отказ: без заплатки страница осталась бы совсем без текста.
+   * Но и не рядовой исход — полностраничный кроп читается моделью хуже
+   * прицельного, поэтому человек должен знать, где портал распознавал вслепую.
+   */
+  'text_fallback_applied',
 ]);
 export type AttentionFlag = z.infer<typeof attentionFlagSchema>;
 

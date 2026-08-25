@@ -1159,6 +1159,7 @@ function vlmRecognitionDeps(options: PipelineJobsOptions): VlmRecognitionDeps {
           block.shapeType === 'polygon'
             ? block.points.map((point): readonly [number, number] => [point.x, point.y])
             : null,
+        detectorProvenance: block.detectorProvenance,
       }));
     },
 

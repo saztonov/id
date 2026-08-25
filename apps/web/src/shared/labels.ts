@@ -173,6 +173,7 @@ export const ATTENTION_FLAG_LABELS: Record<AttentionFlag, string> = {
   blank_page_candidate: 'Похоже на пустую страницу',
   missing_expected_stamp: 'Нет ожидаемого штампа',
   layout_hash_mismatch: 'Расхождение хэшей разметки',
+  text_fallback_applied: 'Распознана целиком: блоков не нашлось',
 };
 
 export const PROCESSING_STAGE_LABELS: Record<ProcessingStage, string> = {

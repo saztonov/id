@@ -68,8 +68,11 @@ import {
 } from '../../db/repositories/jobs.js';
 import { resetPipelineForRevision } from '../../db/repositories/purge.js';
 import {
+  applyTextCoverageFallback,
+  FALLBACK_LAYOUT_THRESHOLDS,
   freezeLayout,
   listLayoutRevisions,
+  loadProfileForLayout,
   type LayoutRevisionView,
 } from '../../db/repositories/layout.js';
 import {
@@ -301,9 +304,48 @@ function registerCheckRoute(app: AppInstance): void {
           );
         }
 
-        await freezeLayout(app.db, scope, {
+        /**
+         * Страницы, которые детекция не покрыла, уходят на распознавание
+         * целиком — ДО заморозки и только здесь.
+         *
+         * Распознавание идёт по блокам: страница без блока не получает ни
+         * строки текста, а дальше её не видит ни классификатор, ни сегментация,
+         * и комплект теряет напечатанный на ней документ. После заморозки
+         * поправить это уже нельзя — блоки заперты триггером.
+         *
+         * Именно здесь, а не в `layout.analyze_coverage`: тот идёт после КАЖДОЙ
+         * пачки детекции и судил бы «пусто» о странице, до которой детекция ещё
+         * не дошла. Маршрут — единственное место, где стадия разметки
+         * гарантированно затихла: несколькими строками выше он либо отказывает
+         * при незаконченной детекции, либо снимает её остаток.
+         *
+         * Пороги берутся из профиля, запиненного ЭТОЙ ревизией разметки, а не
+         * из настройки портала: расчёт обязан воспроизводиться вместе с
+         * прогоном.
+         */
+        const profile = await loadProfileForLayout(app.db, layout.layoutProfileId);
+        const fallback = await applyTextCoverageFallback(app.db, scope, {
           layoutRevisionId: layout.id,
           expectedVersion: layout.version,
+          thresholds: profile?.thresholds ?? FALLBACK_LAYOUT_THRESHOLDS,
+        });
+        if (fallback.pages.length > 0) {
+          request.log.info(
+            {
+              event: 'text_fallback_applied',
+              layout_revision_id: layout.id,
+              pages: fallback.pages,
+            },
+            'страницы без разметки уходят на распознавание целиком',
+          );
+        }
+
+        await freezeLayout(app.db, scope, {
+          // Версия — та, что вернул фолбэк: он поднимает её вставкой блоков, и
+          // заморозка по прочитанной раньше ответила бы 412 «разметка
+          // изменилась» — на изменение, сделанное этим же нажатием.
+          layoutRevisionId: layout.id,
+          expectedVersion: fallback.version,
           actorUserId: user.id,
         });
         frozen = true;

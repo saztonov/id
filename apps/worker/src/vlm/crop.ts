@@ -1,5 +1,5 @@
 /**
- * Crop policy v1 (ADR-0007, план Ф4а): вырезка PNG-кропа блока из растра
+ * Crop policy v2 (ADR-0007, план Ф4а): вырезка PNG-кропа блока из растра
  * страницы для VLM-распознавания.
  *
  * ## Версия политики — часть снимка прогона
@@ -37,6 +37,14 @@
  *    запас даже до кодирования в data-URL. Значение симметрично
  *    downscale-retry: тот же потолок, тот же детерминированный ресемплинг.
  *
+ *    **Исключение — блок на весь лист** (`FULL_PAGE_MAX_LONG_EDGE_PX`, v2).
+ *    Для фрагмента листа 2048 px ничего не решают, для страницы целиком —
+ *    решают всё: A4@300dpi это 3508 px по длинной стороне, и сжатие до 2048
+ *    уменьшает высоту строки в 1.7 раза. Мелкий шрифт сертификата на этом
+ *    уходит за границу разборчивости — а полностраничные блоки ставит заплатка
+ *    пустой страницы там, где другого текста у страницы нет вовсе. Потолок
+ *    передаёт вызывающий, глядя на `detector_provenance` блока.
+ *
  * ## Маска полигона
  *
  * Точки полигона приходят нормализованными к ЦЕЛОЙ СТРАНИЦЕ (0..1), как в
@@ -70,7 +78,35 @@
  */
 import sharp from 'sharp';
 
-export const CROP_POLICY_VERSION = 'crop.v1';
+/**
+ * Версия crop policy. Уезжает в `settings_snapshot.cropPolicyVersion` и в
+ * провенанс каждого блока, поэтому меняется вместе с ЛЮБЫМ изменением того, как
+ * готовится картинка для модели.
+ *
+ * `v2` — появился отдельный потолок для полностраничных блоков (S27).
+ */
+export const CROP_POLICY_VERSION = 'crop.v2';
+
+/**
+ * Потолок длинной стороны для блока НА ВСЮ СТРАНИЦУ.
+ *
+ * Общий потолок 2048 px выбран для блоков — фрагментов листа, где он ничего не
+ * решает. Для полностраничного блока он означает другое: A4 на 300 DPI — это
+ * 3508 px по длинной стороне, и сжатие до 2048 уменьшает высоту строки в 1.7
+ * раза. На сертификате, где значимое напечатано мелким шрифтом, это ровно та
+ * граница, за которой распознавание перестаёт быть надёжным, — а полностраничные
+ * блоки ставит заплатка `applyTextCoverageFallback` именно там, где другого
+ * текста у страницы нет вовсе.
+ *
+ * 3000 px: A4@300dpi проходит почти без сжатия, а бюджет тела запроса прокси
+ * (~24 MiB после base64) сохраняет кратный запас — плотная текстовая страница в
+ * PNG на этой стороне занимает единицы мегабайт.
+ *
+ * Константой, а не настройкой: это часть crop policy, и её смена обязана менять
+ * `CROP_POLICY_VERSION`. Настройка дала бы два прогона с одной версией политики
+ * и разными кропами — то есть провенанс, который врёт.
+ */
+export const FULL_PAGE_MAX_LONG_EDGE_PX = 3000;
 
 /** Поля вокруг заказанного прямоугольника блока, px. */
 const DEFAULT_PADDING_PX = 8;
@@ -117,7 +153,9 @@ function clamp01(value: number): number {
 }
 
 function toBuffer(bytes: Uint8Array): Buffer {
-  return Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  return Buffer.isBuffer(bytes)
+    ? bytes
+    : Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 }
 
 /**
@@ -150,7 +188,8 @@ function polygonMaskSvg(
  * потребовался ли даунскейл именно этому блоку.
  */
 export async function cropBlockPng(input: CropBlockInput): Promise<CropBlockResult> {
-  const source = input.pagePngPath ?? (input.pageBuffer === undefined ? undefined : toBuffer(input.pageBuffer));
+  const source =
+    input.pagePngPath ?? (input.pageBuffer === undefined ? undefined : toBuffer(input.pageBuffer));
   if (source === undefined) {
     throw new Error('cropBlockPng: требуется pagePngPath либо pageBuffer');
   }
@@ -180,10 +219,15 @@ export async function cropBlockPng(input: CropBlockInput): Promise<CropBlockResu
 
   if (input.polygon !== null && input.polygon.length >= 3) {
     const pointsPx = input.polygon.map(
-      ([px, py]) => [clamp01(px) * input.pageWidthPx - left, clamp01(py) * input.pageHeightPx - top] as const,
+      ([px, py]) =>
+        [clamp01(px) * input.pageWidthPx - left, clamp01(py) * input.pageHeightPx - top] as const,
     );
     const maskSvg = polygonMaskSvg(width, height, pointsPx);
-    const masked = await pipeline.ensureAlpha().composite([{ input: maskSvg, blend: 'dest-in' }]).png().toBuffer();
+    const masked = await pipeline
+      .ensureAlpha()
+      .composite([{ input: maskSvg, blend: 'dest-in' }])
+      .png()
+      .toBuffer();
     const whiteBackground = sharp({
       create: { width, height, channels: 3, background: { r: 255, g: 255, b: 255 } },
     });

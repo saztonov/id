@@ -49,6 +49,7 @@ import {
   type ShapeType,
 } from '@id/contracts';
 import type { AuthScope } from '../../auth/scope.js';
+import { unionArea } from '../../layout/attention.js';
 import { conflict, internal, notFound, preconditionFailed } from '../../lib/problem.js';
 import { withScope, type ScopeTarget } from '../scoped.js';
 import { appendRevisionEvent, type JobExecutor } from './jobs.js';
@@ -218,6 +219,26 @@ export interface LayoutThresholds {
   readonly neighborMinBlocks: number;
   /** Ждать ли `stamp` на странице, где есть `image` (схемы). */
   readonly expectStampOnImagePage: boolean;
+  /**
+   * Ниже какой доли покрытия страница уходит на распознавание ЦЕЛИКОМ
+   * (`applyTextCoverageFallback`).
+   *
+   * Отличается от `minCoverageRatio` предметом: тот решает, показать ли человеку
+   * флаг внимания, а этот — заменить ли скудную автоматическую разметку одним
+   * блоком на всю страницу. Флаг ничего не меняет и ждёт человека; замена меняет
+   * вход распознавания и делается сама, поэтому и порог у неё свой, заметно
+   * выше.
+   *
+   * `0` — только страницы БЕЗ единого блока: детекция ничего не нашла, и
+   * распознавать иначе нечего.
+   *
+   * Живёт в профиле разметки, а не в настройках портала, и это не вкусовщина:
+   * профиль пинится ревизией разметки, значит прогон месячной давности
+   * воспроизводится с тем порогом, с которым выполнялся, а применённая версия
+   * профиля уже уезжает в событие `layout.coverage_analyzed`. Глобальная
+   * настройка меняла бы прошлое молча.
+   */
+  readonly textFallbackCoverageRatio: number;
 }
 
 export const FALLBACK_LAYOUT_THRESHOLDS: LayoutThresholds = {
@@ -229,6 +250,7 @@ export const FALLBACK_LAYOUT_THRESHOLDS: LayoutThresholds = {
   neighborCountDeltaRatio: 0.6,
   neighborMinBlocks: 3,
   expectStampOnImagePage: false,
+  textFallbackCoverageRatio: 0.35,
 };
 
 export interface LayoutProfileView {
@@ -264,6 +286,9 @@ export function parseThresholds(raw: unknown): LayoutThresholds {
     degenerateSideRatio: numberOr(source, 'degenerateSideRatio'),
     neighborCountDeltaRatio: numberOr(source, 'neighborCountDeltaRatio'),
     neighborMinBlocks: numberOr(source, 'neighborMinBlocks'),
+    // Профили, заведённые до S27, ключа не содержат: `numberOr` подставит
+    // умолчание, и миграции под новый порог не требуется.
+    textFallbackCoverageRatio: numberOr(source, 'textFallbackCoverageRatio'),
     expectStampOnImagePage:
       typeof source.expectStampOnImagePage === 'boolean'
         ? source.expectStampOnImagePage
@@ -1464,6 +1489,175 @@ export async function applyFullPageTextProfile(
     });
     return { version, pages: pages.size };
   });
+}
+
+export interface TextCoverageFallbackResult {
+  readonly version: number;
+  /** Страницы, ушедшие на распознавание целиком. Пусто — ничего не тронуто. */
+  readonly pages: readonly number[];
+}
+
+/**
+ * Страница, которую детекция не покрыла, уходит на распознавание ЦЕЛИКОМ.
+ *
+ * ## Зачем
+ *
+ * Распознавание идёт по блокам: нет блока — нет и вызова модели, то есть у
+ * страницы не появляется ни строки текста. Дальше её не видит ни классификатор,
+ * ни сегментация, и комплект теряет документ, который на ней напечатан. При этом
+ * «страница без блоков» — штатный исход детекции, а не сбой: она честно
+ * отвечает, что ничего не нашла. До S27 выход был один — человек открывал
+ * «Разметку» и нажимал «Заменить страницу одним блоком» на каждой такой
+ * странице.
+ *
+ * ## Чем отличается от `applyFullPageTextProfile`
+ *
+ * Та сносит блоки ВСЕХ страниц комплекта и запрещена после первой ручной правки
+ * — это режим «распознавать весь комплект сплошным текстом». Здесь наоборот:
+ * трогаются ровно те страницы, где распознавать иначе нечего, а всё остальное
+ * остаётся как есть.
+ *
+ * ## Политика по странице
+ *
+ * 1. блоков нет — вставить один `text` на всю страницу;
+ * 2. все блоки `text` и покрытие ниже порога профиля — снести автоматические,
+ *    вставить один: скудная разметка означает, что детекция нашла заголовок и
+ *    потеряла тело, и половина текста документа пропала бы молча;
+ * 3. есть `image` или `stamp` — НЕ трогать. Это единственный признак
+ *    исполнительной схемы (`docs/CORPUS_FINDINGS.md`): у неё текста почти нет по
+ *    построению, и низкое покрытие для неё нормально, а полностраничный `text`
+ *    отправил бы чертёж в текстовый промт;
+ * 4. есть блок `source='user'` — НЕ трогать: человек уже сказал, как надо.
+ *
+ * ## Почему `source='auto'`
+ *
+ * Не деталь, а условие обратимости: `importDetectedBlocks` удаляет и заменяет
+ * именно автоматические блоки целевых страниц, а страницы с ручными пропускает.
+ * Полностраничная заплатка с `source='user'` (как в
+ * `replacePageWithFullPageBlock`, где это верно — там её ставит человек)
+ * навсегда закрыла бы странице повторную детекцию.
+ */
+export async function applyTextCoverageFallback(
+  db: Database,
+  scope: AuthScope,
+  input: {
+    readonly layoutRevisionId: string;
+    readonly expectedVersion: number;
+    readonly thresholds: LayoutThresholds;
+  },
+): Promise<TextCoverageFallbackResult> {
+  const layout = await requireEditableLayout(
+    db,
+    scope,
+    input.layoutRevisionId,
+    input.expectedVersion,
+  );
+
+  const pages = await loadPageMap(db, scope, layout.bundleId, []);
+  if (pages.size === 0) return { version: layout.version, pages: [] };
+
+  const blocks = await listLayoutBlocks(db, scope, layout.id);
+  const byPage = new Map<number, LayoutBlockView[]>();
+  for (const block of blocks) {
+    const list = byPage.get(block.workingPageIndex) ?? [];
+    list.push(block);
+    byPage.set(block.workingPageIndex, list);
+  }
+
+  const ratio = input.thresholds.textFallbackCoverageRatio;
+  const targets: number[] = [];
+  for (const workingPageIndex of pages.keys()) {
+    const own = byPage.get(workingPageIndex) ?? [];
+    if (own.length === 0) {
+      targets.push(workingPageIndex);
+      continue;
+    }
+    if (own.some((block) => block.source === 'user')) continue;
+    if (own.some((block) => block.blockType !== 'text')) continue;
+    if (ratio <= 0) continue;
+    const covered = unionArea(own.map((b) => ({ x0: b.x0, y0: b.y0, x1: b.x1, y1: b.y1 })));
+    if (covered < ratio) targets.push(workingPageIndex);
+  }
+
+  if (targets.length === 0) return { version: layout.version, pages: [] };
+
+  const version = await db.transaction(async (tx) => {
+    for (const workingPageIndex of targets) {
+      // Только автоматические: страницы с ручными блоками сюда не попадают
+      // вовсе, и условие здесь — второй рубеж, а не первый.
+      await tx.execute(sql`
+        delete from ${layoutBlocks}
+         where ${layoutBlocks.layoutRevisionId} = ${layout.id}::uuid
+           and ${layoutBlocks.workingPageIndex} = ${workingPageIndex}
+           and ${layoutBlocks.source} = 'auto'
+      `);
+      const sourcePageId = pages.get(workingPageIndex);
+      if (sourcePageId === undefined) continue;
+      await insertBlock(tx, {
+        layoutRevisionId: layout.id,
+        revisionId: layout.revisionId,
+        bundleId: layout.bundleId,
+        objectId: layout.objectId,
+        sourcePageId,
+        block: {
+          workingPageIndex,
+          blockType: 'text',
+          shapeType: 'rectangle',
+          x0: 0,
+          y0: 0,
+          x1: 1,
+          y1: 1,
+          sortOrder: 0,
+          points: [],
+        },
+        source: 'auto',
+        provenance: 'full_page',
+      });
+    }
+
+    /**
+     * Флаг внимания — ДОПОЛНЕНИЕМ к существующим, а не заменой набора.
+     *
+     * `savePageAttentionFlags` заменяет флаги страницы целиком: так и надо
+     * анализу покрытия, который пересчитывает их все разом. Здесь наоборот —
+     * добавляется один факт к тому, что анализ уже посчитал (`no_blocks`,
+     * `low_coverage` останутся и объяснят, ПОЧЕМУ заплатка понадобилась).
+     *
+     * `array_append` под условием `not ... = any(...)`: повторный вызов не
+     * должен наращивать массив дублями.
+     */
+    const targetIds = targets
+      .map((page) => pages.get(page))
+      .filter((id): id is string => id !== undefined);
+    if (targetIds.length > 0) {
+      await tx.execute(sql`
+        update ${sourcePages}
+           set attention_flags = array_append(attention_flags, 'text_fallback_applied')
+         where ${sourcePages.id} in (${sql.join(
+           targetIds.map((id) => sql`${id}::uuid`),
+           sql`, `,
+         )})
+           and not ('text_fallback_applied' = any(attention_flags))
+      `);
+    }
+
+    // Ручной правкой это не является: заплатку ставит конвейер, и пометив её
+    // как работу человека, портал запретил бы сам себе режим `full-page-text` и
+    // соврал бы в поле `first_manual_edit_by`.
+    const next = await bumpVersion(tx, layout.id, null, false);
+    await appendRevisionEvent(tx, {
+      revisionId: layout.revisionId,
+      eventType: 'layout.text_fallback_applied',
+      payload: {
+        layoutRevisionId: layout.id,
+        pages: targets,
+        coverageRatio: ratio,
+      },
+    });
+    return next;
+  });
+
+  return { version, pages: targets };
 }
 
 // =====================================================================

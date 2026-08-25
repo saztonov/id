@@ -52,6 +52,7 @@ import {
   ensureDraftLayout,
   enqueueSystemJob,
   findLayoutRevision,
+  FALLBACK_LAYOUT_THRESHOLDS,
   importDetectedBlocks,
   JobRunner,
   listBundlePages,
@@ -62,6 +63,7 @@ import {
   readDetectionSettings,
   type Database,
   type LayoutBlockView,
+  type LayoutThresholds,
   type PageRasterizer,
   type PdfToolkit,
   type RenderPageInput,
@@ -242,16 +244,7 @@ async function buildTestMarkupTarget(
   readonly workingPdfKey: string;
   readonly workingPdfSizeBytes: number;
   readonly pageIndices: readonly number[];
-  readonly thresholds: {
-    readonly minCoverageRatio: number;
-    readonly blankPageCoverageRatio: number;
-    readonly tinyBlockAreaRatio: number;
-    readonly overlapIouThreshold: number;
-    readonly degenerateSideRatio: number;
-    readonly neighborCountDeltaRatio: number;
-    readonly neighborMinBlocks: number;
-    readonly expectStampOnImagePage: boolean;
-  };
+  readonly thresholds: LayoutThresholds;
   readonly layoutProfileVersion: number | null;
 } | null> {
   const layout = await findLayoutRevision(db, ADMIN_SCOPE, lrId);
@@ -267,16 +260,9 @@ async function buildTestMarkupTarget(
     workingPdfKey: blobKey(sourcePdfSha256),
     workingPdfSizeBytes: sourcePdfSize,
     pageIndices: [...Array(PAGE_COUNT).keys()],
-    thresholds: {
-      minCoverageRatio: 0.12,
-      blankPageCoverageRatio: 0.02,
-      tinyBlockAreaRatio: 0.002,
-      overlapIouThreshold: 0.2,
-      degenerateSideRatio: 0.002,
-      neighborCountDeltaRatio: 0.6,
-      neighborMinBlocks: 3,
-      expectStampOnImagePage: false,
-    },
+    // Умолчания портала, а не их копия: копия разошлась бы с профилем при
+    // добавлении порога — как это и случилось с `textFallbackCoverageRatio`.
+    thresholds: FALLBACK_LAYOUT_THRESHOLDS,
     layoutProfileVersion: null,
   };
 }

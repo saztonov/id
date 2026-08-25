@@ -112,6 +112,8 @@ function frozenBlock(overrides: Partial<VlmFrozenBlock> = {}): VlmFrozenBlock {
     coordsNorm: [0.1, 0.1, 0.5, 0.5],
     sortOrder: 0,
     polygon: null,
+    // Обычный блок детектора: свой потолок кропа получает только `full_page`.
+    detectorProvenance: 'rf_detr',
     ...overrides,
   };
 }
@@ -423,7 +425,7 @@ describe('createVlmStartHandler', () => {
     ]);
     expect(merged).toHaveLength(1);
     expect(merged[0]).toMatchObject({
-      cropPolicyVersion: 'crop.v1',
+      cropPolicyVersion: 'crop.v2',
       rasterizer: { kind: 'pdftoppm', version: '1.0', dpi: 300 },
     });
     expect((merged[0]?.['promptVersions'] as Record<string, number>)['text']).toBe(1);
@@ -926,7 +928,7 @@ describe('createVlmFinalizeHandler', () => {
           actualModel: 'vendor/model-1',
           finishReason: 'stop',
           attempts: 1,
-          cropPolicyVersion: 'crop.v1',
+          cropPolicyVersion: 'crop.v2',
           cropSha256: 'x'.repeat(64),
         },
       },
