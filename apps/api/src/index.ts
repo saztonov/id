@@ -285,6 +285,7 @@ export {
   saveRdJobId,
   saveRecognitionResults,
   saveRemoteHashBefore,
+  scheduleRunRecoveryRound,
   seedRunPages,
   startRecognitionRun,
 } from './db/repositories/recognition.js';

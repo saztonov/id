@@ -38,7 +38,7 @@ import {
   withAttempt,
 } from './port.js';
 import type { LlmPolicy } from './policy.js';
-import { responseHash, type LruCache } from './prompt.js';
+import { type LruCache } from './prompt.js';
 import {
   chatCompletionsUrl,
   describeFailure,
@@ -51,7 +51,7 @@ import {
   UPSTREAM_RESPONSE_TOO_LARGE,
 } from './proxy.js';
 import type { VlmPort, VlmRequest, VlmResponse, VlmToolCall } from './vlm-port.js';
-import { vlmInputHash } from './vlm-prompt.js';
+import { vlmInputHash, vlmOutputHash } from './vlm-prompt.js';
 
 const PROVIDER = 'proxy_llm' as const;
 
@@ -101,6 +101,8 @@ interface VlmCompletionPayload {
     readonly cost?: unknown;
   };
   readonly model?: unknown;
+  /** Идентификатор ответа у шлюза (`gen-…` у OpenRouter) — в аудит. */
+  readonly id?: unknown;
 }
 
 export class ProxyVlmProvider implements VlmPort {
@@ -186,7 +188,8 @@ export class ProxyVlmProvider implements VlmPort {
       tokensOut: optionalCount(payload.usage?.completion_tokens),
       cost: optionalCost(payload.usage?.cost),
       inputHash,
-      outputHash: responseHash(text),
+      outputHash: vlmOutputHash({ text, toolCalls }),
+      upstreamId: typeof payload.id === 'string' && payload.id.length > 0 ? payload.id : null,
       finishReason,
     };
     this.#options.cache.set(inputHash, completion);
@@ -228,6 +231,11 @@ export class ProxyVlmProvider implements VlmPort {
                 parameters: tool.parameters,
               },
             })),
+            // `tool_choice` кладётся ТОЛЬКО вместе с объявлением: без списка
+            // инструментов он бессмыслен, а часть провайдеров на него ругается.
+            // `none` закрывает последний круг дозапроса, не переписывая уже
+            // состоявшуюся историю вызовов в `messages` (vlm-port.ts, S28).
+            tool_choice: request.toolChoice ?? 'auto',
           }
         : {}),
       temperature: request.temperature,

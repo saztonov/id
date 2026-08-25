@@ -17,9 +17,8 @@
  */
 import { LlmRecordingMissingError } from './port.js';
 import type { LlmPolicy } from './policy.js';
-import { responseHash } from './prompt.js';
 import type { VlmPort, VlmRequest, VlmResponse } from './vlm-port.js';
-import { vlmInputHash } from './vlm-prompt.js';
+import { vlmInputHash, vlmOutputHash } from './vlm-prompt.js';
 
 const PROVIDER = 'recorded' as const;
 
@@ -111,7 +110,10 @@ export class RecordedVlmProvider implements VlmPort {
       cost: recorded.cost ?? null,
       latencyMs: this.#now() - startedAt,
       inputHash,
-      outputHash: responseHash(recorded.text),
+      outputHash: vlmOutputHash({ text: recorded.text, toolCalls: [] }),
+      // Записи делаются офлайн: ответа шлюза за ними нет, и выдумывать его
+      // идентификатор нечем.
+      upstreamId: null,
       cacheHit: false,
       finishReason: recorded.finishReason,
     };

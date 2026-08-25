@@ -111,6 +111,41 @@ const GEOMETRY_ASPECT_TOLERANCE = 0.02;
 
 const RECOGNIZE_BLOCK_TYPES: readonly BlockType[] = ['text', 'image', 'stamp'];
 
+/**
+ * Потолок кругов дозапроса кропа для блока «страница целиком».
+ *
+ * Три против общих двух. Такой блок ставит заплатка пустой страницы — там, где
+ * детектор не нашёл ничего, а текст на листе есть, — и модель видит сразу весь
+ * лист: просьба показать участок крупнее для него норма, а не зацикливание. На
+ * комплекте, из-за которого правило появилось, дозапрос случался примерно на
+ * трети блоков, и почти все они были полностраничными.
+ */
+const FULL_PAGE_MAX_CROP_REQUESTS = 3;
+
+/**
+ * Сколько раз финализация вправе переиграть упавшие страницы прогона.
+ *
+ * Один. Раунд существует ради недетерминированных отказов модели — второй
+ * такой же круг по тем же блокам означал бы, что дело не в случайности, и
+ * платить за третий взгляд неоткуда.
+ */
+const MAX_RECOVERY_ROUNDS = 1;
+
+/**
+ * Довесок к system-промпту в раунде дораспознавания.
+ *
+ * Нужен не столько модели, сколько канонизации входа: без него повторный вызов
+ * даёт ТОТ ЖЕ `input_hash`, а на нём висят и LRU-кэш ответов, и
+ * `X-Idempotency-Key` шлюза — раунд вернул бы прежний отказ, не потратив ни
+ * токена и ничего не изменив. Раз уж вход всё равно меняется, он меняется
+ * осмысленно: модели прямо сказано, что прошлый заход результата не дал.
+ */
+const RECOVERY_INSTRUCTION =
+  'RETRY — a previous attempt on this same crop produced no usable answer. ' +
+  'Read the image again carefully and return ONLY one JSON object matching the ' +
+  'provided response_format schema. Transcribe what is actually visible; leave ' +
+  'a field null rather than guessing it.';
+
 // =====================================================================
 // Типы целей и данных прогона
 // =====================================================================
@@ -127,6 +162,25 @@ export interface VlmRunTarget {
   readonly status: string;
   readonly localLayoutHash: string;
   readonly settingsSnapshot: unknown;
+  /**
+   * Сколько раундов дораспознавания уже потрачено (0 — ни одного).
+   *
+   * Колонка прогона, а не поле снимка настроек: снимок доказывает, ЧЕМ прогон
+   * выполнен, и подмешивать в него изменяемое состояние значит смешивать два
+   * разных предмета — а ещё колонка даёт атомарный переход 0→1, которым две
+   * одновременные финализации разводятся без блокировок.
+   */
+  readonly recoveryRound: number;
+  /** Прогон, который этот восстанавливает (`null` — обычный прогон). */
+  readonly repairOfRunId: string | null;
+  /**
+   * sha256 рабочего документа прогона.
+   *
+   * Нужен ровно для одного решения — можно ли переносить результаты
+   * родительского прогона: другой рабочий документ означает другие страницы,
+   * а значит и другие кропы под теми же координатами блоков.
+   */
+  readonly workingPdfSha256: string;
 }
 
 /** Замороженный блок разметки: вход хэша целостности, кропа и провенанса. */
@@ -241,18 +295,49 @@ export interface VlmRecognizeBlockInput {
    */
   readonly requestCrop?:
     ((rect: readonly [number, number, number, number]) => Promise<Uint8Array | null>) | undefined;
+  /** Потолок кругов дозапроса для этого блока; отсутствие — умолчание порта. */
+  readonly maxCropRequests?: number | undefined;
+}
+
+/** Зеркало `VlmCropEvent` из `@id/api` (см. шапку файла: структурная копия). */
+export interface VlmCropEvent {
+  readonly rect: readonly [number, number, number, number] | null;
+  readonly outcome:
+    'granted' | 'degenerate' | 'crop_failed' | 'invalid_args' | 'unknown_tool' | 'ceiling_rejected';
+}
+
+/**
+ * Доказательства прохода, общие для всех трёх исходов.
+ *
+ * `calls` — ВСЕ физические ответы модели, а не только последний: круги
+ * дозапроса кропа оплачены так же, как итоговый вызов, и до S28 не попадали в
+ * `ai_runs` вовсе — расход прогона был занижен на треть.
+ */
+export interface VlmBlockEvidence {
+  readonly calls: readonly VlmResponse[];
+  readonly cropTrail: readonly VlmCropEvent[];
+  readonly cropRequests: number;
+  readonly forcedFinal: boolean;
 }
 
 export type VlmRecognizeBlockOutcome =
-  | {
+  | ({
       readonly kind: 'ok';
       readonly block: RecognitionBlock;
       readonly raw: unknown;
       readonly response: VlmResponse;
       readonly warnings: readonly string[];
-    }
-  | { readonly kind: 'invalid_response'; readonly reason: string; readonly response?: VlmResponse }
-  | { readonly kind: 'model_refusal'; readonly reason: string; readonly response?: VlmResponse };
+    } & VlmBlockEvidence)
+  | ({
+      readonly kind: 'invalid_response';
+      readonly reason: string;
+      readonly response?: VlmResponse;
+    } & VlmBlockEvidence)
+  | ({
+      readonly kind: 'model_refusal';
+      readonly reason: string;
+      readonly response?: VlmResponse;
+    } & VlmBlockEvidence);
 
 // --- Сборка результата (структурно = recognition/assemble.ts) ---
 
@@ -390,6 +475,23 @@ export interface VlmRecognitionDeps {
 
   /** Как wired: `listRunPages(db, scope, runId)` — 1:1. */
   listRunPages(runId: string): Promise<readonly VlmRunPageState[]>;
+
+  /**
+   * Раунд дораспознавания упавших страниц одной транзакцией (S28).
+   *
+   * Как wired: `scheduleRunRecoveryRound(db, scope, input)` — 1:1. Портом, а не
+   * тремя вызовами подряд (пометить раунд, сбросить страницы, поставить
+   * задачи), потому что порознь они опасны: сбой между сбросом и постановкой
+   * оставляет страницы ждущими работы, которой никто не поставил.
+   *
+   * `scheduled: false` — переход раунда не состоялся: его уже сделала другая
+   * попытка финализации. Это не ошибка, а «опоздал»: работать не над чем.
+   */
+  scheduleRecoveryRound(input: {
+    readonly runId: string;
+    readonly fromRound: number;
+    readonly pages: readonly number[];
+  }): Promise<{ readonly scheduled: boolean; readonly round: number }>;
 
   /** Как wired: `listRunBlockIds(db, scope, runId)` — 1:1 (checkpoint страницы). */
   existingBlockIds(runId: string): Promise<ReadonlySet<string>>;
@@ -814,6 +916,164 @@ function dryRunOf(run: VlmRunTarget): boolean {
 }
 
 /**
+ * Провенанс конверта результата блока — то, ЧЕМ он получен.
+ *
+ * Читается сырым объектом, а не схемой: `provenance` намеренно свободен
+ * (`parseBlockEnvelope` валидирует только сам блок), и жёсткая схема здесь
+ * запретила бы дописывать в него доказательства, ради которых он и заведён.
+ */
+function provenanceOf(contentJson: unknown): Record<string, unknown> {
+  if (typeof contentJson !== 'object' || contentJson === null) return {};
+  const provenance = (contentJson as Record<string, unknown>)['provenance'];
+  return typeof provenance === 'object' && provenance !== null
+    ? (provenance as Record<string, unknown>)
+    : {};
+}
+
+/**
+ * Совместимы ли прогоны настолько, что результаты одного годятся другому.
+ *
+ * Вопрос звучит как «тот же ли это кроп с тем же вопросом к той же модели», и
+ * ответ собирается из доказательств, которые уже есть на руках, БЕЗ повторного
+ * рендера страниц: кроп детерминирован рабочим документом, набором блоков,
+ * растеризатором с его DPI и версией crop policy, а вопрос — моделью, кодом и
+ * версией промпта. Сверять `cropSha256` пришлось бы, отрендерив весь комплект
+ * заново, то есть проделав ровно ту работу, ради экономии которой перенос и
+ * затевается.
+ *
+ * Расхождение в чём угодно из перечисленного — не повод для догадок: блок
+ * распознаётся заново.
+ */
+interface RepairConditions {
+  readonly layoutRevisionId: string;
+  readonly localLayoutHash: string;
+  readonly workingPdfSha256: string;
+  readonly model: string;
+  readonly cropPolicyVersion: string;
+  /** `kind/version@dpi` растеризатора — одной строкой, чтобы сверка была одна. */
+  readonly rasterizer: string;
+}
+
+/** `kind/version@dpi` из снимка; пустая строка — снимок про растеризатор молчит. */
+function rasterizerSignatureOf(snapshot: Record<string, unknown>): string {
+  const value = snapshot['rasterizer'];
+  if (typeof value !== 'object' || value === null) return '';
+  const record = value as Record<string, unknown>;
+  return `${String(record['kind'])}/${String(record['version'])}@${String(record['dpi'])}`;
+}
+
+function runsProduceSameCrops(parent: VlmRunTarget, expected: RepairConditions): boolean {
+  if (parent.layoutRevisionId !== expected.layoutRevisionId) return false;
+  if (parent.localLayoutHash !== expected.localLayoutHash) return false;
+  if (parent.workingPdfSha256 !== expected.workingPdfSha256) return false;
+
+  const snapshot = snapshotOf(parent);
+  if (snapshot['model'] !== expected.model) return false;
+  if (snapshot['cropPolicyVersion'] !== expected.cropPolicyVersion) return false;
+  // Пустая подпись растеризатора — это прогон, не дошедший до `mergeSnapshot`
+  // старта: чем он рендерил, неизвестно, и доказать совпадение нечем.
+  return rasterizerSignatureOf(snapshot) === expected.rasterizer && expected.rasterizer !== '';
+}
+
+/**
+ * Перенос результатов родительского прогона в восстанавливающий (S28).
+ *
+ * Выполняется ДО единственного `seedRunPages` и fan-out: дальше всё делается
+ * само — `vlm.recognize_page` распознаёт только блоки без результата, а
+ * страница, у которой их не осталось, закрывается checkpoint-веткой, ни разу
+ * не позвав модель. Ради этого перенос и стоит здесь, а не отдельной задачей.
+ *
+ * Прогон-родитель при этом не трогается вовсе: он терминален, его исход
+ * объявлен, а результаты копируются, а не переезжают.
+ */
+async function reuseParentResults(
+  deps: VlmRecognitionDeps,
+  ctx: JobContext<'vlm.start_recognition'>,
+  run: VlmRunTarget,
+  parentRunId: string,
+  frozen: readonly VlmFrozenBlock[],
+  promptOf: (blockType: BlockType) => { readonly code: string; readonly version: number },
+  expected: RepairConditions,
+): Promise<number> {
+  const parent = await deps.loadRun({
+    revisionId: run.revisionId,
+    recognitionRunId: parentRunId,
+  });
+  if (parent === null) {
+    ctx.logger.warn(
+      { event: 'vlm_recognition_repair_parent_missing', parent_run_id: parentRunId },
+      'прогон-родитель не найден: восстановление идёт как обычное распознавание',
+    );
+    return 0;
+  }
+  if (!runsProduceSameCrops(parent, expected)) {
+    ctx.logger.warn(
+      { event: 'vlm_recognition_repair_incompatible', parent_run_id: parentRunId },
+      'условия прогона-родителя разошлись с текущими: результаты не переносятся',
+    );
+    return 0;
+  }
+
+  const blockById = new Map(frozen.map((block) => [block.id, block] as const));
+  const envelopes = await deps.listBlockEnvelopes(parentRunId);
+  let reused = 0;
+
+  for (const envelope of envelopes) {
+    const block = blockById.get(envelope.layoutBlockId);
+    if (block === undefined) continue;
+    const parsed = parseBlockEnvelope(envelope.contentJson);
+    if (parsed === null) continue;
+
+    const prompt = promptOf(block.blockType);
+    const provenance = provenanceOf(envelope.contentJson);
+    if (provenance['promptCode'] !== prompt.code) continue;
+    if (provenance['promptVersion'] !== prompt.version) continue;
+    if (provenance['cropPolicyVersion'] !== CROP_POLICY_VERSION) continue;
+    if (provenance['model'] !== expected.model) continue;
+
+    const contentJson = {
+      ...(envelope.contentJson as Record<string, unknown>),
+      provenance: {
+        ...provenance,
+        // Откуда взялся результат, которого этот прогон не считал сам: без
+        // этой строки перенесённый блок неотличим от распознанного заново, и
+        // число строк `ai_runs` не сходится с числом блоков.
+        reusedFromRunId: parentRunId,
+      },
+    };
+
+    const { written } = await deps.insertBlockResult({
+      recognitionRunId: run.runId,
+      layoutRevisionId: run.layoutRevisionId,
+      block: {
+        layoutBlockId: block.id,
+        resultType: `${block.blockType}_json`,
+        contentJson,
+        contentMd: parsed.blockType === 'text' ? parsed.text : null,
+        contentHtml: null,
+        modelId: envelope.modelId,
+        confidence: null,
+      },
+    });
+    if (written) reused += 1;
+  }
+
+  ctx.logger.info(
+    {
+      event: 'vlm_recognition_repair_seeded',
+      parent_run_id: parentRunId,
+      blocks_reused: reused,
+      blocks_retried: frozen.length - reused,
+    },
+    'восстановление прогона: совместимые результаты перенесены, остальное распознаётся заново',
+  );
+  await deps.mergeSnapshot(run.runId, {
+    repair: { parentRunId, blocksReused: reused, blocksRetried: frozen.length - reused },
+  });
+  return reused;
+}
+
+/**
  * Сверка геометрии рендера с сохранённой картой страниц («framesAgree»,
  * Ф4а). Сравнение — по СООТНОШЕНИЮ СТОРОН, а не по абсолютным пикселям:
  * `source_pages.widthPx/heightPx` и рендер `PageRasterizer` живут на разных
@@ -963,6 +1223,7 @@ export function createVlmStartHandler(
     // Теперь отсутствие опубликованной версии — это `version: 0` в снимке, а не
     // отказ (см. `recognitionPromptDefaultByCode`).
     const promptVersions: Record<string, number> = {};
+    const promptByType = new Map<BlockType, { readonly code: string; readonly version: number }>();
     for (const blockType of RECOGNIZE_BLOCK_TYPES) {
       const profile = deps.generationProfile(blockType);
       const published = await deps.promptByCode(profile.code);
@@ -970,6 +1231,7 @@ export function createVlmStartHandler(
       // администратором законна (см. VlmPrompt.modelOverride) — фиксируется
       // только версия, использованная этим прогоном.
       promptVersions[blockType] = published.version;
+      promptByType.set(blockType, { code: published.code, version: published.version });
       if (published.modelOverride !== null && published.modelOverride !== model) {
         ctx.logger.warn(
           {
@@ -984,11 +1246,36 @@ export function createVlmStartHandler(
       }
     }
 
+    const rasterizerSignature = `${rasterizer.kind}/${rasterizer.version}@${String(RASTER_DPI)}`;
     await deps.mergeSnapshot(run.runId, {
       promptVersions,
       rasterizer: { kind: rasterizer.kind, version: rasterizer.version, dpi: RASTER_DPI },
       cropPolicyVersion: CROP_POLICY_VERSION,
     });
+
+    // --- Восстановление: перенос совместимых результатов родителя (S28) ---
+    //
+    // Здесь, а не отдельной задачей, потому что дальше всё делается само:
+    // `vlm.recognize_page` зовёт модель только для блоков без результата, и
+    // страница, у которой их не осталось, закрывается вообще без вызовов.
+    if (run.repairOfRunId !== null) {
+      await reuseParentResults(
+        deps,
+        ctx,
+        run,
+        run.repairOfRunId,
+        frozen,
+        (blockType) => promptByType.get(blockType) ?? { code: '', version: -1 },
+        {
+          layoutRevisionId: run.layoutRevisionId,
+          localLayoutHash: run.localLayoutHash,
+          workingPdfSha256: run.workingPdfSha256,
+          model,
+          cropPolicyVersion: CROP_POLICY_VERSION,
+          rasterizer: rasterizerSignature,
+        },
+      );
+    }
 
     // --- Сидирование страниц с блоками + fan-out ---
     const blocksByPage = new Map<number, number>();
@@ -1075,40 +1362,66 @@ async function recordBlockFeedback(
   });
 }
 
-async function recordSuccessAiRun(
+/**
+ * Строки `ai_runs` по ВСЕМ физическим вызовам блока (S28).
+ *
+ * До S28 писался ровно один вызов — последний, — и это врало в обе стороны:
+ * круги дозапроса кропа оплачены, но в учёт не попадали (на комплекте, из-за
+ * которого правило и появилось, 118 вызовов против 85 блоков), а попадание в
+ * кэш писалось как новый вызов и удваивало стоимость, которой не было.
+ *
+ * Кэш-хиты пропускаются тем же правилом и по той же причине, что в
+ * `segmentation.ts` («вторая строка удвоила бы учтённую стоимость»): вызова не
+ * было, платить не за что, а факт повторного обращения виден по прогону.
+ */
+async function recordBlockAiRuns(
   deps: VlmRecognitionDeps,
   ctx: JobContext<'vlm.recognize_page'>,
   run: VlmRunTarget,
   block: VlmFrozenBlock,
   prompt: { readonly code: string; readonly version: number },
   cropSha256: string,
-  response: VlmResponse,
-  outcomeKind: string,
+  outcome: VlmRecognizeBlockOutcome,
+  recoveryRound: number,
 ): Promise<void> {
-  await deps.recordAiRun({
-    revisionId: run.revisionId,
-    stage: 'recognize',
-    provider: response.provider,
-    model: response.model,
-    promptCode: prompt.code,
-    promptVersion: prompt.version,
-    inputHash: response.inputHash,
-    outputHash: response.outputHash,
-    tokensIn: response.tokensIn,
-    tokensOut: response.tokensOut,
-    cost: response.cost,
-    latencyMs: response.latencyMs,
-    structuredResult: {
-      recognitionRunId: run.runId,
-      layoutBlockId: block.id,
-      cropSha256,
-      requestedModel: response.requestedModel,
-      actualModel: response.model,
-      attempt: ctx.attempt,
-      outcome: outcomeKind,
-    },
-    requestId: ctx.payload.request_id ?? null,
-  });
+  const total = outcome.calls.length;
+  for (const [index, response] of outcome.calls.entries()) {
+    if (response.cacheHit) continue;
+    await deps.recordAiRun({
+      revisionId: run.revisionId,
+      stage: 'recognize',
+      provider: response.provider,
+      model: response.model,
+      promptCode: prompt.code,
+      promptVersion: prompt.version,
+      inputHash: response.inputHash,
+      outputHash: response.outputHash,
+      tokensIn: response.tokensIn,
+      tokensOut: response.tokensOut,
+      cost: response.cost,
+      latencyMs: response.latencyMs,
+      structuredResult: {
+        recognitionRunId: run.runId,
+        layoutBlockId: block.id,
+        cropSha256,
+        requestedModel: response.requestedModel,
+        actualModel: response.model,
+        attempt: ctx.attempt,
+        // Порядковый номер вызова внутри блока и их общее число: без них
+        // строки одного блока неразличимы, а именно их последовательность и
+        // объясняет цену.
+        sequence: index + 1,
+        calls: total,
+        finishReason: response.finishReason,
+        // Идентификатор ответа шлюза сшивает строку с его логами без ручного
+        // сопоставления по времени и модели.
+        upstreamId: response.upstreamId,
+        recoveryRound,
+        outcome: index === total - 1 ? outcome.kind : 'tool_exchange',
+      },
+      requestId: ctx.payload.request_id ?? null,
+    });
+  }
 }
 
 async function recordFailureAiRun(
@@ -1158,6 +1471,7 @@ export function createVlmRecognizePageHandler(
     if (run === null) return;
     const pageIndex = ctx.payload.pageIndex;
     const requestedModel = snapshotModelOf(run);
+    const recoveryRound = run.recoveryRound;
 
     const frozen = await deps.loadFrozenBlocks(run.runId);
     const pageBlocks = frozen
@@ -1239,6 +1553,17 @@ export function createVlmRecognizePageHandler(
         let recognizedThisAttempt = 0;
         let invalidCount = 0;
         let refusedCount = 0;
+        /**
+         * Сколько блоков просило кроп и скольким не хватило кругов — в разрезе
+         * провенанса блока.
+         *
+         * Считается ради решения, которое иначе принимается на глаз: потолок
+         * кругов у блока «страница целиком» выше общего, и верен ли он, видно
+         * только из доли закрывающих вызовов на таких блоках. Сводка пишется
+         * по странице, а не по прогону: страница — единица работы задачи, и
+         * агрегировать её выше есть кому.
+         */
+        const cropStats = new Map<string, { requested: number; forced: number; blocks: number }>();
 
         for (const block of pending) {
           const generationProfile = deps.generationProfile(block.blockType);
@@ -1333,7 +1658,14 @@ export function createVlmRecognizePageHandler(
           const prompt: VlmRecognizeBlockPrompt = {
             code: published.code,
             version: published.version,
-            systemPrompt: published.systemPrompt,
+            // Версия промта при этом НЕ меняется: раунд — это тот же промт,
+            // выполненный второй раз, и приписывать ему отдельную версию
+            // значило бы врать каталогу. Факт раунда пишется в `ai_runs` и в
+            // конверт результата.
+            systemPrompt:
+              recoveryRound > 0
+                ? `${published.systemPrompt}\n\n${RECOVERY_INSTRUCTION}`
+                : published.systemPrompt,
             userTemplate: published.userTemplate,
             temperature: generationProfile.temperature,
             maxTokens: generationProfile.maxTokens,
@@ -1358,6 +1690,13 @@ export function createVlmRecognizePageHandler(
               },
               cropPng: cropResult.png,
               pageNumber: pageIndex + 1,
+              // Блоку «страница целиком» дозапрос нужнее, чем точечному: он
+              // ставится заплаткой там, где другого текста у страницы нет, и
+              // кроп для него — единственный способ увеличить мелкий шрифт.
+              // Тот же принцип, что у потолка разрешения кропа выше.
+              ...(block.detectorProvenance === 'full_page'
+                ? { maxCropRequests: FULL_PAGE_MAX_CROP_REQUESTS }
+                : {}),
               downscale: deps.downscale,
               /**
                * Кроп по запросу модели (ADR-0013, S21).
@@ -1460,6 +1799,14 @@ export function createVlmRecognizePageHandler(
                   attempts: ctx.attempt,
                   cropPolicyVersion: CROP_POLICY_VERSION,
                   cropSha256,
+                  // Предупреждения исхода прежде терялись целиком: порт их
+                  // возвращал, а записать было некуда. Здесь им и место —
+                  // конверт хранит доказательства того, ЧЕМ получен результат,
+                  // а «блок дочитан без запрошенного участка» — ровно такое
+                  // доказательство.
+                  warnings: outcome.warnings,
+                  ...(outcome.cropTrail.length > 0 ? { cropTrail: outcome.cropTrail } : {}),
+                  ...(recoveryRound > 0 ? { recoveryRound } : {}),
                 },
               };
               const { written } = await deps.insertBlockResult({
@@ -1476,16 +1823,6 @@ export function createVlmRecognizePageHandler(
                 },
               });
               if (written) recognizedThisAttempt += 1;
-              await recordSuccessAiRun(
-                deps,
-                ctx,
-                run,
-                block,
-                prompt,
-                cropSha256,
-                outcome.response,
-                'ok',
-              );
               break;
             }
             case 'invalid_response': {
@@ -1495,6 +1832,7 @@ export function createVlmRecognizePageHandler(
                   event: 'block_invalid_response',
                   layout_block_id: block.id,
                   reason: outcome.reason,
+                  crop_trail: outcome.cropTrail,
                 },
                 'ответ модели непригоден: блок invalid',
               );
@@ -1506,26 +1844,28 @@ export function createVlmRecognizePageHandler(
                 reasonCode: outcome.reason.includes('schema')
                   ? 'vlm.schema_mismatch'
                   : 'vlm.invalid_json',
-                observed: { reason_code: outcome.reason, block_type: block.blockType },
+                observed: {
+                  reason_code: outcome.reason,
+                  block_type: block.blockType,
+                  crop_trail: outcome.cropTrail,
+                  crop_requests: outcome.cropRequests,
+                  forced_final: outcome.forcedFinal,
+                  calls: outcome.calls.length,
+                },
               });
-              if (outcome.response !== undefined) {
-                await recordSuccessAiRun(
-                  deps,
-                  ctx,
-                  run,
-                  block,
-                  prompt,
-                  cropSha256,
-                  outcome.response,
-                  'invalid_response',
-                );
-              }
               break;
             }
             case 'model_refusal': {
               refusedCount += 1;
               ctx.logger.warn(
-                { event: 'block_model_refusal', layout_block_id: block.id, reason: outcome.reason },
+                {
+                  event: 'block_model_refusal',
+                  layout_block_id: block.id,
+                  reason: outcome.reason,
+                  // Какие именно участки просила модель и что портал ответил —
+                  // без этого разбор отказа сводится к пересказу причины.
+                  crop_trail: outcome.cropTrail,
+                },
                 'модель не дала результата: блок refused',
               );
               await recordBlockFeedback(deps, ctx, run, block, prompt, requestedModel, {
@@ -1534,23 +1874,50 @@ export function createVlmRecognizePageHandler(
                   reason_code: outcome.reason,
                   block_type: block.blockType,
                   finish_reason: outcome.response?.finishReason ?? null,
+                  crop_trail: outcome.cropTrail,
+                  crop_requests: outcome.cropRequests,
+                  forced_final: outcome.forcedFinal,
+                  calls: outcome.calls.length,
                 },
               });
-              if (outcome.response !== undefined) {
-                await recordSuccessAiRun(
-                  deps,
-                  ctx,
-                  run,
-                  block,
-                  prompt,
-                  cropSha256,
-                  outcome.response,
-                  'model_refusal',
-                );
-              }
               break;
             }
           }
+
+          const stats = cropStats.get(block.detectorProvenance) ?? {
+            requested: 0,
+            forced: 0,
+            blocks: 0,
+          };
+          cropStats.set(block.detectorProvenance, {
+            requested: stats.requested + (outcome.cropRequests > 0 ? 1 : 0),
+            forced: stats.forced + (outcome.forcedFinal ? 1 : 0),
+            blocks: stats.blocks + 1,
+          });
+
+          // Учёт — общий для всех трёх исходов и по КАЖДОМУ вызову: платит
+          // прогон одинаково и за круг дозапроса, и за итоговый ответ.
+          await recordBlockAiRuns(
+            deps,
+            ctx,
+            run,
+            block,
+            prompt,
+            cropSha256,
+            outcome,
+            recoveryRound,
+          );
+        }
+
+        if (cropStats.size > 0) {
+          ctx.logger.info(
+            {
+              event: 'page_crop_usage',
+              working_page_index: pageIndex,
+              by_provenance: Object.fromEntries(cropStats),
+            },
+            'дозапросы кропа на странице: сколько блоков просили участок и скольким не хватило кругов',
+          );
         }
 
         await deps.markRunPage({
@@ -1670,6 +2037,60 @@ export function createVlmFinalizeHandler(deps: VlmRecognitionDeps): JobHandler<'
     const frozenAll = await deps.loadFrozenBlocks(run.runId);
     const envelopes = await deps.listBlockEnvelopes(run.runId);
     const incomplete = counts.pagesFailed > 0 || envelopes.length < frozenAll.length;
+
+    /**
+     * Раунд дораспознавания — прежде, чем объявлять покрытие неполным (S28).
+     *
+     * Прогон срывался целиком из-за одного блока: модель на нём не дала
+     * результата, страница стала `failed`, и 84 распознанных блока из 85
+     * выбрасывались. Между «модель промолчала» и «прогон провален» теперь
+     * стоит один повтор ровно по непокрытым блокам — их находит сам
+     * `vlm.recognize_page` по checkpoint'у, поэтому страница, у которой дыр
+     * нет, закрывается вообще без вызовов модели.
+     *
+     * Переигрываются ТОЛЬКО страницы с пробелами модельного происхождения
+     * (`blocksInvalid`/`blocksRefused`). Страница, упавшая на расхождении
+     * геометрии рендера, детерминирована: второй проход даст тот же отказ,
+     * оплатив его заново.
+     *
+     * Раунд идёт при обоих режимах неизменяемости: дочитать выгоднее, чем
+     * публиковать неполное. Ни один инвариант публикации это не ослабляет —
+     * если после раунда дыра осталась, ниже происходит ровно то же, что
+     * происходило раньше.
+     */
+    if (incomplete && run.recoveryRound < MAX_RECOVERY_ROUNDS) {
+      const recoverable = pages
+        .filter(
+          (page) => page.status === 'failed' && (page.blocksInvalid > 0 || page.blocksRefused > 0),
+        )
+        .map((page) => page.workingPageIndex);
+      if (recoverable.length > 0) {
+        const scheduled = await deps.scheduleRecoveryRound({
+          runId: run.runId,
+          fromRound: run.recoveryRound,
+          pages: recoverable,
+        });
+        ctx.logger.warn(
+          {
+            event: 'vlm_recognition_recovery_round',
+            recovery_round: scheduled.round,
+            scheduled: scheduled.scheduled,
+            pages: recoverable.length,
+            blocks_expected: frozenAll.length,
+            blocks_covered: envelopes.length,
+          },
+          scheduled.scheduled
+            ? 'покрытие неполно: упавшие страницы поставлены на дораспознавание'
+            : 'раунд дораспознавания уже спланирован другой попыткой финализации',
+        );
+        // Отсрочка, а не отказ: страницы снова `pending`, и финализация
+        // вернётся к ним следующей попыткой — тем же поллером, что ждёт
+        // первый проход.
+        throw new VlmRecognitionPendingError(
+          `Дораспознавание: страниц ${recoverable.length} из ${counts.pagesTotal} возвращены в работу`,
+        );
+      }
+    }
 
     /**
      * Неполное покрытие: отказ или частичный результат.

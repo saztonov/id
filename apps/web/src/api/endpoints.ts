@@ -240,6 +240,8 @@ export interface CheckPipelineResult {
   readonly recognitionRunId: string | null;
   readonly jobId: string;
   readonly jobCreated: boolean;
+  /** Прогон, который запущенный восстанавливает; `null` — распознавание с нуля. */
+  readonly repairOfRunId?: string | null;
 }
 
 export interface RecognitionProgress {
@@ -253,6 +255,12 @@ export interface RecognitionProgress {
   readonly blocksRecognized: number;
   readonly blocksInvalid: number;
   readonly blocksRefused: number;
+  /** Сколько раундов дораспознавания потратила финализация (S28). */
+  readonly recoveryRound: number;
+  /** Прогон-родитель, если этот восстанавливает упавший (S28). */
+  readonly repairOfRunId: string | null;
+  /** Блоки, перенесённые из родителя без вызова модели (S28). */
+  readonly blocksReused: number;
 }
 
 /**

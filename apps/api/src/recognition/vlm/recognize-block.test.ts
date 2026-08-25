@@ -61,6 +61,7 @@ function reply(text: string, patch: Partial<VlmResponse> = {}): VlmResponse {
     latencyMs: 5,
     inputHash: 'a'.repeat(64),
     outputHash: 'b'.repeat(64),
+    upstreamId: null,
     cacheHit: false,
     finishReason: 'stop',
     ...patch,

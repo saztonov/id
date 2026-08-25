@@ -59,6 +59,14 @@ export const checkResponseSchema = z.object({
   recognitionRunId: z.string().nullable(),
   jobId: z.string(),
   jobCreated: z.boolean(),
+  /**
+   * Прогон, который новый восстанавливает (S28); `null` — распознавание с нуля.
+   *
+   * Экран обязан различать эти два случая: у восстановления другая цена и
+   * другая длительность — часть блоков берётся из упавшего прогона, и модель
+   * для них не вызывается вовсе.
+   */
+  repairOfRunId: z.string().nullable().optional(),
 });
 
 export const recognitionProgressSchema = z.object({
@@ -72,4 +80,10 @@ export const recognitionProgressSchema = z.object({
   blocksRecognized: z.number(),
   blocksInvalid: z.number(),
   blocksRefused: z.number(),
+  /** Сколько раундов дораспознавания потратила финализация (S28). */
+  recoveryRound: z.number(),
+  /** Прогон-родитель, если этот восстанавливает упавший (S28). */
+  repairOfRunId: z.string().nullable(),
+  /** Блоки, перенесённые из родителя без вызова модели (S28). */
+  blocksReused: z.number(),
 });

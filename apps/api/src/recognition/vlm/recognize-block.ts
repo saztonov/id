@@ -18,6 +18,13 @@
  *   `LlmError`, а здесь ошибок нет — есть исходы); блок остаётся непокрытым, и
  *   прогон завершится `failed` при финализации.
  *
+ * ## Потолок вызовов на блок
+ *
+ * `maxCropRequests + 1` на проход, проходов два (основной и корректирующий):
+ * шесть вызовов при потолке по умолчанию, восемь у блока «страница целиком».
+ * Больше не бывает: круги ограничены потолком, а закрывающий вызов запрещает
+ * инструмент и потому не порождает следующего круга.
+ *
  * ## Два внутренних повтора — оба ограничены единицей
  *
  * 1. **Корректирующий** — платный второй вызов при классифицированной
@@ -43,6 +50,7 @@ import type {
   VlmPort,
   VlmRequest,
   VlmResponse,
+  VlmToolCall,
   VlmToolExchange,
 } from '../../llm/vlm-port.js';
 
@@ -54,6 +62,7 @@ import {
 } from './map.js';
 import {
   CORRECTIVE_INSTRUCTION,
+  NO_MORE_CROPS_INSTRUCTION,
   classifyFailure,
   extractJson,
   stripNoise,
@@ -68,17 +77,60 @@ import {
   vlmTextResponseSchema,
 } from './schemas.js';
 
+/** Один запрос инструмента и что портал на него ответил (S28). */
+export interface VlmCropEvent {
+  /** Границы участка, нормированные к странице; `null` — аргументы негодны. */
+  readonly rect: readonly [number, number, number, number] | null;
+  readonly outcome:
+    /** Участок вырезан и приложен к диалогу. */
+    | 'granted'
+    /** Резчик отказал: участок вне листа или вырожден. */
+    | 'degenerate'
+    /** Резчик сломался; блок при этом дочитывается по основному кропу. */
+    | 'crop_failed'
+    /** Аргументы инструмента не прямоугольник. */
+    | 'invalid_args'
+    /** Модель позвала инструмент, которого не существует. */
+    | 'unknown_tool'
+    /** Круги кончились: запрос отклонён потолком, выдачи не будет. */
+    | 'ceiling_rejected';
+}
+
+/**
+ * Доказательства прохода, общие для всех трёх исходов.
+ *
+ * `calls` — ВСЕ физические ответы модели (круги дозапроса, закрывающий вызов,
+ * корректирующий повтор), а не только последний: каждый из них оплачен, и по
+ * строке `ai_runs` на каждый — единственный способ увидеть настоящую цену
+ * блока. Пока наружу отдавался один ответ, круги кропа не попадали в учёт
+ * вовсе.
+ */
+export interface VlmBlockEvidence {
+  readonly calls: readonly VlmResponse[];
+  readonly cropTrail: readonly VlmCropEvent[];
+  /** Сколько кругов дозапроса состоялось (0 — модель обошлась без них). */
+  readonly cropRequests: number;
+  /**
+   * Понадобился ли закрывающий вызов.
+   *
+   * Отдельным полем, а не выводом из `warnings`: по нему считается доля блоков,
+   * которым потолка кругов не хватило, — а это и есть ответ на вопрос, верен
+   * ли потолок для блоков такого рода.
+   */
+  readonly forcedFinal: boolean;
+}
+
 export type VlmBlockOutcome =
-  | {
+  | ({
       kind: 'ok';
       block: RecognitionBlock;
       /** Разобранный и провалидированный ответ модели — источник `content_json`. */
       raw: unknown;
       response: VlmResponse;
       warnings: string[];
-    }
-  | { kind: 'invalid_response'; reason: string; response?: VlmResponse }
-  | { kind: 'model_refusal'; reason: string; response?: VlmResponse };
+    } & VlmBlockEvidence)
+  | ({ kind: 'invalid_response'; reason: string; response?: VlmResponse } & VlmBlockEvidence)
+  | ({ kind: 'model_refusal'; reason: string; response?: VlmResponse } & VlmBlockEvidence);
 
 export interface RecognizeBlockPrompt {
   readonly code: string;
@@ -122,16 +174,33 @@ export interface RecognizeBlockInput {
    */
   readonly requestCrop?:
     ((rect: readonly [number, number, number, number]) => Promise<Uint8Array | null>) | undefined;
+  /**
+   * Потолок кругов дозапроса для ЭТОГО блока; по умолчанию `MAX_CROP_REQUESTS`.
+   *
+   * Параметром, а не константой, потому что блоки неравны: у блока «страница
+   * целиком» (заплатка пустой страницы) кроп — единственный способ увеличить
+   * мелкий шрифт, и двух кругов ему бывает мало, тогда как точечному блоку
+   * второй круг чаще всего уже не нужен. Решение принимает вызывающий: он
+   * знает провенанс блока, а порт — нет.
+   */
+  readonly maxCropRequests?: number | undefined;
 }
 
 /**
- * Потолок дозапросов на один блок.
+ * Потолок дозапросов на один блок по умолчанию.
  *
  * Два — не «на всякий случай», а граница платности: каждый круг это полный
  * повторный вызов со всем диалогом в теле, то есть растущая цена. Модель,
- * которой двух взглядов на соседний участок не хватило, третьим не
+ * которой двух взглядов на соседний участок не хватило, третьим чаще всего не
  * воспользуется — она зациклилась, и платить за это должен потолок, а не
  * заказчик.
+ *
+ * Потолок при этом больше не обрывает диалог молчанием: исчерпав круги, портал
+ * делает ЗАКРЫВАЮЩИЙ вызов с запрещённым инструментом (`tool_choice: none`) и
+ * требованием ответить по имеющемуся. Прежде на этом месте блок объявлялся
+ * отказом, и один такой блок из восьмидесяти пяти ронял весь прогон.
+ *
+ * Отдельным блокам потолок поднимает вызывающий (`maxCropRequests`).
  */
 export const MAX_CROP_REQUESTS = 2;
 
@@ -228,6 +297,14 @@ export async function recognizeBlock(input: RecognizeBlockInput): Promise<VlmBlo
   let downscaleUsed = false;
   /** Сколько кругов дозапроса состоялось: уходит в предупреждения исхода. */
   let cropRequests = 0;
+  /** Понадобился ли закрывающий вызов: различает две разные причины отказа. */
+  let forcedFinalUsed = false;
+  /** Каждый запрос инструмента и что портал на него ответил (S28). */
+  const cropTrail: VlmCropEvent[] = [];
+  /** Все физические ответы модели: по строке `ai_runs` на каждый (S28). */
+  const calls: VlmResponse[] = [];
+
+  const maxCropRequests = Math.max(0, input.maxCropRequests ?? MAX_CROP_REQUESTS);
 
   /**
    * Один вызов модели с уже состоявшимися кругами дозапроса.
@@ -235,11 +312,14 @@ export async function recognizeBlock(input: RecognizeBlockInput): Promise<VlmBlo
    * Диалог передаётся целиком: у шлюза нет состояния, а `X-Idempotency-Key`
    * считается по каноническому входу — круги обязаны в него входить, иначе
    * второй вызов склеится с первым и вернёт тот же запрос кропа (см.
-   * `vlm-prompt.ts`, версия канонизации 2).
+   * `vlm-prompt.ts`, версия канонизации 3). Право позвать инструмент входит
+   * туда же: закрывающий вызов отличается от обычного только им и довеском к
+   * system, и без обоих в хэше он вернулся бы из кэша прежним отказом.
    */
   const callOnce = async (
     systemPrompt: string,
     exchanges: readonly VlmToolExchange[],
+    toolChoice: 'auto' | 'none',
   ): Promise<VlmResponse> => {
     const request = (): VlmRequest => ({
       stage: 'recognize',
@@ -255,67 +335,131 @@ export async function recognizeBlock(input: RecognizeBlockInput): Promise<VlmBlo
       maxTokens: input.prompt.maxTokens,
       topK: input.prompt.topK,
       // Инструмент объявляется, только если его есть чем исполнить: модель,
-      // которой пообещали кроп и не дали, застрянет на запросе.
-      ...(input.requestCrop !== undefined ? { tools: [REQUEST_CROP_TOOL_SPEC] } : {}),
+      // которой пообещали кроп и не дали, застрянет на запросе. Объявление
+      // сохраняется и в закрывающем вызове — звать его запрещает `toolChoice`,
+      // а не изъятие: история прошлых кругов уже уехала в `messages`, и часть
+      // провайдеров отвергает её при пустом списке инструментов.
+      ...(input.requestCrop !== undefined ? { tools: [REQUEST_CROP_TOOL_SPEC], toolChoice } : {}),
       ...(exchanges.length > 0 ? { exchanges } : {}),
     });
+    const record = (response: VlmResponse): VlmResponse => {
+      calls.push(response);
+      return response;
+    };
     try {
-      return await input.vlm.complete(request());
+      return record(await input.vlm.complete(request()));
     } catch (error) {
       if (!isPayloadTooLarge(error) || input.downscale === undefined || downscaleUsed) {
         throw error;
       }
       downscaleUsed = true;
       png = await input.downscale(png);
-      return await input.vlm.complete(request());
+      return record(await input.vlm.complete(request()));
     }
+  };
+
+  /**
+   * Выдача одного запрошенного участка с записью следа.
+   *
+   * Отказ резчика (`null`) и его поломка (исключение) доезжают до модели
+   * ТЕКСТОМ: она ждёт картинку, и молчание вместо ответа — это зависший круг,
+   * оплаченный целиком. Поломка при этом не роняет блок: соседний участок не
+   * вырезался, но прочитать основной кроп это не мешает.
+   */
+  const serveCrop = async (toolCall: VlmToolCall): Promise<VlmToolExchange['results'][number]> => {
+    if (toolCall.name !== REQUEST_CROP_TOOL) {
+      cropTrail.push({ rect: null, outcome: 'unknown_tool' });
+      return {
+        toolCallId: toolCall.id,
+        text: `Инструмент «${toolCall.name}» не существует.`,
+        images: [],
+      };
+    }
+    const parsedRect = parseCropRect(toolCall.argumentsJson);
+    if ('error' in parsedRect) {
+      cropTrail.push({ rect: null, outcome: 'invalid_args' });
+      return { toolCallId: toolCall.id, text: parsedRect.error, images: [] };
+    }
+    // Не `undefined` по построению: инструмент не объявляется без резчика.
+    const requestCrop = input.requestCrop as NonNullable<RecognizeBlockInput['requestCrop']>;
+    let cropped: Uint8Array | null;
+    try {
+      cropped = await requestCrop(parsedRect.rect);
+    } catch {
+      cropTrail.push({ rect: parsedRect.rect, outcome: 'crop_failed' });
+      return { toolCallId: toolCall.id, text: 'Участок вырезать не удалось.', images: [] };
+    }
+    if (cropped === null) {
+      cropTrail.push({ rect: parsedRect.rect, outcome: 'degenerate' });
+      return { toolCallId: toolCall.id, text: 'Участок вырезать не удалось.', images: [] };
+    }
+    cropTrail.push({ rect: parsedRect.rect, outcome: 'granted' });
+    return { toolCallId: toolCall.id, text: 'Участок приложен.', images: [{ png: cropped }] };
   };
 
   /**
    * Вызов с отработкой дозапросов кропов до окончательного ответа.
    *
-   * Возвращает ПОСЛЕДНИЙ ответ. Если потолок кругов исчерпан, а модель всё ещё
-   * просит кроп, ответ отдаётся как есть: его `toolCalls` непусты, и это
-   * различает `interpret` — «просила и не дождалась» не то же самое, что
-   * «ответила пусто».
+   * Потолок кругов больше не обрывает диалог молчанием: вызов, следующий за
+   * ПОСЛЕДНИМ разрешённым кругом, идёт ЗАКРЫВАЮЩИМ — инструмент запрещён
+   * (`tool_choice: none`), в system добавлено последнее слово. Модель, которой
+   * не хватило участков, отвечает по имеющемуся вместо того, чтобы остаться
+   * отказом.
+   *
+   * Вызовов при этом ровно столько же, сколько было раньше: `maxCropRequests
+   * + 1`. Закрывающий занимает место того вызова, который прежде уходил
+   * впустую — модель на нём просила очередной участок, а портал просто
+   * переставал отвечать. Лишнего вызова с самым тяжёлым телом (весь диалог с
+   * картинками внутри) здесь нет.
    */
   const call = async (systemPrompt: string): Promise<VlmResponse> => {
     const exchanges: VlmToolExchange[] = [];
-    let response = await callOnce(systemPrompt, exchanges);
+    /** Идёт ли ЗАКРЫВАЮЩИЙ вызов: круги исчерпаны либо их нет вовсе. */
+    let closing = maxCropRequests === 0;
+    if (closing) forcedFinalUsed = true;
 
-    while (response.toolCalls.length > 0 && input.requestCrop !== undefined) {
-      if (exchanges.length >= MAX_CROP_REQUESTS) break;
+    const promptOf = (): string =>
+      closing ? `${systemPrompt}\n\n${NO_MORE_CROPS_INSTRUCTION}` : systemPrompt;
+
+    let response = await callOnce(promptOf(), exchanges, closing ? 'none' : 'auto');
+
+    while (response.toolCalls.length > 0 && input.requestCrop !== undefined && !closing) {
       cropRequests += 1;
 
       const results: VlmToolExchange['results'][number][] = [];
       for (const toolCall of response.toolCalls) {
-        if (toolCall.name !== REQUEST_CROP_TOOL) {
-          results.push({
-            toolCallId: toolCall.id,
-            text: `Инструмент «${toolCall.name}» не существует.`,
-            images: [],
-          });
-          continue;
-        }
-        const parsedRect = parseCropRect(toolCall.argumentsJson);
-        if ('error' in parsedRect) {
-          results.push({ toolCallId: toolCall.id, text: parsedRect.error, images: [] });
-          continue;
-        }
-        const cropped = await input.requestCrop(parsedRect.rect);
-        results.push(
-          cropped === null
-            ? { toolCallId: toolCall.id, text: 'Участок вырезать не удалось.', images: [] }
-            : { toolCallId: toolCall.id, text: 'Участок приложен.', images: [{ png: cropped }] },
-        );
+        results.push(await serveCrop(toolCall));
       }
 
       exchanges.push({ calls: response.toolCalls, results });
-      response = await callOnce(systemPrompt, exchanges);
+      closing = exchanges.length >= maxCropRequests;
+      if (closing) forcedFinalUsed = true;
+      response = await callOnce(promptOf(), exchanges, closing ? 'none' : 'auto');
+    }
+
+    if (response.toolCalls.length > 0 && closing) {
+      // Модель просит участок в вызове, где инструмент ей запрещён. Выдачи не
+      // будет, и запрос обязан остаться в следе: иначе разбор видит выданные
+      // участки и не видит того, на котором блок встал.
+      for (const toolCall of response.toolCalls) {
+        const parsed = parseCropRect(toolCall.argumentsJson);
+        cropTrail.push({
+          rect: 'error' in parsed ? null : parsed.rect,
+          outcome: 'ceiling_rejected',
+        });
+      }
     }
 
     return response;
   };
+
+  /** Доказательства прохода: одинаковые поля у всех трёх исходов. */
+  const evidence = (): VlmBlockEvidence => ({
+    calls: [...calls],
+    cropTrail: [...cropTrail],
+    cropRequests,
+    forcedFinal: forcedFinalUsed,
+  });
 
   /** `null` — жанровая ошибка, разрешён корректирующий повтор. */
   const interpret = (response: VlmResponse, allowGenreRetry: boolean): VlmBlockOutcome | null => {
@@ -327,17 +471,22 @@ export async function recognizeBlock(input: RecognizeBlockInput): Promise<VlmBlo
         kind: 'model_refusal',
         reason: `finish_reason=${finish}: модель не завершила ответ`,
         response,
+        ...evidence(),
       };
     }
     if (response.toolCalls.length > 0) {
-      // Модель всё ещё просит кроп, а круги исчерпаны (либо инструмент не
-      // подключён). Это НЕ пустой ответ: текста нет потому, что она ещё не
+      // Модель просит участок там, где просить уже нечем: либо инструмент не
+      // подключён вовсе, либо закрывающий вызов его запретил, а она просит
+      // всё равно. Это НЕ пустой ответ: текста нет потому, что она ещё не
       // говорила по существу, и путать эти два случая нельзя — чинятся они
       // разным (потолок кругов против промта и схемы).
       return {
         kind: 'model_refusal',
-        reason: `модель запрашивает дополнительный кроп после ${String(cropRequests)} кругов: потолок исчерпан`,
+        reason: forcedFinalUsed
+          ? `модель просит кроп и после закрывающего вызова: кругов ${String(cropRequests)}, инструмент был запрещён`
+          : `модель запрашивает дополнительный кроп после ${String(cropRequests)} кругов: выдать его нечем`,
         response,
+        ...evidence(),
       };
     }
     if (response.text.trim() === '') {
@@ -346,6 +495,7 @@ export async function recognizeBlock(input: RecognizeBlockInput): Promise<VlmBlo
         reason:
           'пустой текст ответа: пустой блок выражается JSON-объектом с пустыми полями, а не пустой строкой',
         response,
+        ...evidence(),
       };
     }
 
@@ -356,6 +506,7 @@ export async function recognizeBlock(input: RecognizeBlockInput): Promise<VlmBlo
         kind: 'invalid_response',
         reason: 'ответ не является JSON-объектом (и после корректирующего повтора)',
         response,
+        ...evidence(),
       };
     }
 
@@ -363,6 +514,7 @@ export async function recognizeBlock(input: RecognizeBlockInput): Promise<VlmBlo
       kind: 'invalid_response',
       reason: reasonCode,
       response,
+      ...evidence(),
     });
 
     const context: VlmBlockContext = {
@@ -381,9 +533,11 @@ export async function recognizeBlock(input: RecognizeBlockInput): Promise<VlmBlo
       const warnings = [...validation.warnings];
       // Дозапрос кропа — не дефект, но факт, влияющий на цену и на доверие к
       // результату: он обязан быть виден в предупреждениях прогона, а не
-      // только в счётчиках шлюза.
+      // только в счётчиках шлюза. Закрывающий вызов отмечается отдельно: это
+      // ответ, данный без участка, который модель считала нужным.
       if (cropRequests > 0) warnings.push(`crop_requests=${String(cropRequests)}`);
-      return { kind: 'ok', block, raw, response, warnings };
+      if (forcedFinalUsed) warnings.push('crop_ceiling_reached');
+      return { kind: 'ok', block, raw, response, warnings, ...evidence() };
     };
 
     const schemaFailure = (error: ZodError): VlmBlockOutcome | null => {
@@ -439,6 +593,7 @@ export async function recognizeBlock(input: RecognizeBlockInput): Promise<VlmBlo
       kind: 'invalid_response',
       reason: 'ответ не разобран после корректирующего повтора',
       response: corrected,
+      ...evidence(),
     }
   );
 }

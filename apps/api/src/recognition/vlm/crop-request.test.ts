@@ -103,6 +103,7 @@ function response(patch: Partial<VlmResponse>): VlmResponse {
     latencyMs: 1,
     inputHash: 'a'.repeat(64),
     outputHash: 'b'.repeat(64),
+    upstreamId: null,
     cacheHit: false,
     finishReason: 'stop',
     ...patch,
@@ -207,8 +208,7 @@ describe('recognizeBlock: дозапрос кропа', () => {
     expect(result?.images).toEqual([]);
     expect(result?.text).toContain('за пределы листа');
   });
-
-  it('потолок кругов исчерпан — исход model_refusal с названной причиной', async () => {
+  it('потолок кругов исчерпан — закрывающий вызов без права звать инструмент', async () => {
     const asking = response({
       toolCalls: [
         {
@@ -216,6 +216,57 @@ describe('recognizeBlock: дозапрос кропа', () => {
           name: REQUEST_CROP_TOOL,
           argumentsJson: '{"x0":0,"y0":0,"x1":1,"y1":1}',
         },
+      ],
+    });
+    // Модель просит кроп на каждом вызове, где инструмент разрешён, и
+    // отвечает по существу на закрывающем.
+    const { port, requests } = portReturning([asking, asking, response({ text: FINAL_TEXT })]);
+
+    const outcome = await recognizeBlock({
+      vlm: port,
+      prompt: PROMPT,
+      model: 'requested/model',
+      block: BLOCK,
+      cropPng: new Uint8Array([1, 2, 3]),
+      pageNumber: 1,
+      requestCrop: async () => Promise.resolve(new Uint8Array([9])),
+    });
+
+    // Прежде здесь был `model_refusal`: диалог обрывался молчанием, и блок
+    // оставался непокрытым, роняя весь прогон на строгом покрытии.
+    expect(outcome.kind).toBe('ok');
+    // Ровно `MAX_CROP_REQUESTS + 1` вызовов: закрывающий занимает место того,
+    // который прежде уходил впустую, а не добавляется к ним.
+    expect(requests).toHaveLength(MAX_CROP_REQUESTS + 1);
+
+    const closing = requests.at(-1);
+    // Инструмент остаётся ОБЪЯВЛЕННЫМ: история кругов уже уехала в диалог, и
+    // часть провайдеров отвергает её при пустом списке инструментов. Запрещает
+    // звать его `tool_choice`.
+    expect(closing?.tools).toHaveLength(1);
+    expect(closing?.toolChoice).toBe('none');
+    expect(closing?.exchanges).toHaveLength(MAX_CROP_REQUESTS);
+    expect(closing?.systemPrompt).toContain('FINAL ANSWER REQUIRED');
+    // Обычные круги права не теряют.
+    expect(requests[0]?.toolChoice).toBe('auto');
+
+    if (outcome.kind === 'ok') {
+      expect(outcome.warnings).toContain('crop_ceiling_reached');
+      expect(outcome.warnings).toContain(`crop_requests=${String(MAX_CROP_REQUESTS)}`);
+    }
+    // Все разрешённые круги выданы: закрывающий вызов идёт следом за
+    // последним из них, а не вместо ответа на очередной запрос.
+    expect(outcome.cropTrail).toHaveLength(MAX_CROP_REQUESTS);
+    expect(outcome.cropTrail.every((event) => event.outcome === 'granted')).toBe(true);
+    // Каждый физический вызов доступен вызывающему: по строке `ai_runs` на
+    // каждый, иначе круги кропа не попадают в учёт стоимости вовсе.
+    expect(outcome.calls).toHaveLength(MAX_CROP_REQUESTS + 1);
+  });
+
+  it('модель просит кроп и после закрывающего вызова — model_refusal, четвёртого вызова нет', async () => {
+    const asking = response({
+      toolCalls: [
+        { id: 'call-1', name: REQUEST_CROP_TOOL, argumentsJson: '{"x0":0,"y0":0,"x1":1,"y1":1}' },
       ],
     });
     const { port, requests } = portReturning([asking]);
@@ -232,10 +283,73 @@ describe('recognizeBlock: дозапрос кропа', () => {
 
     expect(outcome.kind).toBe('model_refusal');
     if (outcome.kind === 'model_refusal') {
-      expect(outcome.reason).toContain('потолок исчерпан');
+      expect(outcome.reason).toContain('после закрывающего вызова');
     }
-    // Первый вызов плюс `MAX_CROP_REQUESTS` кругов на КАЖДУЮ из двух попыток
-    // (основную и корректирующую): дальше цикл не растёт.
+    // Запрос, сделанный вопреки запрету, остаётся в следе — иначе разбор
+    // видит выданные участки и не видит того, на котором блок встал.
+    expect(outcome.cropTrail.at(-1)?.outcome).toBe('ceiling_rejected');
+    // Закрывающий вызов на КАЖДУЮ из двух попыток (основную и корректирующую);
+    // дальше цикл не растёт — пятого и шестого круга не бывает.
     expect(requests.length).toBeLessThanOrEqual(2 * (MAX_CROP_REQUESTS + 1));
+  });
+
+  it('потолок поднимается вызывающим: блоку на весь лист дают лишний круг', async () => {
+    const asking = response({
+      toolCalls: [
+        { id: 'call-1', name: REQUEST_CROP_TOOL, argumentsJson: '{"x0":0,"y0":0,"x1":1,"y1":1}' },
+      ],
+    });
+    const { port, requests } = portReturning([
+      asking,
+      asking,
+      asking,
+      response({ text: FINAL_TEXT }),
+    ]);
+
+    const outcome = await recognizeBlock({
+      vlm: port,
+      prompt: PROMPT,
+      model: 'requested/model',
+      block: BLOCK,
+      cropPng: new Uint8Array([1, 2, 3]),
+      pageNumber: 1,
+      requestCrop: async () => Promise.resolve(new Uint8Array([9])),
+      maxCropRequests: 3,
+    });
+
+    expect(outcome.kind).toBe('ok');
+    expect(requests).toHaveLength(4);
+    expect(requests.at(-1)?.exchanges).toHaveLength(3);
+  });
+
+  it('поломка резчика доезжает до модели текстом, а не исключением', async () => {
+    const { port, requests } = portReturning([
+      response({
+        toolCalls: [
+          {
+            id: 'call-1',
+            name: REQUEST_CROP_TOOL,
+            argumentsJson: '{"x0":0.1,"y0":0.4,"x1":0.9,"y1":0.6}',
+          },
+        ],
+      }),
+      response({ text: FINAL_TEXT }),
+    ]);
+
+    const outcome = await recognizeBlock({
+      vlm: port,
+      prompt: PROMPT,
+      model: 'requested/model',
+      block: BLOCK,
+      cropPng: new Uint8Array([1, 2, 3]),
+      pageNumber: 1,
+      requestCrop: () => Promise.reject(new Error('sharp упал')),
+    });
+
+    // Соседний участок вырезать не вышло — это не повод терять блок: основной
+    // кроп у модели есть, и она отвечает по нему.
+    expect(outcome.kind).toBe('ok');
+    expect(requests[1]?.exchanges?.[0]?.results[0]?.images).toEqual([]);
+    expect(outcome.cropTrail).toEqual([{ rect: [0.1, 0.4, 0.9, 0.6], outcome: 'crop_failed' }]);
   });
 });

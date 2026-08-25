@@ -496,62 +496,6 @@ export const rdRunDocuments = pgTable("rd_run_documents", {
 	unique("rd_run_documents_layout_revision_id_uq").on(table.id, table.layoutRevisionId),
 ]);
 
-export const recognitionRuns = pgTable("recognition_runs", {
-	id: uuid().defaultRandom().primaryKey().notNull(),
-	revisionId: uuid("revision_id").notNull(),
-	layoutRevisionId: uuid("layout_revision_id").notNull(),
-	rdRunDocumentId: uuid("rd_run_document_id"),
-	rdJobId: text("rd_job_id"),
-	localLayoutHash: text("local_layout_hash").notNull(),
-	remoteLayoutHashBefore: text("remote_layout_hash_before"),
-	remoteLayoutHashAfter: text("remote_layout_hash_after"),
-	workingPdfSha256: text("working_pdf_sha256").notNull(),
-	settingsSnapshot: jsonb("settings_snapshot").default({}).notNull(),
-	status: text().default('running').notNull(),
-	startedAt: timestamp("started_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-	finishedAt: timestamp("finished_at", { withTimezone: true, mode: 'string' }),
-	counts: jsonb().default({}).notNull(),
-	warnings: jsonb().default([]).notNull(),
-}, (table) => [
-	index("ix_recognition_runs_layout").using("btree", table.layoutRevisionId.asc().nullsLast().op("uuid_ops")),
-	index("ix_recognition_runs_rd_document").using("btree", table.rdRunDocumentId.asc().nullsLast().op("uuid_ops")),
-	index("ix_recognition_runs_revision").using("btree", table.revisionId.asc().nullsLast().op("uuid_ops")),
-	index("ix_recognition_runs_status").using("btree", table.status.asc().nullsLast().op("text_ops")).where(sql`(status = 'running'::text)`),
-	foreignKey({
-			columns: [table.revisionId],
-			foreignColumns: [submissionRevisions.id],
-			name: "recognition_runs_revision_id_fkey"
-		}),
-	foreignKey({
-			columns: [table.layoutRevisionId],
-			foreignColumns: [layoutRevisions.id],
-			name: "recognition_runs_layout_revision_id_fkey"
-		}),
-	foreignKey({
-			columns: [table.rdRunDocumentId],
-			foreignColumns: [rdRunDocuments.id],
-			name: "recognition_runs_rd_run_document_id_fkey"
-		}),
-	foreignKey({
-			columns: [table.revisionId, table.layoutRevisionId],
-			foreignColumns: [layoutRevisions.id, layoutRevisions.revisionId],
-			name: "recognition_runs_layout_fk"
-		}),
-	foreignKey({
-			columns: [table.layoutRevisionId, table.rdRunDocumentId],
-			foreignColumns: [rdRunDocuments.id, rdRunDocuments.layoutRevisionId],
-			name: "recognition_runs_rd_document_fk"
-		}),
-	unique("recognition_runs_revision_id_uq").on(table.id, table.revisionId),
-	unique("recognition_runs_layout_revision_uq").on(table.id, table.layoutRevisionId),
-	check("recognition_runs_status_chk", sql`status = ANY (ARRAY['running'::text, 'done'::text, 'integrity_error'::text, 'failed'::text])`),
-	check("recognition_runs_local_hash_chk", sql`local_layout_hash ~ '^[0-9a-f]{64}$'::text`),
-	check("recognition_runs_remote_before_chk", sql`remote_layout_hash_before ~ '^[0-9a-f]{64}$'::text`),
-	check("recognition_runs_remote_after_chk", sql`remote_layout_hash_after ~ '^[0-9a-f]{64}$'::text`),
-	check("recognition_runs_working_pdf_chk", sql`working_pdf_sha256 ~ '^[0-9a-f]{64}$'::text`),
-	check("recognition_runs_finished_chk", sql`(status = 'running'::text) OR (finished_at IS NOT NULL)`),
-]);
-
 export const layoutBlocks = pgTable("layout_blocks", {
 	id: uuid().defaultRandom().primaryKey().notNull(),
 	layoutRevisionId: uuid("layout_revision_id").notNull(),
@@ -607,6 +551,72 @@ export const layoutBlocks = pgTable("layout_blocks", {
 	check("layout_blocks_provenance_chk", sql`detector_provenance = ANY (ARRAY['rf_detr'::text, 'full_page'::text, 'user'::text, 'unavailable'::text])`),
 	check("layout_blocks_coords_chk", sql`(x0 >= (0)::double precision) AND (y0 >= (0)::double precision) AND (x1 <= (1)::double precision) AND (y1 <= (1)::double precision) AND (x0 <= x1) AND (y0 <= y1)`),
 	check("layout_blocks_detection_score_chk", sql`(detection_score IS NULL) OR ((detection_score >= (0)::double precision) AND (detection_score <= (1)::double precision))`),
+]);
+
+export const recognitionRuns = pgTable("recognition_runs", {
+	id: uuid().defaultRandom().primaryKey().notNull(),
+	revisionId: uuid("revision_id").notNull(),
+	layoutRevisionId: uuid("layout_revision_id").notNull(),
+	rdRunDocumentId: uuid("rd_run_document_id"),
+	rdJobId: text("rd_job_id"),
+	localLayoutHash: text("local_layout_hash").notNull(),
+	remoteLayoutHashBefore: text("remote_layout_hash_before"),
+	remoteLayoutHashAfter: text("remote_layout_hash_after"),
+	workingPdfSha256: text("working_pdf_sha256").notNull(),
+	settingsSnapshot: jsonb("settings_snapshot").default({}).notNull(),
+	status: text().default('running').notNull(),
+	startedAt: timestamp("started_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	finishedAt: timestamp("finished_at", { withTimezone: true, mode: 'string' }),
+	counts: jsonb().default({}).notNull(),
+	warnings: jsonb().default([]).notNull(),
+	recoveryRound: integer("recovery_round").default(0).notNull(),
+	repairOfRunId: uuid("repair_of_run_id"),
+}, (table) => [
+	index("ix_recognition_runs_layout").using("btree", table.layoutRevisionId.asc().nullsLast().op("uuid_ops")),
+	index("ix_recognition_runs_rd_document").using("btree", table.rdRunDocumentId.asc().nullsLast().op("uuid_ops")),
+	index("ix_recognition_runs_repair_of").using("btree", table.repairOfRunId.asc().nullsLast().op("uuid_ops")).where(sql`(repair_of_run_id IS NOT NULL)`),
+	index("ix_recognition_runs_revision").using("btree", table.revisionId.asc().nullsLast().op("uuid_ops")),
+	index("ix_recognition_runs_status").using("btree", table.status.asc().nullsLast().op("text_ops")).where(sql`(status = 'running'::text)`),
+	foreignKey({
+			columns: [table.revisionId],
+			foreignColumns: [submissionRevisions.id],
+			name: "recognition_runs_revision_id_fkey"
+		}),
+	foreignKey({
+			columns: [table.layoutRevisionId],
+			foreignColumns: [layoutRevisions.id],
+			name: "recognition_runs_layout_revision_id_fkey"
+		}),
+	foreignKey({
+			columns: [table.rdRunDocumentId],
+			foreignColumns: [rdRunDocuments.id],
+			name: "recognition_runs_rd_run_document_id_fkey"
+		}),
+	foreignKey({
+			columns: [table.revisionId, table.layoutRevisionId],
+			foreignColumns: [layoutRevisions.id, layoutRevisions.revisionId],
+			name: "recognition_runs_layout_fk"
+		}),
+	foreignKey({
+			columns: [table.layoutRevisionId, table.rdRunDocumentId],
+			foreignColumns: [rdRunDocuments.id, rdRunDocuments.layoutRevisionId],
+			name: "recognition_runs_rd_document_fk"
+		}),
+	foreignKey({
+			columns: [table.repairOfRunId],
+			foreignColumns: [table.id],
+			name: "recognition_runs_repair_of_run_id_fkey"
+		}),
+	unique("recognition_runs_revision_id_uq").on(table.id, table.revisionId),
+	unique("recognition_runs_layout_revision_uq").on(table.id, table.layoutRevisionId),
+	check("recognition_runs_status_chk", sql`status = ANY (ARRAY['running'::text, 'done'::text, 'integrity_error'::text, 'failed'::text])`),
+	check("recognition_runs_local_hash_chk", sql`local_layout_hash ~ '^[0-9a-f]{64}$'::text`),
+	check("recognition_runs_remote_before_chk", sql`remote_layout_hash_before ~ '^[0-9a-f]{64}$'::text`),
+	check("recognition_runs_remote_after_chk", sql`remote_layout_hash_after ~ '^[0-9a-f]{64}$'::text`),
+	check("recognition_runs_working_pdf_chk", sql`working_pdf_sha256 ~ '^[0-9a-f]{64}$'::text`),
+	check("recognition_runs_finished_chk", sql`(status = 'running'::text) OR (finished_at IS NOT NULL)`),
+	check("recognition_runs_recovery_round_chk", sql`recovery_round >= 0`),
+	check("recognition_runs_repair_not_self_chk", sql`repair_of_run_id IS DISTINCT FROM id`),
 ]);
 
 export const blockResults = pgTable("block_results", {

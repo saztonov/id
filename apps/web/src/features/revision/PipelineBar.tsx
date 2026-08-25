@@ -255,9 +255,19 @@ export function PipelineBar({ revisionId, editable }: PipelineBarProps): ReactNo
             />
             <Typography.Text type="secondary">
               страниц {progress.data.pagesDone} из {progress.data.pagesTotal}, блоков распознано{' '}
-              {progress.data.blocksRecognized}
+              {progress.data.blocksRecognized} из {progress.data.blocksTotal}
               {progress.data.pagesFailed > 0
                 ? `, страниц с отказом ${String(progress.data.pagesFailed)}`
+                : ''}
+              {/*
+                Дораспознавание и восстановление — не служебные подробности:
+                они объясняют, почему прогон идёт второй круг или почему он
+                добежал до конца подозрительно быстро. Без них экран показывает
+                одно и то же для работы и для повтора работы.
+              */}
+              {progress.data.recoveryRound > 0 ? ', идёт дораспознавание упавших страниц' : ''}
+              {progress.data.blocksReused > 0
+                ? `, перенесено из прошлого прогона ${String(progress.data.blocksReused)}`
                 : ''}
             </Typography.Text>
           </Space>
@@ -417,13 +427,21 @@ function failureOf(
       ? 'Сервер не назвал причину; подробности — в журнале задач.'
       : `Класс ошибки: ${worst.lastErrorClass}.`);
 
-  const attempts =
-    worst.attempts > 0 ? `, попыток ${String(worst.attempts)}` : ', ни одной попытки не выполнено';
+  /**
+   * Сколько ЗАДАЧ встало, а не сколько попыток они суммарно сделали.
+   *
+   * `attempts` — агрегат по всему типу задачи: на комплекте в восемьдесят три
+   * страницы он давал «попыток 215» при ста тридцати двух мёртвых задачах, и
+   * читалось это как одна задача, которая двести раз пыталась. Число попыток
+   * ОДНОЙ задачи отсюда неизвестно в принципе, поэтому оно и не называется:
+   * плашка отвечает на «что встало и почему», а подробности — в журнале задач.
+   */
+  const what =
+    worst.dead === 1
+      ? `задача «${worst.jobType}» исчерпала попытки`
+      : `задачи «${worst.jobType}» исчерпали попытки, задач ${String(worst.dead)}`;
 
-  return {
-    what: `задача «${worst.jobType}» исчерпала попытки${attempts}`,
-    reason,
-  };
+  return { what, reason };
 }
 
 /**

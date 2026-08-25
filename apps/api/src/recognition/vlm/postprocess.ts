@@ -235,3 +235,28 @@ export const CORRECTIVE_INSTRUCTION: Record<'text' | 'image' | 'stamp', string> 
   stamp:
     'CRITICAL — the previous attempt returned the wrong kind of answer. Return ONLY one JSON object matching the provided response_format schema, with every field present: null for unread scalar fields, [] for absent signature/revision rows. No prose, no Markdown, no fences, no explanations — nothing outside the JSON object.',
 };
+
+// ---------------------------------------------------------------------------
+// Закрывающая инструкция последнего круга дозапроса (S28)
+// ---------------------------------------------------------------------------
+
+/**
+ * Довесок к system-промпту вызова, в котором инструмент уже запрещён
+ * (`tool_choice: none`).
+ *
+ * Одна строка на все три типа блока: причина запрета от типа не зависит —
+ * круги кропа кончились, и модель обязана ответить по тому, что видит. Без
+ * этой инструкции запрет выглядел бы для неё сбоем инструмента, а не
+ * последним словом: молчание вместо ответа — ровно то, чем закончился прогон,
+ * из-за которого правило и появилось.
+ *
+ * Требование «нечитаемое отражай как есть» существенно: без него модель
+ * восстанавливает обрезанный текст по смыслу, а ADR-0007 это прямо запрещает.
+ */
+export const NO_MORE_CROPS_INSTRUCTION =
+  'FINAL ANSWER REQUIRED — no further page regions will be provided, and the ' +
+  'crop tool is disabled for this turn. Answer from what is already visible in ' +
+  'the images you have. Transcribe only what you can actually read: leave a ' +
+  'field null or a fragment out rather than reconstructing it from context or ' +
+  'from domain knowledge. Return ONLY one JSON object matching the provided ' +
+  'response_format schema — no prose, no Markdown, no fences, no explanations.';

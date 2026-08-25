@@ -404,9 +404,30 @@ function registerCheckRoute(app: AppInstance): void {
         // после dry-run, который разметку заморозил, но ничего не опубликовал.
         await assertRecognitionStageReady(app.db, app.env, { requirePublication: true });
 
-        if (!enforceGates && runOfLayout.length > 0) {
+        /**
+         * Восстановление вместо распознавания с нуля (S28).
+         *
+         * Упавший прогон этой же разметки оставил после себя результаты — на
+         * комплекте, из-за которого правило появилось, 84 блока из 85. Прежде
+         * нажатие «Распознать» начинало всё заново и платило за них второй раз;
+         * теперь новый прогон объявляется восстанавливающим, а совместимые
+         * результаты переносит `vlm.start_recognition` до первого вызова
+         * модели. Совместимость он же и решает: разошлись модель, промпт,
+         * растеризатор или рабочий документ — блок распознаётся заново.
+         *
+         * Берётся ПОСЛЕДНИЙ терминальный прогон: список отсортирован по
+         * времени старта. `integrity_error` донором не бывает — у такого
+         * прогона разошлись доказательства, и переносить из него значит
+         * тащить дальше расхождение, ради обнаружения которого он и упал.
+         */
+        const parentRun = runOfLayout.find(
+          (run) => run.status === 'failed' || run.status === 'done',
+        );
+
+        if (!enforceGates && runOfLayout.length > 0 && parentRun === undefined) {
           // Прежние результаты по этой разметке больше не описывают то, что
-          // получится сейчас: сносим их до старта, а не «поверх».
+          // получится сейчас: сносим их до старта, а не «поверх». На пути
+          // восстановления сброса нет — он снёс бы ровно то, что переносится.
           await resetPipelineForRevision(app.db, revisionId);
         }
         const started = await startRecognition(app.db, app.env, scope, {
@@ -414,6 +435,7 @@ function registerCheckRoute(app: AppInstance): void {
           frozenLayoutId: layout.id,
           idempotencyKey,
           autoContinue: true,
+          repairOfRunId: parentRun?.id ?? null,
         });
         return reply.code(202).send({
           stage: 'recognition',
@@ -421,6 +443,7 @@ function registerCheckRoute(app: AppInstance): void {
           recognitionRunId: started.recognitionRunId,
           jobId: started.jobId,
           jobCreated: started.jobCreated,
+          repairOfRunId: parentRun?.id ?? null,
         });
       }
 
@@ -478,6 +501,15 @@ function latestUsableLayout(layouts: readonly LayoutRevisionView[]): LayoutRevis
 // Прогресс распознавания
 // =====================================================================
 
+/** `settings_snapshot.repair.blocksReused` — сколько блоков перенесено (S28). */
+function reusedBlocksOf(settingsSnapshot: unknown): number {
+  if (typeof settingsSnapshot !== 'object' || settingsSnapshot === null) return 0;
+  const repair = (settingsSnapshot as Record<string, unknown>)['repair'];
+  if (typeof repair !== 'object' || repair === null) return 0;
+  const reused = (repair as Record<string, unknown>)['blocksReused'];
+  return typeof reused === 'number' ? reused : 0;
+}
+
 /**
  * Постраничный прогресс VLM-прогона.
  *
@@ -521,6 +553,13 @@ function registerProgressRoute(app: AppInstance): void {
         blocksRecognized: sum((page) => page.blocksRecognized),
         blocksInvalid: sum((page) => page.blocksInvalid),
         blocksRefused: sum((page) => page.blocksRefused),
+        recoveryRound: run.recoveryRound,
+        repairOfRunId: run.repairOfRunId,
+        // Счёт ведёт `vlm.start_recognition` при переносе: экрану важно, что
+        // часть блоков не стоила ни одного вызова модели, — без этого числа
+        // восстановление выглядит обычным прогоном, который подозрительно
+        // быстро дошёл до конца.
+        blocksReused: reusedBlocksOf(run.settingsSnapshot),
       });
     },
   );

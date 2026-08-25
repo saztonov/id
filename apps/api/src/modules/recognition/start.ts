@@ -141,6 +141,14 @@ export async function startRecognition(
     readonly frozenLayoutId: string;
     readonly idempotencyKey: string;
     readonly autoContinue: boolean;
+    /**
+     * Прогон, который новый восстанавливает (S28).
+     *
+     * Передаётся, когда предыдущий прогон этой же разметки упал: совместимые
+     * результаты будут перенесены до первого вызова модели, и повторно
+     * оплачивается только то, что осталось непокрытым.
+     */
+    readonly repairOfRunId?: string | null | undefined;
   },
 ): Promise<StartRecognitionResult> {
   /**
@@ -191,6 +199,9 @@ export async function startRecognition(
     // Ветке RD WEB без RD-документа OCR запускать негде; у VLM-прогона его нет
     // по построению (ADR-0007).
     requireRdDocument: recognition.provider !== 'openrouter_vlm',
+    // Восстановление возможно только у ветки VLM: перенос результатов
+    // выполняет `vlm.start_recognition`, у ветки RD WEB такого шага нет.
+    repairOfRunId: recognition.provider === 'openrouter_vlm' ? (input.repairOfRunId ?? null) : null,
   });
   if (run.revisionId !== input.revisionId) {
     // Разметка чужой ревизии в теле запроса. Область её бы пропустила, если

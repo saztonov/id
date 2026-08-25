@@ -46,6 +46,7 @@ import {
   recognitionPromptDefaultByCode,
   recognizeBlock,
   schemaHash,
+  scheduleRunRecoveryRound,
   seedRunPages,
   NoopProcessingFeedbackSink,
   type ProcessingFeedbackSink,
@@ -1140,6 +1141,9 @@ function vlmRecognitionDeps(options: PipelineJobsOptions): VlmRecognitionDeps {
         status: run.status,
         localLayoutHash: run.localLayoutHash,
         settingsSnapshot: run.settingsSnapshot,
+        recoveryRound: run.recoveryRound,
+        repairOfRunId: run.repairOfRunId,
+        workingPdfSha256: run.workingPdfSha256,
       };
     },
 
@@ -1183,6 +1187,11 @@ function vlmRecognitionDeps(options: PipelineJobsOptions): VlmRecognitionDeps {
     listRunPages: async (runId) => {
       const { scope } = await scopeOfRun(runId);
       return listRunPages(db, scope, runId);
+    },
+
+    scheduleRecoveryRound: async (input) => {
+      const { scope } = await scopeOfRun(input.runId);
+      return scheduleRunRecoveryRound(db, scope, input);
     },
 
     existingBlockIds: async (runId) => {

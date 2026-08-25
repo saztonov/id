@@ -30,7 +30,7 @@
  * артефакта: ключ объекта в хранилище выдаётся только тем же соединением.
  */
 import { createHash } from 'node:crypto';
-import { and, asc, desc, eq, isNull, sql, type SQL } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull, sql, type SQL } from 'drizzle-orm';
 import {
   artifactVersions,
   blockResults,
@@ -48,7 +48,7 @@ import type { AuthScope } from '../../auth/scope.js';
 import { conflict, internal, notFound } from '../../lib/problem.js';
 import { artifactKey, type ArtifactKind } from '../../storage/keys.js';
 import { withScope, type ScopeTarget } from '../scoped.js';
-import { appendRevisionEvent } from './jobs.js';
+import { appendRevisionEvent, enqueueSystemJob } from './jobs.js';
 import type { Database } from './users.js';
 
 const REVISION_SCOPE: ScopeTarget = {
@@ -84,6 +84,10 @@ export interface RecognitionRunView {
   readonly counts: Record<string, unknown>;
   readonly warnings: readonly unknown[];
   readonly runDocumentClosedAt: string | null;
+  /** Сколько раундов дораспознавания уже потратила финализация (S28). */
+  readonly recoveryRound: number;
+  /** Прогон, который этот восстанавливает; `null` — обычный прогон (S28). */
+  readonly repairOfRunId: string | null;
 }
 
 const isoAt = (column: unknown, alias: string) =>
@@ -110,6 +114,8 @@ const RUN_SELECTION = {
   counts: recognitionRuns.counts,
   warnings: recognitionRuns.warnings,
   runDocumentClosedAt: isoAt(rdRunDocuments.closedAt, 'run_document_closed_at_iso'),
+  recoveryRound: recognitionRuns.recoveryRound,
+  repairOfRunId: recognitionRuns.repairOfRunId,
 };
 
 function toView(row: Record<string, unknown>): RecognitionRunView {
@@ -119,19 +125,22 @@ function toView(row: Record<string, unknown>): RecognitionRunView {
     startedAt: (row.startedAt as string | null) ?? '',
     counts: (row.counts ?? {}) as Record<string, unknown>,
     warnings: (row.warnings ?? []) as readonly unknown[],
+    recoveryRound: (row.recoveryRound as number | null) ?? 0,
   };
 }
 
 function runQuery(db: Database, scope: AuthScope, ...conditions: SQL[]) {
-  return db
-    .select(RUN_SELECTION)
-    .from(recognitionRuns)
-    // LEFT JOIN, а не INNER: у VLM-прогона rd_run_document_id NULL (0019), и
-    // внутреннее соединение молча выкинуло бы такие прогоны из всех выборок —
-    // они «исчезали» бы из истории и из finalize.
-    .leftJoin(rdRunDocuments, eq(recognitionRuns.rdRunDocumentId, rdRunDocuments.id))
-    .innerJoin(submissionRevisions, eq(recognitionRuns.revisionId, submissionRevisions.id))
-    .where(withScope(scope, REVISION_SCOPE, ...conditions));
+  return (
+    db
+      .select(RUN_SELECTION)
+      .from(recognitionRuns)
+      // LEFT JOIN, а не INNER: у VLM-прогона rd_run_document_id NULL (0019), и
+      // внутреннее соединение молча выкинуло бы такие прогоны из всех выборок —
+      // они «исчезали» бы из истории и из finalize.
+      .leftJoin(rdRunDocuments, eq(recognitionRuns.rdRunDocumentId, rdRunDocuments.id))
+      .innerJoin(submissionRevisions, eq(recognitionRuns.revisionId, submissionRevisions.id))
+      .where(withScope(scope, REVISION_SCOPE, ...conditions))
+  );
 }
 
 export async function findRecognitionRun(
@@ -234,6 +243,16 @@ export async function findRunForLayout(
 export interface StartRunInput {
   readonly layoutRevisionId: string;
   readonly settingsSnapshot: Record<string, unknown>;
+  /**
+   * Прогон, который новый восстанавливает (S28).
+   *
+   * Не «продолжение» и не переоткрытие: родитель остаётся терминальным со
+   * своим исходом, а ссылка отвечает на вопрос «откуда взялись результаты,
+   * которых этот прогон не считал сам». Без неё перенесённые блоки выглядели
+   * бы распознанными заново, и цена прогона в аудите не сходилась бы с числом
+   * строк `ai_runs`.
+   */
+  readonly repairOfRunId?: string | null | undefined;
   /**
    * Нужен ли прогону RD-документ. Ветка RD WEB — да (без него OCR негде
    * запускать), ветка VLM (ADR-0007) — нет. Флаг обязателен и без значения по
@@ -371,6 +390,7 @@ export async function startRecognitionRun(
         workingPdfSha256,
         settingsSnapshot: input.settingsSnapshot,
         status: 'running',
+        repairOfRunId: input.repairOfRunId ?? null,
       })
       .returning({ id: recognitionRuns.id });
 
@@ -381,6 +401,7 @@ export async function startRecognitionRun(
         layoutRevisionId: found.id,
         recognitionRunId: rows[0]?.id ?? null,
         localLayoutHash: found.blocksHash,
+        ...(input.repairOfRunId != null ? { repairOfRunId: input.repairOfRunId } : {}),
       },
     });
     return rows[0]?.id ?? null;
@@ -1068,6 +1089,90 @@ export async function listRunPages(
     .where(eq(recognitionRunPages.recognitionRunId, runId))
     .orderBy(asc(recognitionRunPages.workingPageIndex));
   return rows.map((row) => ({ ...row, status: row.status as RunPageStatus }));
+}
+
+/**
+ * Планирование раунда дораспознавания упавших страниц (S28).
+ *
+ * Одной транзакцией и в одном месте, потому что три её действия имеют смысл
+ * только вместе: пометить раунд израсходованным, вернуть страницы в `pending`
+ * и поставить им задачи. Разорвись это на три вызова — сбой посередине оставил
+ * бы страницы ожидающими работы, которой никто не поставил, и финализация
+ * ждала бы их своими двумястами сорока попытками (часы), прежде чем закрыть
+ * прогон отказом.
+ *
+ * Переход `recovery_round` — сравнение с ожидаемым значением, а не инкремент:
+ * финализация — поллер, её попытки идут одна за другой и могут пересечься.
+ * Проигравшая гонку получает `scheduled: false` и просто ждёт, вместо того
+ * чтобы поставить второй комплект задач на те же страницы.
+ *
+ * `dedupeKey` несёт номер раунда: ключ прежней задачи занят, если та умерла
+ * (`enqueueSystemJob` держит мёртвых в индексе намеренно — исчерпавшая попытки
+ * задача разбирается человеком, а не пересоздаётся молча), и без номера раунда
+ * страница осталась бы `pending` навсегда.
+ */
+export async function scheduleRunRecoveryRound(
+  db: Database,
+  scope: AuthScope,
+  input: {
+    readonly runId: string;
+    /** Номер раунда, который сейчас записан у прогона (ожидание для перехода). */
+    readonly fromRound: number;
+    readonly pages: readonly number[];
+  },
+): Promise<{ readonly scheduled: boolean; readonly round: number }> {
+  const run = await findRecognitionRun(db, scope, input.runId);
+  if (run === null) throw notFound('Прогон распознавания не найден.');
+  if (input.pages.length === 0) return { scheduled: false, round: run.recoveryRound };
+
+  const round = input.fromRound + 1;
+  return db.transaction(async (tx) => {
+    const claimed = await tx
+      .update(recognitionRuns)
+      .set({ recoveryRound: round })
+      .where(
+        and(
+          eq(recognitionRuns.id, input.runId),
+          eq(recognitionRuns.recoveryRound, input.fromRound),
+          // Раунд имеет смысл только у прогона, в который ещё можно писать:
+          // закрытому дораспознавать нечего, его исход уже объявлен.
+          eq(recognitionRuns.status, 'running'),
+        ),
+      )
+      .returning({ id: recognitionRuns.id });
+    if (claimed.length === 0) return { scheduled: false, round: run.recoveryRound };
+
+    await tx
+      .update(recognitionRunPages)
+      .set({
+        status: 'pending',
+        // Счётчики обнуляются: их перезапишет проход страницы, а до тех пор
+        // «непригодных блоков 1» относилось бы к прошлому кругу и врало бы.
+        blocksInvalid: 0,
+        blocksRefused: 0,
+        updatedAt: sql`now()`,
+      })
+      .where(
+        and(
+          eq(recognitionRunPages.recognitionRunId, input.runId),
+          inArray(recognitionRunPages.workingPageIndex, [...input.pages]),
+        ),
+      );
+
+    for (const pageIndex of input.pages) {
+      await enqueueSystemJob(tx, {
+        type: 'vlm.recognize_page',
+        payload: {
+          revisionId: run.revisionId,
+          recognitionRunId: input.runId,
+          pageIndex,
+        },
+        dedupeKey: `vlm.recognize_page:${input.runId}:${String(pageIndex)}:r${String(round)}`,
+      });
+    }
+
+    return { scheduled: true, round };
+  });
 }
 
 /**

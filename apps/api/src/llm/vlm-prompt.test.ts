@@ -14,7 +14,12 @@
 import { describe, expect, it } from 'vitest';
 
 import type { VlmRequest } from './vlm-port.js';
-import { buildVlmCanonicalInput, canonicalJson, vlmInputHash } from './vlm-prompt.js';
+import {
+  buildVlmCanonicalInput,
+  canonicalJson,
+  vlmInputHash,
+  vlmOutputHash,
+} from './vlm-prompt.js';
 
 const PNG_A = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
 const PNG_B = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 9, 9, 9]);
@@ -175,5 +180,67 @@ describe('canonicalJson', () => {
   it('опускает undefined-свойства — как JSON.stringify при отправке', () => {
     expect(canonicalJson({ a: 1, skip: undefined })).toBe('{"a":1}');
     expect(canonicalJson([1, undefined, 2])).toBe('[1,null,2]');
+  });
+});
+
+describe('право позвать инструмент входит в канонизацию (S28)', () => {
+  const TOOL = {
+    name: 'request_crop',
+    description: 'Показать другой участок ТОЙ ЖЕ страницы.',
+    parameters: { type: 'object', properties: {}, additionalProperties: false },
+  };
+
+  it('tool_choice различает разрешающий и закрывающий вызовы', () => {
+    const asking = vlmInputHash(request({ tools: [TOOL], toolChoice: 'auto' }));
+    const closing = vlmInputHash(request({ tools: [TOOL], toolChoice: 'none' }));
+
+    // Совпади они — закрывающий вызов вернулся бы из LRU-кэша прежним запросом
+    // кропа, и цикл, ради размыкания которого он делается, не разомкнулся бы.
+    expect(closing).not.toBe(asking);
+  });
+
+  it('отсутствие tool_choice канонизируется как `auto`', () => {
+    expect(vlmInputHash(request({ tools: [TOOL] }))).toBe(
+      vlmInputHash(request({ tools: [TOOL], toolChoice: 'auto' })),
+    );
+  });
+});
+
+describe('vlmOutputHash', () => {
+  const call = (argumentsJson: string) => ({
+    id: 'call-1',
+    name: 'request_crop',
+    argumentsJson,
+  });
+
+  it('различает ответы с пустым текстом и разными вызовами инструмента', () => {
+    // Ровно случай, из-за которого правило и появилось: три круга дозапроса
+    // кропа отличались только аргументами и получали один отпечаток в `ai_runs`.
+    const first = vlmOutputHash({ text: '', toolCalls: [call('{"x0":0,"y0":0,"x1":1,"y1":0.5}')] });
+    const second = vlmOutputHash({
+      text: '',
+      toolCalls: [call('{"x0":0,"y0":0.5,"x1":1,"y1":1}')],
+    });
+
+    expect(first).not.toBe(second);
+    expect(first).not.toBe(vlmOutputHash({ text: '', toolCalls: [] }));
+  });
+
+  it('идентификатор вызова в хэш не входит: он выдаётся заново на каждый ответ', () => {
+    const withId = vlmOutputHash({
+      text: '',
+      toolCalls: [{ id: 'call-1', name: 'request_crop', argumentsJson: '{"x0":0}' }],
+    });
+    const otherId = vlmOutputHash({
+      text: '',
+      toolCalls: [{ id: 'call-2', name: 'request_crop', argumentsJson: '{"x0":0}' }],
+    });
+    expect(withId).toBe(otherId);
+  });
+
+  it('порядок ключей в аргументах не меняет хэш: это тот же запрос', () => {
+    expect(vlmOutputHash({ text: '', toolCalls: [call('{"x0":0,"y0":1}')] })).toBe(
+      vlmOutputHash({ text: '', toolCalls: [call('{"y0":1,"x0":0}')] }),
+    );
   });
 });

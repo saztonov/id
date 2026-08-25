@@ -143,6 +143,9 @@ function runTarget(overrides: Partial<VlmRunTarget> = {}): VlmRunTarget {
     layoutRevisionId: LAYOUT,
     status: 'running',
     localLayoutHash: MATCHING_HASH,
+    recoveryRound: 0,
+    repairOfRunId: null,
+    workingPdfSha256: 'f'.repeat(64),
     settingsSnapshot: {
       version: 2,
       provider: 'openrouter_vlm',
@@ -225,6 +228,10 @@ function okOutcome(block: VlmFrozenBlock): VlmRecognizeBlockOutcome {
     raw: {},
     response: vlmResponse() as never,
     warnings: [],
+    calls: [vlmResponse() as never],
+    cropTrail: [],
+    cropRequests: 0,
+    forcedFinal: false,
   };
 }
 
@@ -268,6 +275,7 @@ function deps(overrides: Partial<VlmRecognitionDeps> = {}): VlmRecognitionDeps {
     // тесты, проверяющие сквозной прогон, задают его признаком в payload.
     readAutoContinue: async () => null,
     loadRun: async () => runTarget(),
+    scheduleRecoveryRound: unexpected('scheduleRecoveryRound') as never,
     loadFrozenBlocks: async () => DEFAULT_FROZEN,
     loadPageGeometry: async () => GEOMETRY,
     seedRunPages: async () => {},
@@ -441,6 +449,134 @@ describe('createVlmStartHandler', () => {
     expect(finalizeJobs[0]?.dedupeKey).toBe(`vlm.finalize_run:${RUN}`);
   });
 
+  it('восстановление: совместимые результаты родителя переносятся до первого вызова модели', async () => {
+    const PARENT = '00000000-0000-4000-8000-0000000000f1';
+    const block = frozenBlock();
+    const parentSnapshot = {
+      version: 2,
+      provider: 'openrouter_vlm',
+      model: 'vendor/model-1',
+      dryRun: false,
+      cropPolicyVersion: 'crop.v2',
+      rasterizer: { kind: 'pdftoppm', version: '1.0', dpi: 300 },
+    };
+    const parentEnvelope = (patch: Record<string, unknown> = {}) => ({
+      id: 'parent-result',
+      layoutBlockId: block.id,
+      modelId: 'vendor/model-1',
+      contentJson: {
+        envelope: 'recognition.block_result.v1',
+        block: okBlock(block),
+        page: { workingPageIndex: 0, widthPx: 595, heightPx: 842 },
+        provenance: {
+          promptCode: 'recognition_block_text',
+          promptVersion: 1,
+          model: 'vendor/model-1',
+          cropPolicyVersion: 'crop.v2',
+          ...patch,
+        },
+      },
+    });
+
+    const inserted: { block: { layoutBlockId: string; contentJson: unknown } }[] = [];
+    const merged: Record<string, unknown>[] = [];
+    const d = deps({
+      loadRun: async ({ recognitionRunId }) =>
+        recognitionRunId === PARENT
+          ? runTarget({ status: 'failed', settingsSnapshot: parentSnapshot })
+          : runTarget({ repairOfRunId: PARENT }),
+      listBlockEnvelopes: async () => [parentEnvelope()],
+      insertBlockResult: async (input) => {
+        inserted.push(input as never);
+        return { written: true };
+      },
+      mergeSnapshot: async (_runId, patch) => {
+        merged.push(patch);
+      },
+      seedRunPages: async () => {},
+    });
+    const sink = makeSink();
+    const handler = createVlmStartHandler(d);
+    const ctx = makeContext(
+      'vlm.start_recognition',
+      { revisionId: REVISION, recognitionRunId: RUN },
+      sink,
+    );
+
+    await handler(ctx);
+
+    // Результат перенесён ДО fan-out: `vlm.recognize_page` увидит блок уже
+    // покрытым и модель для него не позовёт — за прочитанное платят один раз.
+    expect(inserted).toHaveLength(1);
+    expect(inserted[0]?.block.layoutBlockId).toBe(block.id);
+    const provenance = (inserted[0]?.block.contentJson as { provenance: Record<string, unknown> })
+      .provenance;
+    // Откуда взялся результат, которого этот прогон не считал сам.
+    expect(provenance['reusedFromRunId']).toBe(PARENT);
+    expect(merged.at(-1)).toMatchObject({
+      repair: { parentRunId: PARENT, blocksReused: 1, blocksRetried: 0 },
+    });
+  });
+
+  it('восстановление: результат другой модели не переносится', async () => {
+    const PARENT = '00000000-0000-4000-8000-0000000000f2';
+    const block = frozenBlock();
+    const inserted: unknown[] = [];
+    const d = deps({
+      loadRun: async ({ recognitionRunId }) =>
+        recognitionRunId === PARENT
+          ? runTarget({
+              status: 'failed',
+              settingsSnapshot: {
+                version: 2,
+                provider: 'openrouter_vlm',
+                model: 'vendor/model-1',
+                cropPolicyVersion: 'crop.v2',
+                rasterizer: { kind: 'pdftoppm', version: '1.0', dpi: 300 },
+              },
+            })
+          : runTarget({ repairOfRunId: PARENT }),
+      listBlockEnvelopes: async () => [
+        {
+          id: 'parent-result',
+          layoutBlockId: block.id,
+          modelId: 'vendor/model-OLD',
+          contentJson: {
+            envelope: 'recognition.block_result.v1',
+            block: okBlock(block),
+            page: { workingPageIndex: 0, widthPx: 595, heightPx: 842 },
+            provenance: {
+              promptCode: 'recognition_block_text',
+              promptVersion: 1,
+              // Блок прочитан другой моделью: перенести его значит выдать
+              // чужой ответ за результат этого прогона.
+              model: 'vendor/model-OLD',
+              cropPolicyVersion: 'crop.v2',
+            },
+          },
+        },
+      ],
+      insertBlockResult: async (input) => {
+        inserted.push(input);
+        return { written: true };
+      },
+      mergeSnapshot: async () => {},
+      seedRunPages: async () => {},
+    });
+    const sink = makeSink();
+    const handler = createVlmStartHandler(d);
+    const ctx = makeContext(
+      'vlm.start_recognition',
+      { revisionId: REVISION, recognitionRunId: RUN },
+      sink,
+    );
+
+    await handler(ctx);
+
+    expect(inserted).toHaveLength(0);
+    // Блок остаётся непокрытым — его распознает `vlm.recognize_page`.
+    expect(sink.enqueued.filter((job) => job.type === 'vlm.recognize_page')).toHaveLength(1);
+  });
   it('снимок непригоден (провайдер не openrouter_vlm) — конфигурационный отказ', async () => {
     const d = deps({
       loadRun: async () => runTarget({ settingsSnapshot: { version: 1, provider: 'rdweb' } }),
@@ -523,6 +659,10 @@ describe('createVlmRecognizePageHandler', () => {
         kind: 'invalid_response',
         reason: 'ответ не по схеме',
         response: vlmResponse() as never,
+        calls: [vlmResponse() as never],
+        cropTrail: [],
+        cropRequests: 0,
+        forcedFinal: false,
       }),
       insertBlockResult: async (input) => {
         inserted.push(input);
@@ -696,6 +836,119 @@ describe('createVlmRecognizePageHandler', () => {
         blocksRefused: 0,
       },
     ]);
+  });
+
+  it('строка ai_runs пишется на КАЖДЫЙ физический вызов, кэш-хиты пропускаются', async () => {
+    const aiRuns: Record<string, unknown>[] = [];
+    const d = deps({
+      workingPdfToFile: async () => ({ path: '/tmp/work.pdf', cleanup: async () => {} }),
+      rasterizer: {
+        kind: 'pdftoppm',
+        version: '1.0',
+        renderPage: async () => ({ widthPx: 595, heightPx: 842 }),
+      },
+      crop: async () => ({ png: new Uint8Array([9, 9, 9]), widthPx: 50, heightPx: 50 }),
+      recognizeBlock: async (input: VlmRecognizeBlockInput) => ({
+        ...okOutcome(frozenBlock({ id: input.block.layoutBlockId })),
+        // Два круга дозапроса кропа и итоговый ответ: до S28 в учёт попадал
+        // только последний, и расход прогона был занижен на треть.
+        calls: [
+          vlmResponse({ upstreamId: 'gen-1' }) as never,
+          vlmResponse({ upstreamId: 'gen-2' }) as never,
+          // Попадание в кэш вызовом не было: платить за него нечем.
+          vlmResponse({ upstreamId: 'gen-2', cacheHit: true }) as never,
+        ],
+      }),
+      insertBlockResult: async () => ({ written: true }),
+      markRunPage: async () => {},
+      recordAiRun: async (input) => {
+        aiRuns.push(input as unknown as Record<string, unknown>);
+      },
+    });
+    const sink = makeSink();
+    const handler = createVlmRecognizePageHandler(d);
+    const ctx = makeContext(
+      'vlm.recognize_page',
+      { revisionId: REVISION, recognitionRunId: RUN, pageIndex: 0 },
+      sink,
+    );
+
+    await handler(ctx);
+
+    expect(aiRuns).toHaveLength(2);
+    const structured = aiRuns.map((row) => row['structuredResult'] as Record<string, unknown>);
+    expect(structured.map((row) => row['sequence'])).toEqual([1, 2]);
+    expect(structured.map((row) => row['upstreamId'])).toEqual(['gen-1', 'gen-2']);
+    // Промежуточный вызов и итоговый различаются исходом: первый — обмен с
+    // инструментом, ответом блока он не был.
+    expect(structured[0]?.['outcome']).toBe('tool_exchange');
+  });
+
+  it('блок на весь лист получает лишний круг дозапроса', async () => {
+    const inputs: VlmRecognizeBlockInput[] = [];
+    const d = deps({
+      loadFrozenBlocks: async () => [frozenBlock({ detectorProvenance: 'full_page' })],
+      workingPdfToFile: async () => ({ path: '/tmp/work.pdf', cleanup: async () => {} }),
+      rasterizer: {
+        kind: 'pdftoppm',
+        version: '1.0',
+        renderPage: async () => ({ widthPx: 595, heightPx: 842 }),
+      },
+      crop: async () => ({ png: new Uint8Array([9, 9, 9]), widthPx: 50, heightPx: 50 }),
+      recognizeBlock: async (input: VlmRecognizeBlockInput) => {
+        inputs.push(input);
+        return okOutcome(frozenBlock({ id: input.block.layoutBlockId }));
+      },
+      insertBlockResult: async () => ({ written: true }),
+      markRunPage: async () => {},
+    });
+    const sink = makeSink();
+    const handler = createVlmRecognizePageHandler(d);
+    const ctx = makeContext(
+      'vlm.recognize_page',
+      { revisionId: REVISION, recognitionRunId: RUN, pageIndex: 0 },
+      sink,
+    );
+
+    await handler(ctx);
+
+    // Заплатка «страница целиком» ставится там, где другого текста у страницы
+    // нет: зум для неё — рабочий инструмент, а не зацикливание.
+    expect(inputs[0]?.maxCropRequests).toBe(3);
+  });
+
+  it('раунд дораспознавания меняет промпт: иначе ответ придёт из кэша', async () => {
+    const inputs: VlmRecognizeBlockInput[] = [];
+    const d = deps({
+      loadRun: async () => runTarget({ recoveryRound: 1 }),
+      workingPdfToFile: async () => ({ path: '/tmp/work.pdf', cleanup: async () => {} }),
+      rasterizer: {
+        kind: 'pdftoppm',
+        version: '1.0',
+        renderPage: async () => ({ widthPx: 595, heightPx: 842 }),
+      },
+      crop: async () => ({ png: new Uint8Array([9, 9, 9]), widthPx: 50, heightPx: 50 }),
+      recognizeBlock: async (input: VlmRecognizeBlockInput) => {
+        inputs.push(input);
+        return okOutcome(frozenBlock({ id: input.block.layoutBlockId }));
+      },
+      insertBlockResult: async () => ({ written: true }),
+      markRunPage: async () => {},
+    });
+    const sink = makeSink();
+    const handler = createVlmRecognizePageHandler(d);
+    const ctx = makeContext(
+      'vlm.recognize_page',
+      { revisionId: REVISION, recognitionRunId: RUN, pageIndex: 0 },
+      sink,
+    );
+
+    await handler(ctx);
+
+    expect(inputs[0]?.prompt.systemPrompt).toContain('RETRY');
+    // Версия промпта при этом та же: раунд — это тот же промт, выполненный
+    // второй раз, и приписывать ему отдельную версию значило бы врать каталогу.
+    expect(inputs[0]?.prompt.version).toBe(1);
   });
 
   it('stopsBatch-подобная ошибка (retriable:false) закрывает прогон через withVlmRunTermination', async () => {
@@ -1004,6 +1257,120 @@ describe('createVlmFinalizeHandler', () => {
     await expect(handler(ctx)).rejects.toThrow(VlmRecognitionCoverageError);
     expect(finishCalls).toHaveLength(1);
     expect(finishCalls[0]?.['status']).toBe('failed');
+  });
+
+  it('пробел по вине модели — упавшая страница уходит на дораспознавание, а не в отказ', async () => {
+    const finishCalls: Record<string, unknown>[] = [];
+    const scheduled: Record<string, unknown>[] = [];
+    const d = deps({
+      listRunPages: async () => [
+        donePage({ status: 'failed', blocksRecognized: 0, blocksRefused: 1 }),
+      ],
+      listBlockEnvelopes: async () => [],
+      scheduleRecoveryRound: async (input) => {
+        scheduled.push(input);
+        return { scheduled: true, round: 1 };
+      },
+      finishRun: async (input) => {
+        finishCalls.push(input);
+        return { changed: true };
+      },
+    });
+    const sink = makeSink();
+    const handler = createVlmFinalizeHandler(d);
+    const ctx = makeContext(
+      'vlm.finalize_run',
+      { revisionId: REVISION, recognitionRunId: RUN },
+      sink,
+    );
+
+    // Отсрочка, а не отказ: страницы вернулись в работу, и прогон закрывать
+    // нечем — именно здесь прежде терялись 84 распознанных блока из 85.
+    await expect(handler(ctx)).rejects.toThrow(VlmRecognitionPendingError);
+    expect(scheduled).toEqual([{ runId: RUN, fromRound: 0, pages: [0] }]);
+    expect(finishCalls).toHaveLength(0);
+  });
+
+  it('страница упала не по вине модели — раунд не тратится', async () => {
+    const finishCalls: Record<string, unknown>[] = [];
+    const d = deps({
+      // Расхождение геометрии рендера: счётчики модельных пробелов пусты.
+      // Второй проход дал бы тот же отказ, оплатив его заново.
+      listRunPages: async () => [donePage({ status: 'failed', blocksRecognized: 0 })],
+      listBlockEnvelopes: async () => [],
+      scheduleRecoveryRound: async () => {
+        throw new Error('раунд не должен планироваться');
+      },
+      finishRun: async (input) => {
+        finishCalls.push(input);
+        return { changed: true };
+      },
+    });
+    const sink = makeSink();
+    const handler = createVlmFinalizeHandler(d);
+    const ctx = makeContext(
+      'vlm.finalize_run',
+      { revisionId: REVISION, recognitionRunId: RUN },
+      sink,
+    );
+
+    await expect(handler(ctx)).rejects.toThrow(VlmRecognitionCoverageError);
+    expect(finishCalls[0]?.['status']).toBe('failed');
+  });
+
+  it('раунд израсходован — покрытие неполно, прогон закрывается как прежде', async () => {
+    const finishCalls: Record<string, unknown>[] = [];
+    const d = deps({
+      loadRun: async () => runTarget({ recoveryRound: 1 }),
+      listRunPages: async () => [
+        donePage({ status: 'failed', blocksRecognized: 0, blocksRefused: 1 }),
+      ],
+      listBlockEnvelopes: async () => [],
+      scheduleRecoveryRound: async () => {
+        throw new Error('второго раунда не бывает');
+      },
+      finishRun: async (input) => {
+        finishCalls.push(input);
+        return { changed: true };
+      },
+    });
+    const sink = makeSink();
+    const handler = createVlmFinalizeHandler(d);
+    const ctx = makeContext(
+      'vlm.finalize_run',
+      { revisionId: REVISION, recognitionRunId: RUN },
+      sink,
+    );
+
+    await expect(handler(ctx)).rejects.toThrow(VlmRecognitionCoverageError);
+    expect(finishCalls[0]?.['status']).toBe('failed');
+  });
+
+  it('раунд уже спланирован соседней попыткой — ждём, второй комплект задач не ставим', async () => {
+    const finishCalls: Record<string, unknown>[] = [];
+    const d = deps({
+      listRunPages: async () => [
+        donePage({ status: 'failed', blocksRecognized: 0, blocksInvalid: 1 }),
+      ],
+      listBlockEnvelopes: async () => [],
+      // Переход раунда достался другой попытке финализации: она же поставила
+      // задачи. Эта обязана просто ждать.
+      scheduleRecoveryRound: async () => ({ scheduled: false, round: 1 }),
+      finishRun: async (input) => {
+        finishCalls.push(input);
+        return { changed: true };
+      },
+    });
+    const sink = makeSink();
+    const handler = createVlmFinalizeHandler(d);
+    const ctx = makeContext(
+      'vlm.finalize_run',
+      { revisionId: REVISION, recognitionRunId: RUN },
+      sink,
+    );
+
+    await expect(handler(ctx)).rejects.toThrow(VlmRecognitionPendingError);
+    expect(finishCalls).toHaveLength(0);
   });
 
   it('есть страницы failed — тоже failed, даже при полном покрытии конвертов', async () => {

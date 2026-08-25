@@ -42,8 +42,17 @@
  * входа изменился, и правило этого файла — версионировать изменение формата, а
  * не его наблюдаемость на частном случае. Цена — несравнимость новых хэшей со
  * старыми, и она осознанна: это ровно то, что версия и означает.
+ *
+ * ## Версия 3: право позвать инструмент (S28)
+ *
+ * Последний круг дозапроса закрывается не изъятием инструмента, а `tool_choice:
+ * none` при том же объявлении. Для модели это РАЗНЫЕ входы: в одном она вправе
+ * попросить кроп, в другом обязана ответить по имеющемуся. Не войди это в
+ * канонизацию — оба вызова получили бы один `input_hash`, и закрывающий круг
+ * вернулся бы из LRU-кэша (или из идемпотентности шлюза) прежним запросом
+ * кропа: ровно тот цикл, ради размыкания которого он и делается.
  */
-import type { VlmRequest, VlmToolExchange } from './vlm-port.js';
+import type { VlmRequest, VlmToolCall, VlmToolExchange } from './vlm-port.js';
 import { normalizeNewlines, sha256Hex } from './prompt.js';
 
 /**
@@ -51,7 +60,7 @@ import { normalizeNewlines, sha256Hex } from './prompt.js';
  * независимо от `EFFECTIVE_PROMPT_VERSION` текстового пути: они версионируют
  * разные контракты.
  */
-export const VLM_PROMPT_CANON_VERSION = 2;
+export const VLM_PROMPT_CANON_VERSION = 3;
 
 const HEADER = `ID-VLM-PROMPT/${VLM_PROMPT_CANON_VERSION}`;
 const SYSTEM_MARK = '--SYSTEM--';
@@ -120,6 +129,10 @@ export function buildVlmCanonicalInput(request: VlmRequest): string {
           canonicalJson({ description: tool.description, parameters: tool.parameters }),
         )}`,
     ),
+    // Право позвать инструмент — часть входа, а не деталь транспорта: «можно
+    // просить кроп» и «отвечай по имеющемуся» — разные вопросы к модели, и
+    // сливать их в один хэш значит выдавать ответ на первый за ответ на второй.
+    `toolChoice=${request.toolChoice ?? 'auto'}`,
     `exchanges=${exchanges.length}`,
     ...exchanges.flatMap((exchange, index) => canonicalExchange(exchange, index)),
     `len=${system.length},${user.length}`,
@@ -137,6 +150,32 @@ export function buildVlmCanonicalInput(request: VlmRequest): string {
  */
 export function vlmInputHash(request: VlmRequest): string {
   return sha256Hex(buildVlmCanonicalInput(request));
+}
+
+/**
+ * sha256 ОТВЕТА VLM — `ai_runs.output_hash` (S28).
+ *
+ * Считается по тексту И по запрошенным инструментам, а не по одному тексту.
+ * Ответ с пустым `content` и разными `tool_calls` — разные ответы: пока хэш
+ * брался с текста, три круга дозапроса кропа получали один отпечаток, и по
+ * строкам `ai_runs` вызовы были неотличимы друг от друга.
+ *
+ * Идентификатор вызова (`call.id`) в хэш НЕ входит: он выдаётся провайдером
+ * заново на каждый ответ и различал бы одинаковые по смыслу ответы.
+ */
+export function vlmOutputHash(response: {
+  readonly text: string;
+  readonly toolCalls: readonly VlmToolCall[];
+}): string {
+  return sha256Hex(
+    canonicalJson({
+      text: normalizeNewlines(response.text),
+      toolCalls: response.toolCalls.map((call) => ({
+        name: call.name,
+        arguments: parseArgumentsForHash(call.argumentsJson),
+      })),
+    }),
+  );
 }
 
 /**
