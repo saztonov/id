@@ -49,7 +49,9 @@ import {
   field,
   foldHomoglyphs,
   formatDate,
+  isAnalysisAnchor,
   isIsoDate,
+  isRegistryCode,
   parentsOf,
   PROTOCOL_TYPES,
   relevantDateFor,
@@ -216,6 +218,40 @@ function unknownRelevant(
   });
 }
 
+/**
+ * Документы, СРОК ДЕЙСТВИЯ которых вообще имеет смысл.
+ *
+ * ## Что это отсекает и почему это не сужение проверки
+ *
+ * Правила `DATE.3xx` отвечают на один вопрос: действовал ли документ,
+ * ПОДТВЕРЖДАЮЩИЙ материал, в момент применения материала. Ни акт
+ * освидетельствования, ни реестр приложений такого утверждения не несут:
+ *
+ * - **акт** ничего не подтверждает, он фиксирует факт работ. У акта нет срока
+ *   действия, и «акт истёк» — утверждение без смысла;
+ * - **реестр приложений** составляется В ДЕНЬ подписания акта, то есть по
+ *   построению позже окончания работ. `DATE.310` («выдан позже применения»)
+ *   объявлял бы его дефектом на КАЖДОМ комплекте, где реестр есть.
+ *
+ * Оба случая наблюдались на корпусе ровно в тот момент, когда даты акта начали
+ * распознаваться: до этого релевантная дата была неизвестна, и правила молчали
+ * с вердиктом `undetermined`. То есть дефект существовал всё это время и был
+ * замаскирован другим дефектом.
+ *
+ * ## Чего фильтр НЕ делает
+ *
+ * Не отсекает документы незнакомого и резервного типа. §9.1, строка 1: базовые
+ * правила дат работают даже там, где типо-специфичные дают `n_a`, — иначе
+ * незнакомый раздел вообще не проверялся бы на сроки, а именно ради этого §8.4
+ * применяет базовую схему реквизитов ко всем документам. Отсекаются ровно две
+ * РОЛИ, а не «всё, чего мы не знаем».
+ */
+function documentsWithValidity(graph: CheckGraph): readonly DocumentNode[] {
+  return graph.documents.filter(
+    (document) => !isAnalysisAnchor(document.docTypeCode) && !isRegistryCode(document.docTypeCode),
+  );
+}
+
 // ---------------------------------------------------------------------------
 // DATE.300 — интервальный документ действует на релевантную дату
 // ---------------------------------------------------------------------------
@@ -232,7 +268,7 @@ function evaluateInterval(graph: CheckGraph): RuleResult {
   const findings: RuleFinding[] = [];
   let applicable = 0;
 
-  for (const document of graph.documents) {
+  for (const document of documentsWithValidity(graph)) {
     const from = dateRef(document, 'valid_from');
     const to = dateRef(document, 'valid_to');
     if (from.value === null || to.value === null) continue;
@@ -282,7 +318,7 @@ function evaluateExpiredToday(graph: CheckGraph): RuleResult {
   const findings: RuleFinding[] = [];
   let applicable = 0;
 
-  for (const document of graph.documents) {
+  for (const document of documentsWithValidity(graph)) {
     const to = dateRef(document, 'valid_to');
     if (to.value === null) continue;
     applicable += 1;
@@ -311,7 +347,7 @@ function evaluateNotYetValid(graph: CheckGraph): RuleResult {
   const findings: RuleFinding[] = [];
   let applicable = 0;
 
-  for (const document of graph.documents) {
+  for (const document of documentsWithValidity(graph)) {
     const from = dateRef(document, 'valid_from');
     if (from.value === null) continue;
     applicable += 1;
@@ -353,7 +389,7 @@ function evaluateProlongation(graph: CheckGraph): RuleResult {
   const findings: RuleFinding[] = [];
   let applicable = 0;
 
-  for (const document of graph.documents) {
+  for (const document of documentsWithValidity(graph)) {
     const to = dateRef(document, 'valid_to');
     const until = dateRef(document, 'valid_until');
     if (to.value === null || until.value === null) continue;
@@ -393,7 +429,7 @@ function evaluateIssuedBeforeUse(graph: CheckGraph): RuleResult {
   const findings: RuleFinding[] = [];
   let applicable = 0;
 
-  for (const document of graph.documents) {
+  for (const document of documentsWithValidity(graph)) {
     const issued = dateRef(document, 'issued_at');
     if (issued.value === null) continue;
     // Интервальные документы проверяются `DATE.300`/`DATE.303`: у них дата
@@ -447,7 +483,7 @@ function evaluateAbsurdlyOld(graph: CheckGraph, params: RuleParams): RuleResult 
   const findings: RuleFinding[] = [];
   let applicable = 0;
 
-  for (const document of graph.documents) {
+  for (const document of documentsWithValidity(graph)) {
     const issued = dateRef(document, 'issued_at');
     if (issued.value === null) continue;
     applicable += 1;

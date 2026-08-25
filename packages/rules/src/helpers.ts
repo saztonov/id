@@ -33,7 +33,7 @@ import type {
  * Предикаты ре-экспортируются под прежними именами: их читают правила, тесты и
  * харнес, и переименование ради переименования — правка чужого кода.
  */
-export { isAnalysisAnchor, isFallbackCode, isQualityDocCode } from '@id/doc-types';
+export { isAnalysisAnchor, isFallbackCode, isQualityDocCode, isRegistryCode } from '@id/doc-types';
 
 /** Акт освидетельствования — якорь проверки комплекта. */
 export const ACT_TYPES = /^aosr/u;

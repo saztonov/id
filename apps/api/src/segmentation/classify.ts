@@ -48,6 +48,13 @@ import {
   PAGE_ROLES,
   resolveDocType,
 } from '@id/doc-types';
+import {
+  detectActContinuation,
+  detectPrimaryAct,
+  isActContinuation,
+  isPrimaryAct,
+  PRIMARY_ACT_CONFIDENT_MARKERS,
+} from './primary-act.js';
 import type { PageClassification, PageInput, TextEvidence, TypeOutcome } from './types.js';
 
 export interface Phase1Options {
@@ -77,6 +84,23 @@ export const PHASE1_CONFIDENCE = {
   /** Тип присвоен по составу блоков — косвенный признак. */
   blocks: 0.35,
   /**
+   * Воспроизведена форма бланка освидетельствования: три признака и более.
+   *
+   * Выше `KNOWN_TYPE_MIN_CONFIDENCE`, и это существенно: ниже порога документ
+   * не считался бы уверенно типизированным, и весь чек-лист АОСР ответил бы
+   * `n_a` — то есть акт был бы найден и не проверен.
+   */
+  actForm: 0.85,
+  /** Форма бланка узнана по двум признакам: гипотеза, требует проверки. */
+  actFormWeak: 0.6,
+  /**
+   * Лист продолжает бланк акта: признаки подвала при акте на предыдущем листе.
+   *
+   * Ниже `sheetCounter` (0.7): счётчик утверждает позицию листа прямо, а здесь
+   * вывод сделан из соседства двух признаков.
+   */
+  actContinuation: 0.65,
+  /**
    * Заголовок опознан как заголовок ДОКУМЕНТА, но ни один тип не подошёл.
    *
    * Значение высокое намеренно: §0.5 прямо разрешает высокую уверенность у
@@ -91,6 +115,9 @@ export const PHASE1_CONFIDENCE = {
 
 /** Тип, который присваивается по составу блоков. Единственный такой в каталоге. */
 const EXEC_SCHEME_CODE = 'exec_scheme';
+
+/** Тип, который присваивается по форме печатного бланка. Тоже единственный. */
+const PRIMARY_ACT_CODE = 'aosr';
 
 /**
  * Роль «продолжение документа» — метка `I-DOC`, а не `A-ROLE`.
@@ -580,7 +607,39 @@ function classifyOne(
     };
   }
 
-  // 4. Склейка разорванного заголовка — только когда обычный якорь не сработал.
+  // 4. Форма бланка освидетельствования. Стоит ВЫШЕ склейки заголовка, потому
+  //    что воспроизведённая печатная форма — признак сильнее реконструкции
+  //    разорванной строки: склейка утверждает, что титул выглядел вот так,
+  //    форма — что перед нами бланк РД-11-02 целиком.
+  //
+  //    Это единственный тип, опознаваемый не по титулу: потеря акта обнуляет
+  //    весь анализ комплекта, а титул хрупок ровно там, где дороже всего
+  //    (склеен провайдером в одну строку, разорван переносом, срезан сканом).
+  const actForm = detectPrimaryAct(page.text);
+  if (isPrimaryAct(actForm)) {
+    const confident = actForm.markers.length >= PRIMARY_ACT_CONFIDENT_MARKERS;
+    const rawLine =
+      actForm.titleLineIndex >= 0 ? rawLineByNormalizedIndex(lines, actForm.titleLineIndex) : null;
+    const span = rawLine ? contentSpan(rawLine) : null;
+    return {
+      ...NO_SIGNAL,
+      label: 'B-DOC',
+      docTypeCode: PRIMARY_ACT_CODE,
+      // Три признака и больше — это уже не совпадение фразы, а воспроизведённая
+      // форма, и тип объявляется определённым. Два — гипотеза: декодер обязан
+      // поставить `needs_review`.
+      typeOutcome: confident ? 'known' : 'uncertain',
+      observedTitle: rawLine === null ? null : normalizeLine(rawLine.raw),
+      confidence: confident ? PHASE1_CONFIDENCE.actForm : PHASE1_CONFIDENCE.actFormWeak,
+      source: 'anchor',
+      reason:
+        `титул не опознан, но воспроизведена форма бланка освидетельствования ` +
+        `(${actForm.markers.join('; ')})${note}`,
+      evidence: span ? evidenceFor(page, span) : null,
+    };
+  }
+
+  // 5. Склейка разорванного заголовка — только когда обычный якорь не сработал.
   //    Порядок важен: реконструкция не имеет права переспорить настоящую строку.
   const glued = glueCandidates(normalized, headingLines);
   if (glued.length > 0) {
@@ -718,6 +777,95 @@ function classifyOne(
 }
 
 /**
+ * Второй лист бланка присоединяется к акту.
+ *
+ * ## Что теряется без этого прохода
+ *
+ * Бланк РД-11-02 не помещается на один лист: на втором лежат п. 4 (перечень
+ * подтверждающих документов), п. 5 (даты работ), п. 6, п. 7 и подписи четырёх
+ * представителей — вход восьми правил чек-листа сразу. Заголовка на этом листе
+ * нет по построению, счётчика «лист 2 из 2» типографский бланк не печатает, и
+ * страница уходила в `unassigned` вместе со всем своим содержимым.
+ *
+ * ## Почему это ПОСТ-проход, а не ветка `classifyOne`
+ *
+ * Решение зависит от РЕШЕНИЯ соседа, а не от его текста: присоединять лист
+ * можно только к акту, а был ли предыдущий лист актом — известно лишь после
+ * его классификации. `classifyOne` видит `PageInput` предыдущей страницы, но не
+ * её метку, и передать метку внутрь значило бы сделать функцию зависимой от
+ * порядка обхода.
+ *
+ * ## Что именно переписывается
+ *
+ * Два состояния, и второе неочевидно.
+ *
+ * `U` — страница без сигнала: это тот самый потерянный лист с пп. 4–7.
+ *
+ * `B-DOC` типа акта, присвоенный ФОРМОЙ и без собственного титула. Замер на
+ * корпусе показал, что раскладка бланка непостоянна: в одном пакете первый лист
+ * несёт шапку с объектом и участниками, а все семь пунктов уезжают на второй.
+ * Детектор формы честно опознавал там бланк — и порождал ВТОРОЙ акт на каждом
+ * из шести пакетов. Собственного титула у такой страницы нет: заголовок
+ * напечатан один раз, на первом листе. Поэтому форма без титула сразу за актом
+ * читается как продолжение, а форма с титулом остаётся новым документом —
+ * настоящий второй акт свой заголовок печатает.
+ *
+ * ## Три ограничения, каждое со своей ценой
+ *
+ * - присоединяется ТОЛЬКО непосредственно следующая страница: цепочка
+ *   «акт → продолжение → продолжение» разорвана намеренно, потому что третий
+ *   лист бланка не существует, а признаки подвала повторяются в подвале
+ *   следующего документа;
+ * - решение человека (`source: 'manual'`) не переписывается никогда — §8.2
+ *   объявляет ручную разметку приоритетной;
+ * - страница, получившая тип по ЯКОРЮ ЗАГОЛОВКА, не трогается: у неё есть
+ *   прямой признак, и отменять его подсказкой соседа значило бы поставить
+ *   контекст выше напечатанного.
+ */
+function linkActContinuations(
+  pages: readonly PageInput[],
+  decisions: readonly Decision[],
+): readonly Decision[] {
+  const out = [...decisions];
+
+  for (let i = 1; i < out.length; i += 1) {
+    const current = out[i] as Decision;
+    const previous = out[i - 1] as Decision;
+
+    if (current.source === 'manual') continue;
+    if (previous.docTypeCode !== PRIMARY_ACT_CODE) continue;
+
+    // Отсутствие `observedTitle` у акта означает, что тип присвоен формой, а не
+    // якорем заголовка: якорь всегда кладёт в него сработавшую строку.
+    const formActWithoutTitle =
+      current.label === 'B-DOC' &&
+      current.docTypeCode === PRIMARY_ACT_CODE &&
+      current.observedTitle === null;
+    if (current.label !== 'U' && !formActWithoutTitle) continue;
+
+    const evidence = detectActContinuation((pages[i] as PageInput).text);
+    if (!isActContinuation(evidence)) continue;
+
+    out[i] = {
+      ...current,
+      label: 'I-DOC',
+      docTypeCode: null,
+      typeOutcome: 'none',
+      observedTitle: null,
+      alternatives: [],
+      ambiguous: false,
+      confidence: PHASE1_CONFIDENCE.actContinuation,
+      reason:
+        `страница продолжает бланк освидетельствования: предыдущий лист опознан ` +
+        `как акт, на этой воспроизведены ${evidence.markers.join('; ')}` +
+        `${formActWithoutTitle ? ', а собственного заголовка нет' : ''}`,
+    };
+  }
+
+  return out;
+}
+
+/**
  * Классифицирует страницы фазой 1.
  *
  * Возвращает РОВНО одно решение на каждую страницу входа и в том же порядке.
@@ -730,9 +878,13 @@ export function classifyPages(
   options: Phase1Options = {},
 ): readonly PageClassification[] {
   const headingLines = options.headingLines ?? DEFAULT_HEADING_LINES;
+  const decided = linkActContinuations(
+    pages,
+    pages.map((page, i) => classifyOne(page, pages[i - 1], headingLines)),
+  );
   const out: PageClassification[] = pages.map((page, i) => ({
     sourcePageId: page.sourcePageId,
-    ...classifyOne(page, pages[i - 1], headingLines),
+    ...(decided[i] as Decision),
   }));
 
   if (out.length !== pages.length) {

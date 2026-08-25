@@ -472,3 +472,106 @@ describe('признаки продолжения не дают открыть �
     expect(result.confidence).toBe(PHASE1_CONFIDENCE.unknownHeading);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Акт как якорь комплекта
+// ---------------------------------------------------------------------------
+
+/**
+ * Раскладка бланка РД-11-02 из корпуса: шапка на первом листе, пункты на втором.
+ *
+ * Тексты синтетические — только печатные подписи граф, без наименований
+ * организаций, фамилий и адресов из реальных актов.
+ */
+const ACT_HEADER_SHEET = [
+  'Общество с ограниченной ответственностью «Пример»',
+  '**АКТ**',
+  '**освидетельствования скрытых работ**',
+  '№ 01-СИН/П',
+  '" 21 ноября 2024 г.',
+  '(дата составления акта)',
+].join('\n');
+
+const ACT_ITEMS_SHEET = [
+  '**произвели осмотр работ, выполненных:**',
+  '**1. К освидетельствованию предъявлены следующие работы:**',
+  '**4. Предъявлены документы, подтверждающие соответствие работ предъявляемым к ним требованиям:**',
+  '5. Даты: начала работ "27" сентября 2024 г.',
+  'окончания работ "04" октября 2024 г.',
+  '**6. Работы выполнены в соответствии с:**',
+  '**7. Разрешается производство последующих работ:**',
+].join('\n');
+
+describe('акт опознаётся по форме бланка', () => {
+  it('лист без титула, но с формой бланка — акт', () => {
+    const result = only(page('p1', ACT_ITEMS_SHEET));
+
+    expect(result.label).toBe('B-DOC');
+    expect(result.docTypeCode).toBe('aosr');
+    expect(result.typeOutcome).toBe('known');
+    // Выше KNOWN_TYPE_MIN_CONFIDENCE: ниже порога акт был бы найден и не
+    // проверен — весь чек-лист АОСР ответил бы `n_a`.
+    expect(result.confidence).toBe(PHASE1_CONFIDENCE.actForm);
+    expect(result.reason).toContain('форма бланка освидетельствования');
+  });
+
+  it('лист с пунктами сразу за листом с титулом — продолжение, а не второй акт', () => {
+    // Дефект, найденный замером: раскладка бланка непостоянна, и детектор формы
+    // честно опознавал бланк на втором листе — порождая ВТОРОЙ акт на каждом из
+    // шести пакетов корпуса. Отличает второй лист отсутствие своего заголовка.
+    const [first, second] = classifyPages([
+      page('p1', ACT_HEADER_SHEET),
+      page('p2', ACT_ITEMS_SHEET),
+    ]);
+
+    expect(first?.docTypeCode).toBe('aosr');
+    expect(second?.label).toBe('I-DOC');
+    expect(second?.docTypeCode).toBeNull();
+    expect(second?.reason).toContain('собственного заголовка нет');
+  });
+
+  it('второй акт со своим титулом остаётся отдельным документом', () => {
+    const [, second] = classifyPages([
+      page('p1', ACT_HEADER_SHEET),
+      page('p2', `${ACT_HEADER_SHEET}\n${ACT_ITEMS_SHEET}`),
+    ]);
+
+    expect(second?.label).toBe('B-DOC');
+    expect(second?.docTypeCode).toBe('aosr');
+  });
+
+  it('потерянный лист с пунктами 4-7 присоединяется к акту', () => {
+    // Без этого прохода лист уходил в `unassigned`, унося п. 4, п. 5, п. 7 и
+    // всех подписантов — вход восьми правил чек-листа сразу.
+    const tail = ['**6. Работы выполнены в соответствии с:**', 'Дополнительные сведения'].join(
+      '\n',
+    );
+    const [, second] = classifyPages([page('p1', ACT_HEADER_SHEET), page('p2', tail)]);
+
+    expect(second?.label).toBe('I-DOC');
+    expect(second?.confidence).toBe(PHASE1_CONFIDENCE.actContinuation);
+  });
+
+  it('за НЕ актом тот же лист остаётся без сигнала', () => {
+    const tail = ['**6. Работы выполнены в соответствии с:**', 'Дополнительные сведения'].join(
+      '\n',
+    );
+    const [, second] = classifyPages([
+      page('p1', 'СЕРТИФИКАТ СООТВЕТСТВИЯ\n№ A-1'),
+      page('p2', tail),
+    ]);
+
+    expect(second?.label).toBe('U');
+  });
+
+  it('разметка человека пост-проходом не переписывается', () => {
+    const manual = page('p2', ACT_ITEMS_SHEET, {
+      manual: { label: 'B-DOC', docTypeCode: 'cert_conformity', pageRoleCode: null },
+    });
+    const [, second] = classifyPages([page('p1', ACT_HEADER_SHEET), manual]);
+
+    expect(second?.source).toBe('manual');
+    expect(second?.label).toBe('B-DOC');
+    expect(second?.docTypeCode).toBe('cert_conformity');
+  });
+});
