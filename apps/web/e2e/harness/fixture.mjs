@@ -392,9 +392,15 @@ export function fixtureSql(pdfSha) {
     // Без этой строки прогон проверок сослался бы в пустоту, а экран правил
     // показал бы «действующая версия не назначена» — то есть стенд проверял бы
     // не боевое состояние.
+    // `ON CONFLICT`, потому что миграция 0044 заводит встроенный набор правил и
+    // назначает действующим ЕГО. Стенду нужен свой: сценарии проверок ссылаются на
+    // `IDS.rulesetVersion`. Без перезаписи вставка падает дубликатом ключа, и стенд
+    // не поднимается вовсе.
     `INSERT INTO app_settings (key, value, updated_by)
        VALUES ('ruleset.active_version_id', to_jsonb('${IDS.rulesetVersion}'::text),
-               '${IDS.userAdmin}')`,
+               '${IDS.userAdmin}')
+       ON CONFLICT (key) DO UPDATE
+         SET value = EXCLUDED.value, updated_by = EXCLUDED.updated_by`,
 
     // --- Справочники §14, у которых на S11 появились экраны ---
     //
