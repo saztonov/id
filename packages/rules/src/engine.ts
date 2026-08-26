@@ -76,15 +76,31 @@ export class RuleRegistryError extends Error {
  * `enabled_rule_codes`.
  *
  * Расхождение — fail-fast: исключение бросается, а не логируется.
+ *
+ * ## Снятые правила — законное исключение с ОДНОЙ стороны (S30)
+ *
+ * Правило, снятое с исполнения, остаётся в `rule_definitions` навсегда:
+ * `findings.rule_code` — внешний ключ на неё, и удалить строку значило бы либо
+ * стереть замечания прошлых прогонов, либо порвать ссылку. Строка снимка
+ * опубликованного набора удалению не подлежит тем более — её запирает триггер,
+ * и запирает верно: снимок описывает, ЧТО проверял прогон месячной давности.
+ *
+ * Поэтому такой код разрешён в БД без реализации — но ТОЛЬКО в эту сторону.
+ * Обратная («реализация есть, записи нет») остаётся отказом: это по-прежнему
+ * правило, которое невозможно включить в профиль.
  */
 export function reconcileRuleRegistry(
   definitionCodes: Iterable<string>,
   specs: readonly RuleSpec[] = RULE_SPECS_PLACEHOLDER,
+  retiredCodes: Iterable<string> = [],
 ): void {
   const defined = new Set(definitionCodes);
   const implemented = new Set(specs.map((spec) => spec.code));
+  const retired = new Set(retiredCodes);
 
-  const missingImplementations = [...defined].filter((code) => !implemented.has(code)).sort();
+  const missingImplementations = [...defined]
+    .filter((code) => !implemented.has(code) && !retired.has(code))
+    .sort();
   const missingDefinitions = [...implemented].filter((code) => !defined.has(code)).sort();
 
   if (missingImplementations.length > 0 || missingDefinitions.length > 0) {

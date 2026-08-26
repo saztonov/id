@@ -348,7 +348,15 @@ export const workSchema = z.object({
   id: uuidSchema,
   objectId: uuidSchema,
   sectionCode: sectionCodeSchema,
-  period: periodSchema,
+  /**
+   * Месяц комплекта; `null` — портал ещё не прочитал акт (S30).
+   *
+   * Выводится конвейером по самому раннему распознанному акту, а не называется
+   * человеком: акта в момент заведения комплекта ещё нет. У реестра
+   * (`registrySchema`) месяц остаётся обязательным — это свойство подписываемой
+   * бумаги, и выводить его неоткуда.
+   */
+  period: periodSchema.nullable(),
   contractorId: uuidSchema,
   managedByContractorId: uuidSchema,
   kind: workKindSchema,

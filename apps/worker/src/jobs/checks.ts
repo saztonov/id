@@ -29,7 +29,7 @@
 import {
   RuleRegistryError,
   RULE_CATALOG,
-  reconcileRuleRegistry,
+  assertRuleRegistryMatches,
   resolveExternalRegistries,
   runRules,
   type CheckGraph,
@@ -156,7 +156,7 @@ export function createChecksRunHandler(deps: ChecksDeps): JobHandler<'checks.run
     // и отличить это от исправной работы нечем.
     const definitionCodes = await deps.listRuleDefinitionCodes();
     try {
-      reconcileRuleRegistry(definitionCodes, RULE_CATALOG);
+      assertRuleRegistryMatches(definitionCodes);
     } catch (error) {
       if (error instanceof RuleRegistryError) {
         throw new ChecksStateError(

@@ -24,7 +24,9 @@ import { applyMigrations, checksumOf, loadMigrations } from '@id/migrator';
 import type { SqlExecutor } from '@id/migrator';
 import {
   BUILTIN_RULESET_MIGRATION,
+  RETIRED_SEED_BATCHES,
   RULE_CATALOG,
+  RULE_CATALOG_WITH_RETIRED,
   RULE_SEED_BATCHES,
   RuleRegistryError,
   assertRuleRegistryMatches,
@@ -81,6 +83,32 @@ describe('seed реестра правил не отстаёт от катало
       }
     }
     expect(overlaps).toEqual([]);
+  });
+
+  /**
+   * Снятое правило продолжает сторожиться, хотя движок его не исполняет.
+   *
+   * Его миграция УЖЕ ПРИМЕНЕНА, и её контрольную сумму раннер сверяет при
+   * каждом накате. Выпади она из проверок вместе с правилом — файл можно было
+   * бы поправить, и узнали бы об этом на боевом стенде отказом наката.
+   */
+  it.each(RETIRED_SEED_BATCHES.map((batch) => [batch.migration, batch] as const))(
+    '%s (снятое правило) по-прежнему совпадает с выводом генератора',
+    (migration, batch) => {
+      expect(checksumOf(committedSeedOf(migration))).toBe(
+        checksumOf(generateRuleSeedSql(batch.rules)),
+      );
+    },
+  );
+
+  it('снятые правила не пересекаются с действующим каталогом', () => {
+    // Код, вернувшийся в каталог, дал бы зелёную галочку в чек-листе за
+    // проверку, которая не может не пройти.
+    const active = new Set(RULE_CATALOG.map((spec) => spec.code));
+    const returned = RETIRED_SEED_BATCHES.flatMap((batch) => batch.rules)
+      .map((spec) => spec.code)
+      .filter((code) => active.has(code));
+    expect(returned).toEqual([]);
   });
 
   it('в каталоге нет дублирующихся кодов', () => {
@@ -148,9 +176,12 @@ describe('встроенный набор правил применяется и
         ORDER BY r.rule_code`,
     );
 
-    expect(rows).toHaveLength(RULE_CATALOG.length);
+    // Снятое правило из снимка НЕ удаляется: снимок описывает, что проверял
+    // прогон месячной давности, и переписывать его задним числом нельзя —
+    // именно это и запрещает триггер `ruleset_rules_published_immutable`.
+    expect(rows).toHaveLength(RULE_CATALOG_WITH_RETIRED.length);
     const byCode = new Map(rows.map((row) => [row.rule_code, row]));
-    for (const spec of RULE_CATALOG) {
+    for (const spec of RULE_CATALOG_WITH_RETIRED) {
       const row = byCode.get(spec.code);
       expect(row, `правила ${spec.code} нет в снимке встроенного набора`).toBeDefined();
       expect(row?.severity).toBe(spec.defaultSeverity);
@@ -192,8 +223,11 @@ describe('seed применяется на настоящей схеме', () =>
     );
     const codes = rows.map((row) => row.code);
 
-    expect(codes.length).toBe(RULE_CATALOG.length);
-    expect(codes).toEqual([...RULE_CATALOG.map((spec) => spec.code)].sort());
+    // Определение снятого правила остаётся навсегда: `findings.rule_code` —
+    // внешний ключ на него, и удаление либо стёрло бы замечания прошлых
+    // прогонов, либо порвало бы ссылку.
+    expect(codes.length).toBe(RULE_CATALOG_WITH_RETIRED.length);
+    expect(codes).toEqual([...RULE_CATALOG_WITH_RETIRED.map((spec) => spec.code)].sort());
   });
 
   it('прочитанные из БД коды проходят сверку с реализациями', async () => {

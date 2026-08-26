@@ -15,7 +15,7 @@
  * требует ЯВНОЙ миграции. Молчаливое исчезновение правила из реестра — это
  * ровно тот отказ, из-за которого §9.6 требует двусторонней сверки.
  */
-import { RULE_CATALOG } from './catalog.js';
+import { RULE_CATALOG, RULE_CATALOG_WITH_RETIRED } from './catalog.js';
 import type { RuleSpec } from './types.js';
 
 const TAG_BASE = 'rules';
@@ -182,7 +182,9 @@ const BUILTIN_HEADER = `-- Встроенный набор правил и ег�
  * умолчаний разошлась бы с остальными молча, а разойтись ей нельзя: снимок
  * определяет, что именно проверял прогон месячной давности.
  */
-export function generateBuiltinRulesetSql(specs: readonly RuleSpec[] = RULE_CATALOG): string {
+export function generateBuiltinRulesetSql(
+  specs: readonly RuleSpec[] = RULE_CATALOG_WITH_RETIRED,
+): string {
   const rows = defaultSnapshotRows(specs)
     .map(
       (row) =>

@@ -315,9 +315,11 @@ function fixtureStatements(
     `INSERT INTO user_roles (user_id, role) VALUES ('${USER_ADMIN}', 'admin')`,
     `INSERT INTO object_contractors (object_id, contractor_id)
        VALUES ('${OBJECT}', '${ORG_CONTRACTOR}') ON CONFLICT DO NOTHING`,
+    // Месяц НЕ задан намеренно (S30): его обязан вывести конвейер по самому
+    // раннему распознанному акту — это и проверяется ниже.
     `INSERT INTO works
-       (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-     VALUES ('${SUBMISSION}', '${OBJECT}', '${ORG_CONTRACTOR}', '${ORG_CONTRACTOR}', 'roofing', DATE '2026-01-01', 'Поставка 1', '${USER_CONTRACTOR}')`,
+       (id, object_id, contractor_id, managed_by_contractor_id, section_code, title, created_by)
+     VALUES ('${SUBMISSION}', '${OBJECT}', '${ORG_CONTRACTOR}', '${ORG_CONTRACTOR}', 'roofing', 'Поставка 1', '${USER_CONTRACTOR}')`,
     `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
        VALUES ('${REVISION}', '${SUBMISSION}', '${OBJECT}', '${ORG_CONTRACTOR}', 1, 'draft')`,
     `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
@@ -665,6 +667,49 @@ describe('непривязанные страницы существуют яв�
     expect(await listUnaccountedPages(db, SCOPE, REVISION)).toEqual([]);
   });
 });
+/**
+ * Месяц комплекта выводится конвейером (S30).
+ *
+ * Утверждение — ИНВАРИАНТ, а не ожидание конкретной даты: месяц равен месяцу
+ * самой ранней ИЗВЛЕЧЁННОЙ даты акта, а если ни одной не извлеклось — остаётся
+ * пустым. Обе стороны важны одинаково. Комплект заведён без месяца, поэтому
+ * любое значение здесь могло появиться только от прогона; а «выдуманный месяц
+ * вместо пустого» — ровно тот дефект, ради которого поле и сделано
+ * необязательным.
+ *
+ * На этой фикстуре акт написан как «№ 01-ТЕСТ от «27» февраля 2026»: шаблон
+ * `act_date` рассчитан на подпись снизу («(дата составления акта)») и на «от» в
+ * пределах одной строки, поэтому дата не извлекается и месяц остаётся пустым.
+ * Тест это не скрывает — он проверяет ту же формулу в обеих ветках.
+ */
+describe('месяц комплекта', () => {
+  it('равен месяцу самой ранней извлечённой даты акта, иначе пуст', async () => {
+    const actDates = await testDb.query<{ value_date: string }>(
+      `SELECT fv.value_date FROM field_values fv
+         JOIN logical_documents d ON d.id = fv.document_id
+        WHERE fv.revision_id = '${REVISION}'
+          AND fv.field_code = 'act_date'
+          AND d.doc_type_code LIKE 'aosr%'
+          AND fv.value_date IS NOT NULL
+        ORDER BY fv.value_date`,
+    );
+    const work = await testDb.query<{ period: string | null }>(
+      `SELECT to_char(period, 'YYYY-MM-DD') AS period FROM works WHERE id = '${SUBMISSION}'`,
+    );
+
+    const earliest = actDates[0]?.value_date;
+    const expected = earliest === undefined ? null : `${String(earliest).slice(0, 7)}-01`;
+    expect(work[0]?.period ?? null).toBe(expected);
+  });
+
+  it('прогон по комплекту без месяца доходит до конца', async () => {
+    // Месяц был NOT NULL до S30, и снятие ограничения касается пятнадцати
+    // запросов. Утверждение выше проверяет значение; это — что конвейер вообще
+    // дошёл до документов, не споткнувшись о пустое поле.
+    expect(await listLogicalDocuments(db, SCOPE, REVISION)).not.toHaveLength(0);
+  });
+});
+
 describe('гейт S8', () => {
   it('акт, реестр, сертификат, декларации и протокол опознаны', async () => {
     const documents = await listLogicalDocuments(db, SCOPE, REVISION);

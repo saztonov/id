@@ -414,6 +414,10 @@ function AddWorkControl({
         objectId: registry.objectId,
         sectionCode: registry.sectionCode,
         period: registry.period,
+        // Комплект, который портал ещё не распознал, месяца не имеет (S30) — и
+        // без этого признака выпал бы из кандидатов, хотя включить его можно:
+        // сверка месяца при включении пропускает неизвестный.
+        includeUndatedPeriod: true,
         unassigned: true,
       }),
   });

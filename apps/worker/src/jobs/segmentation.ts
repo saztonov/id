@@ -81,6 +81,8 @@ import {
   type Segmentation,
   type SegmentationInput,
 } from '@id/api';
+import { isAnalysisAnchor } from '@id/doc-types';
+import { AOSR_FIELDS, periodOfEarliestAct } from '@id/rules';
 
 /**
  * Версия сегментатора и экстрактора.
@@ -168,6 +170,14 @@ export interface LlmCallResult {
 }
 
 export interface SegmentationDeps {
+  /**
+   * Проставить месяц комплекта, если он ещё не определён (S30).
+   *
+   * Порт, а не прямой вызов репозитория: обработчики этого файла написаны на
+   * портах целиком, и один прямой вызов сделал бы их непроверяемыми без базы.
+   * Возвращает `true`, если месяц записан именно этим вызовом.
+   */
+  readonly fillWorkPeriod: (revisionId: string, period: string) => Promise<boolean>;
   /** Вход сегментации: страницы ревизии, текст последнего успешного прогона. */
   loadPages(revisionId: string): Promise<SegmentationInput>;
 
@@ -436,7 +446,8 @@ export function createClassifyPagesHandler(
         // ОПУБЛИКОВАННОЙ версии ступень больше не выключает. Ветка оставлена
         // для стадии, у которой встроенного текста нет вовсе, — и говорит
         // именно это, а не «опубликуйте промт».
-        llmStats.skippedReason = 'у стадии page_classify нет ни опубликованного, ни встроенного промта';
+        llmStats.skippedReason =
+          'у стадии page_classify нет ни опубликованного, ни встроенного промта';
       }
     }
 
@@ -901,6 +912,8 @@ export function createExtractFieldsHandler(
     let baseOnly = 0;
     let llmFields = 0;
     let llmProblems = 0;
+    /** Даты актов: по самой ранней портал выведет месяц комплекта (S30). */
+    const actDates: (string | null)[] = [];
     for (const document of targets) {
       const pageIds = pagesOfDocument.get(document.id) ?? [];
       const pages = pageIds
@@ -951,6 +964,11 @@ export function createExtractFieldsHandler(
         }
       }
 
+      if (isAnalysisAnchor(document.docTypeCode)) {
+        const actDate = fields.find((value) => value.fieldCode === AOSR_FIELDS.actDate);
+        actDates.push(actDate?.valueDate ?? null);
+      }
+
       const outcome = await deps.saveFieldValues({
         revisionId,
         documentId: document.id,
@@ -977,6 +995,31 @@ export function createExtractFieldsHandler(
     };
     ctx.logger.info({ counts }, 'реквизиты извлечены');
     await ctx.emit('documents.fields_extracted', counts);
+
+    /**
+     * Месяц комплекта выводится ЗДЕСЬ (S30).
+     *
+     * Раньше его называл человек при заведении, не видя акта, — и подставленный
+     * по умолчанию текущий месяц оставался в карточке как факт. Теперь он
+     * берётся по самому раннему распознанному акту.
+     *
+     * Только при полном прогоне: `documentId` задан — переизвлекали ОДИН
+     * документ, и остальные акты комплекта в `actDates` не попали. Вывести месяц
+     * по одному из нескольких актов значило бы назвать не самый ранний.
+     *
+     * Запись идемпотентна и не трогает уже определённый месяц; отсутствие
+     * распознанных дат — не повод подставить сегодняшний.
+     */
+    if (documentId === undefined) {
+      const period = periodOfEarliestAct(actDates);
+      if (period !== null) {
+        const filled = await deps.fillWorkPeriod(revisionId, period);
+        if (filled) {
+          ctx.logger.info({ period }, 'месяц комплекта выведен по дате акта');
+          await ctx.emit('work.period_resolved', { period });
+        }
+      }
+    }
 
     if (documentId === undefined) {
       await ctx.enqueue({

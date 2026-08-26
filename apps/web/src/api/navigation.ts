@@ -71,8 +71,8 @@ export interface Work {
   id: string;
   objectId: string;
   sectionCode: string;
-  /** Месяц первым числом: `ГГГГ-ММ-01`. */
-  period: string;
+  /** Месяц первым числом; `null` — портал ещё не прочитал акт (S30). */
+  period: string | null;
   /** Исполнитель работы — он печатается в реестре. */
   contractorId: string;
   /** Организация, ведущая комплект: только она правит его состав. */
@@ -267,6 +267,8 @@ export interface WorkFilter {
   readonly period?: string | undefined;
   readonly periodFrom?: string | undefined;
   readonly periodTo?: string | undefined;
+  /** Пускать в отбор по месяцу комплекты, месяц которых ещё не определён. */
+  readonly includeUndatedPeriod?: boolean | undefined;
   readonly registryId?: string | undefined;
   readonly unassigned?: boolean | undefined;
   readonly search?: string | undefined;
@@ -282,6 +284,7 @@ export async function listWorks(
         ...(filter.objectId === undefined ? {} : { objectId: filter.objectId }),
         ...(filter.sectionCode === undefined ? {} : { sectionCode: filter.sectionCode }),
         ...(filter.period === undefined ? {} : { period: filter.period }),
+        ...(filter.includeUndatedPeriod === true ? { includeUndatedPeriod: 'true' } : {}),
         ...(filter.periodFrom === undefined ? {} : { periodFrom: filter.periodFrom }),
         ...(filter.periodTo === undefined ? {} : { periodTo: filter.periodTo }),
         ...(filter.registryId === undefined ? {} : { registryId: filter.registryId }),
@@ -340,7 +343,6 @@ export async function getWork(workId: string): Promise<NavigationResult<Work>> {
 export interface CreateWorkInput {
   readonly objectId: string;
   readonly sectionCode: string;
-  readonly period: string;
   readonly title: string;
   /** Исполнитель. Задаёт только генподрядчик; подрядчику поле запрещено. */
   readonly contractorId?: string | undefined;
@@ -368,7 +370,6 @@ export async function createWork(input: CreateWorkInput): Promise<CreatedWork> {
     body: {
       objectId: input.objectId,
       sectionCode: input.sectionCode,
-      period: input.period,
       title: input.title,
       ...(input.contractorId === undefined ? {} : { contractorId: input.contractorId }),
     },

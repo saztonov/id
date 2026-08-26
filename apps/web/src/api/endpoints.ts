@@ -141,7 +141,6 @@ export const auth = {
 export interface CreateWorkWithFileInput {
   readonly objectId: string;
   readonly sectionCode: string;
-  readonly period: string;
   readonly title: string;
   /** Исполнитель. Задают все, кроме подрядчика: ему сервер берёт свою организацию. */
   readonly contractorId?: string | undefined;

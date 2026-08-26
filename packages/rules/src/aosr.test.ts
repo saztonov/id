@@ -25,8 +25,9 @@ import {
   AOSR_SIGNER_ROLES,
   CROSSCHECK_RULES,
   EXTERNAL_RULES,
-  WORK_PERIOD_RULES,
 } from './aosr.js';
+import { RETIRED_RULES, RULE_CATALOG } from './catalog.js';
+import { periodOfEarliestAct } from './helpers.js';
 import { runRules } from './engine.js';
 import { inconsistencyOf } from './result.js';
 import {
@@ -40,7 +41,6 @@ import {
   makeProfile,
   makeRdDocument,
   makeRegistryRow,
-  makeRevision,
   makeUnavailableRegistries,
   makeUnconfiguredProfile,
   resetTestIds,
@@ -60,12 +60,7 @@ import type {
   SroRecord,
 } from './types.js';
 
-const ALL_RULES: readonly RuleSpec[] = [
-  ...AOSR_RULES,
-  ...WORK_PERIOD_RULES,
-  ...CROSSCHECK_RULES,
-  ...EXTERNAL_RULES,
-];
+const ALL_RULES: readonly RuleSpec[] = [...AOSR_RULES, ...CROSSCHECK_RULES, ...EXTERNAL_RULES];
 
 // ---------------------------------------------------------------------------
 // Инструменты
@@ -469,47 +464,49 @@ describe('AOSR.ACT.031 — порядок дат акта', () => {
   });
 });
 
-describe('AOSR.ACT.032 — месяц комплекта против даты акта', () => {
-  /** Месяц комплекта — свойство ревизии, а не документа. */
-  function withPeriod(period: string, fields = healthyActFields()): CheckGraph {
-    return actGraph(fields, { revision: makeRevision({ period }) });
-  }
-
-  it('месяц комплекта совпадает с месяцем акта — pass', () => {
-    expect(verdictOf('AOSR.ACT.032', withPeriod('2026-03-01'))).toBe('pass');
+/**
+ * Правило снято с исполнения (S30).
+ *
+ * Оно сверяло акт с месяцем, который человек называл руками при заведении
+ * комплекта. Теперь месяц выводится порталом из самого раннего акта, и правило
+ * сравнивало бы акт с самим собой. Сверку даты акта с периодами документов ведут
+ * `relevantDateFor` и семейство `DATE.*`, внутреннюю согласованность дат акта —
+ * `AOSR.ACT.031`.
+ *
+ * Проверяется теперь ровно одно: код не вернулся в каталог. Тест на месте, а не
+ * удалён, потому что молча вернувшееся правило дало бы зелёную галочку в
+ * чек-листе за проверку, которая не может не пройти.
+ */
+describe('periodOfEarliestAct — месяц комплекта выводится из акта', () => {
+  it('берёт САМЫЙ РАННИЙ акт, а не первый попавшийся', () => {
+    // Так поступил бы и человек, подшивая папку: комплект относится к месяцу,
+    // в котором работы начали освидетельствовать.
+    expect(periodOfEarliestAct(['2026-04-20', '2026-03-09', '2026-05-01'])).toBe('2026-03-01');
   });
 
-  it('день внутри месяца значения не имеет', () => {
-    // Акт от 10 марта в мартовской папке — совпадение, хотя даты не равны.
-    // Сравнение по полной дате давало бы замечание на каждый акт, составленный
-    // не первого числа, то есть почти на каждый.
-    expect(verdictOf('AOSR.ACT.032', withPeriod('2026-03-01'))).toBe('pass');
+  it('день внутри месяца отбрасывается: месяц — первое число', () => {
+    expect(periodOfEarliestAct(['2026-03-31'])).toBe('2026-03-01');
   });
 
-  it('акт другого месяца даёт замечание с обеими датами', () => {
-    const graph = withPeriod('2026-04-01');
-    expect(verdictOf('AOSR.ACT.032', graph)).toBe('fail');
-    const message = messagesOf('AOSR.ACT.032', graph)[0] ?? '';
-    expect(message).toContain('10.03.2026');
-    expect(message).toContain('01.04.2026');
+  it('нераспознанные даты пропускаются, а не роняют вывод', () => {
+    expect(periodOfEarliestAct([null, undefined, '', '2026-07-04'])).toBe('2026-07-01');
   });
 
-  it('правило не блокирует и остаётся предупреждением', () => {
-    const spec = specOf('AOSR.ACT.032');
-    expect(spec.defaultSeverity).toBe('warning');
-    expect(spec.defaultBlocking).toBe(false);
+  it('без единой распознанной даты месяца НЕТ, а не «сегодняшний»', () => {
+    // Выдуманное значение неотличимо от прочитанного, а месяц комплекта
+    // попадает в реестр передачи.
+    expect(periodOfEarliestAct([])).toBeNull();
+    expect(periodOfEarliestAct([null, 'не дата'])).toBeNull();
+  });
+});
+
+describe('AOSR.ACT.032 снято с исполнения', () => {
+  it('кода нет в каталоге правил', () => {
+    expect(RULE_CATALOG.some((spec) => spec.code === 'AOSR.ACT.032')).toBe(false);
   });
 
-  it('нераспознанная дата акта молчит: о ней говорит AOSR.ACT.031', () => {
-    const graph = actGraph(without(healthyActFields(), AOSR_FIELDS.actDate), {
-      revision: makeRevision({ period: '2026-04-01' }),
-    });
-    expect(verdictOf('AOSR.ACT.032', graph)).toBe('n_a');
-    expect(reasonOf('AOSR.ACT.032', graph)).toContain('дата составления');
-  });
-
-  it('без актов правило неприменимо', () => {
-    expect(verdictOf('AOSR.ACT.032', graphWithoutActs())).toBe('n_a');
+  it('спек остался только среди снятых — ради контрольных сумм применённых миграций', () => {
+    expect(RETIRED_RULES.map((spec) => spec.code)).toContain('AOSR.ACT.032');
   });
 });
 

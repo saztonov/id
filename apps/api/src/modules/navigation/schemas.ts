@@ -68,6 +68,14 @@ export const workListQuerySchema = pageQuerySchema.extend({
   objectId: uuidSchema.optional(),
   sectionCode: sectionCodeSchema.optional(),
   period: periodSchema.optional(),
+  /**
+   * Пускать в отбор по месяцу комплекты, месяц которых ещё не определён (S30).
+   *
+   * Нужен списку кандидатов на включение в реестр: комплект, который портал ещё
+   * не распознал, месяца не имеет, а включить его можно. По умолчанию выключен —
+   * обычный отбор «за август» это вопрос о фактах.
+   */
+  includeUndatedPeriod: queryFlagSchema.optional(),
   periodFrom: periodSchema.optional(),
   periodTo: periodSchema.optional(),
   registryId: uuidSchema.optional(),
@@ -139,7 +147,9 @@ export const workListSchema = z.array(workSchema);
 export const createWorkBodySchema = z.object({
   objectId: uuidSchema,
   sectionCode: sectionCodeSchema,
-  period: periodSchema,
+  // Месяца здесь нет намеренно (S30): его выводит конвейер по самому раннему
+  // распознанному акту. Спрашивать его при заведении значило бы просить
+  // человека назвать то, чего он ещё не видел, — акта в этот момент нет.
   title: z.string().min(1).max(1000),
   contractorId: uuidSchema.nullish(),
 });

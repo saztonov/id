@@ -207,7 +207,6 @@ function registerUploadRoutes(app: AppInstance, ticketKey: Buffer): void {
         {
           objectId: body.objectId,
           sectionCode: body.sectionCode,
-          period: body.period,
           contractorId: body.contractorId,
           title: body.title,
         },

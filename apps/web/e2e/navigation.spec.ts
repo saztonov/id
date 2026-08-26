@@ -54,28 +54,6 @@ async function openSection(page: Page, name: string): Promise<void> {
   );
 }
 
-/** Месяц выбирается селектом: поля ввода даты у формы больше нет. */
-async function selectPeriod(page: Page, period: string): Promise<void> {
-  const names = [
-    'январь',
-    'февраль',
-    'март',
-    'апрель',
-    'май',
-    'июнь',
-    'июль',
-    'август',
-    'сентябрь',
-    'октябрь',
-    'ноябрь',
-    'декабрь',
-  ];
-  const month = Number(period.split('-')[1] ?? '1');
-  const label = `${names[month - 1] ?? ''} ${period.slice(0, 4)}`;
-  await page.getByTestId('work-period').click();
-  await page.locator('.ant-select-dropdown:visible').getByTitle(label).click();
-}
-
 /** Адреса запросов к API, снятые с сети: контракт проверяется по факту. */
 function recordApiCalls(page: Page): string[] {
   const seen: string[] = [];
@@ -137,7 +115,6 @@ test('подрядчик заводит комплект одним файлом
   await expect(page.getByTestId('work-title')).toHaveValue('Многостраничный.pdf');
   await page.getByTestId('work-title').fill('Комплект из интерфейса');
 
-  await selectPeriod(page, IDS.period);
   await page.getByTestId('create-work').click();
 
   // Экран уходит на рабочее место новой ревизии: комплект без ревизии — это
@@ -208,7 +185,6 @@ test('файл, отвергнутый хранилищем, оставляет 
     buffer: readFileSync(FIXTURE),
   });
   await page.getByTestId('work-title').fill('Комплект с оборванной загрузкой');
-  await selectPeriod(page, IDS.period);
   await page.getByTestId('create-work').click();
 
   // Экран называет состояние и даёт путь дальше, а не сообщает «не получилось».

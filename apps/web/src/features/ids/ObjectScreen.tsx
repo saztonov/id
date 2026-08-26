@@ -109,7 +109,16 @@ const MONTHS = [
   'декабрь',
 ];
 
-export function periodLabel(period: string): string {
+/**
+ * `null` — портал ещё не прочитал акт (S30).
+ *
+ * Прочерк здесь читался бы как «портал не смог определить», а это не отказ, а
+ * ещё не случившаяся работа: месяц выводится из самого раннего акта, и до
+ * распознавания его просто нет. Разница важна — по прочерку идут разбираться,
+ * по «После OCR» ждут.
+ */
+export function periodLabel(period: string | null): string {
+  if (period === null) return 'После OCR';
   const [year, month] = period.split('-');
   const index = Number(month) - 1;
   return MONTHS[index] === undefined ? period : `${MONTHS[index]} ${year ?? ''}`.trim();
@@ -615,7 +624,7 @@ function SectionPanel({
                 title: 'Месяц',
                 dataIndex: 'period',
                 key: 'period',
-                render: (period: string) => periodLabel(period),
+                render: (period: string | null) => periodLabel(period),
               },
               {
                 title: 'Исполнитель',
@@ -669,7 +678,6 @@ function SectionPanel({
 }
 
 interface WorkFormValues {
-  period: string;
   title: string;
   contractorId?: string;
 }
@@ -724,7 +732,6 @@ function NewWorkWithFileCard({
       const created = await files.createWorkWithFile({
         objectId,
         sectionCode,
-        period: values.period,
         title: values.title,
         ...(values.contractorId === undefined ? {} : { contractorId: values.contractorId }),
         fileName: file.name,
@@ -808,7 +815,6 @@ function NewWorkWithFileCard({
         <Form<WorkFormValues>
           form={form}
           layout="inline"
-          initialValues={{ period: currentPeriod() }}
           onFinish={(values) => {
             create.mutate(values);
           }}
@@ -829,13 +835,14 @@ function NewWorkWithFileCard({
               }}
             />
           </Form.Item>
-          <Form.Item
-            name="period"
-            label="Месяц"
-            rules={[{ required: true, message: 'Месяц обязателен' }]}
-          >
-            <Select style={{ width: 180 }} options={periodOptions()} data-testid="work-period" />
-          </Form.Item>
+          {/*
+            Месяца в форме нет (S30): его выводит портал по самому раннему
+            распознанному акту. Спрашивать здесь значило бы просить назвать то,
+            чего человек ещё не видел, — акта в этот момент нет, есть файл,
+            который никто не читал. Подставленный по умолчанию текущий месяц
+            оставался в карточке как факт: комплект с актом от 09.03.2026
+            заводился «августом 2026».
+          */}
           <Form.Item
             name="title"
             label="Работа"

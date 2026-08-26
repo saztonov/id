@@ -84,6 +84,7 @@ import {
   isNull,
   lte,
   ne,
+  or,
   sql,
   type SQL,
 } from 'drizzle-orm';
@@ -145,8 +146,25 @@ const isoNullable = (column: unknown, alias: string) =>
     alias,
   );
 
-/** Дата без времени: месяц передаётся строкой `ГГГГ-ММ-01`, а не меткой времени. */
+/**
+ * Дата без времени: месяц передаётся строкой `ГГГГ-ММ-01`, а не меткой времени.
+ *
+ * Тип объявлен nullable: `to_char(NULL, …)` возвращает `NULL`, и прежнее
+ * `sql<string>` просто лгало — у комплекта, месяц которого портал ещё не
+ * прочитал, поле приходит пустым (S30).
+ */
 const date = (column: unknown, alias: string) =>
+  sql<string | null>`to_char(${column}, 'YYYY-MM-DD')`.as(alias);
+
+/**
+ * То же для колонки, объявленной `NOT NULL`.
+ *
+ * Отдельным именем, а не приведением по месту: месяц реестра обязателен по
+ * построению (свойство подписываемой бумаги, ADR-0011), и разница между ним и
+ * месяцем комплекта — предметная, а не техническая. Приведение по месту стёрло
+ * бы её ровно там, где она и важна.
+ */
+const requiredDate = (column: unknown, alias: string) =>
   sql<string>`to_char(${column}, 'YYYY-MM-DD')`.as(alias);
 
 export interface Page<TItem> {
@@ -400,6 +418,19 @@ export interface WorkFilterParams {
   readonly period?: string | undefined;
   readonly periodFrom?: string | undefined;
   readonly periodTo?: string | undefined;
+  /**
+   * Пускать в отбор по месяцу комплекты, месяц которых ещё не определён (S30).
+   *
+   * Нужен ровно одному вызывающему — списку кандидатов на включение в реестр.
+   * Комплект, который портал ещё не распознал, месяца не имеет, и без этого
+   * признака он выпал бы из кандидатов, а включить его при этом можно: сверка
+   * месяца в `includeWork` пропускает неизвестный.
+   *
+   * По умолчанию выключен: обычный отбор «за август» — это вопрос о фактах, и
+   * подмешивать в ответ комплекты неизвестного месяца значило бы отвечать не на
+   * него.
+   */
+  readonly includeUndatedPeriod?: boolean | undefined;
   readonly registryId?: string | undefined;
   /** Только комплекты, не включённые ни в один реестр. */
   readonly unassigned?: boolean | undefined;
@@ -424,7 +455,11 @@ function workFilters(params: WorkFilterParams): SQL {
     eq(works.kind, 'complect'),
     params.objectId === undefined ? undefined : eq(works.objectId, params.objectId),
     params.sectionCode === undefined ? undefined : eq(works.sectionCode, params.sectionCode),
-    params.period === undefined ? undefined : eq(works.period, params.period),
+    params.period === undefined
+      ? undefined
+      : params.includeUndatedPeriod === true
+        ? or(eq(works.period, params.period), isNull(works.period))
+        : eq(works.period, params.period),
     params.periodFrom === undefined ? undefined : gte(works.period, params.periodFrom),
     params.periodTo === undefined ? undefined : lte(works.period, params.periodTo),
     params.registryId === undefined ? undefined : eq(works.registryId, params.registryId),
@@ -529,7 +564,12 @@ export async function findWork(
 export interface CreateWorkInput {
   readonly objectId: string;
   readonly sectionCode: string;
-  readonly period: string;
+  /**
+   * Месяц комплекта. Задаётся только там, где он ИЗВЕСТЕН независимо от
+   * распознавания, — у файла описи он наследуется от реестра. Обычный комплект
+   * заводится без месяца: его выведет конвейер по самому раннему акту (S30).
+   */
+  readonly period?: string | undefined;
   readonly title: string;
   /** Исполнитель. Задаётся только генподрядчиком (см. `resolveActingContractor`). */
   readonly contractorId?: string | null | undefined;
@@ -571,7 +611,7 @@ export async function createWork(
         .values({
           objectId: input.objectId,
           sectionCode: input.sectionCode,
-          period: input.period,
+          period: input.period ?? null,
           contractorId: acting.contractorId,
           managedByContractorId: acting.managedByContractorId,
           kind: 'complect',
@@ -621,6 +661,52 @@ export async function createWork(
       return { work: toWork({ ...work, currentRevisionId: revision.id }), revision };
     }),
   );
+}
+
+/**
+ * Проставить месяц комплекта, если портал его ещё не знает (S30).
+ *
+ * Зовёт конвейер после извлечения реквизитов: месяц выводится по самому раннему
+ * распознанному акту (`periodOfEarliestAct`), а не называется человеком.
+ *
+ * ## Почему отдельно от `updateWork`
+ *
+ * Та правит КАРТОЧКУ и требует `requireManagedByActor` — правку состава ведёт
+ * организация-владелец. Здесь пишет конвейер, у которого организации нет, и
+ * проверять его правами человека было бы подлогом: месяц не решение
+ * пользователя, а прочитанный факт.
+ *
+ * ## Почему `AND period IS NULL`
+ *
+ * Повтор задачи обязан быть безопасен (§12, at-least-once). Без этого условия
+ * повторное извлечение реквизитов переписывало бы месяц каждый раз, а после
+ * пересегментации — ещё и другим значением. Условие делает запись
+ * одноразовой по факту, а не по договорённости с вызывающим.
+ *
+ * Возвращает `true`, если месяц был записан именно этим вызовом.
+ */
+export async function fillWorkPeriodIfEmpty(
+  db: Database,
+  revisionId: string,
+  period: string,
+): Promise<boolean> {
+  // Комплект находится подзапросом, а не вторым чтением: между чтением и
+  // записью ревизию можно удалить, и тогда месяц уехал бы в строку, которой
+  // больше нет предмета.
+  const updated = await db
+    .update(works)
+    .set({ period, updatedAt: sql`now()` })
+    .where(
+      and(
+        isNull(works.period),
+        eq(
+          works.id,
+          sql`(select r.work_id from ${submissionRevisions} r where r.id = ${revisionId})`,
+        ),
+      ),
+    )
+    .returning({ id: works.id });
+  return updated.length > 0;
 }
 
 export interface UpdateWorkPatch {
@@ -1240,7 +1326,7 @@ const REGISTRY_SELECTION = {
   id: registries.id,
   objectId: registries.objectId,
   sectionCode: registries.sectionCode,
-  period: date(registries.period, 'period_date'),
+  period: requiredDate(registries.period, 'period_date'),
   number: registries.number,
   folderNo: registries.folderNo,
   building: registries.building,
@@ -1579,10 +1665,19 @@ export async function includeWork(
   if (work.kind !== 'complect') {
     throw conflict('Файл реестра включается в него отдельным действием, а не как комплект.');
   }
+  /**
+   * Месяц сверяется, только когда он ИЗВЕСТЕН (S30).
+   *
+   * `null` означает «портал ещё не прочитал акт», а не «месяц другой». Сверять
+   * с ним значило бы запретить включение любого комплекта до распознавания —
+   * то есть сделать папку недоступной ровно тогда, когда её и собирают.
+   * Расхождение известных месяцев по-прежнему отказ: реестр описывает работы
+   * одного раздела за один период.
+   */
   if (
     work.objectId !== registry.objectId ||
     work.sectionCode !== registry.sectionCode ||
-    work.period !== registry.period
+    (work.period !== null && work.period !== registry.period)
   ) {
     throw unprocessable(
       [

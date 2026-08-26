@@ -81,7 +81,7 @@ export const uploadInitBodySchema = z.object({
 export const createWorkWithFileBodySchema = z.object({
   objectId: uuidSchema,
   sectionCode: z.string().min(1).max(64),
-  period: z.string().regex(/^\d{4}-\d{2}-01$/u, 'Месяц — первое число: ГГГГ-ММ-01'),
+  // Месяца здесь нет намеренно (S30) — см. `createWorkBodySchema`.
   title: z.string().min(1).max(1000),
   contractorId: uuidSchema.nullish(),
   fileName: fileNameSchema,

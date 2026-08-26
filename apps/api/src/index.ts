@@ -590,6 +590,7 @@ export {
  * `export *`: воркеру незачем уметь передавать папку.
  */
 export {
+  fillWorkPeriodIfEmpty,
   findRegistry,
   findRegistryFile,
   findWork,

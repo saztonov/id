@@ -111,6 +111,7 @@ import {
   listFieldValuesOfRevisions,
   listRegistryComplectRevisions,
   saveReconciliation,
+  fillWorkPeriodIfEmpty,
   listFieldValues,
   listLogicalDocuments,
   listPageAssignments,
@@ -1722,6 +1723,11 @@ function segmentationDeps(options: PipelineJobsOptions): SegmentationDeps {
       listPageAssignments(db, await scopeOf(revisionId), revisionId),
 
     listFieldValues: async (documentId) => listFieldValues(db, SYSTEM_SCOPE, documentId),
+
+    // Без области: месяц выводит конвейер, а не человек, и проверять его
+    // правами пользователя было бы подлогом. Запись идемпотентна и не трогает
+    // уже определённый месяц — условие живёт в самом операторе.
+    fillWorkPeriod: async (revisionId, period) => fillWorkPeriodIfEmpty(db, revisionId, period),
 
     saveFieldValues: async (input) => saveFieldValues(db, await scopeOf(input.revisionId), input),
 

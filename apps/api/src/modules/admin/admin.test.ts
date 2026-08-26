@@ -26,7 +26,7 @@ import type { LightMyRequestResponse } from 'fastify';
 import type { Pool } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { RULE_CODES } from '@id/rules';
+import { RETIRED_RULES, RULE_CODES } from '@id/rules';
 
 import { eq } from 'drizzle-orm';
 import { promptTemplates } from '@id/db';
@@ -1279,6 +1279,10 @@ describe('набор правил: атомарная публикация ве�
     expect(codes).toEqual([...RULE_CODES].sort());
     expect(codes).toContain(RULE_A);
     expect(codes).toContain(RULE_B);
+
+    // Снятое правило в списке не предлагается, хотя строка в БД осталась:
+    // включённое, оно дало бы проверку, которую движок не исполняет (S30).
+    for (const spec of RETIRED_RULES) expect(codes).not.toContain(spec.code);
   });
 
   it('версия публикуется вместе со снимком и становится действующей', async () => {

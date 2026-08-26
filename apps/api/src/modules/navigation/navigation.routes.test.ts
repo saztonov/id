@@ -769,14 +769,32 @@ describe('POST /works', () => {
     expect(pointers).toContain('/contractorId');
   });
 
-  it('месяц задаётся первым числом: произвольный день — 422', async () => {
+  it('комплект заводится БЕЗ месяца, и месяц приходит пустым', async () => {
+    // Месяц выводит конвейер по самому раннему распознанному акту (S30).
+    // Спрашивать его при заведении значило бы просить назвать то, чего человек
+    // ещё не видел: акта в этот момент нет, есть файл, который никто не читал.
     const response = await as(KC.a, 'POST', '/api/v1/works', {
       objectId: OBJECT_1,
       sectionCode: SECTION,
-      period: '2026-01-15',
-      title: 'Комплект середины месяца',
+      title: 'Комплект без месяца',
     });
-    expect(response.statusCode).toBe(422);
+    expect(response.statusCode).toBe(201);
+    expect(response.json<{ work: { period: string | null } }>().work.period).toBeNull();
+  });
+
+  it('присланный месяц не назначается: он производный, а не заданный', async () => {
+    // Схемы тел в портале не `strict` — незнакомое поле отбрасывается zod'ом, и
+    // это общее решение, а не особенность этого маршрута. Утверждение здесь не
+    // про код ответа, а про ПОСЛЕДСТВИЕ: месяц остаётся пустым, и назначить его
+    // снаружи нельзя даже случайно, старым клиентом.
+    const response = await as(KC.a, 'POST', '/api/v1/works', {
+      objectId: OBJECT_1,
+      sectionCode: SECTION,
+      period: '2026-01-01',
+      title: 'Комплект с назначенным месяцем',
+    });
+    expect(response.statusCode).toBe(201);
+    expect(response.json<{ work: { period: string | null } }>().work.period).toBeNull();
   });
 });
 

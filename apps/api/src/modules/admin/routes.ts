@@ -23,6 +23,7 @@
  * секретный ключ отвергается с указанием, где значение живёт.
  */
 import type { FastifyRequest } from 'fastify';
+import { RETIRED_RULES } from '@id/rules';
 import type { AppInstance } from '../../app.js';
 import type { Env } from '../../config/env.js';
 import type { AuditEntry } from '../../db/repositories/admin.js';
@@ -877,7 +878,21 @@ function registerRulesetRoutes(app: AppInstance): void {
     async (request) => {
       const { scope } = currentAuth(request);
       const items = await listRuleDefinitions(app.db, scope);
-      return { items: items.map((rule) => ({ ...rule, waiverRoles: [...rule.waiverRoles] })) };
+      /**
+       * Снятые правила администратору не предлагаются (S30).
+       *
+       * Их строки остаются в `rule_definitions` навсегда — на них ссылаются
+       * замечания прошлых прогонов, — но реализации у них больше нет. Показать
+       * такое правило в списке значило бы дать включить его в набор и получить
+       * ровно тот дефект, против которого этот список и сверяется с каталогом:
+       * проверку, которую администратор видит включённой, а движок не исполняет.
+       */
+      const retired = new Set(RETIRED_RULES.map((spec) => spec.code));
+      return {
+        items: items
+          .filter((rule) => !retired.has(rule.code))
+          .map((rule) => ({ ...rule, waiverRoles: [...rule.waiverRoles] })),
+      };
     },
   );
 
