@@ -156,6 +156,68 @@ const PARTIAL_SCORE = 0.6;
  */
 const MIN_PARTIAL_LENGTH = 4;
 
+/**
+ * Внутренний «№» в графе номера помечает, где номер начинается.
+ *
+ * `cleanDocNo` снимает «№» ВЕДУЩИЙ, но реестр сплошь и рядом пишет перед
+ * номером сокращённый вид документа: «ИС №001», «ПС №4». Тогда «№» оказывается
+ * внутри значения, и сравнимая форма получается `ИС001` — при том, что сам лист
+ * называет себя «№ 001». Ни одна ступень лестницы такую пару не сводит: точная
+ * и фолдинг сравнивают целиком, а частичная требует от КАЖДОЙ стороны четырёх
+ * символов и до трёхсимвольного `001` не дотягивается.
+ *
+ * Поэтому у строки может быть вторая сравнимая форма — хвост после последнего
+ * «№». Она не заменяет первую, а дополняет: «ИС №001» ищется и как `ИС001`, и
+ * как `001`.
+ *
+ * ## Почему форма вычисляется здесь, а не хранится
+ *
+ * `registry_rows` хранит `doc_no_norm` и `doc_no_folded` — формы САМОГО
+ * значения. Алиас же — предположение о том, где в значении кончается приставка,
+ * и относится он к сопоставлению, а не к разбору. Храниться должно то, что
+ * прочитано с листа; выводимое из него незачем класть в таблицу, где оно
+ * разойдётся с алгоритмом при первой же правке.
+ */
+const INNER_NUMBER_SIGN = /№\s*(.+)$/u;
+
+/**
+ * Сравнимые формы строки реестра: сохранённая и, если есть, алиас.
+ *
+ * Алиас участвует ТОЛЬКО в точной ступени и фолдинге. В частичную его пускать
+ * нельзя: «001» входит подстрокой в половину номеров комплекта, и ступень,
+ * которая и без того нестрогая, начала бы находить случайные пары.
+ */
+function rowKeys(row: ParsedRegistryRow): {
+  readonly normalized: readonly string[];
+  readonly folded: readonly string[];
+} {
+  const normalized = [row.docNoNorm as string];
+  const folded = [row.docNoFolded as string];
+
+  const inner = row.docNoRaw === null ? null : INNER_NUMBER_SIGN.exec(row.docNoRaw);
+  const tail = inner?.[1]?.trim() ?? '';
+  if (tail !== '') {
+    const alias = normalizeDocNo(tail);
+    if (alias.normalized !== '' && !normalized.includes(alias.normalized)) {
+      normalized.push(alias.normalized);
+      folded.push(alias.folded);
+    }
+  }
+
+  return { normalized, folded };
+}
+
+/** Документы, найденные по любой из сравнимых форм строки. */
+function lookup(index: Map<string, string[]>, keys: readonly string[]): readonly string[] {
+  const found: string[] = [];
+  for (const key of keys) {
+    for (const id of index.get(key) ?? []) {
+      if (!found.includes(id)) found.push(id);
+    }
+  }
+  return found;
+}
+
 /** Индекс документов по одной из форм номера: у документа их может быть несколько. */
 function indexBy(
   documents: readonly MatchableDocument[],
@@ -241,7 +303,8 @@ export function matchRegistryRows(
       continue;
     }
 
-    const exact = byNormalized.get(row.docNoNorm) ?? [];
+    const keys = rowKeys(row);
+    const exact = lookup(byNormalized, keys.normalized);
     for (const id of exact) named.add(id);
 
     if (exact.length === 1) {
@@ -269,7 +332,7 @@ export function matchRegistryRows(
       continue;
     }
 
-    const folded = byFolded.get(row.docNoFolded) ?? [];
+    const folded = lookup(byFolded, keys.folded);
     for (const id of folded) named.add(id);
 
     if (folded.length === 1) {

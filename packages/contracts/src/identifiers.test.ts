@@ -65,6 +65,22 @@ describe('normalizeDocNo', () => {
     );
   });
 
+  it('хвостовая пунктуация снимается, внутренняя — нет', () => {
+    // На листе исполнительной схемы напечатано «…схемы № 001.», и точка
+    // кончает предложение, а не номер: строка реестра «ИС №001» не находила
+    // документ ни одной ступенью лестницы.
+    expect(normalizeDocNo('001.').normalized).toBe('001');
+    expect(normalizeDocNo('001.').normalized).toBe(normalizeDocNo('№ 001').normalized);
+    // Внутренняя точка значаща и остаётся на месте.
+    expect(normalizeDocNo('RU.MCC.240.445.38406.').normalized).toBe('RU.MCC.240.445.38406');
+    expect(normalizeDocNo('230126/2/126000477.1.1').normalized).toBe('230126/2/126000477.1.1');
+  });
+
+  it('дословная форма хвостовую пунктуацию сохраняет', () => {
+    // `raw` показывается человеку и обязан совпадать с листом.
+    expect(normalizeDocNo('001.').raw).toBe('001.');
+  });
+
   it('пустая строка не является особым случаем', () => {
     expect(normalizeDocNo('')).toEqual({ raw: '', normalized: '', folded: '' });
   });
