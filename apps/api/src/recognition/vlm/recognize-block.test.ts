@@ -153,9 +153,12 @@ describe('recognizeBlock: успех', () => {
       model: 'requested/model-slug',
       temperature: 0,
       maxTokens: 4096,
-      topK: 1,
       schemaVersion: 'stamp_block_result@test',
     });
+    // `topK` не задан ни у одного профиля: при `temperature: 0` выборка и так
+    // жадная, а лишний параметр сужает маршрутизацию OpenRouter. Сам механизм
+    // «задан → уезжает в тело» остаётся под `vlm-proxy.test.ts`.
+    expect(request?.topK).toBeUndefined();
     expect(request?.userPrompt).toContain('PAGE_NUM: 3');
     expect(request?.userPrompt).toContain('BLOCK_ID: f0c0de00-1111-4222-8333-000000000042');
     expect(request?.userPrompt).not.toContain('{PAGE_NUM}');

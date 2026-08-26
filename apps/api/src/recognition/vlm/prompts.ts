@@ -42,12 +42,21 @@
  *
  * ## Параметры инференса
  *
- * Из `DEFAULT_INFERENCE_PARAMS` RD WEB: text — production-профиль Chandra
- * (t=0.1, maxTokens 12384); image — non-thinking профиль их VL-модели (t=0.7,
- * 8192); stamp — greedy под schema-constrained extraction (t=0.0, top_k=1,
- * 4096). Расширенные sampling-ключи (top_p, repetition_penalty, min_p) через
- * прокси не передаются — `VlmRequest` их сознательно не имеет: это рычаги
- * конкретного локального движка LM Studio, а не OpenRouter-маршрута.
+ * Исходно взяты из `DEFAULT_INFERENCE_PARAMS` RD WEB: text — production-профиль
+ * Chandra (t=0.1, maxTokens 12384); image — non-thinking профиль их VL-модели
+ * (t=0.7, 8192); stamp — greedy под schema-constrained extraction (t=0.0,
+ * top_k=1, 4096). Два из них были профилями ЧУЖИХ моделей, а не решениями про
+ * задачу, и при уходе с прежней модели пересмотрены: image опущен до 0.2 ради
+ * воспроизводимости, `top_k` снят как пустышка, сужающая маршрутизацию
+ * OpenRouter (пояснения — у самих значений ниже).
+ *
+ * Расширенные sampling-ключи (top_p, repetition_penalty, min_p) через прокси не
+ * передаются — `VlmRequest` их сознательно не имеет: это рычаги конкретного
+ * локального движка LM Studio, а не OpenRouter-маршрута.
+ *
+ * В `prompt_templates` эти параметры НЕ уезжают: сид-миграция несёт только
+ * `system_prompt`/`user_template`/`output_schema`, а профиль читает воркер
+ * отсюда на каждом вызове. Правка значений новой миграции не требует.
  */
 import type { VlmJsonSchemaFormat } from '../../llm/vlm-port.js';
 
@@ -374,7 +383,14 @@ export const RECOGNITION_PROMPT_DEFAULTS: Record<
     code: 'recognition_block_image',
     systemPrompt: RECOGNITION_IMAGE_SYSTEM,
     userTemplate: RECOGNITION_IMAGE_USER,
-    temperature: 0.7,
+    // 0.2, а не унаследованные 0.7. Прежнее значение пришло из non-thinking
+    // профиля чужой VL-модели, и объяснения, зачем описанию чертежа
+    // разнообразие выборки, у него не было. Описание блока — не сочинение: из
+    // него собирается текст страницы, по которому дальше идут типизация,
+    // извлечение реквизитов и сверка реестра. Два прогона одного листа обязаны
+    // давать один результат, иначе «доказательство» портала опровергается
+    // повторным запуском. Text и stamp в этом же файле давно стоят на 0.1 и 0.0.
+    temperature: 0.2,
     maxTokens: 8192,
     responseFormat: VLM_IMAGE_RESPONSE_FORMAT,
   },
@@ -382,9 +398,13 @@ export const RECOGNITION_PROMPT_DEFAULTS: Record<
     code: 'recognition_block_stamp',
     systemPrompt: RECOGNITION_STAMP_SYSTEM,
     userTemplate: RECOGNITION_STAMP_USER,
+    // `topK` снят намеренно. При `temperature: 0` выборка и так жадная, то есть
+    // `top_k: 1` ничего не добавлял, — а через OpenRouter он ещё и сужает
+    // маршрутизацию: при `require_parameters: true`, который нужен ради
+    // strict-схем, в отбор проходят только бекенды, поддерживающие ОБА
+    // параметра. Платить сужением пула за параметр-пустышку незачем.
     temperature: 0.0,
     maxTokens: 4096,
-    topK: 1,
     responseFormat: VLM_STAMP_RESPONSE_FORMAT,
   },
 };

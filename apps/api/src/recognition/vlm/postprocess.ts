@@ -38,8 +38,46 @@ import type { VlmStampResponse, VlmTextResponse } from './schemas.js';
 /** Закрытые reasoning-блоки (Qwen-стиль: `<think>…</think>{json}`). */
 const THINK_BLOCK_RE = /<think\b[^>]*>[\s\S]*?<\/think>/giu;
 
+/** Открывающий тег, оставшийся без пары после снятия закрытых блоков. */
+const THINK_OPEN_RE = /<think\b[^>]*>/iu;
+
+/** Закрывающий тег без пары: шаблон чата подставил `<think>` за модель. */
+const THINK_CLOSE_RE = /<\/think\s*>/giu;
+
 /** Ответ целиком обёрнут в кодовый фенс: ```json … ``` (порт _strip_code_fences). */
 const FENCED_RE = /^```[a-zA-Z0-9_-]*[ \t]*\r?\n([\s\S]*?)\r?\n?```$/u;
+
+/**
+ * Снять хвост рассуждений, оставшийся без пары тегов.
+ *
+ * Балансный regex выше снимает только ПАРНЫЙ блок, и до перехода на Qwen этого
+ * хватало. У reasoning-моделей пара распадается двумя способами, и оба
+ * заканчиваются не отказом, а НЕВЕРНО прочитанным блоком:
+ *
+ * - шаблон чата подставляет `<think>` за модель, поэтому в `content` приезжает
+ *   только закрывающий тег: `…рассуждения</think>{json}`. Балансный скан
+ *   `extractJson` возьмёт ПЕРВЫЙ сбалансированный объект, а модель по дороге
+ *   успевает набросать в рассуждениях черновой JSON — и в схему уходит черновик;
+ * - ответ обрывается внутри незакрытого `<think>`. Обычно это ловится раньше по
+ *   `finish_reason='length'`, но если шлюз причину не донёс, черновик из
+ *   рассуждений опять уедет как ответ.
+ *
+ * Оба случая срезаются только когда ответ НЕ начинается с `{`: литеральный
+ * `</think>` внутри значения JSON — это содержимое страницы, а не разметка
+ * рассуждений, и трогать его нельзя.
+ */
+function stripUnpairedThinking(text: string): string {
+  if (text.startsWith('{')) return text;
+
+  const open = THINK_OPEN_RE.exec(text);
+  if (open !== null) return text.slice(0, open.index).trim();
+
+  let afterLastClose = -1;
+  for (const match of text.matchAll(THINK_CLOSE_RE)) {
+    afterLastClose = match.index + match[0].length;
+  }
+  return afterLastClose === -1 ? text : text.slice(afterLastClose).trim();
+}
 
 /**
  * Снять reasoning-блоки и обёртку кодовых фенсов.
@@ -49,7 +87,7 @@ const FENCED_RE = /^```[a-zA-Z0-9_-]*[ \t]*\r?\n([\s\S]*?)\r?\n?```$/u;
  * оттуда достанет балансный скан `extractJson`.
  */
 export function stripNoise(text: string): string {
-  const withoutThink = text.replace(THINK_BLOCK_RE, '').trim();
+  const withoutThink = stripUnpairedThinking(text.replace(THINK_BLOCK_RE, '').trim());
   const fenced = FENCED_RE.exec(withoutThink);
   return fenced === null ? withoutThink : (fenced[1] ?? '').trim();
 }

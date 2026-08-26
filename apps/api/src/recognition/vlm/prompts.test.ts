@@ -146,17 +146,18 @@ describe('промпты стадии recognize', () => {
     );
   });
 
-  it('параметры инференса соответствуют DEFAULT_INFERENCE_PARAMS RD WEB', () => {
+  it('распознавание идёт с низкой температурой на всех трёх типах', () => {
     expect(RECOGNITION_PROMPT_DEFAULTS.text).toMatchObject({ temperature: 0.1, maxTokens: 12384 });
-    expect(RECOGNITION_PROMPT_DEFAULTS.image).toMatchObject({ temperature: 0.7, maxTokens: 8192 });
-    expect(RECOGNITION_PROMPT_DEFAULTS.stamp).toMatchObject({
-      temperature: 0,
-      maxTokens: 4096,
-      topK: 1,
-    });
-    // topK объявлен только у stamp: отсутствие ключа = параметр не уезжает.
-    expect('topK' in RECOGNITION_PROMPT_DEFAULTS.text).toBe(false);
-    expect('topK' in RECOGNITION_PROMPT_DEFAULTS.image).toBe(false);
+    // 0.2, а не унаследованные от чужого профиля 0.7: описание чертежа уходит в
+    // текст страницы, а по нему идут типизация и сверка — повторный прогон
+    // обязан давать тот же результат.
+    expect(RECOGNITION_PROMPT_DEFAULTS.image).toMatchObject({ temperature: 0.2, maxTokens: 8192 });
+    expect(RECOGNITION_PROMPT_DEFAULTS.stamp).toMatchObject({ temperature: 0, maxTokens: 4096 });
+    // `topK` не объявлен НИ У ОДНОГО типа: отсутствие ключа = параметр не
+    // уезжает в тело запроса и не сужает маршрутизацию OpenRouter.
+    for (const type of TYPES) {
+      expect('topK' in RECOGNITION_PROMPT_DEFAULTS[type]).toBe(false);
+    }
   });
 
   it('responseFormat присоединён к каждому типу и strict', () => {
