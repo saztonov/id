@@ -44,6 +44,7 @@
  */
 
 import { normalizeDocNo } from '@id/contracts';
+import { DOC_TYPES, matchDocTypes, resolveDocType } from '@id/doc-types';
 import type { ParsedRegistryRow } from './types.js';
 
 /** Документ комплекта в том виде, в каком он участвует в сверке. */
@@ -67,6 +68,13 @@ export interface MatchableDocument {
    * одной строке, и это честный результат, а не повод искать по прозе.
    */
   readonly numbers: readonly string[];
+  /**
+   * Дата выдачи документа: слабый признак кандидата, не основание совпадения.
+   *
+   * `null` — реквизит не извлечён. Пустое значение с любой стороны кандидата не
+   * порождает: «дата не прочитана» и «даты разошлись» — разные факты.
+   */
+  readonly issuedAt: string | null;
   readonly title: string | null;
 }
 
@@ -104,13 +112,34 @@ export function documentNumbersOf(
   return numbers;
 }
 
+/**
+ * Основание, по которому документ попал в кандидаты строки.
+ *
+ * Перечисление закрытое: основание уходит в БД и в отчёт, и «похож» без
+ * названной причины проверяющему бесполезен.
+ */
+export type CandidateBasis = 'doc_type' | 'issued_at' | 'doc_type_and_issued_at';
+
+export interface RegistryCandidate {
+  readonly documentId: string;
+  readonly basis: CandidateBasis;
+  readonly score: number;
+}
+
 export interface RegistryMatch {
   readonly rowNo: number;
-  readonly matchState: 'matched' | 'missing' | 'extra' | 'ambiguous';
+  readonly matchState: 'matched' | 'missing' | 'extra' | 'ambiguous' | 'candidate';
   readonly matchedDocumentId: string | null;
   /** `null` там, где счёта нет: `missing` и `ambiguous` не выбирают документ. */
   readonly matchScore: number | null;
   readonly reason: string;
+  /**
+   * Документы, похожие на строку, но НЕ подтверждённые номером.
+   *
+   * Заполняется только у `candidate`: у `matched` документ назван прямо, у
+   * `ambiguous` кандидаты различить нельзя, у `missing` их нет вовсе.
+   */
+  readonly candidates: readonly RegistryCandidate[];
 }
 
 export interface MatchRegistryResult {
@@ -155,6 +184,90 @@ const PARTIAL_SCORE = 0.6;
  * длинных шифров, где потерян префикс или хвост.
  */
 const MIN_PARTIAL_LENGTH = 4;
+
+/**
+ * Счёт кандидата: строго ниже частичного совпадения и НЕ равен совпадению.
+ *
+ * Кандидат — не слабое совпадение, а другое состояние. Совпадение утверждает
+ * «это тот самый документ» и строит ребро графа `акт → документ`, которое
+ * читают правила дат; кандидат утверждает только «похоже, и подтвердить
+ * нечем». Счёт нужен ради упорядочивания кандидатов между собой, а не ради
+ * сравнения с совпадениями.
+ */
+const CANDIDATE_TYPE_SCORE = 0.4;
+const CANDIDATE_DATE_SCORE = 0.35;
+const CANDIDATE_BOTH_SCORE = 0.5;
+
+/**
+ * Вид документа, выведенный из НАИМЕНОВАНИЯ строки реестра.
+ *
+ * §8.3 запрещает решать по виду: реестр обобщает, и «Паспорт качества Арматура
+ * №16005» описывает лист, озаглавленный «СЕРТИФИКАТ КАЧЕСТВА № 16005». Запрет
+ * остаётся в силе для СОВПАДЕНИЯ и снят только для кандидата — потому что
+ * кандидат ничего не утверждает.
+ *
+ * Каталог берётся тот же и функцией той же: вторая реализация «на что похоже
+ * это наименование» разошлась бы с классификатором страниц, и строка реестра
+ * начала бы считаться похожей на документ, которым он никогда не был.
+ * Наименование материала («Гвозди», «Блок стеновой 600x250x200») вида не даёт
+ * вовсе — и это правильный ответ, а не пропуск.
+ */
+function rowDocType(row: ParsedRegistryRow): string | null {
+  const name = row.docNameRaw.trim();
+  if (name === '') return null;
+
+  return resolveDocType(matchDocTypes(name, DOC_TYPES, { headingLines: 1 }), DOC_TYPES).code;
+}
+
+/** Как основание кандидата читается человеком в объяснении решения. */
+function basisLabel(basis: CandidateBasis): string {
+  switch (basis) {
+    case 'doc_type_and_issued_at':
+      return 'и видом, и датой выдачи';
+    case 'doc_type':
+      return 'видом документа';
+    case 'issued_at':
+      return 'датой выдачи';
+  }
+}
+
+/**
+ * Документы, похожие на строку по виду либо по дате выдачи.
+ *
+ * Ступень последняя и самая слабая, поэтому её видят только строки, которым не
+ * ответила ни одна ступень номера. Документы, уже названные другой строкой, в
+ * кандидаты не попадают: они заняты, и предлагать их второй раз значит
+ * подсказывать проверяющему заведомо неверный ответ.
+ */
+function candidatesOf(
+  row: ParsedRegistryRow,
+  documents: readonly MatchableDocument[],
+  taken: ReadonlySet<string>,
+): readonly RegistryCandidate[] {
+  const typeCode = rowDocType(row);
+  const found: RegistryCandidate[] = [];
+
+  for (const document of documents) {
+    if (taken.has(document.documentId)) continue;
+
+    const sameType = typeCode !== null && document.docTypeCode === typeCode;
+    const sameDate = row.issuedAt !== null && document.issuedAt === row.issuedAt;
+    if (!sameType && !sameDate) continue;
+
+    const basis: CandidateBasis =
+      sameType && sameDate ? 'doc_type_and_issued_at' : sameType ? 'doc_type' : 'issued_at';
+    const score =
+      basis === 'doc_type_and_issued_at'
+        ? CANDIDATE_BOTH_SCORE
+        : basis === 'doc_type'
+          ? CANDIDATE_TYPE_SCORE
+          : CANDIDATE_DATE_SCORE;
+
+    found.push({ documentId: document.documentId, basis, score });
+  }
+
+  return found.sort((left, right) => right.score - left.score);
+}
 
 /**
  * Внутренний «№» в графе номера помечает, где номер начинается.
@@ -299,6 +412,7 @@ export function matchRegistryRows(
         matchedDocumentId: null,
         matchScore: null,
         reason: 'строка реестра не содержит сравнимого номера документа',
+        candidates: [],
       });
       continue;
     }
@@ -314,6 +428,7 @@ export function matchRegistryRows(
         matchedDocumentId: exact[0] ?? null,
         matchScore: EXACT_SCORE,
         reason: 'номер документа совпал точно',
+        candidates: [],
       });
       continue;
     }
@@ -328,6 +443,7 @@ export function matchRegistryRows(
         matchedDocumentId: null,
         matchScore: null,
         reason: `точный номер найден у ${exact.length} документов комплекта`,
+        candidates: [],
       });
       continue;
     }
@@ -342,6 +458,7 @@ export function matchRegistryRows(
         matchedDocumentId: folded[0] ?? null,
         matchScore: FOLDED_SCORE,
         reason: 'номер совпал после фолдинга гомоглифов: точного совпадения нет',
+        candidates: [],
       });
       continue;
     }
@@ -353,6 +470,7 @@ export function matchRegistryRows(
         matchedDocumentId: null,
         matchScore: null,
         reason: `после фолдинга гомоглифов номеру соответствуют ${folded.length} документов: различить их сверка не может`,
+        candidates: [],
       });
       continue;
     }
@@ -370,6 +488,7 @@ export function matchRegistryRows(
         matchedDocumentId: partial[0] ?? null,
         matchScore: PARTIAL_SCORE,
         reason: 'номер совпал частично: полного совпадения в комплекте нет, кандидат единственный',
+        candidates: [],
       });
       continue;
     }
@@ -381,6 +500,7 @@ export function matchRegistryRows(
         matchedDocumentId: null,
         matchScore: null,
         reason: `номер частично совпал у ${partial.length} документов: выбрать один сверка не вправе`,
+        candidates: [],
       });
       continue;
     }
@@ -391,12 +511,45 @@ export function matchRegistryRows(
       matchedDocumentId: null,
       matchScore: null,
       reason: 'документ с таким номером в комплекте не найден',
+      candidates: [],
     });
   }
 
+  // Второй проход: строкам, которым номер не ответил, ищутся КАНДИДАТЫ.
+  //
+  // Отдельным проходом, а не внутри цикла, потому что кандидат не предлагается
+  // из документов, уже названных другой строкой, — а полный список названных
+  // известен только после того, как все строки прошли лестницу номера.
+  for (const [index, decision] of matches.entries()) {
+    if (decision.matchState !== 'missing') continue;
+
+    const row = rows[index];
+    if (row === undefined) continue;
+
+    const candidates = candidatesOf(row, documents, named);
+    if (candidates.length === 0) continue;
+
+    for (const candidate of candidates) named.add(candidate.documentId);
+
+    const best = candidates[0] as RegistryCandidate;
+    matches[index] = {
+      ...decision,
+      matchState: 'candidate',
+      // Документ НЕ выбирается: `candidate` ничего не утверждает, и ребро
+      // графа `акт → документ` по нему не строится.
+      matchedDocumentId: null,
+      matchScore: best.score,
+      reason:
+        candidates.length === 1
+          ? `документа с таким номером в комплекте нет; один документ похож ${basisLabel(best.basis)}`
+          : `документа с таким номером в комплекте нет; похожих документов ${candidates.length}`,
+      candidates,
+    };
+  }
+
   // «Лишний» — не названный НИ ОДНОЙ строкой, включая строки, оставшиеся
-  // `ambiguous`: документ, попавший в кандидаты, реестром упомянут, и
-  // объявлять его лишним значило бы обвинить комплект дважды за одно.
+  // `ambiguous`, и документы, попавшие в кандидаты: документ, реестром
+  // упомянутый, объявлять лишним значило бы обвинить комплект дважды за одно.
   const extraDocumentIds = documents
     .filter((document) => !named.has(document.documentId))
     .map((document) => document.documentId);

@@ -37,8 +37,16 @@ function doc(
   documentId: string,
   number: string | null,
   title = 'СЕРТИФИКАТ КАЧЕСТВА',
+  extra: Partial<MatchableDocument> = {},
 ): MatchableDocument {
-  return { documentId, docTypeCode: null, numbers: number === null ? [] : [number], title };
+  return {
+    documentId,
+    docTypeCode: null,
+    numbers: number === null ? [] : [number],
+    issuedAt: null,
+    title,
+    ...extra,
+  };
 }
 
 describe('matchRegistryRows', () => {
@@ -53,6 +61,9 @@ describe('matchRegistryRows', () => {
       matchedDocumentId: 'd1',
       matchScore: 1,
       reason: 'номер документа совпал точно',
+      // Подтверждённое совпадение называет документ прямо, и предлагать к нему
+      // «похожих» незачем: кандидаты заполняются только у `candidate`.
+      candidates: [],
     });
   });
 
@@ -68,6 +79,7 @@ describe('matchRegistryRows', () => {
           documentId: 'd1',
           docTypeCode: 'mill_certificate',
           numbers: ['16005'],
+          issuedAt: null,
           title: 'СЕРТИФИКАТ КАЧЕСТВА',
         },
       ],
@@ -200,6 +212,7 @@ describe('matchRegistryRows', () => {
         documentId: 'd1',
         docTypeCode: 'exec_scheme',
         numbers: ['К14/ДК2-СЦ4'],
+        issuedAt: null,
         title: null,
       };
       const result = matchRegistryRows([row(1, '№ К14/ДК2-СЦ4')], [scheme]);
@@ -213,6 +226,7 @@ describe('matchRegistryRows', () => {
         documentId: 'd1',
         docTypeCode: null,
         numbers: ['A-10001', 'A 10001'],
+        issuedAt: null,
         title: null,
       };
       const result = matchRegistryRows([row(1, 'A-10001')], [both]);
@@ -339,5 +353,75 @@ describe('алиас номера после внутреннего «№»', ()
     const result = matchRegistryRows([row(1, 'ИС №001')], [doc('d1', '001'), doc('d2', '001.')]);
 
     expect(result.rows[0]).toMatchObject({ matchState: 'ambiguous', matchedDocumentId: null });
+  });
+});
+
+/**
+ * S34: кандидат — состояние между «нашли» и «нет в комплекте».
+ *
+ * Когда номер не ответил, у строки два разных исхода, которые до сих пор
+ * сливались в один: «документа нет» — вывод, «номер не прочитан, но похожий
+ * документ лежит» — наблюдение. Кандидат не выбирает документ и не строит
+ * ребро графа: иначе похожесть по виду молча стала бы основанием для правил
+ * дат.
+ */
+describe('кандидаты строки реестра', () => {
+  const SCHEME = 'Исполнительная схема обратной засыпки';
+
+  it('вид, выведенный из наименования строки, даёт кандидата', () => {
+    const result = matchRegistryRows(
+      [row(1, 'ИС №002', SCHEME)],
+      [doc('d1', '1383653.', 'Схема', { docTypeCode: 'exec_scheme' })],
+    );
+
+    expect(result.rows[0]).toMatchObject({
+      matchState: 'candidate',
+      // Документ НЕ выбран: состояние ничего не утверждает.
+      matchedDocumentId: null,
+      candidates: [{ documentId: 'd1', basis: 'doc_type' }],
+    });
+  });
+
+  it('кандидат не объявляется лишним документом', () => {
+    const result = matchRegistryRows(
+      [row(1, 'ИС №002', SCHEME)],
+      [doc('d1', '1383653.', 'Схема', { docTypeCode: 'exec_scheme' })],
+    );
+
+    expect(result.extraDocumentIds).toEqual([]);
+  });
+
+  it('документ, названный другой строкой, кандидатом не предлагается', () => {
+    // Строка 8 нашла свою схему точным совпадением; предлагать её же строке 9
+    // значит подсказывать проверяющему заведомо неверный ответ.
+    const result = matchRegistryRows(
+      [row(1, 'ИС №001', SCHEME), row(2, 'ИС №002', SCHEME)],
+      [doc('d1', '001', 'Схема', { docTypeCode: 'exec_scheme' })],
+    );
+
+    expect(result.rows[0]?.matchState).toBe('matched');
+    expect(result.rows[1]).toMatchObject({ matchState: 'missing', candidates: [] });
+  });
+
+  it('совпадение даты выдачи тоже делает документ кандидатом', () => {
+    const result = matchRegistryRows(
+      [{ ...row(1, 'НЕТ-ТАКОГО-НОМЕРА', 'Гвозди'), issuedAt: '2024-10-04' }],
+      [doc('d1', 'ДРУГОЙ-НОМЕР', 'Паспорт', { issuedAt: '2024-10-04' })],
+    );
+
+    expect(result.rows[0]).toMatchObject({
+      matchState: 'candidate',
+      candidates: [{ documentId: 'd1', basis: 'issued_at' }],
+    });
+  });
+
+  it('наименование материала вида не даёт и кандидата по виду не порождает', () => {
+    // «Гвозди» и «Блок стеновой» — наименования МАТЕРИАЛА, а не документа.
+    const result = matchRegistryRows(
+      [row(1, 'НЕТ-ТАКОГО-НОМЕРА', 'Гвозди')],
+      [doc('d1', 'ДРУГОЙ-НОМЕР', 'Паспорт', { docTypeCode: 'quality_passport' })],
+    );
+
+    expect(result.rows[0]?.matchState).toBe('missing');
   });
 });

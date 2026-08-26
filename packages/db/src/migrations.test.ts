@@ -115,6 +115,9 @@ const EXPECTED_TABLES: readonly string[] = [
   'document_relations',
   'field_values',
   'registry_rows',
+  // Кандидаты строки реестра (0051): документы, похожие на строку по виду или
+  // дате, но номером не подтверждённые. Живут и умирают вместе со строкой.
+  'registry_row_candidates',
   'materials',
   'batches',
   'material_documents',

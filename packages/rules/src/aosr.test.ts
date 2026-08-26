@@ -823,6 +823,51 @@ describe('REG.100 / REG.101 / REG.102 — сверка с реестром пр�
     expect(verdictOf('REG.102', makeGraph({ documents: [quality] }))).toBe('n_a');
   });
 
+  /**
+   * S34: незнание перестаёт выдаваться за дефект.
+   *
+   * Вывод «документа нет в комплекте» опирается на то, что комплект разобран
+   * весь. Если часть листов портал не разобрал, документ может лежать ровно на
+   * таком листе, и вывод не установлен.
+   */
+  it('REG.100: при пробеле покрытия строка даёт undetermined, а не fail', () => {
+    const missing = registryGraph('missing');
+    const withGaps = makeGraph({ ...missing, coverageGaps: 2 });
+
+    expect(verdictOf('REG.100', withGaps)).toBe('undetermined');
+    expect(messagesOf('REG.100', withGaps)[0]).toContain('не разобрал');
+  });
+
+  it('REG.100: разобранный целиком комплект по-прежнему даёт fail', () => {
+    // Отрицательный контроль: смягчение обязано зависеть от пробелов покрытия,
+    // а не наступать всегда.
+    expect(verdictOf('REG.100', makeGraph({ ...registryGraph('missing'), coverageGaps: 0 }))).toBe(
+      'fail',
+    );
+  });
+
+  it('REG.101: документ-кандидат строки лишним не объявляется', () => {
+    // Двойное обвинение: строка реестра не нашла документ по номеру, а сам
+    // документ объявлялся не названным реестром — за один и тот же факт.
+    const scheme = makeDocument({ docTypeCode: 'exec_scheme', title: null });
+    const graph = makeGraph({
+      documents: [registry, scheme],
+      registryRows: [
+        makeRegistryRow({
+          registryDocumentId: registry.id,
+          rowNo: 9,
+          docNameRaw: 'Исполнительная схема обратной засыпки',
+          docNoRaw: 'ИС №002',
+          matchState: 'candidate',
+          matchedDocumentId: null,
+          candidateDocumentIds: [scheme.id],
+        }),
+      ],
+    });
+
+    expect(verdictOf('REG.101', graph)).toBe('pass');
+  });
+
   it('вид документа в реестре не сверяется: обобщённое название дефектом не является', () => {
     // Реестр называет лист «Документ о качестве», сам лист озаглавлен
     // «СЕРТИФИКАТ КАЧЕСТВА № 16005» — расхождением это не считается

@@ -156,6 +156,7 @@ export function runPackage(dir: string, options: HarnessOptions): PackageRunResu
   const classifications = classifyPages(pages);
   const llmPending = pagesNeedingLlm(classifications).length;
   const segmentation = decodeSegmentation(pages, classifications);
+  const textBySourcePage = new Map(pages.map((page) => [page.sourcePageId, page.text] as const));
 
   // Задача 16: извлечение реквизитов по каждому документу.
   const typeConfidentByDocument = new Map<string, boolean>();
@@ -236,6 +237,7 @@ export function runPackage(dir: string, options: HarnessOptions): PackageRunResu
         // Все формы номера, а не один `number`: у исполнительной схемы он
         // приходит шифром из штампа, и сверка обязана видеть его тоже.
         numbers: documentNumbersOf(candidate.fields),
+        issuedAt: candidate.fields.find((f) => f.fieldCode === 'issued_at')?.valueDate ?? null,
         title: candidate.title,
       }));
 
@@ -272,7 +274,10 @@ export function runPackage(dir: string, options: HarnessOptions): PackageRunResu
             ? 'matched'
             : decision?.matchState === 'ambiguous'
               ? 'ambiguous'
-              : 'missing',
+              : decision?.matchState === 'candidate'
+                ? 'candidate'
+                : 'missing',
+        candidateDocumentIds: (decision?.candidates ?? []).map((candidate) => candidate.documentId),
       });
     }
   }
@@ -306,6 +311,13 @@ export function runPackage(dir: string, options: HarnessOptions): PackageRunResu
     rdDocuments: [],
     today: options.today,
     hasRecognizedText: true,
+    // Пробел покрытия офлайн считается так же, как в БД (`checks.ts`): лист,
+    // не отнесённый ни к одному документу, при том что содержание на нём есть.
+    // Пустой оборот не считается: он разобран, и на нём действительно ничего
+    // нет.
+    coverageGaps: segmentation.unassigned.filter(
+      (page) => (textBySourcePage.get(page.sourcePageId) ?? '').trim() !== '',
+    ).length,
   });
 
   // Задача 20: полный каталог, все правила включены (`enabledRuleCodes: null`

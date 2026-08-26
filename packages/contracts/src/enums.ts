@@ -237,8 +237,13 @@ export type ExtractedBy = z.infer<typeof extractedBySchema>;
  * `ambiguous` обязателен: совпадение только после фолдинга гомоглифов при
  * наличии коллизии не является совпадением, и объявить его `matched` значило
  * бы тихо привязать документ не к той строке.
+ *
+ * `candidate` — тоже не совпадение, но и не отсутствие: номер не ответил, а в
+ * комплекте лежит документ того же вида либо той же даты. Состояние документ
+ * НЕ выбирает (`matched_document_id` пуст) и ребра графа не строит: иначе
+ * похожесть по виду молча стала бы основанием для правил дат (§9.2).
  */
-export const matchStateSchema = z.enum(['matched', 'missing', 'extra', 'ambiguous']);
+export const matchStateSchema = z.enum(['matched', 'missing', 'extra', 'ambiguous', 'candidate']);
 export type MatchState = z.infer<typeof matchStateSchema>;
 
 /** Откуда взят материал в графе проверки (§9.3, `AOSR.P3`). */

@@ -462,6 +462,7 @@ export function createRegistryReconcileHandler(
         documentId: document.id,
         docTypeCode: document.docTypeCode,
         numbers: facts.get(document.id)?.numbers ?? [],
+        issuedAt: facts.get(document.id)?.issuedAt ?? null,
         title: document.title,
       }));
       const byId = new Map(revisionDocuments.map((document) => [document.id, document]));
@@ -475,6 +476,9 @@ export function createRegistryReconcileHandler(
         const row = rowsOfGroup[index];
         if (row === undefined) continue;
         if (verdict.matchedDocumentId !== null) named.add(verdict.matchedDocumentId);
+        // Документ, попавший в кандидаты, описью упомянут: объявлять его
+        // лишним значило бы обвинить комплект дважды за одно.
+        for (const candidate of verdict.candidates) named.add(candidate.documentId);
 
         const document =
           verdict.matchedDocumentId === null ? undefined : byId.get(verdict.matchedDocumentId);
@@ -508,7 +512,16 @@ export function createRegistryReconcileHandler(
           matchedDocumentId: verdict.matchedDocumentId,
           // `matchRegistryRows` знает и значение `'extra'`, но строкам его не
           // присваивает ни одна ветка: у строки описи такого состояния нет.
-          matchState: verdict.matchState === 'extra' ? 'missing' : verdict.matchState,
+          //
+          // `candidate` экрану сверки папки пока не показывается и сводится к
+          // `missing`: состояние заведено для реестра ПРИЛОЖЕНИЙ, а выдача
+          // описи — другой контракт и другой экран. Существенная половина —
+          // «не обвинять документ-кандидата лишним» — работает и здесь: его
+          // идентификаторы попадают в `named` ниже.
+          matchState:
+            verdict.matchState === 'extra' || verdict.matchState === 'candidate'
+              ? 'missing'
+              : verdict.matchState,
           matchScore: verdict.matchScore,
           fieldMismatches: mismatches,
           reason: verdict.reason,

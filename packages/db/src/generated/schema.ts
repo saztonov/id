@@ -819,9 +819,9 @@ export const registryRows = pgTable("registry_rows", {
 	unique("registry_rows_ordinal_uq").on(table.documentId, table.ordinal),
 	check("registry_rows_row_no_chk", sql`row_no > 0`),
 	check("registry_rows_match_score_chk", sql`(match_score IS NULL) OR ((match_score >= (0)::double precision) AND (match_score <= (1)::double precision))`),
-	check("registry_rows_match_state_chk", sql`match_state = ANY (ARRAY['matched'::text, 'missing'::text, 'extra'::text, 'ambiguous'::text])`),
 	check("registry_rows_matched_chk", sql`(match_state <> 'matched'::text) OR (matched_document_id IS NOT NULL)`),
 	check("registry_rows_ordinal_chk", sql`ordinal >= 0`),
+	check("registry_rows_match_state_chk", sql`match_state = ANY (ARRAY['matched'::text, 'missing'::text, 'extra'::text, 'ambiguous'::text, 'candidate'::text])`),
 ]);
 
 export const fieldValues = pgTable("field_values", {
@@ -2225,6 +2225,36 @@ export const rulesetRules = pgTable("ruleset_rules", {
 		}),
 	primaryKey({ columns: [table.ruleCode, table.rulesetVersionId], name: "ruleset_rules_pkey"}),
 	check("ruleset_rules_severity_chk", sql`severity = ANY (ARRAY['error'::text, 'warning'::text, 'info'::text])`),
+]);
+
+export const registryRowCandidates = pgTable("registry_row_candidates", {
+	revisionId: uuid("revision_id").notNull(),
+	registryRowId: uuid("registry_row_id").notNull(),
+	documentId: uuid("document_id").notNull(),
+	basis: text().notNull(),
+	score: doublePrecision().notNull(),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+}, (table) => [
+	index("ix_registry_row_candidates_document").using("btree", table.documentId.asc().nullsLast().op("uuid_ops")),
+	index("ix_registry_row_candidates_revision").using("btree", table.revisionId.asc().nullsLast().op("uuid_ops")),
+	foreignKey({
+			columns: [table.revisionId],
+			foreignColumns: [submissionRevisions.id],
+			name: "registry_row_candidates_revision_id_fkey"
+		}).onDelete("cascade"),
+	foreignKey({
+			columns: [table.registryRowId],
+			foreignColumns: [registryRows.id],
+			name: "registry_row_candidates_row_fk"
+		}).onDelete("cascade"),
+	foreignKey({
+			columns: [table.revisionId, table.documentId],
+			foreignColumns: [logicalDocuments.id, logicalDocuments.revisionId],
+			name: "registry_row_candidates_document_fk"
+		}).onDelete("cascade"),
+	primaryKey({ columns: [table.documentId, table.registryRowId], name: "registry_row_candidates_pk"}),
+	check("registry_row_candidates_basis_chk", sql`basis = ANY (ARRAY['doc_type'::text, 'issued_at'::text, 'doc_type_and_issued_at'::text])`),
+	check("registry_row_candidates_score_chk", sql`(score >= (0)::double precision) AND (score <= (1)::double precision)`),
 ]);
 
 export const registryItems = pgTable("registry_items", {

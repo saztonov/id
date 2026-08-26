@@ -656,6 +656,7 @@ describe('реестр приложений', () => {
           matchedDocumentId: matchedDocument.id,
           matchScore: 1,
           matchState: 'matched',
+          candidates: [],
         },
         // Строка не из этой ревизии: пропуск обязан считаться, а не молчаться.
         {
@@ -663,6 +664,7 @@ describe('реестр приложений', () => {
           matchedDocumentId: null,
           matchScore: null,
           matchState: 'missing',
+          candidates: [],
         },
       ],
     });

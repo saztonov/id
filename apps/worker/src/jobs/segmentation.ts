@@ -1265,7 +1265,7 @@ export function createMatchRegistryHandler(
     const documents = await deps.listDocuments(revisionId);
 
     if (stored.length === 0) {
-      const counts = { rows: 0, matched: 0, missing: 0, ambiguous: 0, extra: 0 };
+      const counts = { rows: 0, matched: 0, missing: 0, ambiguous: 0, candidate: 0, extra: 0 };
       ctx.logger.info({ counts }, 'реестра в поставке нет: сверять нечего');
       await ctx.emit('documents.registry_matched', counts);
       await ctx.enqueue({
@@ -1280,8 +1280,16 @@ export function createMatchRegistryHandler(
     // приходит шифром схемы из штампа, у бланочных форм рядом с `number` стоит
     // номер бланка. Список кодов — общий для обеих сверок (`documentNumbersOf`).
     const numbers = new Map<string, readonly string[]>();
+    // Дата выдачи — слабый признак КАНДИДАТА, а не основание совпадения:
+    // строка, которой номер не ответил, может быть узнана по дате.
+    const issuedAt = new Map<string, string | null>();
     for (const document of documents) {
-      numbers.set(document.id, documentNumbersOf(await deps.listFieldValues(document.id)));
+      const values = await deps.listFieldValues(document.id);
+      numbers.set(document.id, documentNumbersOf(values));
+      issuedAt.set(
+        document.id,
+        values.find((value) => value.fieldCode === 'issued_at')?.valueDate ?? null,
+      );
     }
 
     const registryDocumentIds = new Set(stored.map((row) => row.documentId));
@@ -1292,6 +1300,7 @@ export function createMatchRegistryHandler(
         documentId: document.id,
         docTypeCode: document.docTypeCode,
         numbers: numbers.get(document.id) ?? [],
+        issuedAt: issuedAt.get(document.id) ?? null,
         title: document.title,
       }));
 
@@ -1299,6 +1308,7 @@ export function createMatchRegistryHandler(
     let matched = 0;
     let missing = 0;
     let ambiguous = 0;
+    let candidate = 0;
     const extra = new Set<string>();
 
     // По каждому реестру отдельно: строки разных актов не конкурируют.
@@ -1328,9 +1338,15 @@ export function createMatchRegistryHandler(
           matchedDocumentId: decision.matchedDocumentId,
           matchScore: decision.matchScore,
           matchState: decision.matchState,
+          candidates: decision.candidates.map((candidate) => ({
+            documentId: candidate.documentId,
+            basis: candidate.basis,
+            score: candidate.score,
+          })),
         });
         if (decision.matchState === 'matched') matched += 1;
         else if (decision.matchState === 'ambiguous') ambiguous += 1;
+        else if (decision.matchState === 'candidate') candidate += 1;
         else missing += 1;
       }
     }
@@ -1347,6 +1363,7 @@ export function createMatchRegistryHandler(
       matched,
       missing,
       ambiguous,
+      candidate,
       extra: extra.size,
     };
     ctx.logger.info({ counts }, 'реестр сверен с комплектом');

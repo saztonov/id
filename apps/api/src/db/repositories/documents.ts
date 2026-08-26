@@ -41,7 +41,7 @@
  * один способ на весь файл означает, что «забыл область» невозможно по форме
  * запроса. Ни одна функция не выполняется без `withScope()`.
  */
-import { and, asc, eq, inArray, isNotNull, sql, type SQL } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNotNull, sql, type SQL } from 'drizzle-orm';
 import {
   docTypes,
   documentRelations,
@@ -55,6 +55,7 @@ import {
   pageTextVersions,
   processingBundlePages,
   recognitionRuns,
+  registryRowCandidates,
   registryRows,
   sourcePages,
   submissionRevisions,
@@ -1458,6 +1459,14 @@ export interface RegistryRowView {
   readonly matchedDocumentId: string | null;
   readonly matchScore: number | null;
   readonly matchState: MatchState;
+  /**
+   * Документы, похожие на строку, но номером не подтверждённые.
+   *
+   * Отдаются вместе со строкой, а не отдельным запросом: их читают и правило
+   * «документ не назван реестром», и отчёт, и разойтись в том, кого считать
+   * названным, они не вправе.
+   */
+  readonly candidateDocumentIds: readonly string[];
 }
 
 export interface SaveRegistryRowsInput {
@@ -1527,6 +1536,17 @@ export interface RegistryMatch {
   readonly matchedDocumentId: string | null;
   readonly matchScore: number | null;
   readonly matchState: MatchState;
+  /**
+   * Похожие документы у строки в состоянии `candidate`.
+   *
+   * Пишутся вместе с решением и в той же транзакции: кандидат без решения —
+   * это утверждение о похожести, оторванное от того, почему номер не ответил.
+   */
+  readonly candidates: readonly {
+    readonly documentId: string;
+    readonly basis: string;
+    readonly score: number;
+  }[];
 }
 
 /**
@@ -1580,6 +1600,23 @@ export async function saveRegistryMatches(
           .returning({ id: registryRows.id });
         if (changed.length > 0) updated += 1;
         else skipped += 1;
+
+        // Кандидаты переписываются целиком: повторный прогон сверки обязан
+        // отменять прежнее «похоже на этот документ», а не копить его.
+        await tx
+          .delete(registryRowCandidates)
+          .where(eq(registryRowCandidates.registryRowId, match.registryRowId));
+        if (match.candidates.length > 0) {
+          await tx.insert(registryRowCandidates).values(
+            match.candidates.map((candidate) => ({
+              revisionId: input.revisionId,
+              registryRowId: match.registryRowId,
+              documentId: candidate.documentId,
+              basis: candidate.basis,
+              score: candidate.score,
+            })),
+          );
+        }
       }
       return { updated, skipped };
     }),
@@ -1619,7 +1656,29 @@ export async function listRegistryRows(
     // собой (миграция 0015).
     .orderBy(asc(registryRows.documentId), asc(registryRows.ordinal));
 
-  return rows.map((row) => ({ ...row, matchState: row.matchState as MatchState }));
+  const candidates = await db
+    .select({
+      registryRowId: registryRowCandidates.registryRowId,
+      documentId: registryRowCandidates.documentId,
+      score: registryRowCandidates.score,
+    })
+    .from(registryRowCandidates)
+    .where(eq(registryRowCandidates.revisionId, revisionId))
+    // По убыванию силы основания: первый кандидат — самый вероятный.
+    .orderBy(desc(registryRowCandidates.score));
+
+  const byRow = new Map<string, string[]>();
+  for (const candidate of candidates) {
+    const bucket = byRow.get(candidate.registryRowId);
+    if (bucket === undefined) byRow.set(candidate.registryRowId, [candidate.documentId]);
+    else bucket.push(candidate.documentId);
+  }
+
+  return rows.map((row) => ({
+    ...row,
+    matchState: row.matchState as MatchState,
+    candidateDocumentIds: byRow.get(row.id) ?? [],
+  }));
 }
 
 // =====================================================================

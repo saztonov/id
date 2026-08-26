@@ -124,6 +124,7 @@ export function makeRegistryRow(patch: Partial<RegistryRowNode> = {}): RegistryR
     matchedDocumentId: null,
     matchScore: null,
     matchState: 'missing',
+    candidateDocumentIds: [],
     ...patch,
   };
 }
@@ -218,6 +219,9 @@ export function makeGraph(patch: Partial<CheckGraph> = {}): CheckGraph {
     external: makeUnavailableRegistries(),
     today: '2026-08-18',
     hasRecognizedText: true,
+    // Комплект разобран целиком: пробелы покрытия — отдельный случай, и тест,
+    // который их проверяет, объявляет их явно.
+    coverageGaps: 0,
     ...patch,
   };
 }

@@ -127,6 +127,7 @@ export const DERIVED_DELETES: readonly PurgeStep[] = [
   { table: 'page_assignments', where: (id: SQL) => sql`revision_id = ${id}` },
   { table: 'registry_reconciliation_extra_docs', where: (id: SQL) => sql`revision_id = ${id}` },
   { table: 'registry_reconciliation_rows', where: (id: SQL) => sql`revision_id = ${id}` },
+  { table: 'registry_row_candidates', where: (id: SQL) => sql`revision_id = ${id}` },
   { table: 'registry_rows', where: (id: SQL) => sql`revision_id = ${id}` },
   { table: 'logical_documents', where: (id: SQL) => sql`revision_id = ${id}` },
   {

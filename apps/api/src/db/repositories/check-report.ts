@@ -507,7 +507,9 @@ class ReportFacts {
           ? 'error'
           : row.matchState === 'ambiguous'
             ? 'warning'
-            : 'warning';
+            : row.matchState === 'candidate'
+              ? 'warning'
+              : 'warning';
     const where = page === null ? '' : `, стр. ${String(page.number)}`;
     const statusText =
       row.matchState === 'matched'
@@ -518,7 +520,15 @@ class ReportFacts {
           ? 'нет в комплекте'
           : row.matchState === 'ambiguous'
             ? 'номер подошёл нескольким документам — какой именно, неизвестно'
-            : 'документ комплекта не назван ни одной строкой реестра';
+            : row.matchState === 'candidate'
+              ? // Кандидат ничего не утверждает: номер не совпал, а похожий
+                // документ в комплекте есть. Решает человек.
+                `номер не совпал; ${
+                  row.candidateDocumentIds.length === 1
+                    ? 'похожий документ в комплекте есть'
+                    : `похожих документов в комплекте ${String(row.candidateDocumentIds.length)}`
+                } — сверьте вручную`
+              : 'документ комплекта не назван ни одной строкой реестра';
 
     return {
       id: row.id,

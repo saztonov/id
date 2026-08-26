@@ -1348,19 +1348,51 @@ function rowLabel(rowNo: number, docNoRaw: string | null, docNameRaw: string): s
   return `строка ${String(rowNo)} реестра («${docNameRaw}»${docNoRaw === null ? '' : `, № ${docNoRaw}`})`;
 }
 
+/**
+ * Вывод «документа нет в комплекте» опирается на то, что комплект разобран весь.
+ *
+ * Если часть листов портал не разобрал — с них ничего не прочитано либо
+ * прочитанное не отнесено ни к одному документу, — то отсутствие документа не
+ * установлено: он может лежать ровно на таком листе. Это `undetermined`, а не
+ * дефект помягче: `fromFindings` выводит вердикт из СОСТОЯНИЯ замечания, а не
+ * из его тяжести, и понижение одной severity оставило бы прогон в `fail`.
+ *
+ * Тяжесть при этом тоже понижается — замечание остаётся видимым, но перестаёт
+ * блокировать: `severityOverride` объявлен как понижение и повышать правило не
+ * вправе.
+ */
+function coverageNote(gaps: number): string {
+  return (
+    ` Часть комплекта портал не разобрал: ${String(gaps)} ` +
+    `${gaps === 1 ? 'лист' : 'листов'} без распознанного текста либо не отнесены ни к одному ` +
+    'документу, поэтому вывод об отсутствии документа не сделан.'
+  );
+}
+
 function evaluateRegistryMissing(graph: CheckGraph): RuleResult {
   if (graph.registryRows.length === 0) return notApplicable(NO_REGISTRY);
 
+  const gaps = graph.coverageGaps;
   const findings = graph.registryRows
     .filter((row) => row.matchState === 'missing')
-    .map((row) =>
-      defect({
+    .map((row) => {
+      const label = rowLabel(row.rowNo, row.docNoRaw, row.docNameRaw);
+      if (gaps > 0) {
+        return unknown({
+          ...anchorOf('registry_row', row.id),
+          origin: 'deterministic',
+          severityOverride: 'warning',
+          message: `Документ, названный в ${label}, в разобранной части комплекта не найден.${coverageNote(gaps)}`,
+          hint: 'Разберите непривязанные листы комплекта либо приложите недостающий документ.',
+        });
+      }
+      return defect({
         ...anchorOf('registry_row', row.id),
         origin: 'deterministic',
-        message: `В комплекте не найден документ, названный в ${rowLabel(row.rowNo, row.docNoRaw, row.docNameRaw)}.`,
+        message: `В комплекте не найден документ, названный в ${label}.`,
         hint: 'Приложите недостающий документ к комплекту либо исключите строку из реестра приложений.',
-      }),
-    );
+      });
+    });
 
   return fromFindings(findings);
 }
@@ -1368,11 +1400,15 @@ function evaluateRegistryMissing(graph: CheckGraph): RuleResult {
 function evaluateRegistryExtra(graph: CheckGraph): RuleResult {
   if (graph.registryRows.length === 0) return notApplicable(NO_REGISTRY);
 
-  const named = new Set(
-    graph.registryRows
-      .map((row) => row.matchedDocumentId)
-      .filter((id): id is string => id !== null),
-  );
+  // «Названным» считается и документ, попавший в КАНДИДАТЫ строки: реестром он
+  // упомянут, и объявить его лишним значило бы обвинить комплект дважды за
+  // одно. Определение то же, что у сверки (`match.ts`, `named`), и берётся оно
+  // готовым: вторая реализация лестницы разошлась бы с первой молча.
+  const named = new Set<string>();
+  for (const row of graph.registryRows) {
+    if (row.matchedDocumentId !== null) named.add(row.matchedDocumentId);
+    for (const id of row.candidateDocumentIds) named.add(id);
+  }
   const registryDocuments = new Set(graph.registryRows.map((row) => row.registryDocumentId));
 
   const findings: RuleFinding[] = [];

@@ -50,6 +50,7 @@ import {
   processingBundlePages,
   processingBundles,
   rdDocuments,
+  registryRowCandidates,
   registryRows,
   ruleDefinitions,
   rulesetRules,
@@ -411,7 +412,7 @@ export async function loadCheckGraph(
     };
   });
 
-  const registryRowsData: readonly RegistryRowNode[] = (
+  const registryRowsData = (
     await db
       .select({
         id: registryRows.id,
@@ -436,6 +437,28 @@ export async function loadCheckGraph(
       .orderBy(asc(registryRows.documentId), asc(registryRows.ordinal))
   ).map((row) => ({ ...row, matchState: row.matchState as RegistryRowNode['matchState'] }));
 
+  // Кандидаты — одним запросом на ревизию, а не по строке: правило REG.101
+  // читает их для КАЖДОГО документа, и запрос на строку превратил бы одну
+  // проверку в сотню round-trip'ов.
+  const candidatesByRow = new Map<string, string[]>();
+  for (const candidate of await db
+    .select({
+      registryRowId: registryRowCandidates.registryRowId,
+      documentId: registryRowCandidates.documentId,
+    })
+    .from(registryRowCandidates)
+    .where(eq(registryRowCandidates.revisionId, input.revisionId))
+    .orderBy(desc(registryRowCandidates.score))) {
+    const bucket = candidatesByRow.get(candidate.registryRowId);
+    if (bucket === undefined) candidatesByRow.set(candidate.registryRowId, [candidate.documentId]);
+    else bucket.push(candidate.documentId);
+  }
+
+  const registryRowNodes: readonly RegistryRowNode[] = registryRowsData.map((row) => ({
+    ...row,
+    candidateDocumentIds: candidatesByRow.get(row.id) ?? [],
+  }));
+
   const documentIds = documents.map((document) => document.id);
   const relations: readonly RelationNode[] =
     documentIds.length === 0
@@ -453,6 +476,39 @@ export async function loadCheckGraph(
     .select({ count: sql<number>`count(*)::int` })
     .from(pageTextVersions)
     .innerJoin(sourcePages, eq(pageTextVersions.sourcePageId, sourcePages.id))
+    .where(eq(sourcePages.revisionId, input.revisionId));
+
+  // Пробелы покрытия: листы, которых портал НЕ разобрал.
+  //
+  // Два случая, и оба означают одно — часть комплекта система не видела:
+  // с листа ничего не прочитано, либо прочитанное не отнесено ни к одному
+  // документу. Подтверждённый пустой лист сюда не входит: он разобран, и на
+  // нём действительно ничего нет.
+  const coverage = await db
+    .select({
+      gaps: sql<number>`count(*) filter (
+        where (
+          not exists (
+            select 1 from page_text_versions ptv
+            where ptv.source_page_id = source_pages.id and length(btrim(ptv.text_md)) > 0
+          )
+          and not exists (
+            select 1 from page_classifications pc
+            where pc.source_page_id = source_pages.id and pc.page_role_code = 'blank'
+          )
+        )
+        or (
+          exists (
+            select 1 from page_text_versions ptv
+            where ptv.source_page_id = source_pages.id and length(btrim(ptv.text_md)) > 0
+          )
+          and not exists (
+            select 1 from page_assignments pa where pa.source_page_id = source_pages.id
+          )
+        )
+      )::int`,
+    })
+    .from(sourcePages)
     .where(eq(sourcePages.revisionId, input.revisionId));
 
   return {
@@ -474,11 +530,12 @@ export async function loadCheckGraph(
     counterparties: counterpartyRows,
     rdDocuments: rdRows,
     documents,
-    registryRows: registryRowsData,
+    registryRows: registryRowNodes,
     relations,
     materials: [],
     today: input.today,
     hasRecognizedText: Number(hasText[0]?.count ?? 0) > 0,
+    coverageGaps: Number(coverage[0]?.gaps ?? 0),
   };
 }
 
