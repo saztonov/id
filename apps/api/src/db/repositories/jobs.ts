@@ -1291,6 +1291,45 @@ export interface StageSummary {
   readonly finishedAt: string | null;
 }
 
+/**
+ * Постраничный ход выделения блоков (S30).
+ *
+ * ## Почему считается ОСТАТОК, а не сделанное
+ *
+ * Постраничной таблицы у детекции нет — в отличие от распознавания, где статус
+ * страницы хранит `recognition_run_pages`. Два очевидных числителя не годятся, и
+ * оба врут тихо:
+ *
+ * * **страницы, у которых появились блоки.** Страница, на которой детектор не
+ *   нашёл ничего, — штатный терминальный исход, и блоков для неё не пишется
+ *   вовсе (`local-detection.ts`, «Терминальность пустой страницы»). На комплекте
+ *   с пустыми листами счётчик никогда не дошёл бы до конца;
+ * * **завершённые задачи детекции.** Черновик разметки у ревизии один, а
+ *   `resetPipelineForRevision` намеренно не снимает задачи стадии `layout` — и
+ *   `done`-задачи прошлого прогона остаются. Повторное нажатие «1. Выделить
+ *   блоки» показывало бы «83 из 83» в первую же секунду.
+ *
+ * Остаток свободен от обоих дефектов: новый прогон ставит задачи на все
+ * страницы заново, счётчик честно начинается с нуля, а старые завершённые
+ * задачи на ответ не влияют.
+ *
+ * ## Почему по страницам, а не по задачам
+ *
+ * У локальной ветки (RF-DETR) одна задача — одна страница, у ветки RD WEB — до
+ * восьми. Считать задачи значило бы получить верный ответ на одном провайдере и
+ * заниженный в разы на другом, причём в зависимости от настройки портала.
+ * Поэтому массив `pageIndices` разворачивается, и берётся `count(distinct)`.
+ */
+export interface LayoutProgress {
+  /** Страницы рабочего документа — та же карта, по которой раздавались задачи. */
+  readonly pagesTotal: number;
+  /** Ни одна задача больше не ждёт эту страницу. */
+  readonly pagesDone: number;
+  readonly pagesPending: number;
+  /** Страницы задач, исчерпавших попытки: в `pagesDone` они не входят. */
+  readonly pagesFailed: number;
+}
+
 export interface ProcessingStatus {
   readonly revisionId: string;
   /** Сводная стадия: самая дальняя, где была активность; `failed` при мёртвых задачах. */
@@ -1307,6 +1346,8 @@ export interface ProcessingStatus {
   readonly finishedAt: string | null;
   readonly stages: readonly StageSummary[];
   readonly jobTypes: readonly JobTypeSummary[];
+  /** `null` — рабочего документа ещё нет, считать страницы не по чему. */
+  readonly layout: LayoutProgress | null;
 }
 
 /**
@@ -1394,6 +1435,8 @@ export async function computeProcessingStatus(
     }
   }
 
+  const layout = await computeLayoutProgress(db, revisionId);
+
   /**
    * Ключи ОБЪЕДИНЯЮТСЯ, а не берутся из журнала попыток.
    *
@@ -1462,6 +1505,81 @@ export async function computeProcessingStatus(
     finishedAt,
     stages,
     jobTypes,
+    layout,
+  };
+}
+
+/** Типы задач детекции: обе ветки провайдера сразу (ADR-0008 и легаси RD WEB). */
+const DETECTION_JOB_TYPES = ['layout.detect_local', 'layout.detect_pages'] as const;
+
+/**
+ * Постраничный ход выделения блоков — см. докстринг `LayoutProgress`.
+ *
+ * Отдельным запросом, а не подзапросом в общей сводке: та собирается по
+ * `job_runs` и `jobs` в разрезе ТИПОВ задач, а здесь разрез страничный, и
+ * склеивать два разреза в один оператор значило бы получить строку, где часть
+ * колонок про задачи, а часть про страницы.
+ *
+ * `pending` перекрывает `failed`: страница, которую мёртвая задача прошлого
+ * прогона оставила упавшей, а новая задача взяла в работу, — это работающая
+ * страница. Не разведи их — сумма превысила бы общее число страниц, и остаток
+ * ушёл бы в минус.
+ */
+async function computeLayoutProgress(
+  db: Database,
+  revisionId: string,
+): Promise<LayoutProgress | null> {
+  const rows = await db.execute<{
+    pages_total: number;
+    pages_pending: number;
+    pages_failed: number;
+  }>(sql`
+    with bundle as (
+      select b.id
+        from processing_bundles b
+       where b.revision_id = ${revisionId}
+       order by b.created_at desc
+       limit 1
+    ),
+    -- Разворот pageIndices обязателен: у локальной ветки одна задача несёт одну
+    -- страницу, у легаси RD WEB — до восьми, и счёт задач дал бы разный ответ
+    -- на разных провайдерах.
+    pages as (
+      select (idx.value)::int as page_index,
+             bool_or(j.status in ('queued', 'running')) as pending,
+             bool_or(j.status = 'failed') as failed
+        from ${jobs} j
+        cross join lateral jsonb_array_elements_text(
+          coalesce(j.payload -> 'pageIndices', '[]'::jsonb)
+        ) as idx(value)
+       where j.payload ->> 'revisionId' = ${revisionId}
+         and j.type in (${sql.join(
+           DETECTION_JOB_TYPES.map((type) => sql`${type}`),
+           sql`, `,
+         )})
+       group by 1
+    )
+    select
+      (select count(*)::int from processing_bundle_pages p
+         join bundle on bundle.id = p.bundle_id) as pages_total,
+      (select count(*)::int from pages where pending) as pages_pending,
+      (select count(*)::int from pages where failed and not pending) as pages_failed
+  `);
+
+  const row = rows.rows[0];
+  // Рабочего документа ещё нет — считать страницы не по чему, и ноль здесь
+  // означал бы «комплект пуст», а не «мы пока не знаем».
+  if (row === undefined || row.pages_total === 0) return null;
+
+  const pagesPending = row.pages_pending;
+  const pagesFailed = row.pages_failed;
+  return {
+    pagesTotal: row.pages_total,
+    // Ограничение снизу — не перестраховка: страницы могли быть поставлены по
+    // прежней карте, а рабочий документ пересобран короче.
+    pagesDone: Math.max(0, row.pages_total - pagesPending - pagesFailed),
+    pagesPending,
+    pagesFailed,
   };
 }
 

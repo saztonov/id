@@ -116,6 +116,23 @@ const processingStatusSchema = z.object({
   finishedAt: z.string().nullable(),
   stages: z.array(stageSummarySchema),
   jobTypes: z.array(jobTypeSummarySchema),
+  /**
+   * Постраничный ход выделения блоков; `null` — рабочего документа ещё нет.
+   *
+   * Живёт здесь, а не отдельной ручкой по образцу прогресса распознавания:
+   * экран уже опрашивает эту сводку, пока конвейер занят, и поток обесценивает
+   * её на любое событие ревизии. Своя ручка потребовала бы своего опроса и
+   * своей строки в `invalidateFor` — третьего механизма свежести на одном
+   * экране.
+   */
+  layout: z
+    .object({
+      pagesTotal: z.int().nonnegative(),
+      pagesDone: z.int().nonnegative(),
+      pagesPending: z.int().nonnegative(),
+      pagesFailed: z.int().nonnegative(),
+    })
+    .nullable(),
 });
 
 export function registerRevisionEventRoutes(app: AppInstance): void {

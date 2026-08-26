@@ -723,6 +723,19 @@ export interface ProcessingStatus {
     lastErrorClass: string | null;
     lastErrorMessage: string | null;
   }[];
+  /**
+   * Постраничный ход выделения блоков; `null` — рабочего документа ещё нет.
+   *
+   * Считается ОСТАТКОМ (`pagesTotal − pending − failed`), а не числом сделанных
+   * страниц: постраничной таблицы у детекции нет, страница без единого блока —
+   * законный исход, а завершённые задачи прошлого прогона не удаляются.
+   */
+  layout: {
+    pagesTotal: number;
+    pagesDone: number;
+    pagesPending: number;
+    pagesFailed: number;
+  } | null;
 }
 
 // =====================================================================

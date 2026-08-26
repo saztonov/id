@@ -44,11 +44,13 @@ import {
 } from '@id/db-harness';
 import { loadMigrations } from '@id/migrator';
 
+import type { AuthScope } from '../../auth/scope.js';
 import { HttpProblem } from '../../lib/problem.js';
 import {
   appendRevisionEvent,
   cancelJobsOfRecognitionRun,
   cancelJobsOfRevision,
+  computeProcessingStatus,
   enqueueSystemJob,
   readJobAutoContinue,
 } from './jobs.js';
@@ -555,5 +557,141 @@ describe('enqueueSystemJob: какие состояния держат dedupe_ke
         dedupeKey: key,
       }),
     ).resolves.toEqual({ jobId: first.jobId, created: false });
+  });
+});
+
+// =====================================================================
+// Постраничный счётчик выделения блоков (S30)
+// =====================================================================
+
+/**
+ * Счётчик, который врёт, хуже отсутствующего: по нему решают, ждать дальше или
+ * идти разбираться. Поэтому проверяются ровно те два способа соврать, из-за
+ * которых он и считается ОСТАТКОМ, а не числом сделанных страниц.
+ */
+describe('computeProcessingStatus: разметка постранично', () => {
+  const SCOPE: AuthScope = { kind: 'manager', userId: USER };
+
+  const BLOB = 'c'.repeat(64);
+  const FILE = id(200);
+  const BUNDLE = id(201);
+  const PAGE_COUNT = 5;
+
+  let seeded = false;
+
+  async function seedBundle(): Promise<void> {
+    if (seeded) return;
+    seeded = true;
+    await testDb.query(
+      `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
+         VALUES ('${BLOB}', 'blobs/${BLOB}', 1024, 'application/pdf')`,
+    );
+    await testDb.query(
+      `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order, verify_state)
+         VALUES ('${FILE}', '${REVISION}', '${BLOB}', 'komplekt.pdf', 0, 'ok')`,
+    );
+    await testDb.query(
+      `INSERT INTO processing_bundles
+         (id, revision_id, aggregate_manifest_hash, working_pdf_blob_sha256, builder_version)
+       VALUES ('${BUNDLE}', '${REVISION}', '${'d'.repeat(64)}', '${BLOB}', 'bundle/1+pdf-lib')`,
+    );
+    for (let index = 0; index < PAGE_COUNT; index += 1) {
+      const pageId = id(210 + index);
+      await testDb.query(
+        `INSERT INTO source_pages
+           (id, revision_id, source_file_id, file_page_index, revision_ordinal, width_px, height_px, rotation)
+         VALUES ('${pageId}', '${REVISION}', '${FILE}', ${String(index)}, ${String(index)}, 1654, 2339, 0)`,
+      );
+      await testDb.query(
+        `INSERT INTO processing_bundle_pages (bundle_id, revision_id, working_page_index, source_page_id)
+           VALUES ('${BUNDLE}', '${REVISION}', ${String(index)}, '${pageId}')`,
+      );
+    }
+  }
+
+  /** Задача детекции на одну страницу — как их ставит локальная ветка. */
+  async function detectPage(pageIndex: number, status: string, tag: string): Promise<void> {
+    const { jobId } = await enqueueSystemJob(db, {
+      type: 'layout.detect_local',
+      payload: {
+        revisionId: REVISION,
+        layoutRevisionId: id(220),
+        pageIndices: [pageIndex],
+      },
+      dedupeKey: `layout.detect_local:${String(pageIndex)}:${tag}`,
+    });
+    await testDb.query(`UPDATE jobs SET status = '${status}' WHERE id = '${jobId}'`);
+  }
+
+  const layoutOf = async (): Promise<{
+    pagesTotal: number;
+    pagesDone: number;
+    pagesPending: number;
+    pagesFailed: number;
+  } | null> => {
+    const status = await computeProcessingStatus(db, SCOPE, REVISION);
+    return status?.layout ?? null;
+  };
+
+  it('без рабочего документа счётчика нет вовсе, а не «0 из 0»', async () => {
+    // Ноль страниц читался бы как «комплект пуст», хотя портал просто ещё не
+    // собрал рабочий документ.
+    expect(await layoutOf()).toBeNull();
+  });
+
+  it('считает остаток: сделанное — это то, чего никто больше не ждёт', async () => {
+    await seedBundle();
+    await detectPage(0, 'done', 'a');
+    await detectPage(1, 'done', 'a');
+    await detectPage(2, 'running', 'a');
+    await detectPage(3, 'queued', 'a');
+    await detectPage(4, 'failed', 'a');
+
+    expect(await layoutOf()).toEqual({
+      pagesTotal: 5,
+      pagesDone: 2,
+      pagesPending: 2,
+      pagesFailed: 1,
+    });
+  });
+
+  it('страница с блоками и БЕЗ блоков считается одинаково сделанной', async () => {
+    // Ключевое отличие от подсчёта по `layout_blocks`: страница, на которой
+    // детектор не нашёл ничего, блоков не даёт — и такой счётчик застрял бы,
+    // не дойдя до конца, на любом комплекте с пустым листом.
+    const layout = await layoutOf();
+    expect(layout?.pagesDone).toBe(2);
+
+    const blocks = await testDb.query<{ count: number }>(
+      `SELECT count(*)::int AS count FROM layout_blocks`,
+    );
+    expect(blocks[0]?.count).toBe(0);
+  });
+
+  it('повторный запуск начинает счёт заново, а не показывает «всё готово»', async () => {
+    // `done`-задачи прошлого прогона не удаляются, и черновик разметки у
+    // ревизии один. Счёт по завершённым задачам показал бы «5 из 5» в первую
+    // же секунду нового прогона.
+    for (let index = 0; index < PAGE_COUNT; index += 1) {
+      await detectPage(index, 'queued', 'b');
+    }
+
+    expect(await layoutOf()).toEqual({
+      pagesTotal: 5,
+      pagesDone: 0,
+      pagesPending: 5,
+      pagesFailed: 0,
+    });
+  });
+
+  it('страницу, взятую в работу заново, не считает и упавшей тоже', async () => {
+    // Иначе одна страница попала бы в две корзины сразу, сумма превысила бы
+    // общее число страниц, а остаток ушёл бы в минус.
+    const layout = await layoutOf();
+    expect(layout?.pagesPending ?? 0).toBe(5);
+    expect(layout?.pagesFailed ?? 0).toBe(0);
+    expect(
+      (layout?.pagesDone ?? 0) + (layout?.pagesPending ?? 0) + (layout?.pagesFailed ?? 0),
+    ).toBe(5);
   });
 });

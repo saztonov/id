@@ -188,6 +188,9 @@ export function PipelineBar({ revisionId, editable }: PipelineBarProps): ReactNo
   // считается и виновник остановки.
   const deferred = (data?.jobTypes ?? []).reduce((total, row) => total + row.deferred, 0);
   const busy = isBusy(stage, queued, running);
+  // Постраничный счётчик разметки приезжает в той же сводке: своего запроса и
+  // своего опроса у него нет намеренно (см. `LayoutProgress` на сервере).
+  const layout = data?.layout ?? null;
   const canRun = editable && can('pipeline.run');
 
   // Shadow-режим виден по снимку НОВЕЙШЕГО прогона, а не по настройке: снимок
@@ -250,6 +253,30 @@ export function PipelineBar({ revisionId, editable }: PipelineBarProps): ReactNo
         </span>
 
         {busy && <Elapsed sinceMs={data?.elapsedMs ?? null} />}
+
+        {/*
+          Счётчик выделения блоков. Показывается, пока стадия идёт: у детекции
+          нет своего прогона, поэтому и привязан он к стадии, а не к его
+          идентификатору. Своего запроса счётчик не заводит — числа приезжают
+          в той же сводке, которую экран уже опрашивает и которую поток
+          обесценивает на каждое `layout.detected`.
+        */}
+        {stage === 'layout' && busy && layout !== null && (
+          <Space size={8} data-testid="pipeline-layout-progress">
+            <Progress
+              type="line"
+              style={{ width: 160 }}
+              percent={Math.round((layout.pagesDone / layout.pagesTotal) * 100)}
+              size="small"
+              status={layout.pagesFailed > 0 ? 'exception' : 'active'}
+            />
+            <Typography.Text type="secondary">
+              размечено {layout.pagesDone}{' '}
+              {plural(layout.pagesDone, 'страница', 'страницы', 'страниц')} из {layout.pagesTotal}
+              {layout.pagesFailed > 0 ? `, страниц с отказом ${String(layout.pagesFailed)}` : ''}
+            </Typography.Text>
+          </Space>
+        )}
 
         {/*
           Полоса появляется вместе с прогоном, а не вместе с первой страницей.
