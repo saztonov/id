@@ -35,6 +35,11 @@ const MONO: CSSProperties = {
   margin: 0,
   maxHeight: '32vh',
   overflowY: 'auto',
+  // Горизонтального потолка тоже нет по умолчанию: `pre-wrap` даёт max-content по
+  // самой длинной строке текста, и без `maxWidth` эта строка раздувала колонку
+  // разметки — распознанный текст решал, стоит ли картинка рядом с лентой
+  // страниц или под ней.
+  maxWidth: '100%',
 };
 
 export interface RecognizedTextProps {

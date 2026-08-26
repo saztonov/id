@@ -83,36 +83,39 @@ export function PageTypePanel(props: PageTypePanelProps): ReactNode {
       }}
     >
       <Typography.Text strong>Тип страницы {pageNo}</Typography.Text>
+      {/*
+        Селект — ПРЯМОЙ потомок панели, а не элемент `Space`, и в этом весь смысл
+        его размера. `Space` оборачивает каждого потомка в собственный `div`, тот
+        меряется по содержимому, и `maxWidth: '100%'` на селекте не ограничивал
+        ничего: 420 px оставались 420 px и на узкой колонке выдавливали панель за
+        край. Flex-элементом панели селект получает верхнюю границу 420 px (там
+        помещается большинство названий каталога, остальное дочитывается в
+        выпадающем списке и в подсказке) и право сжаться до 240 и ниже, когда
+        колонка узкая. Раньше от переполнения спасал перенос строк рабочей
+        области — его больше нет, колонки стоят рядом всегда.
+      */}
+      <Select
+        size="small"
+        style={{ flex: '1 1 240px', minWidth: 0, maxWidth: 420 }}
+        // Выпадающий список ШИРЕ поля. По умолчанию antd повторяет ширину поля
+        // (`popupMatchSelectWidth: true`), и обрезание из поля попадало в
+        // список — то есть выбрать было нельзя даже вслепую по началу строки,
+        // если начала совпадают («Акт освидетельствования …»).
+        popupMatchSelectWidth={POPUP_WIDTH}
+        // Значение — ТОЛЬКО ручная метка вида (B-DOC с типом). Автовывод и
+        // «продолжение» значением не показываются: у продолжения собственного
+        // типа нет, а автовывод подписан отдельным текстом ниже.
+        {...(isManual && classification.docTypeCode !== null
+          ? { value: classification.docTypeCode }
+          : {})}
+        options={typeOptions}
+        showSearch
+        optionFilterProp="label"
+        disabled={!canEdit || manual.pending}
+        onChange={(value: string) => manual.setType(page.sourcePageId, value)}
+        aria-label={`Вид ИД страницы ${String(pageNo)}`}
+      />
       <Space size={6} wrap>
-        <Select
-          size="small"
-          // Ширина фиксированная, а не `flex`: `Space` оборачивает каждого
-          // потомка в собственный `div`, поэтому селект НЕ является flex-
-          // элементом панели, и `flex-basis` на нём был бы проигнорирован.
-          // 420 px вмещают большинство названий каталога; остальное дочитывается
-          // в выпадающем списке и в подсказке. Прежние 240 px резали до двух
-          // слов даже короткие названия. `maxWidth: '100%'` спасает узкий экран:
-          // панель `flex-wrap`, и селект переносится целиком, а не выдавливает
-          // соседей за край.
-          style={{ width: 420, maxWidth: '100%' }}
-          // Выпадающий список ШИРЕ поля. По умолчанию antd повторяет ширину
-          // поля (`popupMatchSelectWidth: true`), и обрезание из поля попадало
-          // в список — то есть выбрать было нельзя даже вслепую по началу
-          // строки, если начала совпадают («Акт освидетельствования …»).
-          popupMatchSelectWidth={POPUP_WIDTH}
-          // Значение — ТОЛЬКО ручная метка вида (B-DOC с типом). Автовывод и
-          // «продолжение» значением не показываются: у продолжения собственного
-          // типа нет, а автовывод подписан отдельным текстом ниже.
-          {...(isManual && classification.docTypeCode !== null
-            ? { value: classification.docTypeCode }
-            : {})}
-          options={typeOptions}
-          showSearch
-          optionFilterProp="label"
-          disabled={!canEdit || manual.pending}
-          onChange={(value: string) => manual.setType(page.sourcePageId, value)}
-          aria-label={`Вид ИД страницы ${String(pageNo)}`}
-        />
         <Button
           size="small"
           disabled={!canEdit || manual.pending}

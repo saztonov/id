@@ -391,7 +391,18 @@ function LayoutWorkspace(props: WorkspaceProps): ReactNode {
         detecting={detect.isPending}
       />
 
-      <Row gutter={12} style={{ marginTop: 12 }}>
+      {/*
+        `wrap={false}` — три колонки рабочей области не переносятся никогда.
+
+        Без него `Row` это `flex-flow: row wrap`, а средняя колонка с `flex="auto"`
+        имеет flex-basis по содержимому: решение о переносе строки считается по
+        flex base size, и `minWidth: 0` на него не влияет — он влияет только на
+        сжатие уже сформированной строки. Поэтому ширину строки раздували то
+        длинная строка распознанного текста, то канва на большом масштабе, и
+        картинка уезжала под ленту миниатюр — на одной странице комплекта рядом,
+        на соседней вниз.
+      */}
+      <Row gutter={12} wrap={false} style={{ marginTop: 12 }}>
         <Col flex="240px" style={{ maxHeight: '72vh', overflowY: 'auto' }}>
           {pages.isPending ? (
             <Spin />
@@ -407,7 +418,15 @@ function LayoutWorkspace(props: WorkspaceProps): ReactNode {
           )}
         </Col>
 
-        <Col flex="auto" style={{ minWidth: 0 }}>
+        {/*
+          `1 1 0`, а не `auto`: ширина средней колонки — остаток строки, и она не
+          зависит от содержимого вовсе. Это размыкает петлю «ResizeObserver мерит
+          holder → `fitInto` → явная ширина канвы → шире колонка → шире канва»,
+          из-за которой раскладка залипала в разъехавшемся состоянии до
+          перезагрузки. Строка отдаётся antd в `style.flex` как есть — её
+          `parseFlex` переписывает только `auto`, число и одиночную длину.
+        */}
+        <Col flex="1 1 0" style={{ minWidth: 0 }}>
           {currentPage === undefined ? (
             <Alert
               type="warning"
