@@ -339,12 +339,16 @@ describe('отказы', () => {
     });
   });
 
-  it('ответ без choices — LlmProtocolError', async () => {
+  it('ответ без choices — молчание апстрима, и он повторяем', async () => {
+    // Не дефект промта: тело без `choices` шлюз отдаёт, когда отказал сам
+    // провайдер. Класс обязан быть повторяемым — иначе движок задач не даст
+    // блоку ни одной повторной попытки, и один такой ответ закроет весь
+    // прогон отказом по неполному покрытию.
     const h = harness(() => jsonResponse({ model: 'gw/vlm-a', choices: [] }));
 
     await expect(h.provider.complete(request())).rejects.toMatchObject({
-      name: 'LlmProtocolError',
-      retriable: false,
+      name: 'LlmUpstreamError',
+      retriable: true,
     });
   });
 });
@@ -356,7 +360,9 @@ describe('оборванный и пустой ответы — данные, а
     const h = harness(() =>
       jsonResponse(
         okBody('{"fragments":[{"kind":"par', {
-          choices: [{ message: { content: '{"fragments":[{"kind":"par' }, finish_reason: 'length' }],
+          choices: [
+            { message: { content: '{"fragments":[{"kind":"par' }, finish_reason: 'length' },
+          ],
         }),
       ),
     );
@@ -476,9 +482,9 @@ describe('политика и кэш', () => {
     const h = harness(() => jsonResponse(okBody()), { rateLimitPerMin: 1 });
 
     await h.provider.complete(request());
-    await expect(h.provider.complete(request({ userPrompt: 'другой блок' }))).rejects.toBeInstanceOf(
-      LlmRateLimitError,
-    );
+    await expect(
+      h.provider.complete(request({ userPrompt: 'другой блок' })),
+    ).rejects.toBeInstanceOf(LlmRateLimitError);
     expect(h.calls).toHaveLength(1);
   });
 

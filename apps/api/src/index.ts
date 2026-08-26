@@ -665,6 +665,7 @@ export {
   LlmRecordingMissingError,
   LlmTimeoutError,
   LlmTransportError,
+  LlmUpstreamError,
   ProxyLlmProvider,
   ProxyVlmProvider,
   RecordedLlmProvider,

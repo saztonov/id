@@ -35,6 +35,7 @@ import {
   LlmProtocolError,
   LlmRateLimitError,
   LlmTransportError,
+  LlmUpstreamError,
   withAttempt,
 } from './port.js';
 import type { LlmPolicy } from './policy.js';
@@ -159,9 +160,11 @@ export class ProxyVlmProvider implements VlmPort {
 
     const choice = payload.choices?.[0];
     if (choice === undefined) {
-      // Ответ без choices не разобрать даже как «пустой» — это протокольный
-      // дефект. Попытка прикладывается: вызов состоялся и мог быть оплачен.
-      throw withAttempt(new LlmProtocolError('В ответе шлюза LLM нет choices: разбирать нечего.'), {
+      // Ответ без choices — это НЕ протокольный дефект промта, а молчание
+      // апстрима: так шлюз отдаёт отказ, случившийся на его стороне. Класс
+      // повторяемый, потому что повтор здесь и помогает (`LlmUpstreamError`).
+      // Попытка прикладывается: вызов состоялся и мог быть оплачен.
+      throw withAttempt(new LlmUpstreamError('В ответе шлюза LLM нет choices: разбирать нечего.'), {
         provider: PROVIDER,
         model,
         inputHash,

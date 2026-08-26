@@ -5,7 +5,7 @@
  */
 import { describe, expect, it } from 'vitest';
 
-import { LlmPayloadTooLargeError, LlmRateLimitError } from '../../llm/port.js';
+import { LlmPayloadTooLargeError, LlmRateLimitError, LlmUpstreamError } from '../../llm/port.js';
 import type { VlmPort, VlmRequest, VlmResponse } from '../../llm/vlm-port.js';
 
 import { CORRECTIVE_INSTRUCTION, WARNING_EMPTY_FRAGMENTS } from './postprocess.js';
@@ -213,6 +213,17 @@ describe('recognizeBlock: отказы модели', () => {
       expect(outcome.kind).toBe('model_refusal');
       expect(vlm.requests).toHaveLength(1);
     }
+  });
+
+  it('пустой текст при finish_reason=error — не отказ модели, а молчание шлюза', async () => {
+    // Отказ означает, что модель ответила и ответ непригоден. Здесь ответа не
+    // было вовсе: провайдер сообщил свою ошибку, токенов ноль. Исход сделал бы
+    // блок непокрытым без единого повтора — и один такой ответ стоил боевому
+    // комплекту всего прогона. Повторяемая ошибка отдаёт решение движку задач.
+    const vlm = new FakeVlm([reply('', { finishReason: 'error' })]);
+
+    await expect(recognizeBlock(inputFor(vlm, 'text'))).rejects.toBeInstanceOf(LlmUpstreamError);
+    expect(vlm.requests).toHaveLength(1);
   });
 });
 

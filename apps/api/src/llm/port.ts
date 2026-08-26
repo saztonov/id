@@ -33,12 +33,7 @@
  * `ai_runs.stage`, разделяемое обоими путями аудита.
  */
 export type LlmStage =
-  | 'page_classify'
-  | 'doc_split'
-  | 'extract'
-  | 'check'
-  | 'summary'
-  | 'recognize';
+  'page_classify' | 'doc_split' | 'extract' | 'check' | 'summary' | 'recognize';
 
 /** Провайдеры; совпадают с CHECK `ai_runs_provider_chk`. `rdweb` заблокирован (§0.3 п.6). */
 export type LlmProviderName = 'proxy_llm' | 'rdweb' | 'recorded';
@@ -216,11 +211,37 @@ export class LlmTimeoutError extends LlmError {
 }
 
 /**
- * Ответ не разобрался: не JSON, нет `choices`, нет текста.
+ * Шлюз ответил, но ответа модели в его теле нет.
+ *
+ * ## Почему это отдельный класс, а не `LlmProtocolError`
+ *
+ * Оба выглядят одинаково — «разбирать нечего», — но чинятся противоположным.
+ * Непригодный ответ детерминирован: тот же промт даст тот же мусор, и повтор
+ * лишь потратит бюджет. Молчание провайдера случайно: тело без `choices` —
+ * это ровно то, что возвращает шлюз, когда апстрим отказал на его стороне, и
+ * следующий такой же запрос обычно проходит.
+ *
+ * Разделение сделано по замеру, а не по вкусу. На боевых прогонах восемь
+ * вызовов получили ответ без `choices` — все с `actualModel: null` и нулевым
+ * учётом токенов, — и семь из восьми прошли со следующей же попытки. Восьмой
+ * стоил комплекту всего прогона: класс был неповторяемым, движок задач повтора
+ * не давал, блок оставался непокрытым, и финализация закрывала прогон отказом
+ * по неполному покрытию.
+ */
+export class LlmUpstreamError extends LlmError {
+  constructor(message: string, options: { readonly cause?: unknown } = {}) {
+    super(message, { retriable: true, ...options });
+    this.name = 'LlmUpstreamError';
+  }
+}
+
+/**
+ * Ответ не разобрался: не JSON либо в `choices[0]` нет пригодного текста.
  *
  * Не повторяется намеренно: детерминированный промт даёт детерминированно
  * непригодный ответ, а повтор лишь потратит бюджет. Дефект здесь — в промте
- * или в модели, и чинится он человеком.
+ * или в модели, и чинится он человеком. Случай «шлюз не вернул `choices`
+ * вовсе» сюда НЕ относится — он `LlmUpstreamError` (см. выше).
  */
 export class LlmProtocolError extends LlmError {
   constructor(message: string, options: { readonly cause?: unknown } = {}) {

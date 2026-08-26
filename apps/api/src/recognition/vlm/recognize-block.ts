@@ -44,7 +44,7 @@ import type { BlockType } from '@id/contracts';
 import type { RecognitionBlock } from '@id/recognition';
 import type { ZodError } from 'zod';
 
-import { LlmPayloadTooLargeError } from '../../llm/port.js';
+import { LlmPayloadTooLargeError, LlmUpstreamError } from '../../llm/port.js';
 import type {
   VlmJsonSchemaFormat,
   VlmPort,
@@ -490,6 +490,21 @@ export async function recognizeBlock(input: RecognizeBlockInput): Promise<VlmBlo
       };
     }
     if (response.text.trim() === '') {
+      /**
+       * Пустое тело при `finish_reason=error` — не отказ модели, а её молчание.
+       *
+       * Отказ означает, что модель ответила и ответ непригоден: оборвалась по
+       * лимиту, попала под фильтр, вернула пустую строку вместо пустого
+       * объекта. Здесь же провайдер сообщил СВОЮ ошибку — токенов ноль, модель
+       * не названа, — и повтор её лечит. Пока оба случая были одним исходом,
+       * блок оставался непокрытым без единой попытки повтора, и прогон
+       * закрывался отказом по неполному покрытию из-за одного такого ответа.
+       */
+      if (finish === 'error') {
+        throw new LlmUpstreamError(
+          'Шлюз LLM вернул пустой ответ с finish_reason=error: модель не отвечала.',
+        );
+      }
       return {
         kind: 'model_refusal',
         reason:

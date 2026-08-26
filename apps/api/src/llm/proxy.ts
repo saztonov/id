@@ -29,6 +29,7 @@ import {
   LlmRateLimitError,
   LlmTimeoutError,
   LlmTransportError,
+  LlmUpstreamError,
   withAttempt,
   type LlmPort,
   type LlmRequest,
@@ -338,17 +339,30 @@ export function chatCompletionsUrl(baseUrl: string): string {
  * в загадочный отказ парсера без указания на виновника. Оба случая — не успех
  * и не повторяемый сбой, а `LlmProtocolError`: чинится промтом или лимитом
  * токенов, руками.
+ *
+ * Третий случай выглядит так же, но им не является: тело БЕЗ `choices` — это
+ * не ответ модели, а отказ апстрима, пересказанный шлюзом. Повтор его лечит,
+ * поэтому он `LlmUpstreamError`, и различать их обязано это место: выше по
+ * стеку виден только класс.
  */
 function extractText(payload: ChatCompletionPayload): string {
   const choice = payload.choices?.[0];
-  const finishReason = typeof choice?.finish_reason === 'string' ? choice.finish_reason : null;
+  if (choice === undefined) {
+    // Тела без `choices` промт не порождает: так шлюз отдаёт отказ апстрима.
+    // Повтор здесь помогает, поэтому класс другой (`LlmUpstreamError`).
+    throw new LlmUpstreamError(
+      'В ответе шлюза LLM нет choices: модель не ответила вовсе. ' +
+        'Это отказ на стороне провайдера, а не дефект промта.',
+    );
+  }
+  const finishReason = typeof choice.finish_reason === 'string' ? choice.finish_reason : null;
   if (finishReason === 'length') {
     throw new LlmProtocolError(
       'Ответ модели оборван по max_tokens (finish_reason=length): вызов оплачен, но JSON ' +
         'неполон. Повтор не поможет — увеличьте лимит токенов либо сократите промт.',
     );
   }
-  const content = choice?.message?.content;
+  const content = choice.message?.content;
   if (typeof content !== 'string' || content === '') {
     throw new LlmProtocolError(
       'Пустой ответ модели: в choices[0].message.content нет текста. ' +

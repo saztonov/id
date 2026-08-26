@@ -391,18 +391,31 @@ describe('отказы', () => {
     });
   });
 
-  it('не-JSON и ответ без текста — это LlmProtocolError и он НЕ повторяем', async () => {
+  it('не-JSON и пустой текст — это LlmProtocolError и он НЕ повторяем', async () => {
     const garbage = harness(
       () => new Response('не json', { status: 200, headers: { 'content-type': 'text/plain' } }),
     );
     await expect(garbage.provider.complete(REQUEST)).rejects.toBeInstanceOf(LlmProtocolError);
 
-    const empty = harness(() => jsonResponse({ choices: [] }));
-    await expect(empty.provider.complete(REQUEST)).rejects.toMatchObject({
+    const blank = harness(() => jsonResponse({ choices: [{ message: { content: '' } }] }));
+    await expect(blank.provider.complete(REQUEST)).rejects.toMatchObject({
       name: 'LlmProtocolError',
       // Повтор детерминированного промта даст тот же непригодный ответ и
       // потратит бюджет впустую.
       retriable: false,
+    });
+  });
+
+  it('ответ без choices — молчание апстрима, и он ПОВТОРЯЕМ', async () => {
+    // Выглядит как непригодный ответ, но им не является: тела без `choices`
+    // промт не порождает — так шлюз пересказывает отказ провайдера. На боевых
+    // прогонах семь таких вызовов из восьми проходили со следующей попытки, а
+    // неповторяемый класс лишал их этой попытки вовсе.
+    const empty = harness(() => jsonResponse({ choices: [] }));
+
+    await expect(empty.provider.complete(REQUEST)).rejects.toMatchObject({
+      name: 'LlmUpstreamError',
+      retriable: true,
     });
   });
 
