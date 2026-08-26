@@ -62,7 +62,7 @@ CREATE TABLE registry_row_candidates (
 
   CONSTRAINT registry_row_candidates_pk PRIMARY KEY (registry_row_id, document_id),
   CONSTRAINT registry_row_candidates_basis_chk
-    CHECK (basis IN ('doc_type', 'issued_at', 'doc_type_and_issued_at')),
+    CHECK (basis IN ('doc_no', 'doc_type', 'issued_at', 'doc_type_and_issued_at')),
   CONSTRAINT registry_row_candidates_score_chk
     CHECK (score >= 0 AND score <= 1),
   CONSTRAINT registry_row_candidates_row_fk

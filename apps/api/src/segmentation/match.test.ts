@@ -425,3 +425,46 @@ describe('кандидаты строки реестра', () => {
     expect(result.rows[0]?.matchState).toBe('missing');
   });
 });
+
+/**
+ * S34: претенденты неоднозначной строки — тоже кандидаты.
+ *
+ * `match.ts` считал их названными с самого начала (`named` пополняется до
+ * проверки числа), а правило REG.101 — нет, потому что список никуда не
+ * сохранялся. Комплект получал и «строка сопоставлена неоднозначно», и
+ * «документ не назван ни одной строкой» за один и тот же факт.
+ */
+describe('претенденты неоднозначной строки', () => {
+  it('точный номер у двух документов записывает обоих в кандидаты', () => {
+    const result = matchRegistryRows(
+      [row(1, '№ 00БС-012814', 'Паспорт')],
+      [doc('d1', '00БС-012814'), doc('d2', '00БС-012814')],
+    );
+
+    expect(result.rows[0]).toMatchObject({
+      matchState: 'ambiguous',
+      matchedDocumentId: null,
+      candidates: [
+        { documentId: 'd1', basis: 'doc_no', score: 1 },
+        { documentId: 'd2', basis: 'doc_no', score: 1 },
+      ],
+    });
+  });
+
+  it('ни один претендент не объявляется лишним документом', () => {
+    const result = matchRegistryRows(
+      [row(1, '№ 00БС-012814', 'Паспорт')],
+      [doc('d1', '00БС-012814'), doc('d2', '00БС-012814')],
+    );
+
+    expect(result.extraDocumentIds).toEqual([]);
+  });
+
+  it('однозначное совпадение кандидатов не заводит', () => {
+    // Отрицательный контроль: список претендентов имеет смысл только там, где
+    // выбрать нельзя. У `matched` документ назван прямо.
+    const result = matchRegistryRows([row(1, '№ 16005')], [doc('d1', '16005')]);
+
+    expect(result.rows[0]).toMatchObject({ matchState: 'matched', candidates: [] });
+  });
+});

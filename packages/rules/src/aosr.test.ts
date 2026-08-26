@@ -868,6 +868,31 @@ describe('REG.100 / REG.101 / REG.102 — сверка с реестром пр�
     expect(verdictOf('REG.101', graph)).toBe('pass');
   });
 
+  it('REG.101: претендент неоднозначной строки лишним не объявляется', () => {
+    // Два паспорта под одним номером: сверка не может выбрать, но реестром
+    // упомянуты оба. Обвинять их «не назван ни одной строкой» значит
+    // обвинять комплект дважды за один факт — вместе с REG.102 по строке.
+    const twin = makeDocument({ docTypeCode: 'quality_passport', title: 'Паспорт качества' });
+    const graph = makeGraph({
+      documents: [registry, quality, twin],
+      registryRows: [
+        makeRegistryRow({
+          registryDocumentId: registry.id,
+          rowNo: 2,
+          docNameRaw: 'Блок стеновой',
+          docNoRaw: '00БС-012814',
+          matchState: 'ambiguous',
+          matchedDocumentId: null,
+          candidateDocumentIds: [quality.id, twin.id],
+        }),
+      ],
+    });
+
+    expect(verdictOf('REG.101', graph)).toBe('pass');
+    // Неоднозначность при этом никуда не девается: о ней говорит REG.102.
+    expect(verdictOf('REG.102', graph)).toBe('fail');
+  });
+
   it('вид документа в реестре не сверяется: обобщённое название дефектом не является', () => {
     // Реестр называет лист «Документ о качестве», сам лист озаглавлен
     // «СЕРТИФИКАТ КАЧЕСТВА № 16005» — расхождением это не считается

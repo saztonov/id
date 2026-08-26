@@ -2253,7 +2253,7 @@ export const registryRowCandidates = pgTable("registry_row_candidates", {
 			name: "registry_row_candidates_document_fk"
 		}).onDelete("cascade"),
 	primaryKey({ columns: [table.documentId, table.registryRowId], name: "registry_row_candidates_pk"}),
-	check("registry_row_candidates_basis_chk", sql`basis = ANY (ARRAY['doc_type'::text, 'issued_at'::text, 'doc_type_and_issued_at'::text])`),
+	check("registry_row_candidates_basis_chk", sql`basis = ANY (ARRAY['doc_no'::text, 'doc_type'::text, 'issued_at'::text, 'doc_type_and_issued_at'::text])`),
 	check("registry_row_candidates_score_chk", sql`(score >= (0)::double precision) AND (score <= (1)::double precision)`),
 ]);
 
