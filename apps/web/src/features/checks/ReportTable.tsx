@@ -32,6 +32,7 @@
  */
 import type { ReactNode } from 'react';
 import { Space, Table, Typography } from 'antd';
+import type { ColumnsType } from 'antd/es/table';
 
 import type { CheckReport, ReportRow, ReportSection } from '../../api/types.js';
 import { Link } from '../../app/router.js';
@@ -41,7 +42,9 @@ import {
   itemLabel,
   markOf,
   pagesLabel,
+  rowDetailText,
   rowHref,
+  rowTagText,
   sectionTally,
   toneOf,
 } from './report.js';
@@ -77,7 +80,7 @@ function SectionBlock({
   revisionId: string;
   section: ReportSection;
 }): ReactNode {
-  const tally = sectionTally(section.rows);
+  const tally = sectionTally(section);
 
   return (
     <div data-testid={`checks-report-section-${section.kind}`} style={{ marginBottom: 24 }}>
@@ -105,72 +108,107 @@ function SectionBlock({
           size="middle"
           pagination={false}
           dataSource={section.rows}
+          /*
+            Ширины столбцов обязаны быть ЗАКОНОМ, а не пожеланием.
+
+            При раскладке `auto` (умолчание antd) браузер раздаёт ширину по
+            содержимому, и таблица с длинным замечанием сжимала «Позицию
+            комплекта» до одной буквы в строке, а соседняя таблица на той же
+            странице раскладывалась совсем иначе. Разная разметка у таблиц
+            одного экрана читается как разные сущности, хотя это один и тот же
+            список в четырёх разрезах.
+          */
+          tableLayout="fixed"
           expandable={{
             // Раскрытие только там, где есть что раскрыть: пустая стрелка у
             // каждой строки обещает подробности, которых нет.
             rowExpandable: (row) => row.items.length > 0,
             expandedRowRender: (row) => <ItemList row={row} />,
+            // Место под стрелку резервируется всегда: без этого таблица с
+            // раскрытием и таблица без него разъезжаются по всем колонкам.
+            columnWidth: 48,
           }}
-          columns={[
-            {
-              title: 'Стр.',
-              key: 'pages',
-              width: 90,
-              render: (_value, row) => <PagesCell revisionId={revisionId} row={row} />,
-            },
-            {
-              title: 'Позиция комплекта',
-              key: 'title',
-              width: '38%',
-              render: (_value, row) => (
-                /*
-                  Метка на содержимом ячейки, а не через `onRow`: прокидывает ли
-                  antd произвольные `data-*` до узла строки — её внутреннее
-                  дело, и завязывать на это контракт прогонов значит получить
-                  отказ сценария на обновлении библиотеки, а не на изменении
-                  портала (тот же довод, что был у таблицы замечаний).
-                */
-                <Space direction="vertical" size={0} data-testid={`checks-report-row-${row.id}`}>
-                  <Typography.Text>{row.title}</Typography.Text>
-                  {row.subtitle !== null && (
-                    <Typography.Text type="secondary">{row.subtitle}</Typography.Text>
-                  )}
-                </Space>
-              ),
-            },
-            {
-              title: 'Даты',
-              key: 'dates',
-              width: 200,
-              render: (_value, row) => {
-                const dates = datesLabel(row);
-                return dates === null ? null : <Typography.Text>{dates}</Typography.Text>;
-              },
-            },
-            {
-              title: 'Результат',
-              key: 'status',
-              render: (_value, row) => (
-                <Space direction="vertical" size={2} style={{ width: '100%' }}>
-                  <ToneTag tone={toneOf(row.status)}>
-                    {markOf(row.status)} {row.statusText}
-                  </ToneTag>
-                  {/*
-                    Способ устранения — сразу, а не в раскрытии строки:
-                    замечание без него бесполезно подрядчику (§9.1), а
-                    раскрытие — ещё одно нажатие ради двух строк текста.
-                  */}
-                  {row.statusHint !== null && (
-                    <Typography.Text type="secondary">{row.statusHint}</Typography.Text>
-                  )}
-                </Space>
-              ),
-            },
-          ]}
+          columns={reportColumns(revisionId)}
         />
       )}
     </div>
   );
+}
+
+/**
+ * Столбцы, ОДНИ на все разделы отчёта.
+ *
+ * Объявлены один раз и переиспользуются каждой секцией: пока определения
+ * лежали внутри `map`, ничто не мешало им разъехаться, и разъезжались они уже
+ * при раскладке `auto`. Ширины — в процентах, чтобы таблица дышала вместе с
+ * окном; «Стр.» в пикселях, потому что номер страницы шире не становится.
+ */
+function reportColumns(revisionId: string): ColumnsType<ReportRow> {
+  return [
+    {
+      title: 'Стр.',
+      key: 'pages',
+      width: 72,
+      render: (_value, row) => <PagesCell revisionId={revisionId} row={row} />,
+    },
+    {
+      title: 'Позиция комплекта',
+      key: 'title',
+      width: '34%',
+      render: (_value, row) => (
+        /*
+          Метка на содержимом ячейки, а не через `onRow`: прокидывает ли antd
+          произвольные `data-*` до узла строки — её внутреннее дело, и
+          завязывать на это контракт прогонов значит получить отказ сценария на
+          обновлении библиотеки, а не на изменении портала (тот же довод, что
+          был у таблицы замечаний).
+        */
+        <Space direction="vertical" size={0} data-testid={`checks-report-row-${row.id}`}>
+          <Typography.Text>{row.title}</Typography.Text>
+          {row.subtitle !== null && (
+            <Typography.Text type="secondary">{row.subtitle}</Typography.Text>
+          )}
+        </Space>
+      ),
+    },
+    {
+      title: 'Даты',
+      key: 'dates',
+      width: '18%',
+      render: (_value, row) => {
+        const dates = datesLabel(row);
+        return dates === null ? null : <Typography.Text>{dates}</Typography.Text>;
+      },
+    },
+    {
+      title: 'Результат',
+      key: 'status',
+      render: (_value, row) => {
+        const detail = rowDetailText(row);
+        return (
+          <Space direction="vertical" size={2} style={{ width: '100%' }}>
+            {/*
+              На метке — короткое слово, под ней — подробности обычным текстом.
+              Метка не переносится по словам и, приняв в себя всё замечание,
+              продавливала ширину соседних колонок.
+            */}
+            <ToneTag tone={toneOf(row.status)}>
+              {markOf(row.status)} {rowTagText(row)}
+            </ToneTag>
+            {detail !== null && <Typography.Text>{detail}</Typography.Text>}
+            {/*
+              Способ устранения — сразу, а не в раскрытии строки: замечание без
+              него бесполезно подрядчику (§9.1), а раскрытие — ещё одно нажатие
+              ради двух строк текста.
+            */}
+            {row.statusHint !== null && (
+              <Typography.Text type="secondary">{row.statusHint}</Typography.Text>
+            )}
+          </Space>
+        );
+      },
+    },
+  ];
 }
 
 /**

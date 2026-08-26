@@ -9,7 +9,12 @@
  * Порядок секций и строк здесь НЕ трогается: его задал сервер, и вторая
  * сортировка на клиенте либо повторила бы её, либо разошлась бы с ней.
  */
-import type { ReportItemStatus, ReportRow, ReportRowStatus } from '../../api/types.js';
+import type {
+  ReportItemStatus,
+  ReportRow,
+  ReportRowStatus,
+  ReportSection,
+} from '../../api/types.js';
 
 /** Тон строки: тот же словарь, что у тегов остального портала. */
 export type ReportTone = 'success' | 'danger' | 'warning' | 'neutral';
@@ -61,6 +66,45 @@ const ITEM_LABELS: Readonly<Record<ReportItemStatus, string>> = {
 
 export function itemLabel(status: ReportItemStatus): string {
   return ITEM_LABELS[status];
+}
+
+/**
+ * Короткие подписи состояний строки.
+ *
+ * У `ok` подписи здесь нет намеренно: его `statusText` короток по построению
+ * («данные верны», «чек-лист пройден: 19 из 19», «найден в комплекте, стр. 7»)
+ * и сам является лучшей подписью, чем любое слово из словаря.
+ */
+const ROW_LABELS: Readonly<Record<Exclude<ReportRowStatus, 'ok'>, string>> = {
+  error: 'ошибка',
+  warning: 'предупреждение',
+  undetermined: 'не проверено',
+  missing: 'нет в комплекте',
+  unchecked: 'не проверялось',
+};
+
+/**
+ * Что писать НА метке состояния.
+ *
+ * Метка обязана быть короткой. Пока на неё уходил весь текст замечания
+ * («Наименование объекта в акте № МР/ОВ1/От/32 — „«Высотный градостроительный
+ * комплекс…»"»), она растягивала колонку «Результат» на пол-экрана, а колонка
+ * «Позиция комплекта» сжималась до одной буквы в строке. Ширины столбцов при
+ * этом были заданы верно — их продавливало содержимое.
+ */
+export function rowTagText(row: ReportRow): string {
+  return row.status === 'ok' ? row.statusText : ROW_LABELS[row.status];
+}
+
+/**
+ * Что писать ПОД меткой; `null` — на метке уже всё сказано.
+ *
+ * Отдельной строкой, а не в метке: обычный текст переносится по словам и
+ * подчиняется ширине колонки, а метка — нет.
+ */
+export function rowDetailText(row: ReportRow): string | null {
+  if (row.status === 'ok' || row.status === 'missing' || row.status === 'unchecked') return null;
+  return row.statusText;
 }
 
 /**
@@ -135,13 +179,18 @@ export function pagesLabel(row: ReportRow): string | null {
 }
 
 /**
- * Сводка секции: сколько строк подтверждено.
+ * Сводка секции: сколько её позиций прошло без замечаний.
  *
- * `null` — считать нечего (секция из одних непроверенных строк либо пустая).
- * Печатать «0 из 0 подтверждено» значило бы сообщать о работе, которой не было.
+ * `null` в трёх случаях, и каждый — не косметика:
+ *
+ * * секция пуста либо состоит из непроверенных строк — «0 из 0 без замечаний»
+ *   сообщало бы о работе, которой не было;
+ * * секция `unplaced` — в ней КАЖДАЯ строка и есть замечание, и «0 из 7 без
+ *   замечаний» читается как отчёт о провале там, где считать просто нечего.
  */
-export function sectionTally(rows: readonly ReportRow[]): string | null {
-  const counted = rows.filter((row) => row.status !== 'unchecked');
+export function sectionTally(section: ReportSection): string | null {
+  if (section.kind === 'unplaced') return null;
+  const counted = section.rows.filter((row) => row.status !== 'unchecked');
   if (counted.length === 0) return null;
   const ok = counted.filter((row) => row.status === 'ok').length;
   return `${String(ok)} из ${String(counted.length)} без замечаний`;

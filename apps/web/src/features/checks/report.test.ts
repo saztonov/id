@@ -6,14 +6,16 @@
  * подтверждение непроверенной строке, выглядит исправным.
  */
 import { describe, expect, it } from 'vitest';
-import type { ReportRow } from '../../api/types.js';
+import type { ReportRow, ReportSection } from '../../api/types.js';
 import {
   datesLabel,
   formatDate,
   itemLabel,
   markOf,
   pagesLabel,
+  rowDetailText,
   rowHref,
+  rowTagText,
   sectionTally,
   toneOf,
 } from './report.js';
@@ -58,6 +60,35 @@ describe('toneOf и markOf', () => {
     expect(toneOf('error')).toBe('danger');
     expect(toneOf('missing')).toBe('danger');
     expect(markOf('missing')).toBe('✕');
+  });
+});
+
+describe('rowTagText и rowDetailText', () => {
+  it('длинное замечание уходит ПОД метку, а не на неё', () => {
+    // Пока весь текст замечания жил на метке, она растягивала колонку
+    // «Результат» на пол-экрана, а «Позиция комплекта» сжималась до одной
+    // буквы в строке. Метка не переносится по словам — обычный текст переносится.
+    const long = row({
+      id: 'a',
+      status: 'error',
+      statusText: 'Наименование объекта в акте № МР/ОВ1/От/32 не совпадает с карточкой объекта',
+    });
+    expect(rowTagText(long)).toBe('ошибка');
+    expect(rowDetailText(long)).toBe(long.statusText);
+  });
+
+  it('у подтверждённой строки метка несёт сам текст, а не слово-дубль', () => {
+    const ok = row({ id: 'a', status: 'ok', statusText: 'чек-лист пройден: 19 из 19' });
+    expect(rowTagText(ok)).toBe('чек-лист пройден: 19 из 19');
+    expect(rowDetailText(ok)).toBeNull();
+  });
+
+  it('состояния, где подпись и текст совпадают, не печатаются дважды', () => {
+    for (const status of ['missing', 'unchecked'] as const) {
+      expect(rowDetailText(row({ id: 'a', status }))).toBeNull();
+    }
+    expect(rowTagText(row({ id: 'a', status: 'missing' }))).toBe('нет в комплекте');
+    expect(rowTagText(row({ id: 'a', status: 'unchecked' }))).toBe('не проверялось');
   });
 });
 
@@ -152,18 +183,29 @@ describe('rowHref и pagesLabel', () => {
 });
 
 describe('sectionTally', () => {
+  function section(over: Partial<ReportSection> = {}): ReportSection {
+    return { kind: 'quality', title: 'Документы о качестве', note: null, rows: [], ...over };
+  }
+
   it('считает только то, что проверялось', () => {
     const rows = [
       row({ id: 'a', status: 'ok' }),
       row({ id: 'b', status: 'error' }),
       row({ id: 'c', status: 'unchecked' }),
     ];
-    expect(sectionTally(rows)).toBe('1 из 2 без замечаний');
+    expect(sectionTally(section({ rows }))).toBe('1 из 2 без замечаний');
   });
 
   it('молчит, когда считать нечего', () => {
     // «0 из 0 подтверждено» сообщало бы о работе, которой не было.
-    expect(sectionTally([])).toBeNull();
-    expect(sectionTally([row({ id: 'a', status: 'unchecked' })])).toBeNull();
+    expect(sectionTally(section())).toBeNull();
+    expect(sectionTally(section({ rows: [row({ id: 'a', status: 'unchecked' })] }))).toBeNull();
+  });
+
+  it('молчит в секции замечаний: там каждая строка и есть замечание', () => {
+    // «0 из 7 без замечаний» читается как отчёт о провале там, где считать
+    // просто нечего.
+    const rows = [row({ id: 'a', status: 'error' }), row({ id: 'b', status: 'warning' })];
+    expect(sectionTally(section({ kind: 'unplaced', rows }))).toBeNull();
   });
 });
