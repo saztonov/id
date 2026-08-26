@@ -167,8 +167,11 @@ curl -i -X PUT --upload-file /tmp/proba.pdf "<свежий presigned URL>"
 
 - `LLM_PROVIDER=proxy_llm`
 - `PROXY_LLM_BASE_URL=https://proxyllm.fvds.ru/api/v1` (тот же шлюз, что у estimat)
-- `LLM_MODEL=deepseek/deepseek-v4-flash-0731`
-- `LLM_MODEL_ALLOWLIST=deepseek/deepseek-v4-flash-0731` (в production пустой allowlist запрещает всё)
+- `LLM_MODEL=qwen/qwen3.8-27b`
+- `LLM_MODEL_ALLOWLIST=qwen/qwen3.8-27b` (в production пустой allowlist запрещает всё)
+- `LLM_TIMEOUT_MS=450000` — потолок одного вызова к шлюзу; **обязан быть чуть
+  выше** `REQUEST_DEADLINE_MS` на прокси (сейчас 420000), иначе worker обрывает
+  запрос раньше, чем прокси успевает ответить 504
 - `PROXY_LLM_TOKEN` — только в `/etc/id/id.env`, не в git/чат
 
 **Модель распознавания входит в тот же allowlist.** `recognition.vlm_model`
@@ -177,8 +180,12 @@ curl -i -X PUT --upload-file /tmp/proba.pdf "<свежий presigned URL>"
 настройках, обязан быть в списке — перечисляются через запятую:
 
 ```
-LLM_MODEL_ALLOWLIST=deepseek/deepseek-v4-flash-0731,qwen/qwen3-vl-32b-instruct
+LLM_MODEL_ALLOWLIST=qwen/qwen3.8-27b
+LLM_TIMEOUT_MS=450000
 ```
+
+На шлюзе (`/etc/proxy_llm/.env`): `REQUEST_DEADLINE_MS=420000`,
+`UPSTREAM_ATTEMPT_TIMEOUT_MS=360000`; nginx `proxy_read_timeout` ≥ 480s.
 
 ### Смена модели распознавания
 
