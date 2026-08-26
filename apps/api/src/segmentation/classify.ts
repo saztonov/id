@@ -55,6 +55,7 @@ import {
   isPrimaryAct,
   PRIMARY_ACT_CONFIDENT_MARKERS,
 } from './primary-act.js';
+import { continuesTable } from './table-flow.js';
 import type { PageClassification, PageInput, TextEvidence, TypeOutcome } from './types.js';
 
 export interface Phase1Options {
@@ -127,6 +128,15 @@ const PRIMARY_ACT_CODE = 'aosr';
  * два разных имени для одного состояния и заставить декодер их согласовывать.
  */
 const DOC_CONTINUATION = 'doc_continuation';
+
+/**
+ * Роль «на листе нет ничего, кроме штампа электронной подписи».
+ *
+ * Названа здесь потому, что фаза 1 обязана её СНИМАТЬ там, где содержание на
+ * листе всё-таки есть: декодер присоединяет такой лист к предыдущему
+ * документу по соседству, и ошибка была бы тихой.
+ */
+const SIGNATURE_ROLE = 'signature_visual';
 
 /**
  * Порядок разбора ролей при нескольких совпадениях.
@@ -697,14 +707,26 @@ function classifyOne(
 
   // 6. Роли страницы. Роль документа не открывает: `A-ROLE` — служебный лист,
   //    и присоединять ли его, решает декодер по `autoAttach` и по контексту.
+  const continuesPreviousTable = previous !== undefined && continuesTable(previous.text, page.text);
   const roles = matchPageRoles(page.text, PAGE_ROLES).filter((r) => {
     // Якорь роли `doc_continuation` ловит «Лист N из M» при ЛЮБОМ N, включая
     // первый. Первая страница документа продолжением не является, и
     // присоединение её к предыдущему документу разорвало бы сразу два: этот
     // потерял бы начало, а предыдущий получил бы чужой хвост.
-    if (r.code !== DOC_CONTINUATION) return true;
-    const m = SHEET_COUNTER.exec(r.line);
-    return !(m && Number(m[1]) === 1);
+    if (r.code === DOC_CONTINUATION) {
+      const m = SHEET_COUNTER.exec(r.line);
+      return !(m && Number(m[1]) === 1);
+    }
+    // Роль визуализации подписи означает «на листе нет ничего, кроме штампа»
+    // — так она и определена в каталоге, который прямо оставляет
+    // окончательное решение сегментатору: якорь видит строку, а не страницу.
+    // Безголовое продолжение таблицы предыдущего листа этот ответ
+    // опровергает: содержание на листе есть, и принадлежит он тому же
+    // документу. Без этой строки хвост реестра приложений с блоком подписей
+    // внизу получал роль, уходил в непривязанные, и три его позиции
+    // терялись молча (боевой комплект 01-ДК2-СЦ).
+    if (r.code === SIGNATURE_ROLE) return !continuesPreviousTable;
+    return true;
   });
   if (roles.length > 0) {
     const chosen =

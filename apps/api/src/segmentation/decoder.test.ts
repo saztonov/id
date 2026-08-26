@@ -125,7 +125,7 @@ describe('присоединение служебных страниц', () => {
       [page('p1', 'ПАСПОРТ КАЧЕСТВА № 7'), page('p2'), page('p3')],
       [
         opensKnown('p1', 'quality_passport'),
-        cls('p2', { label: 'A-ROLE', pageRoleCode: 'signature_visual' }),
+        cls('p2', { label: 'U' }),
         cls('p3', { label: 'A-ROLE', pageRoleCode: 'blank' }),
       ],
     );
@@ -134,10 +134,12 @@ describe('присоединение служебных страниц', () => {
     expect(result.unassigned[1]?.reason).toContain('разделитель');
   });
 
-  it('лист визуализации подписи не присоединяется автоматически', () => {
-    // Урок корпуса: штамп ЭП печатается и в подвале содержательных листов,
-    // поэтому автоприсоединение такой страницы теряло бы документ целиком
-    // (CORPUS_FINDINGS, причина 5).
+  it('лист визуализации подписи вплотную к документу становится его листом', () => {
+    // Под ролью остаётся лист, на котором нет ничего, кроме штампа: страницу с
+    // заголовком забирает якорь вида либо отрицательный якорь роли, страницу с
+    // продолжением таблицы — фаза 1. Такой лист принадлежит документу, за
+    // которым идёт, и его уход в непривязанные разрывал набор страниц ровно
+    // так же, как уход пустого оборота.
     const result = decodeSegmentation(
       [page('p1', 'ПАСПОРТ КАЧЕСТВА № 7'), page('p2')],
       [
@@ -145,8 +147,26 @@ describe('присоединение служебных страниц', () => {
         cls('p2', { label: 'A-ROLE', pageRoleCode: 'signature_visual' }),
       ],
     );
+    expect(result.documents[0]?.pages.map((p) => p.sourcePageId)).toEqual(['p1', 'p2']);
+    expect(result.documents[0]?.pages[1]?.pageRoleCode).toBe('signature_visual');
+    expect(result.unassigned).toHaveLength(0);
+  });
+
+  it('лист визуализации подписи, оторванный от документа, остаётся ничьим', () => {
+    // Соседство — единственное основание привязки. Лист через страницу от
+    // документа мог подписывать что угодно, и «наверное, предыдущий» здесь
+    // было бы тихой ошибкой: документ выглядел бы целым.
+    const result = decodeSegmentation(
+      [page('p1', 'ПАСПОРТ КАЧЕСТВА № 7'), page('p2'), page('p3')],
+      [
+        opensKnown('p1', 'quality_passport'),
+        cls('p2', { label: 'U' }),
+        cls('p3', { label: 'A-ROLE', pageRoleCode: 'signature_visual' }),
+      ],
+    );
     expect(result.documents[0]?.pages).toHaveLength(1);
-    expect(result.unassigned).toHaveLength(1);
+    expect(result.unassigned.map((u) => u.sourcePageId)).toEqual(['p2', 'p3']);
+    expect(result.unassigned[1]?.reason).toContain('вне документа');
   });
 
   it('заверение копии присоединяется, только пока лист примыкает к документу', () => {

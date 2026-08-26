@@ -132,6 +132,29 @@ describe.skipIf(CORPUS.length === 0)('сегментация на эталонн
     },
   );
 
+  it('лист со штампом подписи не отрывается от своего документа', () => {
+    // Прямой гейт находки боевого комплекта: семь листов эталона со штампом
+    // ЭП — три при своих схемах, хвост реестра приложений с позициями и
+    // блоком подписей, лист подписей за ним — уходили в непривязанные, потому
+    // что роль запрещала автоприсоединение. Метрики границ этого не ловят: они
+    // считают только страницы `B-DOC`, а здесь ни одна граница не меняется.
+    const STAMP = /ДОКУМЕНТ\s+ПОДПИСАН\s+ЭЛЕКТРОННОЙ\s+ПОДПИСЬЮ/iu;
+    const orphans: string[] = [];
+
+    for (const pkg of CORPUS) {
+      const predicted = new Map(segment(pkg).map((p) => [p.pageNo, p]));
+      for (const page of pkg.pages) {
+        if (page.expected.documentKey === null) continue;
+        if (!STAMP.test(page.text)) continue;
+        if (predicted.get(page.pageNo)?.documentKey == null) {
+          orphans.push(`${pkg.packageKey}#${page.pageNo}`);
+        }
+      }
+    }
+
+    expect(orphans).toEqual([]);
+  });
+
   it('ни один документ не остался пустым', () => {
     for (const pkg of CORPUS) {
       const pages = toPageInputs(pkg);
