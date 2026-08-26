@@ -107,6 +107,37 @@ const RUN_C_NEW = id(83);
 const FINDING_C_OLD = id(84);
 const FINDING_C_NEW = id(85);
 
+/**
+ * Ревизия Г — комплект полного состава для отчёта (S29).
+ *
+ * Отдельная ревизия, а не расширение А: тесты покрытия утверждают точные числа
+ * страниц и документов ревизии А, и дописать туда акт с реестром значило бы
+ * переписать их ради фикстуры соседнего теста.
+ */
+const SUBMISSION_D = id(90);
+const REVISION_D = id(91);
+const FILE_D = id(92);
+const PAGE_D0 = id(93);
+const PAGE_D1 = id(94);
+const PAGE_D2 = id(95);
+const PAGE_D3 = id(96);
+const PAGE_D4 = id(97);
+const BUNDLE_D = id(98);
+const DOC_D_ACT = id(100);
+const DOC_D_REGISTRY = id(101);
+const DOC_D_CERT = id(102);
+const DOC_D_PASSPORT = id(103);
+const RUN_D = id(104);
+const FINDING_D_ACT = id(105);
+const FINDING_D_CERT = id(106);
+const FINDING_D_MATERIAL = id(107);
+const REG_ROW_MATCHED = id(108);
+const REG_ROW_MISSING = id(109);
+/** Ревизия без единого прогона правил: состав виден, проверки не было. */
+const SUBMISSION_E = id(110);
+const REVISION_E = id(111);
+const DOC_E = id(112);
+
 const SHA = (letter: string): string => letter.repeat(64);
 
 /** Код из реестра правил (seed 0017): `findings.rule_code` — внешний ключ. */
@@ -275,6 +306,111 @@ const FIXTURE: readonly string[] = [
      VALUES ('${FINDING_C_NEW}', '${RUN_C_NEW}', '${REVISION_C}', '${OBJECT}', '${ORG_A}', '${RULE_CODE}',
              'warning', 'open', 'deterministic', false, 'revision', '${REVISION_C}',
              'Замечание последнего прогона.')`,
+
+  // --- Поставка Г: комплект полного состава для отчёта -----------------------
+  //
+  // Акт, реестр приложений с двумя строками (одна сошлась, вторая нет),
+  // сертификат со сроком и паспорт. Плюс замечание о материале, которому места
+  // ни в одной строке отчёта нет по построению.
+  `INSERT INTO works
+       (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
+     VALUES ('${SUBMISSION_D}', '${OBJECT}', '${ORG_A}', '${ORG_A}', 'roofing', DATE '2026-03-01', 'Поставка Г', '${USER_A}')`,
+  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
+     VALUES ('${REVISION_D}', '${SUBMISSION_D}', '${OBJECT}', '${ORG_A}', 1, 'draft')`,
+  `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
+     VALUES ('${SHA('d')}', 'blobs/${SHA('d')}', 8192, 'application/pdf')`,
+  `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order, verify_state)
+     VALUES ('${FILE_D}', '${REVISION_D}', '${SHA('d')}', 'komplekt-g.pdf', 0, 'ok')`,
+  ...[PAGE_D0, PAGE_D1, PAGE_D2, PAGE_D3, PAGE_D4].map(
+    (page, index) =>
+      `INSERT INTO source_pages (id, revision_id, source_file_id, file_page_index, revision_ordinal, width_px, height_px, rotation)
+         VALUES ('${page}', '${REVISION_D}', '${FILE_D}', ${String(index)}, ${String(index)}, 1654, 2339, 0)`,
+  ),
+  `INSERT INTO processing_bundles (id, revision_id, aggregate_manifest_hash, working_pdf_blob_sha256, builder_version)
+     VALUES ('${BUNDLE_D}', '${REVISION_D}', '${SHA('c')}', '${SHA('d')}', 'bundle/1+pdf-lib')`,
+  ...[PAGE_D0, PAGE_D1, PAGE_D2, PAGE_D3, PAGE_D4].map(
+    (page, index) =>
+      `INSERT INTO processing_bundle_pages (bundle_id, revision_id, working_page_index, source_page_id)
+         VALUES ('${BUNDLE_D}', '${REVISION_D}', ${String(index)}, '${page}')`,
+  ),
+  // Порядок вставки НАРОЧНО обратный порядку страниц: отчёт обязан упорядочить
+  // документы по первой странице, а не по `ordinal` и не по порядку в таблице.
+  `INSERT INTO logical_documents (id, revision_id, object_id, contractor_id, doc_type_code, ordinal, title)
+     VALUES ('${DOC_D_PASSPORT}', '${REVISION_D}', '${OBJECT}', '${ORG_A}', 'quality_passport', 0, 'Паспорт')`,
+  `INSERT INTO logical_documents (id, revision_id, object_id, contractor_id, doc_type_code, ordinal, title)
+     VALUES ('${DOC_D_CERT}', '${REVISION_D}', '${OBJECT}', '${ORG_A}', 'cert_conformity', 1, 'Сертификат')`,
+  `INSERT INTO logical_documents (id, revision_id, object_id, contractor_id, doc_type_code, ordinal, title)
+     VALUES ('${DOC_D_REGISTRY}', '${REVISION_D}', '${OBJECT}', '${ORG_A}', 'annex_registry', 2, 'Реестр приложений')`,
+  `INSERT INTO logical_documents (id, revision_id, object_id, contractor_id, doc_type_code, ordinal, title)
+     VALUES ('${DOC_D_ACT}', '${REVISION_D}', '${OBJECT}', '${ORG_A}', 'aosr', 3, 'АОСР')`,
+  `INSERT INTO page_assignments (revision_id, source_page_id, document_id, sort_order)
+     VALUES ('${REVISION_D}', '${PAGE_D0}', '${DOC_D_ACT}', 0)`,
+  `INSERT INTO page_assignments (revision_id, source_page_id, document_id, sort_order)
+     VALUES ('${REVISION_D}', '${PAGE_D1}', '${DOC_D_ACT}', 1)`,
+  `INSERT INTO page_assignments (revision_id, source_page_id, document_id, sort_order)
+     VALUES ('${REVISION_D}', '${PAGE_D2}', '${DOC_D_REGISTRY}', 0)`,
+  `INSERT INTO page_assignments (revision_id, source_page_id, document_id, sort_order)
+     VALUES ('${REVISION_D}', '${PAGE_D3}', '${DOC_D_CERT}', 0)`,
+  `INSERT INTO page_assignments (revision_id, source_page_id, document_id, sort_order)
+     VALUES ('${REVISION_D}', '${PAGE_D4}', '${DOC_D_PASSPORT}', 0)`,
+  `INSERT INTO field_values (revision_id, document_id, field_code, value_text, extractor_version, extracted_by)
+     VALUES ('${REVISION_D}', '${DOC_D_ACT}', 'act_number', '01-Бл-П', 'extract/1', 'rule')`,
+  `INSERT INTO field_values (revision_id, document_id, field_code, value_text, extractor_version, extracted_by)
+     VALUES ('${REVISION_D}', '${DOC_D_CERT}', 'number', 'РОСС RU.0001', 'extract/1', 'rule')`,
+  `INSERT INTO field_values (revision_id, document_id, field_code, value_date, extractor_version, extracted_by)
+     VALUES ('${REVISION_D}', '${DOC_D_CERT}', 'issued_at', DATE '2023-03-12', 'extract/1', 'rule')`,
+  `INSERT INTO field_values (revision_id, document_id, field_code, value_date, extractor_version, extracted_by)
+     VALUES ('${REVISION_D}', '${DOC_D_CERT}', 'valid_to', DATE '2024-03-12', 'extract/1', 'rule')`,
+  `INSERT INTO registry_rows (id, revision_id, document_id, row_no, ordinal, doc_name_raw, doc_no_raw, org_raw,
+                              matched_document_id, match_score, match_state)
+     VALUES ('${REG_ROW_MATCHED}', '${REVISION_D}', '${DOC_D_REGISTRY}', 1, 0,
+             'Документ о качестве', 'РОСС RU.0001', 'ООО «Завод»',
+             '${DOC_D_CERT}', 1, 'matched')`,
+  `INSERT INTO registry_rows (id, revision_id, document_id, row_no, ordinal, doc_name_raw, doc_no_raw, match_state)
+     VALUES ('${REG_ROW_MISSING}', '${REVISION_D}', '${DOC_D_REGISTRY}', 2, 1,
+             'Паспорт качества', '16005', 'missing')`,
+  // Журнал исполнения: чек-лист акта показывается по нему, а не по замечаниям.
+  // Четыре пункта нарочно разного исхода — пройденный, провалившийся,
+  // неприменимый и не исполнявшийся: галочка обязана достаться только первому.
+  `INSERT INTO validation_runs (id, revision_id, ruleset_version_id, started_at, finished_at, counts)
+     VALUES ('${RUN_D}', '${REVISION_D}', '${RULESET_VERSION}', now(), now(), '{
+       "journal": {
+         "engineVersion": "checks/1",
+         "rulesetVersion": "2026.1",
+         "executions": [
+           {"ruleCode": "AOSR.HDR.020", "verdict": "pass", "reason": null, "findingCount": 0},
+           {"ruleCode": "AOSR.HDR.021", "verdict": "fail", "reason": null, "findingCount": 1},
+           {"ruleCode": "AOSR.P3.070", "verdict": "n_a", "reason": "профиль раздела не настроен", "findingCount": 0}
+         ],
+         "skippedCodes": {"AOSR.ACT.032": "not_in_profile"},
+         "externalRegistriesUnavailable": [],
+         "engineCounts": {}
+       }
+     }'::jsonb)`,
+  `INSERT INTO findings (id, validation_run_id, revision_id, object_id, contractor_id, rule_code,
+                         severity, state, origin, is_blocking, target_type, target_id, message)
+     VALUES ('${FINDING_D_ACT}', '${RUN_D}', '${REVISION_D}', '${OBJECT}', '${ORG_A}', 'AOSR.HDR.021',
+             'error', 'open', 'deterministic', true, 'document', '${DOC_D_ACT}',
+             'Контрольная сумма ИНН в шапке акта не сходится.')`,
+  `INSERT INTO findings (id, validation_run_id, revision_id, object_id, contractor_id, rule_code,
+                         severity, state, origin, is_blocking, target_type, target_id, message)
+     VALUES ('${FINDING_D_CERT}', '${RUN_D}', '${REVISION_D}', '${OBJECT}', '${ORG_A}', 'DATE.302',
+             'warning', 'open', 'deterministic', false, 'document', '${DOC_D_CERT}',
+             'Документ истёк 12.03.2024.')`,
+  `INSERT INTO findings (id, validation_run_id, revision_id, object_id, contractor_id, rule_code,
+                         severity, state, origin, is_blocking, target_type, target_id, message)
+     VALUES ('${FINDING_D_MATERIAL}', '${RUN_D}', '${REVISION_D}', '${OBJECT}', '${ORG_A}', 'MAT.110',
+             'error', 'open', 'deterministic', false, 'material', '${id(199)}',
+             'На материал нет документа о качестве.')`,
+
+  // --- Поставка Д: состав есть, проверки не было ----------------------------
+  `INSERT INTO works
+       (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
+     VALUES ('${SUBMISSION_E}', '${OBJECT}', '${ORG_A}', '${ORG_A}', 'roofing', DATE '2026-04-01', 'Поставка Д', '${USER_A}')`,
+  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
+     VALUES ('${REVISION_E}', '${SUBMISSION_E}', '${OBJECT}', '${ORG_A}', 1, 'draft')`,
+  `INSERT INTO logical_documents (id, revision_id, object_id, contractor_id, doc_type_code, ordinal, title)
+     VALUES ('${DOC_E}', '${REVISION_E}', '${OBJECT}', '${ORG_A}', 'cert_conformity', 0, 'Сертификат Д')`,
 ];
 
 const STORAGE_DIR = mkdtempSync(join(tmpdir(), 'id-checks-routes-'));
@@ -612,18 +748,14 @@ describe('обогащение замечаний', () => {
   it('цель, исчезнувшая после пересборки, названа словами, а не пустой ячейкой', async () => {
     // Пустая подпись читалась бы как дефект вёрстки, а это свойство данных:
     // прогон описывал документы, которых больше нет.
-    await db.exec(
-      `UPDATE findings SET target_id = '${id(999)}' WHERE id = '${FINDING_A}'`,
-    );
+    await db.exec(`UPDATE findings SET target_id = '${id(999)}' WHERE id = '${FINDING_A}'`);
     try {
       const response = await as(KC.a, 'GET', `/api/v1/revisions/${REVISION_A}/findings`);
       const finding = items(response)[0] as unknown as EnrichedFinding;
       expect(finding.target.kind).toBe('gone');
       expect(finding.target.label).toContain('пересобран');
     } finally {
-      await db.exec(
-        `UPDATE findings SET target_id = '${DOCUMENT_A}' WHERE id = '${FINDING_A}'`,
-      );
+      await db.exec(`UPDATE findings SET target_id = '${DOCUMENT_A}' WHERE id = '${FINDING_A}'`);
     }
   });
 });
@@ -861,11 +993,12 @@ describe('регистрация маршрутов', () => {
    * Модуль, написанный и не подключённый, проходит собственные тесты и
    * недостижим снаружи. Поэтому список снимается с СОБРАННОГО приложения.
    */
-  it('все четыре маршрута модуля достижимы в собранном приложении', () => {
+  it('все маршруты модуля достижимы в собранном приложении', () => {
     const expected: readonly (readonly ['GET' | 'POST', string])[] = [
       ['POST', '/api/v1/revisions/:revisionId/checks'],
       ['GET', '/api/v1/revisions/:revisionId/checks'],
       ['GET', '/api/v1/revisions/:revisionId/findings'],
+      ['GET', '/api/v1/revisions/:revisionId/check-report'],
       ['GET', '/api/v1/admin/rule-catalog'],
     ];
     for (const [method, url] of expected) {
@@ -879,5 +1012,214 @@ describe('регистрация маршрутов', () => {
     // Без этого утверждения предыдущий тест проходил бы и при поломанном
     // способе проверки.
     expect(app.hasRoute({ method: 'POST', url: '/api/v1/admin/rule-catalog' })).toBe(false);
+  });
+});
+
+// =====================================================================
+// Отчёт о составе комплекта (S29)
+// =====================================================================
+
+/**
+ * Проверяется то, ради чего отчёт и появился: по экрану должно быть ВИДНО, что
+ * портал прочитал, и в каком состоянии каждая позиция комплекта.
+ *
+ * Заказчик прошёл стенд и сказал: «результат распознавания невозможно понять».
+ * Пустая таблица ошибок отвечала на вопрос «что не так» и молчала обо всём
+ * остальном, поэтому здесь утверждается не отсутствие ошибок, а наличие состава
+ * и честность каждой отметки — включая ту, которая говорит «не знаю».
+ */
+interface ReportItemBody {
+  readonly code: string;
+  readonly title: string;
+  readonly status: string;
+  readonly detail: string | null;
+  readonly hint: string | null;
+}
+
+interface ReportRowBody {
+  readonly id: string;
+  readonly kind: string;
+  readonly title: string;
+  readonly subtitle: string | null;
+  readonly page: { number: number; workingPageIndex: number | null } | null;
+  readonly pages: string | null;
+  readonly dates: {
+    issuedAt: string | null;
+    validFrom: string | null;
+    validTo: string | null;
+  } | null;
+  readonly status: string;
+  readonly statusText: string;
+  readonly statusHint: string | null;
+  readonly findingIds: readonly string[];
+  readonly items: readonly ReportItemBody[];
+}
+
+interface ReportBody {
+  readonly runId: string | null;
+  readonly sections: readonly {
+    readonly kind: string;
+    readonly title: string;
+    readonly note: string | null;
+    readonly rows: readonly ReportRowBody[];
+  }[];
+}
+
+async function report(kcSub: string, revisionId: string): Promise<ReportBody> {
+  const response = await as(kcSub, 'GET', `/api/v1/revisions/${revisionId}/check-report`);
+  expect(response.statusCode).toBe(200);
+  return response.json<ReportBody>();
+}
+
+function sectionOf(body: ReportBody, kind: string): ReportBody['sections'][number] {
+  const found = body.sections.find((section) => section.kind === kind);
+  if (found === undefined) throw new Error(`в отчёте нет секции ${kind}`);
+  return found;
+}
+
+describe('GET /revisions/:id/check-report', () => {
+  it('порядок секций задан заказчиком: акт, реестр, документы о качестве', async () => {
+    const body = await report(KC.a, REVISION_D);
+    // Пересортировка на клиенте либо повторила бы этот порядок, либо разошлась
+    // бы с ним, поэтому его держит сервер.
+    expect(body.sections.map((section) => section.kind)).toEqual([
+      'act',
+      'registry',
+      'quality',
+      'unplaced',
+    ]);
+    expect(body.runId).toBe(RUN_D);
+  });
+
+  it('акт идёт одной строкой с чек-листом, и галочка достаётся только пройденному', async () => {
+    const act = sectionOf(await report(KC.a, REVISION_D), 'act');
+    expect(act.rows).toHaveLength(1);
+
+    const row = act.rows[0] as ReportRowBody;
+    expect(row.title).toContain('01-Бл-П');
+    expect(row.pages).toBe('1–2');
+    expect(row.page?.number).toBe(1);
+
+    const byCode = new Map(row.items.map((item) => [item.code, item]));
+    // Пройденное правило — единственный случай, где ставится галочка.
+    expect(byCode.get('AOSR.HDR.020')?.status).toBe('ok');
+    expect(byCode.get('AOSR.HDR.021')?.status).toBe('error');
+    expect(byCode.get('AOSR.HDR.021')?.detail).toContain('ИНН');
+    // Троичность §0.5: «неприменимо» и «не исполнялось» не сливаются ни с
+    // успехом, ни с ошибкой — иначе портал выдавал бы непроверенное за
+    // проверенное.
+    expect(byCode.get('AOSR.P3.070')?.status).toBe('not_applicable');
+    expect(byCode.get('AOSR.P3.070')?.detail).toBe('профиль раздела не настроен');
+    expect(byCode.get('AOSR.ACT.032')?.status).toBe('not_run');
+    expect(byCode.get('AOSR.ACT.032')?.detail).toBe('правило не входит в профиль раздела');
+  });
+
+  it('способ устранения виден в строке, а не только в раскрытии', async () => {
+    const findings = sectionOf(await report(KC.engineer, REVISION_A), 'quality');
+    const cert = findings.rows[0] as ReportRowBody;
+    // ADR-0016 назвал это отдельным решением: замечание без способа устранения
+    // бесполезно подрядчику, а раскрытие — ещё одно нажатие ради двух строк.
+    expect(cert.statusHint).toBe('Проверьте нумерацию актов.');
+  });
+
+  it('название пункта чек-листа берётся из набора правил, а не из кода', async () => {
+    const act = sectionOf(await report(KC.a, REVISION_D), 'act');
+    const item = (act.rows[0] as ReportRowBody).items.find(
+      (candidate) => candidate.code === 'AOSR.HDR.020',
+    );
+    // Администратор переименовывает правила в портале, и каталог в коде
+    // разошёлся бы с `rule_definitions` при первой же правке.
+    expect(item?.title).toBe('Реквизиты сторон в шапке акта заполнены');
+  });
+
+  it('строки внутреннего реестра показывают наличие каждого названного документа', async () => {
+    const registry = sectionOf(await report(KC.a, REVISION_D), 'registry');
+    const rows = registry.rows;
+
+    // Первой идёт сам документ-реестр, за ним — его строки по порядку.
+    expect(rows[0]?.kind).toBe('document');
+    expect(rows[1]?.kind).toBe('registry_row');
+
+    const matched = rows.find((row) => row.id === REG_ROW_MATCHED);
+    expect(matched?.status).toBe('ok');
+    expect(matched?.statusText).toContain('стр. 4');
+    expect(matched?.title).toBe('1. Документ о качестве');
+
+    const missing = rows.find((row) => row.id === REG_ROW_MISSING);
+    expect(missing?.status).toBe('error');
+    expect(missing?.statusText).toBe('нет в комплекте');
+  });
+
+  it('у сертификата видны даты и замечание о сроке', async () => {
+    const quality = sectionOf(await report(KC.a, REVISION_D), 'quality');
+    const cert = quality.rows.find((row) => row.id === DOC_D_CERT);
+
+    expect(cert?.dates).toEqual({
+      issuedAt: '2023-03-12',
+      validFrom: null,
+      validTo: '2024-03-12',
+    });
+    expect(cert?.status).toBe('warning');
+    expect(cert?.statusText).toContain('истёк');
+    expect(cert?.findingIds).toEqual([FINDING_D_CERT]);
+  });
+
+  it('документ без замечаний подтверждается прямо, а не молчанием', async () => {
+    const quality = sectionOf(await report(KC.a, REVISION_D), 'quality');
+    const passport = quality.rows.find((row) => row.id === DOC_D_PASSPORT);
+    expect(passport?.status).toBe('ok');
+    expect(passport?.statusText).toBe('данные верны');
+  });
+
+  it('документы упорядочены по первой странице, а не по порядку в базе', async () => {
+    const quality = sectionOf(await report(KC.a, REVISION_D), 'quality');
+    // В фикстуре паспорт вставлен ПЕРВЫМ и имеет ordinal 0, но лежит на
+    // последней странице: человек листает комплект, а не таблицу.
+    expect(quality.rows.map((row) => row.id)).toEqual([DOC_D_CERT, DOC_D_PASSPORT]);
+  });
+
+  it('ни одно видимое замечание не теряется: чему не нашлось строки — в отдельной секции', async () => {
+    const body = await report(KC.a, REVISION_D);
+    const placed = new Set(
+      body.sections.flatMap((section) => section.rows.flatMap((row) => row.findingIds)),
+    );
+
+    // Инвариант полноты: молча потерянное замечание хуже показанного дважды.
+    expect(placed).toEqual(new Set([FINDING_D_ACT, FINDING_D_CERT, FINDING_D_MATERIAL]));
+
+    const unplaced = sectionOf(body, 'unplaced');
+    expect(unplaced.rows.flatMap((row) => row.findingIds)).toEqual([FINDING_D_MATERIAL]);
+    expect(unplaced.note).toContain('не хватает');
+  });
+
+  it('БЕЗ прогона состав виден, но каждая строка честно говорит «не знаю»', async () => {
+    const body = await report(KC.a, REVISION_E);
+    expect(body.runId).toBeNull();
+
+    const quality = sectionOf(body, 'quality');
+    expect(quality.rows).toHaveLength(1);
+    // Ровно то, чего не было на экране: комплект разобран, а проверка не
+    // выполнялась — и портал это говорит вместо «Ошибок не найдено».
+    expect(quality.rows[0]?.status).toBe('unchecked');
+    expect(quality.rows[0]?.statusText).toBe('проверка по правилам не выполнялась');
+  });
+
+  it('без реестра приложений секция объясняет, почему сверять не с чем', async () => {
+    const registry = sectionOf(await report(KC.a, REVISION_E), 'registry');
+    expect(registry.rows).toHaveLength(0);
+    expect(registry.note).toContain('не найден');
+  });
+
+  it('чужой комплект не отдаётся: ни состава, ни замечаний', async () => {
+    const body = await report(KC.b, REVISION_D);
+    // Положительный контроль стоит выше: владелец получает непустой отчёт, и
+    // только поэтому пустота у соседа доказывает изоляцию, а не сломанный запрос.
+    expect(body.sections).toHaveLength(0);
+    expect(body.runId).toBeNull();
+  });
+
+  it('инженер без назначенных объектов не видит отчёт', async () => {
+    const body = await report(KC.engineerNoScope, REVISION_D);
+    expect(body.sections).toHaveLength(0);
   });
 });

@@ -1,15 +1,15 @@
 /**
- * Список ошибок и согласование (§9, §9.6, §14, ADR-0016).
+ * Состав комплекта, результат проверки и согласование (§9, §9.6, §14).
  *
- * Проверяется форма, которую назвал заказчик: «страница такая-то — тип
- * документа такой-то — ошибка такая-то». Прежний экран печатал вместо этого код
- * правила, состояние, источник и идентификатор цели — семь колонок, ни одна из
- * которых не отвечала на вопрос «что не так с комплектом».
+ * Форма строки, которую назвал заказчик, осталась — «страница такая-то — тип
+ * документа такой-то — ошибка такая-то», — но живёт теперь строкой таблицы
+ * СОСТАВА (S29). Прежний список показывал только ошибки, и на чистом комплекте
+ * экран был пуст: «результат распознавания невозможно понять».
  *
  * Здесь же — то, чего на экране быть НЕ должно: фильтра состояний, счётчика
  * блокирующих, разделов «Документы комплекта» и «Реквизиты». Утверждения-негативы
  * стоят рядом с положительными намеренно: «нет фильтра» проходит и на пустой
- * странице, поэтому оно имеет смысл только вместе с «а список есть».
+ * странице, поэтому оно имеет смысл только вместе с «а таблица есть».
  */
 import { expect, test } from '@playwright/test';
 import { IDS, KC, signIn } from './support/session.js';
@@ -19,23 +19,37 @@ test.describe.configure({ mode: 'serial' });
 test('строка называет страницу, вид документа и что не так', async ({ page }) => {
   await signIn(page, KC.engineer, `/ids/revisions/${IDS.revisionReview}?tab=checks`);
 
-  const rows = page.getByTestId('findings-by-page');
-  await expect(rows).toBeVisible();
+  const report = page.getByTestId('checks-report');
+  await expect(report).toBeVisible();
+
+  // Акт идёт первым разделом: порядок назвал заказчик и держит сервер.
+  const act = page.getByTestId('checks-report-section-act');
+  await expect(act).toBeVisible();
 
   // Вид ИД приходит из справочника, а не кодом типа: «aosr» человеку ничего
   // не говорит, и добывать название вторым запросом фронт больше не обязан.
-  await expect(rows).toContainText('Акт освидетельствования скрытых работ');
-  await expect(rows).toContainText('ОГРН не проходит проверку контрольной суммы');
+  await expect(act).toContainText('Акт освидетельствования скрытых работ');
+  await expect(act).toContainText('ОГРН не проходит проверку контрольной суммы');
   // Номер страницы — сквозной по комплекту, тот же, которым лист подписан в
   // бумажной папке.
-  await expect(rows.getByRole('link', { name: '1', exact: true })).toBeVisible();
+  await expect(act.getByRole('link', { name: '1', exact: true })).toBeVisible();
 
   // Способ устранения виден сразу, а не в раскрытии строки: замечание без него
   // бесполезно подрядчику (§9.1), а раскрытие — это ещё одно нажатие ради
   // текста в две строки.
-  await expect(rows).toContainText('Сверьте значение с выпиской ЕГРЮЛ');
-  // Код правила остаётся — он нужен поддержке, — но серой строкой, не колонкой.
-  await expect(rows).toContainText('AOSR.HDR.022');
+  await expect(act).toContainText('Сверьте значение с выпиской ЕГРЮЛ');
+});
+
+test('состав виден целиком, а не только его ошибки', async ({ page }) => {
+  await signIn(page, KC.engineer, `/ids/revisions/${IDS.revisionReview}?tab=checks`);
+
+  // Ровно то, чего не хватало заказчику: по экрану видно, ЧТО портал прочитал.
+  // Реестра приложений в этом комплекте нет, и раздел объясняет это словами, а
+  // не пустотой — пустой раздел неотличим от сломанного экрана.
+  const registry = page.getByTestId('checks-report-section-registry');
+  await expect(registry).toBeVisible();
+  await expect(registry).toContainText('Реестр приложений');
+  await expect(registry).toContainText('не найден');
 });
 
 test('сводка отвечает словами, а не счётчиком блокирующих', async ({ page }) => {
@@ -52,7 +66,7 @@ test('сводка отвечает словами, а не счётчиком �
 
 test('на экране нет ни фильтра состояний, ни разделов ручной сборки', async ({ page }) => {
   await signIn(page, KC.engineer, `/ids/revisions/${IDS.revisionReview}?tab=checks`);
-  await expect(page.getByTestId('findings-by-page')).toBeVisible();
+  await expect(page.getByTestId('checks-report')).toBeVisible();
 
   // Вкладки с типами замечаний убраны решением заказчика: состояние видно
   // тегом в строке, а не переключателем над таблицей.
@@ -71,7 +85,7 @@ test('прежние адреса разделов ведут на «Прове�
 
   await expect(page).toHaveURL(/tab=checks/);
   await expect(page.getByText(/Разделы «Документы» и «Реквизиты» удалены/u)).toBeVisible();
-  await expect(page.getByTestId('findings-by-page')).toBeVisible();
+  await expect(page.getByTestId('checks-report')).toBeVisible();
 });
 
 // Согласование живёт на вкладке «Проверка» с S24: решение принимают, глядя на

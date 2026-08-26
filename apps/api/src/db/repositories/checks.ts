@@ -875,7 +875,21 @@ export async function loadRunJournal(
   input: { readonly validationRunId: string; readonly revisionId: string },
 ): Promise<RuleExecutionJournal | null> {
   await loadRevisionContext(db, scope, input.revisionId);
+  return readRunJournal(db, input);
+}
 
+/**
+ * Журнал прогона БЕЗ проверки области — для вызывающего, который её уже сделал.
+ *
+ * Разбор `counts` живёт здесь одним экземпляром: `journal` лежит внутри jsonb, и
+ * второе место, знающее его форму, разошлось бы с первым при первой же правке
+ * `saveRunJournal`. Область проверяет `loadRunJournal`; отчёт о составе
+ * комплекта проверяет её раньше и своим запросом, внутри общей транзакции.
+ */
+export async function readRunJournal(
+  db: Executor,
+  input: { readonly validationRunId: string; readonly revisionId: string },
+): Promise<RuleExecutionJournal | null> {
   const rows = await db
     .select({ counts: validationRuns.counts })
     .from(validationRuns)
@@ -1000,14 +1014,7 @@ export interface FindingDocumentView {
 
 export interface FindingTargetView {
   readonly kind:
-    | 'document'
-    | 'material'
-    | 'batch'
-    | 'registry_row'
-    | 'page'
-    | 'field'
-    | 'revision'
-    | 'gone';
+    'document' | 'material' | 'batch' | 'registry_row' | 'page' | 'field' | 'revision' | 'gone';
   readonly label: string;
   readonly detail: string | null;
 }
@@ -1080,7 +1087,7 @@ export interface ChecksRunView {
  * `validationRunId`; в блокерах согласования и в сводке архива они больше не
  * участвуют.
  */
-async function resolveShownRun(
+export async function resolveShownRun(
   db: Executor,
   scope: AuthScope,
   revisionId: string,
@@ -1309,64 +1316,83 @@ export async function listFindingsView(
     );
     if (shownRunId === null) return { items: [], latestRun: latest, shownRunId: null };
 
-    const rows = await tx
-      .select({
-        id: findings.id,
-        validationRunId: findings.validationRunId,
-        ruleCode: findings.ruleCode,
-        severity: findings.severity,
-        state: findings.state,
-        origin: findings.origin,
-        isBlocking: findings.isBlocking,
-        targetType: findings.targetType,
-        targetId: findings.targetId,
-        sourcePageId: findings.sourcePageId,
-        blockId: findings.blockId,
-        message: findings.message,
-        hint: findings.hint,
-      })
-      .from(findings)
-      .innerJoin(submissionRevisions, eq(findings.revisionId, submissionRevisions.id))
-      .where(
-        withScope(
-          scope,
-          REVISION_SCOPE,
-          eq(findings.revisionId, input.revisionId),
-          eq(findings.validationRunId, shownRunId),
-        ),
-      )
-      .orderBy(asc(findings.ruleCode), asc(findings.createdAt));
-
-    if (rows.length === 0) return { items: [], latestRun: latest, shownRunId };
-
-    const context = await loadFindingContext(
-      tx,
-      input.revisionId,
-      rows.map((row) => row.id),
-    );
-
-    // Приведение к закрытым перечислениям: значения держат CHECK-ограничения
-    // 0006, и расширять их можно только миграцией.
-    const items = rows.map((row) => {
-      const severity = row.severity as FindingSeverity;
-      const state = row.state as FindingView['state'];
-      const evidence = context.evidence.get(row.id) ?? [];
-      const resolved = resolveSubject(row, context, evidence);
-      return {
-        ...row,
-        severity,
-        state,
-        origin: row.origin as FindingOrigin,
-        text: findingText(row),
-        page: resolved.page,
-        document: resolved.document,
-        target: resolved.target,
-        evidence,
-      };
-    });
-
-    return { items: orderForScreen(items), latestRun: latest, shownRunId };
+    const items = await collectFindings(tx, scope, input.revisionId, shownRunId);
+    return { items, latestRun: latest, shownRunId };
   });
+}
+
+/**
+ * Замечания одного прогона внутри УЖЕ ОТКРЫТОЙ транзакции.
+ *
+ * Отдельно от `listFindingsView`, потому что вызывающих двое: список замечаний
+ * и отчёт о составе комплекта (`check-report.ts`). Оба обязаны читать замечания
+ * ТЕМ ЖЕ прогоном и в ТОЙ ЖЕ транзакции, что и остальные свои таблицы, — иначе
+ * в READ COMMITTED пересегментация посреди чтения даёт ответ, часть которого
+ * описывает старые замечания, а часть уже новые документы.
+ */
+export async function collectFindings(
+  tx: Executor,
+  scope: AuthScope,
+  revisionId: string,
+  shownRunId: string,
+): Promise<readonly FindingView[]> {
+  const rows = await tx
+    .select({
+      id: findings.id,
+      validationRunId: findings.validationRunId,
+      ruleCode: findings.ruleCode,
+      severity: findings.severity,
+      state: findings.state,
+      origin: findings.origin,
+      isBlocking: findings.isBlocking,
+      targetType: findings.targetType,
+      targetId: findings.targetId,
+      sourcePageId: findings.sourcePageId,
+      blockId: findings.blockId,
+      message: findings.message,
+      hint: findings.hint,
+    })
+    .from(findings)
+    .innerJoin(submissionRevisions, eq(findings.revisionId, submissionRevisions.id))
+    .where(
+      withScope(
+        scope,
+        REVISION_SCOPE,
+        eq(findings.revisionId, revisionId),
+        eq(findings.validationRunId, shownRunId),
+      ),
+    )
+    .orderBy(asc(findings.ruleCode), asc(findings.createdAt));
+
+  if (rows.length === 0) return [];
+
+  const context = await loadFindingContext(
+    tx,
+    revisionId,
+    rows.map((row) => row.id),
+  );
+
+  // Приведение к закрытым перечислениям: значения держат CHECK-ограничения
+  // 0006, и расширять их можно только миграцией.
+  const items = rows.map((row) => {
+    const severity = row.severity as FindingSeverity;
+    const state = row.state as FindingView['state'];
+    const evidence = context.evidence.get(row.id) ?? [];
+    const resolved = resolveSubject(row, context, evidence);
+    return {
+      ...row,
+      severity,
+      state,
+      origin: row.origin as FindingOrigin,
+      text: findingText(row),
+      page: resolved.page,
+      document: resolved.document,
+      target: resolved.target,
+      evidence,
+    };
+  });
+
+  return orderForScreen(items);
 }
 
 /**
@@ -1395,22 +1421,25 @@ function orderForScreen(items: readonly FindingView[]): readonly FindingView[] {
 // Обогащение замечаний: страница, документ, объект, доказательство
 // =====================================================================
 
-interface PageFacts {
+export interface PageFacts {
   readonly number: number;
   readonly workingPageIndex: number | null;
   readonly documentId: string | null;
 }
 
-interface DocumentFacts {
+export interface DocumentFacts {
   readonly label: string;
   readonly docTypeCode: string | null;
   readonly firstPageId: string | null;
 }
 
-interface FindingContext {
+export interface FindingContext {
   readonly pages: ReadonlyMap<string, PageFacts>;
   readonly documents: ReadonlyMap<string, DocumentFacts>;
-  readonly fields: ReadonlyMap<string, { documentId: string; fieldCode: string; pageId: string | null }>;
+  readonly fields: ReadonlyMap<
+    string,
+    { documentId: string; fieldCode: string; pageId: string | null }
+  >;
   readonly materials: ReadonlyMap<string, string>;
   readonly batches: ReadonlyMap<string, { material: string; detail: string | null }>;
   readonly registryRows: ReadonlyMap<string, { label: string; detail: string | null }>;
@@ -1418,7 +1447,7 @@ interface FindingContext {
   readonly evidencePageOf: ReadonlyMap<string, string>;
 }
 
-async function loadFindingContext(
+export async function loadFindingContext(
   db: Executor,
   revisionId: string,
   findingIds: readonly string[],
@@ -1474,9 +1503,7 @@ async function loadFindingContext(
       id: logicalDocuments.id,
       docTypeCode: logicalDocuments.docTypeCode,
       title: logicalDocuments.title,
-      typeName: sql<
-        string | null
-      >`coalesce(${docTypeOverrides.name}, ${docTypes.name})`,
+      typeName: sql<string | null>`coalesce(${docTypeOverrides.name}, ${docTypes.name})`,
       firstPageId: sql<string | null>`(
         select a.source_page_id from ${pageAssignments} a
          where a.document_id = ${logicalDocuments.id}
@@ -1515,7 +1542,10 @@ async function loadFindingContext(
     .leftJoin(pageTextVersions, eq(fieldValues.pageTextVersionId, pageTextVersions.id))
     .where(eq(fieldValues.revisionId, revisionId));
 
-  const fields = new Map<string, { documentId: string; fieldCode: string; pageId: string | null }>();
+  const fields = new Map<
+    string,
+    { documentId: string; fieldCode: string; pageId: string | null }
+  >();
   for (const row of fieldRows) {
     fields.set(row.id, {
       documentId: row.documentId,
@@ -1722,9 +1752,7 @@ function describeTarget(row: SubjectRow, context: FindingContext): FindingTarget
     case 'document': {
       if (row.targetId === null) return gone;
       const facts = context.documents.get(row.targetId);
-      return facts === undefined
-        ? gone
-        : { kind: 'document', label: facts.label, detail: null };
+      return facts === undefined ? gone : { kind: 'document', label: facts.label, detail: null };
     }
     case 'field_value': {
       if (row.targetId === null) return gone;

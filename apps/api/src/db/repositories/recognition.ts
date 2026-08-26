@@ -48,7 +48,7 @@ import type { AuthScope } from '../../auth/scope.js';
 import { conflict, internal, notFound } from '../../lib/problem.js';
 import { artifactKey, type ArtifactKind } from '../../storage/keys.js';
 import { withScope, type ScopeTarget } from '../scoped.js';
-import { appendRevisionEvent, enqueueSystemJob } from './jobs.js';
+import { appendRevisionEvent, cancelJobsOfRecognitionRun, enqueueSystemJob } from './jobs.js';
 import type { Database } from './users.js';
 
 const REVISION_SCOPE: ScopeTarget = {
@@ -394,6 +394,22 @@ export async function startRecognitionRun(
       })
       .returning({ id: recognitionRuns.id });
 
+    /**
+     * Задачи восстанавливаемого прогона снимаются ТОЙ ЖЕ транзакцией (S29).
+     *
+     * Их предмет перешёл дочернему прогону, разбирать в них нечего, а
+     * оставленные мёртвыми они держат `dead > 0` по всей ревизии — то есть
+     * стадию `failed` и красную плашку «обработка остановилась» навсегда
+     * (`summaryStage`, `jobs.ts`). Отдельным шагом после транзакции это делать
+     * нельзя: сбой между вставкой и отменой оставил бы ревизию с двумя
+     * прогонами и полным набором мертвецов первого, а повторить нажатие
+     * пользователь уже не смог бы — восстанавливать было бы нечего.
+     */
+    const cancelledParentJobs =
+      input.repairOfRunId == null
+        ? 0
+        : await cancelJobsOfRecognitionRun(tx, found.revisionId, input.repairOfRunId);
+
     await appendRevisionEvent(tx, {
       revisionId: found.revisionId,
       eventType: 'recognition.started',
@@ -401,7 +417,9 @@ export async function startRecognitionRun(
         layoutRevisionId: found.id,
         recognitionRunId: rows[0]?.id ?? null,
         localLayoutHash: found.blocksHash,
-        ...(input.repairOfRunId != null ? { repairOfRunId: input.repairOfRunId } : {}),
+        ...(input.repairOfRunId != null
+          ? { repairOfRunId: input.repairOfRunId, cancelledParentJobs }
+          : {}),
       },
     });
     return rows[0]?.id ?? null;

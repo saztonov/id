@@ -77,17 +77,84 @@ export function markupHref(revisionId: string, finding: Finding): string | null 
 /**
  * Состояние проверки одной фразой.
  *
- * Четыре случая, и они не сливаются. «Проверки ещё не было» и «комплект
- * изменился» выглядят одинаково пустым экраном и означают разное: в первом
- * случае надо нажать кнопку, во втором — знать, что список ниже описывает
- * прежний состав. Прежняя вкладка не различала их вовсе и потому молчала в обоих.
+ * Случаи не сливаются. «Проверки ещё не было» и «комплект изменился» выглядят
+ * одинаково пустым экраном и означают разное: в первом случае надо нажать
+ * кнопку, во втором — знать, что список ниже описывает прежний состав. Прежняя
+ * вкладка не различала их вовсе и потому молчала в обоих.
+ *
+ * ## Успех получил свой вид (S29)
+ *
+ * Прежнее `done` рисовалось отсутствием плашки, то есть было неотличимо от
+ * непрогруженного экрана: пользователь, прошедший комплект без единой ошибки,
+ * не получал подтверждения вовсе и не мог понять, сработало ли что-нибудь.
+ * Теперь исход прогона расщеплён надвое, и зелёное сообщение появляется только
+ * тогда, когда придраться не к чему НИ ПО ОДНОМУ пункту.
  */
 export type RunState =
   | { readonly kind: 'never' }
   | { readonly kind: 'running' }
   | { readonly kind: 'running_over_previous'; readonly since: string }
   | { readonly kind: 'stale' }
-  | { readonly kind: 'done' };
+  | { readonly kind: 'done_clean' }
+  | {
+      readonly kind: 'done_with_issues';
+      /** `error` — есть открытые ошибки; иначе оговорки мягче. */
+      readonly tone: 'error' | 'warning';
+      /** Что именно мешает назвать прогон чистым. Непустой по построению. */
+      readonly reservations: readonly string[];
+    };
+
+/**
+ * Условие зелёного — строгое, и это решение заказчика.
+ *
+ * Зелёная плашка над таблицей, в которой есть хоть один крестик, обесценивает
+ * сама себя: один раз увидев её рядом с непроверенной страницей, проверяющий
+ * перестаёт ей верить и дальше читает таблицу целиком — то есть плашка не
+ * экономит ему ничего. Поэтому чистым считается прогон, у которого сошлось
+ * всё: и находки, и покрытие.
+ *
+ * `undetermined` учитывается наравне с ошибками намеренно (§0.5): «данных для
+ * вывода нет» — это не «всё в порядке», и слить их значило бы выдать
+ * непроверенное за проверенное.
+ */
+function reservationsOf(summary: ChecksSummary): readonly string[] {
+  const { coverage, counts } = summary;
+  const parts: string[] = [];
+
+  if (counts.openErrors > 0) {
+    parts.push(
+      `${String(counts.openErrors)} ${plural(counts.openErrors, 'ошибка', 'ошибки', 'ошибок')}`,
+    );
+  }
+  const soft = counts.openWarnings + counts.openInfo;
+  if (soft > 0) {
+    parts.push(
+      `${String(soft)} ${plural(soft, 'предупреждение', 'предупреждения', 'предупреждений')}`,
+    );
+  }
+  if (counts.undetermined > 0) {
+    parts.push(
+      `${String(counts.undetermined)} ${plural(counts.undetermined, 'замечание', 'замечания', 'замечаний')} не проверено`,
+    );
+  }
+  if (coverage.pagesRecognized < coverage.pagesTotal) {
+    parts.push(
+      `распознано ${String(coverage.pagesRecognized)} ${plural(coverage.pagesRecognized, 'страница', 'страницы', 'страниц')} из ${String(coverage.pagesTotal)}`,
+    );
+  }
+  if (coverage.pagesUnassigned > 0) {
+    parts.push(
+      `${String(coverage.pagesUnassigned)} ${plural(coverage.pagesUnassigned, 'страница', 'страницы', 'страниц')} не ${plural(coverage.pagesUnassigned, 'отнесена', 'отнесены', 'отнесены')} к документам`,
+    );
+  }
+  if (coverage.documentsUnknownType > 0) {
+    parts.push(
+      `вид не определён у ${String(coverage.documentsUnknownType)} ${plural(coverage.documentsUnknownType, 'документа', 'документов', 'документов')}`,
+    );
+  }
+
+  return parts;
+}
 
 export function runStateOf(summary: ChecksSummary, matchesCurrentFiles: boolean): RunState {
   const latest = summary.latestRun;
@@ -99,7 +166,15 @@ export function runStateOf(summary: ChecksSummary, matchesCurrentFiles: boolean)
   }
   // Состав изменился после проверки — догрузили файл. Удаление и замена сносят
   // прогоны вместе с производным, поэтому сюда попадает только догрузка.
-  return matchesCurrentFiles ? { kind: 'done' } : { kind: 'stale' };
+  if (!matchesCurrentFiles) return { kind: 'stale' };
+
+  const reservations = reservationsOf(summary);
+  if (reservations.length === 0) return { kind: 'done_clean' };
+  return {
+    kind: 'done_with_issues',
+    tone: summary.counts.openErrors > 0 ? 'error' : 'warning',
+    reservations,
+  };
 }
 
 /** Склонение по русскому правилу: 1 ошибка, 2 ошибки, 5 ошибок. */
@@ -118,8 +193,19 @@ export function plural(count: number, one: string, few: string, many: string): s
  * Счётчик «блокирующих открытых: 0» отвечал на вопрос, которого у пользователя
  * нет. Вопрос у него другой: сколько страниц портал прочитал и что нашёл, —
  * и ответ на него читается одной фразой.
+ *
+ * ## Почему фраза зависит от состояния прогона (S29)
+ *
+ * Прежняя версия собирала хвост только из счётчиков и при пустых счётчиках
+ * печатала «Ошибок не найдено.» — в том числе там, где прогона правил не было
+ * вовсе. Счётчики в этом случае нули по построению: без прогона выдача
+ * возвращает пустой список. То есть портал заявлял чистоту комплекта, которого
+ * не проверял, и делал это ПРЯМО НАД плашкой «Проверка ещё не выполнялась».
+ *
+ * Различие «не нашли» и «не искали» стоит одного параметра и решает главную
+ * жалобу: по такому экрану нельзя было понять, всё ли в порядке.
  */
-export function summaryText(summary: ChecksSummary): string {
+export function summaryText(summary: ChecksSummary, state: RunState): string {
   const { coverage, counts } = summary;
   const read =
     coverage.pagesTotal === 0
@@ -145,8 +231,21 @@ export function summaryText(summary: ChecksSummary): string {
     parts.push(`${String(counts.undetermined)} не проверено`);
   }
 
-  const found = parts.length === 0 ? 'Ошибок не найдено.' : `Найдено: ${parts.join(', ')}.`;
-  return `${read}. ${found}`;
+  return `${read}. ${foundText(state, parts)}`;
+}
+
+/** Хвост сводки: что искали и что нашли — либо честное «не искали». */
+function foundText(state: RunState, parts: readonly string[]): string {
+  switch (state.kind) {
+    case 'never':
+      return 'Проверка по правилам не выполнялась: ошибки не искали.';
+    case 'running':
+      return 'Проверка по правилам идёт: результата пока нет.';
+    default:
+      return parts.length === 0
+        ? 'Проверка выполнена: ошибок не найдено.'
+        : `Найдено: ${parts.join(', ')}.`;
+  }
 }
 
 /**

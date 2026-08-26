@@ -62,6 +62,7 @@ import { describeError } from '../../api/problem.js';
 import { useSession } from '../../app/session.js';
 import { Link } from '../../app/router.js';
 import { usePollingInterval } from './stream.js';
+import { isDryRun, newestRecognitionRun, runningRecognitionRun } from './runs.js';
 
 /** Стадии, на которых конвейер что-то делает прямо сейчас. */
 const BUSY_STAGES: readonly string[] = ['uploaded', 'layout', 'recognition', 'analysis', 'checks'];
@@ -109,10 +110,18 @@ export function PipelineBar({ revisionId, editable }: PipelineBarProps): ReactNo
     queryFn: () => recognition.runs(revisionId),
   });
 
-  // Прогресс читается по ПОСЛЕДНЕМУ идущему прогону: он один — незавершённый
-  // прогон по ревизии разметки в портале ровно один (доменный инвариант §6.2).
-  const runningRun = (runs.data ?? []).findLast((run) => run.status === 'running') ?? null;
-  const progressRunId = runningRun?.id ?? lastRunId;
+  // Выбор прогона — в `runs.ts`, а не здесь: список приходит отсортированным по
+  // УБЫВАНИЮ времени, и прежние `findLast`/`at(-1)` брали по нему САМЫЙ СТАРЫЙ
+  // прогон ревизии.
+  //
+  // Прогресс читается по ИДУЩЕМУ прогону: он один — незавершённый прогон по
+  // ревизии разметки в портале ровно один (доменный инвариант §6.2).
+  const runningRun = runningRecognitionRun(runs.data);
+  const lastRun = newestRecognitionRun(runs.data);
+  // `lastRunId` — прогон, запущенный В ЭТОЙ вкладке; он старше списка ровно на
+  // время до первого его обновления. Новейший прогон стоит третьим: он и есть
+  // ответ после перезагрузки страницы и при запуске из соседней вкладки.
+  const progressRunId = runningRun?.id ?? lastRunId ?? lastRun?.id ?? null;
 
   // Прогресс опрашивается ВСЕГДА, пока прогон идёт, — и при живом потоке тоже.
   // Поток несёт события задач (`job.succeeded` на каждую страницу), но по §
@@ -181,11 +190,14 @@ export function PipelineBar({ revisionId, editable }: PipelineBarProps): ReactNo
   const busy = isBusy(stage, queued, running);
   const canRun = editable && can('pipeline.run');
 
-  // Shadow-режим виден по снимку ПОСЛЕДНЕГО прогона, а не по настройке: снимок
+  // Shadow-режим виден по снимку НОВЕЙШЕГО прогона, а не по настройке: снимок
   // пиннится на старте (ADR-0007), и прогон, начатый до переключения, идёт по
   // своему режиму, а не по текущему значению настройки. Спрашивать настройку
   // значило бы обещать про идущий прогон то, чего он не делает.
-  const lastRun = (runs.data ?? []).at(-1) ?? null;
+  //
+  // `at(-1)` здесь был дефектом: список сортируется по убыванию времени, то есть
+  // последний его элемент — САМЫЙ СТАРЫЙ прогон ревизии. Плашка режима описывала
+  // давний ручной прогон и выглядела как включённая настройка портала.
   const dryRun = isDryRun(lastRun?.settingsSnapshot);
 
   // Отказ показывается и когда сводная стадия уже уехала дальше: упавшая задача
@@ -331,19 +343,6 @@ function isBusy(stage: string | null, queued: number, running: number): boolean 
   if (stage === null) return false;
   if (!BUSY_STAGES.includes(stage)) return false;
   return queued > 0 || running > 0;
-}
-
-/**
- * Идёт ли прогон в shadow-режиме — по его собственному снимку настроек.
- *
- * Снимок — единственный честный источник: он пиннится на старте (ADR-0007), и
- * прогон, начатый до переключения настройки, идёт по своему режиму. Форма
- * снимка объявлена как `unknown`, потому что версий у него две; читается ровно
- * одно поле, и отсутствие его означает «не dry-run», а не «неизвестно».
- */
-function isDryRun(snapshot: unknown): boolean {
-  if (typeof snapshot !== 'object' || snapshot === null) return false;
-  return (snapshot as { dryRun?: unknown }).dryRun === true;
 }
 
 interface StateInput {

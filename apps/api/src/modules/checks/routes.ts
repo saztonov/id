@@ -28,10 +28,12 @@ import {
   listValidationRuns,
   loadChecksCoverage,
 } from '../../db/repositories/checks.js';
+import { buildCheckReport } from '../../db/repositories/check-report.js';
 import { enqueueJob } from '../../db/repositories/jobs.js';
 import { findRevisionForFiles } from '../../db/repositories/files.js';
 import { dedupeKeyFor } from '../../jobs/types.js';
 import {
+  checkReportSchema,
   findingListSchema,
   findingQuerySchema,
   revisionIdParamSchema,
@@ -127,6 +129,43 @@ export function registerCheckRoutes(app: AppInstance): void {
           coverage: { ...coverage, unassignedPageNumbers: [...coverage.unassignedPageNumbers] },
           counts: countFindings(view.items),
         },
+      };
+    },
+  );
+
+  /**
+   * Состав комплекта и результат проверки по каждой его позиции (S29).
+   *
+   * Право то же, что у замечаний: отчёт не показывает ничего, чего не показывал
+   * бы список, — он показывает то же самое в порядке комплекта и вместе с
+   * ответом «здесь всё в порядке».
+   *
+   * Отдельный адрес, а не поле в `findings`: у ответов разный размер и разная
+   * частота обновления, и подмешивать состав комплекта в список замечаний
+   * значило бы возить весь состав на каждое обновление списка после снятия
+   * одного замечания.
+   */
+  app.get(
+    `${PREFIX}/revisions/:revisionId/check-report`,
+    {
+      preHandler: readChecks,
+      schema: { params: revisionIdParamSchema, response: { 200: checkReportSchema } },
+    },
+    async (request) => {
+      const { scope } = currentAuth(request);
+      const { revisionId } = request.params;
+      updateContext({ revisionId });
+      const report = await buildCheckReport(app.db, scope, revisionId);
+      return {
+        runId: report.runId,
+        sections: report.sections.map((section) => ({
+          ...section,
+          rows: section.rows.map((row) => ({
+            ...row,
+            findingIds: [...row.findingIds],
+            items: row.items.map((item) => ({ ...item })),
+          })),
+        })),
       };
     },
   );

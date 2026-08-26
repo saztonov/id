@@ -1113,23 +1113,83 @@ export async function cancelJobsOfRevision(
     returning id
   `);
 
-  if (cancelled.rows.length === 0) return 0;
+  return closeOpenAttempts(db, cancelled.rows);
+}
 
-  // Попытки закрываются ОТДЕЛЬНЫМ оператором по списку идентификаторов, а не
-  // подзапросом по `jobs`: к этому моменту статус уже переписан, и подзапрос
-  // «где задача отменена» захватил бы задачи, отменённые кем-то раньше, вместе
-  // с их давно закрытыми попытками.
+/**
+ * Снять задачи прогона распознавания, работу которого принял дочерний (S28).
+ *
+ * Нажатие «2. Распознать» после отказа создаёт восстановительный прогон
+ * (`repair_of_run_id`, ADR-0017) и переносит в него совместимые результаты.
+ * Задачи родителя после этого разбирать некому и незачем — их предмет перешёл
+ * дочернему прогоном, — но `computeProcessingStatus` считает `dead` по ВСЕМ
+ * задачам ревизии без фильтра по прогону, а `summaryStage` при `dead > 0`
+ * объявляет стадию `failed`. Одна мёртвая задача погибшего прогона держала
+ * красную плашку «обработка остановилась» вечно, сколько бы успешных прогонов
+ * после неё ни прошло, и гасила опрос сводки: `isBusy` при стадии `failed`
+ * даёт `false`, то есть плашка не могла исчезнуть даже сама собой.
+ *
+ * Почему это правка ПО ФАКТУ, а не по отображению: сокрытие мертвецов в выдаче
+ * оставило бы в очереди задачи, которые `enqueueJob` продолжает считать
+ * стоящими (`ux_jobs_dedupe_key` держит ключ на `failed`), — и повторная
+ * постановка той же работы молча возвращала бы `created: false`, указывая на
+ * мертвеца. Отмена снимает и это.
+ *
+ * Запрет 0039 «мёртвая задача обязана разбираться человеком, а не
+ * пересоздаваться следующим нажатием молча» не нарушен: человек и принял
+ * решение — он нажал «2. Распознать» после отказа, и портал ответил
+ * восстановлением, а не тихим повтором.
+ *
+ * Фильтр — по `recognitionRunId` в payload, а не по стадии: стадия
+ * `recognition` снялась бы у ревизии целиком, включая задачи дочернего прогона,
+ * который прямо сейчас и ставится.
+ */
+export async function cancelJobsOfRecognitionRun(
+  db: JobExecutor,
+  revisionId: string,
+  recognitionRunId: string,
+): Promise<number> {
+  const cancelled = await db.execute<{ id: string }>(sql`
+    update ${jobs}
+       set status = 'cancelled', locked_by = null, locked_until = null, updated_at = now()
+     where ${jobs.payload} ->> 'revisionId' = ${revisionId}
+       and ${jobs.payload} ->> 'recognitionRunId' = ${recognitionRunId}
+       and ${jobs.status} in ('queued', 'running', 'failed')
+    returning id
+  `);
+
+  return closeOpenAttempts(db, cancelled.rows);
+}
+
+/**
+ * Закрыть попытки отменённых задач исходом `cancelled`.
+ *
+ * Попытки закрываются ОТДЕЛЬНЫМ оператором по списку идентификаторов, а не
+ * подзапросом по `jobs`: к этому моменту статус уже переписан, и подзапрос
+ * «где задача отменена» захватил бы задачи, отменённые кем-то раньше, вместе
+ * с их давно закрытыми попытками.
+ *
+ * `job_runs` не удаляются: это журнал (§11). Строка без `outcome` означает
+ * «попытка идёт», и оставленная открытой навсегда попала бы в `in_flight`
+ * сводки обработки.
+ */
+async function closeOpenAttempts(
+  db: JobExecutor,
+  cancelled: readonly { readonly id: string }[],
+): Promise<number> {
+  if (cancelled.length === 0) return 0;
+
   await db.execute(sql`
     update ${jobRuns}
        set finished_at = now(), outcome = 'cancelled'
      where ${jobRuns.outcome} is null
        and ${jobRuns.jobId} in (${sql.join(
-         cancelled.rows.map((row) => sql`${row.id}::uuid`),
+         cancelled.map((row) => sql`${row.id}::uuid`),
          sql`, `,
        )})
   `);
 
-  return cancelled.rows.length;
+  return cancelled.length;
 }
 
 export interface QueueDepthRow {

@@ -1,69 +1,57 @@
 /**
- * Вкладка «Проверка»: список ошибок и согласование (§9, §14, ADR-0016).
+ * Вкладка «Проверка»: состав комплекта, его результат и согласование (§9, §14).
  *
- * ## Одна форма строки, названная заказчиком
+ * ## Что здесь показано и почему именно это
  *
- * > «Страница 5 — сертификат соответствия — просрочена дата».
+ * ADR-0016 свёл экран к списку ошибок по формуле заказчика «страница — вид
+ * документа — что не так». Формула верна и осталась, но отвечала только на
+ * половину вопроса: при чистом комплекте экран показывал пустую таблицу, и
+ * заказчик, пройдя стенд на 83 страницах, сказал прямо — «результат
+ * распознавания невозможно понять». Понять было нельзя даже того, прочитал ли
+ * портал хоть что-нибудь.
  *
- * Всё, что не помещается в эту фразу, ушло: фильтр состояний, счётчик
- * блокирующих, колонки «Правило», «Состояние», «Источник», «Доказательство»,
- * секции «Документы комплекта» и «Реквизиты», карточка сверки с описью. Экран
- * отвечает на один вопрос — что не так с комплектом, — и всё остальное на нём
- * было ответом на вопросы, которых пользователь не задавал.
+ * Поэтому список ошибок заменён таблицей СОСТАВА, в которой ошибка — одно из
+ * состояний строки, а не единственная причина строке появиться. Порядок
+ * разделов назвал заказчик: акт → строки внутреннего реестра → паспорта,
+ * сертификаты и прочее.
  *
- * Подпись собирает СЕРВЕР: номер страницы и название вида ИД живут только в
- * БД, и прежняя вкладка добывала первый двумя лишними запросами, а второго не
- * знала вовсе. Здесь строка печатается как пришла — включая порядок.
+ * ## Это НЕ возврат раздела «Документы комплекта»
  *
- * ## Две секции, а не одна таблица с прочерком
+ * ADR-0016 убрал не показ состава, а требование СОБИРАТЬ его руками: границы
+ * подтверждает конвейер, нарезка идёт сама. В таблице нет ни одной кнопки,
+ * меняющей состав, и просить что-либо подтверждать экран не начинает.
  *
- * Прочерк в колонке «Страница» читался бы как «портал не смог определить
- * страницу», то есть как дефект портала. А замечание «есть материал, но нет
- * сертификата» страницы не имеет по построению: оно о том, чего в комплекте
- * НЕТ, и листа, на котором этого нет, не существует.
+ * ## Одна плашка вместо трёх
+ *
+ * Состояние прогона и заявление о полноте съехались в `RunStateAlert`. Вместе с
+ * плашками конвейера над вкладками пользователь видел до четырёх сообщений о
+ * разных временах жизни одного комплекта и не мог сложить из них ответ на
+ * единственный свой вопрос — всё ли в порядке.
  *
  * ## Троичная логика остаётся видимой
  *
  * `undetermined` — не мягкая ошибка, а отдельное состояние «данных для вывода
- * нет». Слить его с `open` значило бы утверждать дефект там, где методика его
- * не установила, и это ровно тот сорт ложного замечания, который §0.5 называет
- * разрушающим доверие быстрее пропущенного. Поэтому — свой тег, а не своя
- * вкладка: заказчик просил убрать вкладки с типами, а не перестать различать.
- *
- * ## Что не делает этот экран
- *
- * Не просит ничего собирать и подтверждать. Границы документов подтверждает
- * конвейер (S27), нарезка идёт сама, и раздела, где инженер нажимал бы
- * «Подтвердить», больше нет. Маршруты API при этом на месте (ADR-0014: «убраны
- * кнопки, а не возможности»).
+ * нет»; `not_applicable` и `not_run` в чек-листе — «правило не работало».
+ * Слить их с успехом значило бы выдать непроверенное за проверенное, а это
+ * ровно тот сорт лжи, из-за которого экран и переделывался.
  *
  * ## Контракт `data-testid`
  *
- * `checks-summary` · `checks-run-state` · `checks-coverage-gap` ·
- * `findings-by-page` · `findings-by-bundle` · `findings-waived` ·
- * `evidence-{ruleCode}` (переход «замечание → страница», пункт приёмки §16).
+ * `checks-summary` · `checks-run-state` · `checks-report` ·
+ * `checks-report-section-{kind}` · `checks-report-row-{id}` ·
+ * `findings-blocking` · `findings-waived`.
  */
 import { useState, type ReactNode } from 'react';
-import { Alert, App as AntApp, Button, Collapse, Space, Table, Typography } from 'antd';
+import { Alert, App as AntApp, Button, Collapse, Space, Typography } from 'antd';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { bundles, checks, workflow } from '../../api/endpoints.js';
 import { revisionKeys } from '../../api/keys.js';
 import { describeError } from '../../api/problem.js';
 import type { Finding } from '../../api/types.js';
 import { useSession } from '../../app/session.js';
-import { Link } from '../../app/router.js';
 import { ErrorState, LoadingState } from '../../shared/ui.js';
-import { ToneTag } from '../../shared/tags.js';
-import { FINDING_ORIGIN_LABELS, SEVERITY_LABELS, labelOf } from '../../shared/labels.js';
-import {
-  coverageGap,
-  markupHref,
-  pageLabel,
-  runStateOf,
-  splitFindings,
-  summaryText,
-  type RunState,
-} from './grouping.js';
+import { coverageGap, runStateOf, splitFindings, summaryText, type RunState } from './grouping.js';
+import { ReportTable } from './ReportTable.js';
 import { OverrideDialog } from './OverrideDialog.js';
 import { ApprovalCard } from '../workflow/ApprovalCard.js';
 
@@ -76,6 +64,13 @@ export function ChecksTab({ revisionId }: { revisionId: string }): ReactNode {
   const findings = useQuery({
     queryKey: revisionKeys.findings(revisionId),
     queryFn: () => checks.findings(revisionId),
+  });
+  // Отдельный запрос от замечаний: состав комплекта не обязан ехать заново
+  // после снятия одного замечания, а список замечаний — после пересборки
+  // нарезки. Инвалидируются оба одним событием потока (`case 'checks'`).
+  const reportQuery = useQuery({
+    queryKey: revisionKeys.checkReport(revisionId),
+    queryFn: () => checks.report(revisionId),
   });
   // Тот же ключ, что у вкладки «Файлы»: признак «состав изменился после
   // проверки» считает сервер, и второго запроса при переходе между вкладками
@@ -92,13 +87,16 @@ export function ChecksTab({ revisionId }: { revisionId: string }): ReactNode {
       message.success('Замечание снято обоснованным решением руководителя');
       setOverriding(null);
       await queryClient.invalidateQueries({ queryKey: revisionKeys.findings(revisionId) });
+      await queryClient.invalidateQueries({ queryKey: revisionKeys.checkReport(revisionId) });
       await queryClient.invalidateQueries({ queryKey: revisionKeys.workflow(revisionId) });
     },
     onError: (error) => message.error(describeError(error)),
   });
 
-  if (findings.isPending) return <LoadingState label="Загрузка замечаний…" />;
+  if (findings.isPending || reportQuery.isPending)
+    return <LoadingState label="Загрузка проверки…" />;
   if (findings.isError) return <ErrorState error={findings.error} />;
+  if (reportQuery.isError) return <ErrorState error={reportQuery.error} />;
 
   const { items, summary } = findings.data;
   const sections = splitFindings(items);
@@ -106,108 +104,50 @@ export function ChecksTab({ revisionId }: { revisionId: string }): ReactNode {
   const runState = runStateOf(summary, bundle?.matchesCurrentFiles ?? true);
   const gap = coverageGap(summary);
 
+  /**
+   * Замечания, которые может снять только руководитель.
+   *
+   * Прежде кнопка стояла колонкой в таблице замечаний, и вместе с той таблицей
+   * исчезла бы возможность, а не только её вид (ADR-0014: «убраны кнопки, а не
+   * возможности»). Здесь она собрана отдельным списком: у того, кто снимать не
+   * вправе, раздела нет вовсе, а у руководителя он короткий — блокирующих
+   * замечаний единицы, и искать их по всей таблице состава было бы дольше.
+   */
   const canOverride = can('revision.override');
-  const actionColumn = {
-    title: '',
-    key: 'actions',
-    width: 190,
-    render: (_value: unknown, row: Finding) =>
-      row.state === 'open' && row.isBlocking && canOverride ? (
-        <Button size="small" onClick={() => setOverriding(row)}>
-          Снять с обоснованием
-        </Button>
-      ) : null,
-  };
+  const blocking = canOverride
+    ? items.filter((finding) => finding.state === 'open' && finding.isBlocking)
+    : [];
 
   return (
     <>
       <Typography.Paragraph data-testid="checks-summary">
-        {summaryText(summary)}
+        {summaryText(summary, runState)}
       </Typography.Paragraph>
 
-      <RunStateAlert state={runState} />
+      <RunStateAlert state={runState} gap={gap} />
 
-      {gap !== null && (
-        <Alert
-          type="warning"
-          showIcon
-          style={{ marginBottom: 12 }}
-          data-testid="checks-coverage-gap"
-          message="Проверка охватила не весь комплект"
-          description={gap}
-        />
-      )}
+      <ReportTable revisionId={revisionId} report={reportQuery.data} />
 
-      <Typography.Title level={3} style={{ fontSize: 16, marginTop: 8 }}>
-        Ошибки на страницах
-      </Typography.Title>
-      {/*
-        Метка на обёртке, а не на `Table`: прокидывает ли antd произвольные
-        `data-*` до узла контейнера — её внутреннее дело, и завязывать на это
-        контракт прогонов значит получить отказ сценария на обновлении
-        библиотеки, а не на изменении портала.
-      */}
-      <div data-testid="findings-by-page">
-        <Table<Finding>
-          rowKey="id"
-          size="middle"
-          pagination={false}
-          dataSource={[...sections.onPages]}
-          locale={{ emptyText: 'Ошибок, привязанных к страницам, нет' }}
-          columns={[
-            {
-              title: 'Страница',
-              key: 'page',
-              width: 170,
-              render: (_value, row) => <PageCell revisionId={revisionId} finding={row} />,
-            },
-            {
-              title: 'Что за документ',
-              key: 'document',
-              width: '32%',
-              render: (_value, row) => <SubjectCell finding={row} />,
-            },
-            {
-              title: 'Что не так',
-              key: 'text',
-              render: (_value, row) => <FindingCell finding={row} />,
-            },
-            actionColumn,
-          ]}
-        />
-      </div>
-
-      {sections.onBundle.length > 0 && (
-        <>
-          <Typography.Title level={3} style={{ fontSize: 16, marginTop: 24 }}>
-            Ошибки по комплекту
+      {blocking.length > 0 && (
+        <div data-testid="findings-blocking" style={{ marginTop: 8, marginBottom: 24 }}>
+          <Typography.Title level={3} style={{ fontSize: 16 }}>
+            Требуют решения руководителя
           </Typography.Title>
-          <Typography.Paragraph type="secondary">
-            У этих замечаний нет страницы: они о том, чего в комплекте не хватает.
-          </Typography.Paragraph>
-          <div data-testid="findings-by-bundle">
-            <Table<Finding>
-              rowKey="id"
-              size="middle"
-              pagination={false}
-              dataSource={[...sections.onBundle]}
-              columns={[
-                {
-                  title: 'Чего это касается',
-                  key: 'target',
-                  width: '38%',
-                  render: (_value, row) => <SubjectCell finding={row} />,
-                },
-                {
-                  title: 'Что не так',
-                  key: 'text',
-                  render: (_value, row) => <FindingCell finding={row} />,
-                },
-                actionColumn,
-              ]}
-            />
-          </div>
-        </>
+          <Space direction="vertical" size={8} style={{ width: '100%' }}>
+            {blocking.map((finding) => (
+              <Space key={finding.id} size={8} align="start" wrap>
+                <Button size="small" onClick={() => setOverriding(finding)}>
+                  Снять с обоснованием
+                </Button>
+                <Typography.Text>{finding.text}</Typography.Text>
+                <Typography.Text type="secondary">
+                  — {finding.document?.label ?? finding.target.label}
+                  {finding.page === null ? '' : `, страница ${String(finding.page.number)}`}
+                </Typography.Text>
+              </Space>
+            ))}
+          </Space>
+        </div>
       )}
 
       {sections.waived.length > 0 && (
@@ -263,153 +203,103 @@ export function ChecksTab({ revisionId }: { revisionId: string }): ReactNode {
 }
 
 /**
- * Состояние проверки.
+ * Состояние проверки — ОДНОЙ плашкой.
  *
  * Прежняя вкладка молчала во всех этих случаях одинаково — пустым списком, — и
  * именно это заказчик увидел как «никаких данных». Пустой экран без объяснения
  * неотличим от сломанного.
+ *
+ * ## Почему плашка одна (S29)
+ *
+ * Их было две: состояние прогона и отдельная «Проверка охватила не весь
+ * комплект». Вместе с плашками конвейера над вкладками пользователь видел на
+ * одном экране до четырёх сообщений о разных временах жизни одного комплекта и
+ * не мог сложить из них ответ на единственный свой вопрос — всё ли в порядке.
+ * Заявление о полноте не перестало быть заявлением о полноте (ADR-0016,
+ * решение 3): оно осталось тем же текстом и просто переехало внутрь плашки
+ * исхода, где читается вместе с ним, а не вместо него.
  */
-function RunStateAlert({ state }: { state: RunState }): ReactNode {
+function RunStateAlert({ state, gap }: { state: RunState; gap: string | null }): ReactNode {
+  const view = alertOf(state);
+
+  return (
+    <Alert
+      type={view.type}
+      showIcon
+      style={{ marginBottom: 12 }}
+      data-testid="checks-run-state"
+      message={view.message}
+      description={
+        <Space direction="vertical" size={2}>
+          <Typography.Text>{view.description}</Typography.Text>
+          {/*
+            Заявление о полноте прикладывается к ЛЮБОМУ исходу, а не только к
+            «есть замечания». Пустой список ошибок по неразобранным страницам
+            ничего не доказывает — и одинаково ничего не доказывает и там, где
+            проверка ещё не запускалась. Знать это пользователь обязан в обоих
+            случаях (ADR-0016, решение 3).
+          */}
+          {gap !== null && <Typography.Text type="secondary">{gap}</Typography.Text>}
+        </Space>
+      }
+    />
+  );
+}
+
+interface AlertView {
+  readonly type: 'success' | 'info' | 'warning' | 'error';
+  readonly message: string;
+  readonly description: string;
+}
+
+function alertOf(state: RunState): AlertView {
   switch (state.kind) {
+    case 'done_clean':
+      return {
+        type: 'success',
+        message: 'Проверка пройдена: замечаний нет',
+        description:
+          'Портал прочитал комплект целиком, отнёс каждую страницу к документу и не нашёл ' +
+          'ни ошибок, ни непроверенных мест. Состав и результат по каждому документу — ' +
+          'в таблице ниже.',
+      };
+    case 'done_with_issues':
+      return {
+        type: state.tone,
+        message: 'Проверка выполнена, комплект чист не полностью',
+        description: `Требует внимания: ${state.reservations.join(', ')}.`,
+      };
     case 'never':
-      return (
-        <Alert
-          type="info"
-          showIcon
-          style={{ marginBottom: 12 }}
-          data-testid="checks-run-state"
-          message="Проверка ещё не выполнялась"
-          description="Нажмите «2. Распознать» над вкладками: портал прочитает комплект и найдёт ошибки."
-        />
-      );
+      return {
+        type: 'info',
+        message: 'Проверка ещё не выполнялась',
+        description:
+          'Нажмите «2. Распознать» над вкладками: портал прочитает комплект и найдёт ошибки. ' +
+          'Ниже — состав, который он уже разобрал.',
+      };
     case 'running':
-      return (
-        <Alert
-          type="info"
-          showIcon
-          style={{ marginBottom: 12 }}
-          data-testid="checks-run-state"
-          message="Проверка выполняется"
-          description="Список появится, когда портал закончит читать комплект."
-        />
-      );
+      return {
+        type: 'info',
+        message: 'Проверка выполняется',
+        description: 'Результат появится, когда портал закончит читать комплект.',
+      };
     case 'running_over_previous':
-      return (
-        <Alert
-          type="info"
-          showIcon
-          style={{ marginBottom: 12 }}
-          data-testid="checks-run-state"
-          message="Идёт новая проверка"
-          description={`Ниже — результат предыдущей от ${formatMoment(state.since)}. Он относится к тому же комплекту, но может измениться.`}
-        />
-      );
+      return {
+        type: 'info',
+        message: 'Идёт новая проверка',
+        description:
+          `Ниже — результат предыдущей от ${formatMoment(state.since)}. ` +
+          'Он относится к тому же комплекту, но может измениться.',
+      };
     case 'stale':
-      return (
-        <Alert
-          type="warning"
-          showIcon
-          style={{ marginBottom: 12 }}
-          data-testid="checks-run-state"
-          message="Комплект изменился после проверки"
-          description="Список ниже описывает прежний состав файлов. Нажмите «1. Выделить блоки», затем «2. Распознать»."
-        />
-      );
-    case 'done':
-      return null;
+      return {
+        type: 'warning',
+        message: 'Комплект изменился после проверки',
+        description:
+          'Таблица ниже описывает прежний состав файлов. ' +
+          'Нажмите «1. Выделить блоки», затем «2. Распознать».',
+      };
   }
-}
-
-/**
- * Ячейка страницы.
- *
- * Ссылка ведёт на страницу разметки и выделяет блок — §16 называет переход
- * «замечание → доказательство» отдельным пунктом приёмки. Когда рабочий
- * документ не собран, ссылки нет вовсе: неработающая ссылка хуже её
- * отсутствия, потому что по ней нажмут.
- */
-function PageCell({ revisionId, finding }: { revisionId: string; finding: Finding }): ReactNode {
-  const label = pageLabel(finding);
-  const href = markupHref(revisionId, finding);
-  if (href === null) return <Typography.Text>{label}</Typography.Text>;
-  return (
-    <span data-testid={`evidence-${finding.ruleCode}`}>
-      <Link to={href}>{label}</Link>
-    </span>
-  );
-}
-
-/** Что за документ либо чего касается замечание. */
-function SubjectCell({ finding }: { finding: Finding }): ReactNode {
-  const label = finding.document?.label ?? finding.target.label;
-  const detail =
-    finding.document === null
-      ? finding.target.detail
-      : (finding.target.detail ??
-        (finding.target.kind === 'document' ? null : finding.target.label));
-
-  return (
-    <Space direction="vertical" size={0}>
-      <Typography.Text>{label}</Typography.Text>
-      {detail !== null && detail !== label && (
-        <Typography.Text type="secondary">{detail}</Typography.Text>
-      )}
-    </Space>
-  );
-}
-
-/**
- * Что не так — и чем это доказано.
- *
- * Код правила и цитата стоят строкой ниже, а не колонками: поддержке код
- * нужен, а ширины таблицы он не стоит. Цитата — компенсация удалённого
- * раздела «Реквизиты»: «просрочена дата» становится проверяемым утверждением
- * «в документе написано „действителен до 12.03.2024“».
- */
-function FindingCell({ finding }: { finding: Finding }): ReactNode {
-  const quote = finding.evidence[0]?.quote ?? null;
-
-  return (
-    <Space direction="vertical" size={2} style={{ width: '100%' }}>
-      <Space size={6} wrap>
-        <Typography.Text>{finding.text}</Typography.Text>
-        {finding.state === 'undetermined' ? (
-          <ToneTag tone="neutral">не проверено</ToneTag>
-        ) : (
-          <ToneTag tone={finding.severity === 'error' ? 'danger' : 'warning'}>
-            {SEVERITY_LABELS[finding.severity]}
-          </ToneTag>
-        )}
-        {finding.isBlocking && <ToneTag tone="danger">блокирует</ToneTag>}
-        {/*
-          Источник — только на исключениях. §3.7 требует, чтобы проверяющий
-          видел находку модели и недоступный реестр; печатать «Правило» у
-          девяноста строк из ста значит платить вниманием за то, что и так
-          известно по умолчанию.
-        */}
-        {finding.origin !== 'deterministic' && (
-          <ToneTag tone="accent">{labelOf(FINDING_ORIGIN_LABELS, finding.origin)}</ToneTag>
-        )}
-      </Space>
-      {quote !== null && (
-        <Typography.Text type="secondary">
-          в документе написано: «{truncate(quote)}»
-        </Typography.Text>
-      )}
-      {finding.hint !== null && <Typography.Text type="secondary">{finding.hint}</Typography.Text>}
-      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-        {finding.ruleCode}
-      </Typography.Text>
-    </Space>
-  );
-}
-
-/** Цитата обрезается: доказательством служит начало, а не весь абзац. */
-const QUOTE_LIMIT = 200;
-
-function truncate(text: string): string {
-  const collapsed = text.replace(/\s+/gu, ' ').trim();
-  return collapsed.length <= QUOTE_LIMIT ? collapsed : `${collapsed.slice(0, QUOTE_LIMIT)}…`;
 }
 
 function formatMoment(iso: string): string {

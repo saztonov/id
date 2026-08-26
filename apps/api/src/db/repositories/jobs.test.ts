@@ -47,6 +47,7 @@ import { loadMigrations } from '@id/migrator';
 import { HttpProblem } from '../../lib/problem.js';
 import {
   appendRevisionEvent,
+  cancelJobsOfRecognitionRun,
   cancelJobsOfRevision,
   enqueueSystemJob,
   readJobAutoContinue,
@@ -318,6 +319,88 @@ describe('cancelJobsOfRevision', () => {
     // до всех типов было бы худшим из возможных прочтений.
     expect(await cancelJobsOfRevision(db, REVISION, { stages: [] })).toBe(0);
     expect(await statusOf(job)).toBe('queued');
+  });
+});
+
+// =====================================================================
+// Отмена задач восстанавливаемого прогона (S29)
+// =====================================================================
+
+/**
+ * Регрессия на красную плашку, которая не гасла никогда.
+ *
+ * `computeProcessingStatus` считает `dead` по ВСЕМ задачам ревизии без фильтра
+ * по прогону, а `summaryStage` при `dead > 0` объявляет стадию `failed`. На
+ * комплекте в 83 страницы упавший прогон оставил 132 мёртвые задачи, и
+ * восстановительный прогон, прошедший успешно, ничего в этой картине не менял:
+ * экран показывал «обработка остановлена отказом» поверх готового результата, а
+ * опрос сводки при стадии `failed` выключается — плашка не могла погаснуть даже
+ * сама собой.
+ *
+ * Проверяется именно узость фильтра: снять задачи стадии `recognition` целиком
+ * было бы проще и означало бы снять заодно задачи ТОЛЬКО ЧТО поставленного
+ * дочернего прогона.
+ */
+describe('cancelJobsOfRecognitionRun', () => {
+  const PARENT = '00000000-0000-4000-8000-0000000000a1';
+  const CHILD = '00000000-0000-4000-8000-0000000000a2';
+
+  let pageIndex = 0;
+
+  async function seed(runId: string, status: string, tag: string): Promise<string> {
+    const { jobId } = await enqueueSystemJob(db, {
+      type: 'vlm.recognize_page',
+      payload: { revisionId: REVISION, recognitionRunId: runId, pageIndex: pageIndex++ },
+      dedupeKey: `vlm.recognize_page:${runId}:${tag}`,
+    });
+    await testDb.query(`UPDATE jobs SET status = '${status}' WHERE id = '${jobId}'`);
+    return jobId;
+  }
+
+  const statusOf = async (jobId: string): Promise<string | undefined> =>
+    (await testDb.query<{ status: string }>(`SELECT status FROM jobs WHERE id = '${jobId}'`))[0]
+      ?.status;
+
+  it('снимает мертвецов родителя и не трогает задачи дочернего прогона', async () => {
+    const parentDead = await seed(PARENT, 'failed', 'dead');
+    const parentQueued = await seed(PARENT, 'queued', 'queued');
+    const parentDone = await seed(PARENT, 'done', 'done');
+    const childQueued = await seed(CHILD, 'queued', 'child');
+
+    const cancelled = await cancelJobsOfRecognitionRun(db, REVISION, PARENT);
+    expect(cancelled).toBe(2);
+
+    expect(await statusOf(parentDead)).toBe('cancelled');
+    expect(await statusOf(parentQueued)).toBe('cancelled');
+    // Сделанная работа не переписывается: её исход — факт, а не состояние.
+    expect(await statusOf(parentDone)).toBe('done');
+    // Дочерний прогон только что поставлен этим же нажатием — снять его задачи
+    // значило бы отменить восстановление ради того, чтобы погасить плашку.
+    expect(await statusOf(childQueued)).toBe('queued');
+  });
+
+  it('открытая попытка родителя закрывается, а строка журнала остаётся', async () => {
+    const jobId = await seed(PARENT, 'running', 'attempt');
+    await testDb.query(
+      `INSERT INTO job_runs (job_id, job_type, revision_id, attempt)
+         VALUES ('${jobId}', 'vlm.recognize_page', '${REVISION}', 1)`,
+    );
+
+    await cancelJobsOfRecognitionRun(db, REVISION, PARENT);
+
+    const runs = await testDb.query<{ outcome: string | null; finished_at: string | null }>(
+      `SELECT outcome, finished_at FROM job_runs WHERE job_id = '${jobId}'`,
+    );
+    expect(runs).toHaveLength(1);
+    expect(runs[0]?.outcome).toBe('cancelled');
+    expect(runs[0]?.finished_at).not.toBeNull();
+  });
+
+  it('без задач прогона отвечает нулём, а не падает', async () => {
+    // Восстановление первого же прогона ревизии: у родителя задач может не
+    // остаться вовсе (их снёс сброс конвейера), и это не повод для отказа.
+    const unknown = '00000000-0000-4000-8000-0000000000af';
+    expect(await cancelJobsOfRecognitionRun(db, REVISION, unknown)).toBe(0);
   });
 });
 

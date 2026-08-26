@@ -156,10 +156,21 @@ function invalidateFor(
       invalidate(revisionKeys.pages(revisionId));
       invalidate(revisionKeys.registry(revisionId));
       invalidate(revisionKeys.classifications(revisionId));
+      // Отчёт о составе — это те же документы и те же строки реестра, только
+      // сложенные вместе. Пересегментация меняет его целиком, и без этой
+      // строки экран показывал бы прежнюю нарезку как актуальную.
+      invalidate(revisionKeys.checkReport(revisionId));
       break;
     case 'checks':
       invalidate(revisionKeys.checkRuns(revisionId));
       invalidate(revisionKeys.findings(revisionId));
+      invalidate(revisionKeys.checkReport(revisionId));
+      // Блокеры согласования читают ТУ ЖЕ таблицу прогонов: «по ревизии не
+      // завершён ни один прогон проверок» снимается окончанием проверки и
+      // никаким другим событием. Без этой строки карточка согласования
+      // продолжала требовать прогон, который только что закончился, до
+      // перезагрузки страницы.
+      invalidate(revisionKeys.workflow(revisionId));
       break;
     case 'workflow':
     case 'revision':

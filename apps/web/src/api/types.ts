@@ -466,15 +466,7 @@ export interface FindingDocument {
 
 /** Объект замечания: документ, материал, партия, строка реестра, комплект. */
 export interface FindingTarget {
-  kind:
-    | 'document'
-    | 'material'
-    | 'batch'
-    | 'registry_row'
-    | 'page'
-    | 'field'
-    | 'revision'
-    | 'gone';
+  kind: 'document' | 'material' | 'batch' | 'registry_row' | 'page' | 'field' | 'revision' | 'gone';
   label: string;
   detail: string | null;
 }
@@ -539,6 +531,72 @@ export interface ChecksSummary {
 export interface FindingList {
   items: Finding[];
   summary: ChecksSummary;
+}
+
+/**
+ * Отчёт о составе комплекта и результате проверки (S29).
+ *
+ * Порядок секций и строк задаёт СЕРВЕР — акт, реестр приложений, документы о
+ * качестве, прочее, замечания без адреса, — и клиент печатает их как пришли.
+ * Вердикта «чисто/не чисто» здесь нет намеренно: его считает `grouping.ts` по
+ * сводке замечаний и покрытия, и второе место с тем же ответом разошлось бы с
+ * первым.
+ */
+export type ReportRowStatus =
+  | 'ok'
+  | 'error'
+  | 'warning'
+  | 'undetermined'
+  /** Строка реестра, которой не нашлось документа в комплекте. */
+  | 'missing'
+  /** Прогона правил не было: портал НЕ ЗНАЕТ, верны ли данные. */
+  | 'unchecked';
+
+/** `not_applicable` и `not_run` не сливаются ни с успехом, ни с ошибкой (§0.5). */
+export type ReportItemStatus =
+  'ok' | 'error' | 'warning' | 'undetermined' | 'not_applicable' | 'not_run';
+
+export type ReportSectionKind = 'act' | 'registry' | 'quality' | 'other' | 'unplaced';
+
+export interface ReportItem {
+  code: string;
+  title: string;
+  status: ReportItemStatus;
+  detail: string | null;
+  /** Способ устранения: без него замечание бесполезно подрядчику (§9.1). */
+  hint: string | null;
+}
+
+export interface ReportRow {
+  id: string;
+  kind: 'document' | 'registry_row' | 'finding';
+  title: string;
+  subtitle: string | null;
+  page: { number: number; workingPageIndex: number | null } | null;
+  /** Диапазон страниц документа для печати: «1–3» либо «8». */
+  pages: string | null;
+  dates: { issuedAt: string | null; validFrom: string | null; validTo: string | null } | null;
+  status: ReportRowStatus;
+  statusText: string;
+  /** Способ устранения рядом со строкой, а не в раскрытии (ADR-0016). */
+  statusHint: string | null;
+  /** Правило и блок замечания строки: переход «замечание → блок» (§16). */
+  statusRuleCode: string | null;
+  blockId: string | null;
+  findingIds: string[];
+  items: ReportItem[];
+}
+
+export interface ReportSection {
+  kind: ReportSectionKind;
+  title: string;
+  note: string | null;
+  rows: ReportRow[];
+}
+
+export interface CheckReport {
+  runId: string | null;
+  sections: ReportSection[];
 }
 
 export interface RuleCatalogEntry {

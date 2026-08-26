@@ -140,6 +140,76 @@ export const findingListSchema = z.object({
   summary: checksSummarySchema,
 });
 
+/**
+ * Отчёт о составе комплекта и результате проверки (S29).
+ *
+ * Порядок секций задан заказчиком и держится СЕРВЕРОМ: акт → строки внутреннего
+ * реестра → документы о качестве → прочее → замечания без адреса. Пересортировка
+ * на клиенте либо повторила бы этот порядок, либо разошлась бы с ним.
+ *
+ * Вердикта «чисто/не чисто» здесь нет намеренно: его считает экран по сводке
+ * замечаний и покрытия (`grouping.ts`), и второе место, отвечающее на тот же
+ * вопрос, разошлось бы с первым при первой правке условия.
+ *
+ * Поля перечисляются явно по той же причине, что и у `findingSchema`: ответ
+ * сериализуется через zod, и необъявленное поле молча вырезается из тела.
+ */
+const reportItemSchema = z.object({
+  code: z.string(),
+  title: z.string(),
+  /**
+   * `not_applicable` и `not_run` не сливаются ни с успехом, ни с ошибкой:
+   * галочка ставится ТОЛЬКО вердикту `pass` (§0.5).
+   */
+  status: z.enum(['ok', 'error', 'warning', 'undetermined', 'not_applicable', 'not_run']),
+  detail: z.string().nullable(),
+  hint: z.string().nullable(),
+});
+
+const reportRowSchema = z.object({
+  id: z.string(),
+  kind: z.enum(['document', 'registry_row', 'finding']),
+  title: z.string(),
+  subtitle: z.string().nullable(),
+  page: z
+    .object({
+      number: z.int().positive(),
+      workingPageIndex: z.int().nonnegative().nullable(),
+    })
+    .nullable(),
+  /** Диапазон страниц документа для печати: «1–3» либо «8». */
+  pages: z.string().nullable(),
+  dates: z
+    .object({
+      issuedAt: z.string().nullable(),
+      validFrom: z.string().nullable(),
+      validTo: z.string().nullable(),
+    })
+    .nullable(),
+  /** `unchecked` — прогона не было: портал НЕ ЗНАЕТ, верны ли данные. */
+  status: z.enum(['ok', 'error', 'warning', 'undetermined', 'missing', 'unchecked']),
+  statusText: z.string(),
+  /** Способ устранения рядом со строкой: замечание без него бесполезно (§9.1). */
+  statusHint: z.string().nullable(),
+  /** Правило и блок замечания строки: переход «замечание → блок» (§16). */
+  statusRuleCode: z.string().nullable(),
+  blockId: z.uuid().nullable(),
+  findingIds: z.array(z.uuid()),
+  items: z.array(reportItemSchema),
+});
+
+const reportSectionSchema = z.object({
+  kind: z.enum(['act', 'registry', 'quality', 'other', 'unplaced']),
+  title: z.string(),
+  note: z.string().nullable(),
+  rows: z.array(reportRowSchema),
+});
+
+export const checkReportSchema = z.object({
+  runId: z.uuid().nullable(),
+  sections: z.array(reportSectionSchema),
+});
+
 export const findingQuerySchema = z.object({ validationRunId: z.uuid().optional() });
 
 /** Каталог правил с умолчаниями: вход публикации набора (§3.7). */

@@ -24,6 +24,7 @@ export const revisionKeys = {
   classifications: (revisionId: string) => ['revisions', revisionId, 'classifications'] as const,
   checkRuns: (revisionId: string) => ['revisions', revisionId, 'check-runs'] as const,
   findings: (revisionId: string) => ['revisions', revisionId, 'findings'] as const,
+  checkReport: (revisionId: string) => ['revisions', revisionId, 'check-report'] as const,
   recognitionRuns: (revisionId: string) => ['revisions', revisionId, 'recognition-runs'] as const,
   archive: (revisionId: string) => ['revisions', revisionId, 'archive'] as const,
 };

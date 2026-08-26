@@ -44,7 +44,11 @@ function finding(over: Partial<Finding> & { id: string }): Finding {
 
 function summary(over: Partial<ChecksSummary> = {}): ChecksSummary {
   return {
-    latestRun: { id: 'run-1', startedAt: '2026-08-25T10:00:00.000Z', finishedAt: '2026-08-25T10:01:00.000Z' },
+    latestRun: {
+      id: 'run-1',
+      startedAt: '2026-08-25T10:00:00.000Z',
+      finishedAt: '2026-08-25T10:01:00.000Z',
+    },
     shownRunId: 'run-1',
     coverage: {
       pagesTotal: 18,
@@ -76,7 +80,11 @@ describe('splitFindings', () => {
     // вывода нет», отдельное состояние, а не мягкая ошибка. Спрятать его
     // значило бы утверждать, что проверка прошла, там где её не было.
     const sections = splitFindings([
-      finding({ id: 'a', state: 'undetermined', page: { number: 1, workingPageIndex: 0, basis: 'finding' } }),
+      finding({
+        id: 'a',
+        state: 'undetermined',
+        page: { number: 1, workingPageIndex: 0, basis: 'finding' },
+      }),
     ]);
 
     expect(sections.onPages).toHaveLength(1);
@@ -111,7 +119,9 @@ describe('splitFindings', () => {
 
 describe('pageLabel', () => {
   it('печатает номер страницы, когда адрес точный', () => {
-    expect(pageLabel(finding({ id: 'a', page: { number: 5, workingPageIndex: 4, basis: 'finding' } }))).toBe('5');
+    expect(
+      pageLabel(finding({ id: 'a', page: { number: 5, workingPageIndex: 4, basis: 'finding' } })),
+    ).toBe('5');
   });
 
   it('называет приблизительность, когда номер выведен из начала документа', () => {
@@ -128,7 +138,11 @@ describe('markupHref', () => {
   it('ведёт на страницу разметки и выделяет блок', () => {
     const href = markupHref(
       REVISION,
-      finding({ id: 'a', blockId: 'blk', page: { number: 5, workingPageIndex: 4, basis: 'finding' } }),
+      finding({
+        id: 'a',
+        blockId: 'blk',
+        page: { number: 5, workingPageIndex: 4, basis: 'finding' },
+      }),
     );
     expect(href).toBe(`/ids/revisions/${REVISION}?tab=markup&page=4&block=blk`);
   });
@@ -136,7 +150,10 @@ describe('markupHref', () => {
   it('не рисует ссылку, когда рабочий документ не собран', () => {
     // Неработающая ссылка хуже её отсутствия: по ней нажмут.
     expect(
-      markupHref(REVISION, finding({ id: 'a', page: { number: 5, workingPageIndex: null, basis: 'document' } })),
+      markupHref(
+        REVISION,
+        finding({ id: 'a', page: { number: 5, workingPageIndex: null, basis: 'document' } }),
+      ),
     ).toBeNull();
   });
 });
@@ -146,9 +163,73 @@ describe('runStateOf', () => {
     // Оба состояния выглядят одинаково пустым экраном и означают разное:
     // в первом надо нажать кнопку, во втором — знать, что список описывает
     // прежний состав.
-    expect(runStateOf(summary({ latestRun: null, shownRunId: null }), true)).toEqual({ kind: 'never' });
+    expect(runStateOf(summary({ latestRun: null, shownRunId: null }), true)).toEqual({
+      kind: 'never',
+    });
     expect(runStateOf(summary(), false)).toEqual({ kind: 'stale' });
-    expect(runStateOf(summary(), true)).toEqual({ kind: 'done' });
+    expect(runStateOf(summary(), true)).toEqual({ kind: 'done_clean' });
+  });
+
+  it('зелёное только при чистом прогоне: предупреждение уже мешает', () => {
+    const state = runStateOf(
+      summary({
+        counts: { openErrors: 0, openWarnings: 3, openInfo: 0, undetermined: 0, waived: 0 },
+      }),
+      true,
+    );
+    expect(state).toEqual({
+      kind: 'done_with_issues',
+      tone: 'warning',
+      reservations: ['3 предупреждения'],
+    });
+  });
+
+  it('«не проверено» не сливается с успехом: данных для вывода не было', () => {
+    const state = runStateOf(
+      summary({
+        counts: { openErrors: 0, openWarnings: 0, openInfo: 0, undetermined: 2, waived: 0 },
+      }),
+      true,
+    );
+    expect(state).toEqual({
+      kind: 'done_with_issues',
+      tone: 'warning',
+      reservations: ['2 замечания не проверено'],
+    });
+  });
+
+  it('неполное покрытие мешает зелёному, даже когда замечаний нет вовсе', () => {
+    // Ровно случай со стенда: ошибок не нашли, но шесть страниц не отнесены
+    // ни к одному документу — пустой список по ним ничего не доказывает.
+    const state = runStateOf(
+      summary({
+        coverage: {
+          pagesTotal: 83,
+          pagesRecognized: 83,
+          pagesAssigned: 77,
+          pagesUnassigned: 6,
+          unassignedPageNumbers: [4, 5, 10, 14, 78, 79],
+          documentsTotal: 29,
+          documentsUnknownType: 0,
+        },
+      }),
+      true,
+    );
+    expect(state).toEqual({
+      kind: 'done_with_issues',
+      tone: 'warning',
+      reservations: ['6 страниц не отнесены к документам'],
+    });
+  });
+
+  it('открытая ошибка красит плашку в красный, а не в жёлтый', () => {
+    const state = runStateOf(
+      summary({
+        counts: { openErrors: 1, openWarnings: 0, openInfo: 0, undetermined: 0, waived: 0 },
+      }),
+      true,
+    );
+    expect(state).toMatchObject({ kind: 'done_with_issues', tone: 'error' });
   });
 
   it('во время повторной проверки называет её и оставляет прежний результат', () => {
@@ -175,15 +256,39 @@ describe('runStateOf', () => {
 });
 
 describe('summaryText', () => {
+  const DONE = { kind: 'done_clean' } as const;
+
   it('отвечает на вопрос «что прочитано и что нашлось»', () => {
     const text = summaryText(
-      summary({ counts: { openErrors: 7, openWarnings: 3, openInfo: 0, undetermined: 0, waived: 0 } }),
+      summary({
+        counts: { openErrors: 7, openWarnings: 3, openInfo: 0, undetermined: 0, waived: 0 },
+      }),
+      { kind: 'done_with_issues', tone: 'error', reservations: ['7 ошибок'] },
     );
-    expect(text).toBe('Распознано 18 страниц из 18, разобрано 6 документов. Найдено: 7 ошибок, 3 предупреждения.');
+    expect(text).toBe(
+      'Распознано 18 страниц из 18, разобрано 6 документов. Найдено: 7 ошибок, 3 предупреждения.',
+    );
   });
 
   it('пустой результат называется словами, а не пустой строкой', () => {
-    expect(summaryText(summary())).toContain('Ошибок не найдено.');
+    expect(summaryText(summary(), DONE)).toContain('Проверка выполнена: ошибок не найдено.');
+  });
+
+  it('БЕЗ прогона не заявляет чистоту комплекта', () => {
+    // Главная ложь прежнего экрана: счётчики нули по построению (без прогона
+    // выдача пуста), и портал печатал «Ошибок не найдено» прямо над плашкой
+    // «Проверка ещё не выполнялась».
+    const text = summaryText(summary({ latestRun: null, shownRunId: null }), { kind: 'never' });
+    expect(text).not.toContain('не найдено');
+    expect(text).toBe(
+      'Распознано 18 страниц из 18, разобрано 6 документов. ' +
+        'Проверка по правилам не выполнялась: ошибки не искали.',
+    );
+  });
+
+  it('идущий первый прогон не выдаётся за результат', () => {
+    const text = summaryText(summary({ shownRunId: null }), { kind: 'running' });
+    expect(text).toContain('Проверка по правилам идёт: результата пока нет.');
   });
 });
 

@@ -87,6 +87,16 @@ import { appendAudit, type AuditActor } from './audit.js';
 import { appendRevisionEvent } from './jobs.js';
 import type { Database } from './users.js';
 
+/**
+ * Чтение, одинаково пригодное и базе, и открытой транзакции.
+ *
+ * Тот же приём, что в остальных репозиториях (`checks.ts`, `files.ts`). Нужен
+ * читателям, которых зовёт отчёт о составе комплекта: он собирает документы,
+ * реквизиты и строки реестра ОДНОЙ транзакцией, иначе пересегментация посреди
+ * чтения даёт ответ, часть которого описывает прежнюю нарезку.
+ */
+type ReadExecutor = Pick<Database, 'select'>;
+
 const REVISION_SCOPE: ScopeTarget = {
   objectId: submissionRevisions.objectId,
   contractorId: submissionRevisions.contractorId,
@@ -1062,7 +1072,7 @@ const DOCUMENT_SELECTION = {
   )`.as('page_count'),
 };
 
-function documentQuery(db: Database, scope: AuthScope, ...conditions: SQL[]) {
+function documentQuery(db: ReadExecutor, scope: AuthScope, ...conditions: SQL[]) {
   return db
     .select(DOCUMENT_SELECTION)
     .from(logicalDocuments)
@@ -1078,7 +1088,7 @@ function toDocumentView(row: Record<string, unknown>): LogicalDocumentView {
 }
 
 export async function listLogicalDocuments(
-  db: Database,
+  db: ReadExecutor,
   scope: AuthScope,
   revisionId: string,
 ): Promise<readonly LogicalDocumentView[]> {
@@ -1162,7 +1172,7 @@ export interface DocumentFieldValue {
  * бы читать `jsonb` там, где нужен один `text`.
  */
 export async function listFieldValuesOfRevisions(
-  db: Database,
+  db: ReadExecutor,
   scope: AuthScope,
   revisionIds: readonly string[],
   fieldCodes: readonly string[],
@@ -1206,7 +1216,7 @@ export interface PageAssignmentView {
 
 /** Учёт страниц ревизии: и привязанные, и явно непривязанные — одним списком. */
 export async function listPageAssignments(
-  db: Database,
+  db: ReadExecutor,
   scope: AuthScope,
   revisionId: string,
 ): Promise<readonly PageAssignmentView[]> {
@@ -1577,7 +1587,7 @@ export async function saveRegistryMatches(
 }
 
 export async function listRegistryRows(
-  db: Database,
+  db: ReadExecutor,
   scope: AuthScope,
   revisionId: string,
 ): Promise<readonly RegistryRowView[]> {

@@ -44,6 +44,7 @@ import type {
   DocTypeCandidate,
   DocumentDetail,
   FieldValue,
+  CheckReport,
   FindingList,
   FreezeResult,
   JobRunView,
@@ -508,6 +509,16 @@ export const checks = {
     get<FindingList>(`${V1}/revisions/${revisionId}/findings`, {
       query: validationRunId === undefined ? {} : { validationRunId },
     }),
+
+  /**
+   * Состав комплекта и результат проверки по каждой его позиции.
+   *
+   * Отдельный вызов от `findings`: у ответов разный размер и разная частота
+   * обновления, и подмешивать состав комплекта в список замечаний значило бы
+   * возить его целиком на каждое обновление списка после снятия одного
+   * замечания.
+   */
+  report: (revisionId: string) => get<CheckReport>(`${V1}/revisions/${revisionId}/check-report`),
 
   ruleCatalog: () =>
     get<{ items: RuleCatalogEntry[] }>(`${V1}/admin/rule-catalog`).then((r) => r.items),

@@ -92,7 +92,7 @@ test('экран разметки проходит проверку axe', async 
 
 test('экран проверки и согласования проходит axe', async ({ page }) => {
   await signIn(page, KC.engineer, `/ids/revisions/${IDS.revisionReview}?tab=checks`);
-  await expect(page.getByTestId('findings-by-page')).toBeVisible();
+  await expect(page.getByTestId('checks-report')).toBeVisible();
   await analyze(page);
 });
 
