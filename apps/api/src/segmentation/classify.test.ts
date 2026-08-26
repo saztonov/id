@@ -628,3 +628,88 @@ describe('акт опознаётся по форме бланка', () => {
     expect(second?.docTypeCode).toBe('cert_conformity');
   });
 });
+
+/**
+ * S34: лист с собственным заголовком перестаёт быть служебным.
+ *
+ * Три механизма, из-за которых половина комплекта уходила в непривязанные:
+ * штамп заверения перебивал заголовок, зона заголовка не доставала до титула
+ * под шапкой лаборатории, а лист, отданный графикой, не проверялся вовсе.
+ * На каждый — случай «поймала» и случай «не сшила».
+ */
+describe('лист с заголовком против служебной роли', () => {
+  const COPY_STAMP = 'КОПИЯ ВЕРНА\nИнженер ПТО\nИванов И.И.';
+
+  it('штамп заверения не перебивает заголовок документа', () => {
+    const result = only(page('p1', `ПРОТОКОЛ АТТЕСТАЦИИ № 60261\n\n${COPY_STAMP}`));
+
+    expect(result.label).toBe('B-DOC');
+    expect(result.pageRoleCode).toBeNull();
+  });
+
+  it('лист, на котором кроме штампа ничего нет, остаётся служебным', () => {
+    const result = only(page('p1', COPY_STAMP));
+
+    expect(result.label).toBe('A-ROLE');
+    expect(result.pageRoleCode).toBe('copy_stamp');
+  });
+
+  it('заголовок под шапкой лаборатории находится ниже третьей строки', () => {
+    const sheet = [
+      'ООО "ТЕСТ МЕТРОЛОГИЯ"',
+      'Уникальный номер записи об аккредитации в реестре',
+      'аккредитованных лиц № RA.RU.000000',
+      '',
+      'СВИДЕТЕЛЬСТВО О ПОВЕРКЕ',
+      '№ С-ТЕСТ/00-00-2024/000000001',
+    ].join('\n');
+    const result = only(page('p1', sheet));
+
+    expect(result.label).toBe('B-DOC');
+    expect(result.docTypeCode).toBe('metrology_verification');
+  });
+});
+
+describe('заголовок листа, отданного графикой', () => {
+  function imagePage(summary: string, rest = ''): PageInput {
+    return page('p1', `**[IMAGE]** | Type: Таблица\n\n**Summary:** ${summary}${rest}`, {
+      blockTypes: ['image'] as readonly SegmentationBlockType[],
+    });
+  }
+
+  it('пересказ, начинающийся видом документа, открывает документ', () => {
+    const result = only(
+      imagePage('Сертификат калибровки №000000 от 15.04.2024 на плотномер пенетрационный.'),
+    );
+
+    expect(result.label).toBe('B-DOC');
+    expect(result.docTypeCode).toBe('metrology_calibration');
+    // Вид прочитан в прозе распознавания, а не в строке документа: подтверждать
+    // его обязан человек.
+    expect(result.typeOutcome).toBe('uncertain');
+    expect(result.confidence).toBe(PHASE1_CONFIDENCE.imageSummary);
+  });
+
+  it('пересказ без вида в каталоге всё равно открывает документ', () => {
+    const result = only(imagePage('Протокол испытания от 04.10.2024 определения уплотнения.'));
+
+    expect(result.label).toBe('B-DOC');
+    expect(result.typeOutcome).not.toBe('none');
+  });
+
+  it('приложение к чужому документу документом не становится', () => {
+    const result = only(
+      imagePage('Схема расположения контролируемых участков к протоколу № 0000-00/00.'),
+    );
+
+    expect(result.label).not.toBe('B-DOC');
+  });
+
+  it('упоминание документа в Description заголовком не считается', () => {
+    const result = only(
+      imagePage('Фрагмент плана с осями 18-19.', '\n\n**Description:** Сертификат калибровки.'),
+    );
+
+    expect(result.label).not.toBe('B-DOC');
+  });
+});

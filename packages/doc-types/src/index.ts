@@ -41,11 +41,14 @@ export {
 
 export {
   DEFAULT_HEADING_LINES,
+  MAX_TRAILING_CHARS,
   matchDocTypes,
   matchPageRoles,
   normalizeLine,
+  introducesFollowingLine,
   normalizeLines,
   opensEnumeration,
+  opensListItem,
   resolveDocType,
 } from './matching.js';
 export type { DocTypeMatch, MatchOptions, PageRoleMatch, ResolvedDocType } from './matching.js';
