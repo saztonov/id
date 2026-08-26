@@ -108,6 +108,8 @@ interface ReportInput {
   readonly clientEventId?: string;
   readonly repeatCount?: number;
   readonly buildId?: string;
+  readonly statusCode?: number;
+  readonly errorCode?: string;
 }
 
 function report(input: ReportInput = {}): Record<string, unknown> {
@@ -163,12 +165,14 @@ interface SampleRow {
   readonly repeat_count: number;
   readonly release: string | null;
   readonly context: Record<string, unknown> | null;
+  readonly status_code: number | null;
+  readonly error_code: string | null;
 }
 
 async function samples(): Promise<readonly SampleRow[]> {
   return db.query<SampleRow>(
     `select source, execution, domain, user_id, route, client_event_id, repeat_count,
-            release, context
+            release, context, status_code, error_code
        from error_samples order by id`,
   );
 }
@@ -248,6 +252,42 @@ describe('приём отчёта', () => {
         'частота веб-ошибок в журнале заведомо занижена',
     ).toBe(7);
     expect(row?.release).toBe('2026.08.9');
+  });
+
+  /**
+   * Отказ чужого сервиса, с которым браузер говорит МИМО портала.
+   *
+   * Такой путь один — заливка байтов в S3 по presigned-адресу (§4.2), — и
+   * запроса к порталу у неё нет, а значит нет ни `request_id`, ни серверной
+   * строки журнала. Без этих двух полей `HTTP 500` от хранилища выглядит в
+   * журнале безымянной веб-ошибкой: 26 августа 2026 года так и вышло.
+   */
+  it('сохраняет статус и код отказа чужого сервиса', async () => {
+    await post(
+      report({
+        kind: 'manual',
+        name: 'Error',
+        message: 'Хранилище не приняло байты: HTTP 500 (InternalError, запрос TX42)',
+        statusCode: 500,
+        errorCode: 'InternalError',
+      }),
+    );
+    await flush();
+
+    const [row] = await samples();
+    expect(row?.status_code).toBe(500);
+    expect(
+      row?.error_code,
+      'без кода отказ хранилища неотличим в журнале от испорченной подписи',
+    ).toBe('InternalError');
+  });
+
+  it('код отказа обязан быть идентификатором, а не текстом', async () => {
+    // Значение приходит снаружи и становится осью журнала: текст в оси
+    // расщепил бы группировку на одноразовые куски.
+    const response = await post(report({ errorCode: 'Ошибка: не удалось <b>' }));
+
+    expect(response.statusCode).toBe(422);
   });
 });
 

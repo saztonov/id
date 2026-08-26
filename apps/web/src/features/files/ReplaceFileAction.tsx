@@ -45,7 +45,14 @@ export function ReplaceFileAction(props: ReplaceFileActionProps): ReactNode {
   const [asking, setAsking] = useState(false);
 
   const replace = useMutation({
-    mutationFn: (picked: File) => replaceFile(props.revisionId, props.file.id, picked),
+    mutationFn: (picked: File) =>
+      replaceFile(props.revisionId, props.file.id, picked, (attempt, total) => {
+        // Кнопка показывает только «идёт»: без этой строки повтор после отказа
+        // хранилища выглядит как зависшая замена на несколько секунд.
+        message.warning(
+          `Хранилище не приняло файл, повтор ${String(attempt)} из ${String(total)}…`,
+        );
+      }),
     onSuccess: async (stored) => {
       message.success(`Файл заменён на «${stored.fileName}». Проверка сброшена.`);
       await queryClient.invalidateQueries({ queryKey: revisionKeys.files(props.revisionId) });

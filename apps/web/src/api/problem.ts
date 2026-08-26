@@ -185,6 +185,77 @@ export function describeUploadFailure(error: unknown): string {
   return describeError(error);
 }
 
+/**
+ * Отказ хранилища, разобранный из XML-ответа S3.
+ *
+ * `code` вынесен отдельно от текста намеренно: он уезжает в журнал портала осью
+ * `error_code`, по которой отказы группируются и фильтруются, — а текст живёт
+ * только на экране у того, кто грузил.
+ */
+export interface StorageRejection {
+  /** Текст пользователю: статус, код, номер запроса и что с этим делать. */
+  readonly message: string;
+  /** `<Code>` из ответа: `InternalError`, `SlowDown`, `SignatureDoesNotMatch`… */
+  readonly code: string | null;
+  /** `<RequestId>` — с ним обращаются в поддержку хранилища. */
+  readonly requestId: string | null;
+}
+
+/**
+ * Тело ошибки S3 разбирается регулярным выражением, а не `DOMParser`.
+ *
+ * Не из экономии: юнит-тесты идут в node-окружении, где `DOMParser`
+ * отсутствует, — то есть разбор, написанный через него, проверялся бы только
+ * вручную в браузере. Нужны при этом ровно два элемента верхнего уровня, и
+ * ошибиться в них выражению негде.
+ */
+function tagValue(body: string, tag: string): string | null {
+  const match = new RegExp(`<${tag}>([^<]{1,200})</${tag}>`, 'u').exec(body);
+  return match?.[1]?.trim() ?? null;
+}
+
+/**
+ * Что делать пользователю — по классу отказа, а не по одному лишь статусу.
+ *
+ * Совет обязателен: «HTTP 500» человеку не говорит ничего, а «повторите через
+ * минуту» и «начните загрузку заново» — это разные действия, и выбирать между
+ * ними по коду умеем мы, а не он.
+ */
+function adviceFor(status: number, code: string | null): string {
+  if (code === 'SignatureDoesNotMatch' || code === 'AccessDenied' || status === 403) {
+    return 'Ссылка на загрузку недействительна — начните загрузку заново.';
+  }
+  if (code === 'RequestTimeTooSkewed') {
+    return 'Часы устройства разошлись с хранилищем — проверьте время и начните загрузку заново.';
+  }
+  if (code === 'RequestTimeout' || code === 'IncompleteBody') {
+    return 'Файл дошёл не целиком: соединение оборвалось. Попробуйте ещё раз.';
+  }
+  if (status >= 500 || status === 429 || code === 'SlowDown' || code === 'ServiceUnavailable') {
+    return 'Это временный отказ хранилища; портал уже повторил попытку. Попробуйте через минуту.';
+  }
+  return 'Попробуйте ещё раз; если повторяется — сообщите администратору портала.';
+}
+
+/**
+ * Отказ хранилища на заливке байтов.
+ *
+ * Тело кросс-доменного ответа читаемо: раз браузер отдал скрипту статус, а не
+ * `TypeError`, значит CORS-заголовки на ответе есть. Пустое или не-XML тело —
+ * законный исход (прокси, заглушка), и тогда остаётся один статус.
+ */
+export function describeStorageRejection(status: number, body: string): StorageRejection {
+  const code = tagValue(body, 'Code');
+  const requestId = tagValue(body, 'RequestId');
+
+  const details = [code, requestId === null ? null : `запрос ${requestId}`]
+    .filter((part): part is string => part !== null)
+    .join(', ');
+
+  const head = `Хранилище не приняло байты: HTTP ${String(status)}${details === '' ? '' : ` (${details})`}`;
+  return { message: `${head}. ${adviceFor(status, code)}`, code, requestId };
+}
+
 /** Человеческий текст ошибки для уведомления. */
 export function describeError(error: unknown): string {
   if (isApiError(error)) {

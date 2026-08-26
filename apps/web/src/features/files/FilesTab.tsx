@@ -44,7 +44,7 @@ import { VERIFY_STATE_LABELS } from '../../shared/labels.js';
 import { ConfirmIconAction, IconAction, RowActions } from '../../shared/RowActions.js';
 import { MoveDownIcon, MoveUpIcon, OpenIcon, TrashIcon } from '../../shared/icons.js';
 import { ReplaceFileAction } from './ReplaceFileAction.js';
-import { uploadFile } from './upload.js';
+import { uploadFile, type UploadRetryListener } from './upload.js';
 
 export interface FilesTabProps {
   readonly revisionId: string;
@@ -57,7 +57,14 @@ export function FilesTab({ revisionId, editable }: FilesTabProps): ReactNode {
   const queryClient = useQueryClient();
   const input = useRef<HTMLInputElement | null>(null);
   const [uploading, setUploading] = useState(false);
-  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
+  // `note` — то, что происходит прямо сейчас помимо счётчика: повтор заливки
+  // после отказа хранилища. Без него портал молчит несколько секунд, и молчание
+  // читается как зависание, а не как «пробуем ещё раз».
+  const [progress, setProgress] = useState<{
+    done: number;
+    total: number;
+    note: string | null;
+  } | null>(null);
 
   const list = useQuery({
     queryKey: revisionKeys.files(revisionId),
@@ -82,8 +89,8 @@ export function FilesTab({ revisionId, editable }: FilesTabProps): ReactNode {
   };
 
   /** Три шага приёма одного файла; сама последовательность — в `upload.ts`. */
-  const uploadOne = async (file: File): Promise<void> => {
-    const stored = await uploadFile(revisionId, file);
+  const uploadOne = async (file: File, onRetry: UploadRetryListener): Promise<void> => {
+    const stored = await uploadFile(revisionId, file, onRetry);
     if (stored.verifyState === 'quarantined') {
       message.warning(
         `Файл «${stored.fileName}» помещён в карантин: ${stored.verifyError ?? 'причина не указана'}`,
@@ -94,13 +101,19 @@ export function FilesTab({ revisionId, editable }: FilesTabProps): ReactNode {
   /** Выбранная пачка целиком, по очереди и с остановкой на первом отказе. */
   const upload = async (selected: readonly File[]): Promise<void> => {
     setUploading(true);
-    setProgress({ done: 0, total: selected.length });
+    setProgress({ done: 0, total: selected.length, note: null });
     let accepted = 0;
     try {
       for (const file of selected) {
-        await uploadOne(file);
+        await uploadOne(file, (attempt, total) => {
+          setProgress({
+            done: accepted,
+            total: selected.length,
+            note: `хранилище не приняло файл, повтор ${String(attempt)} из ${String(total)}`,
+          });
+        });
         accepted += 1;
-        setProgress({ done: accepted, total: selected.length });
+        setProgress({ done: accepted, total: selected.length, note: null });
       }
       message.success(
         selected.length === 1
@@ -225,6 +238,7 @@ export function FilesTab({ revisionId, editable }: FilesTabProps): ReactNode {
         {progress !== null && (
           <Typography.Text type="secondary" data-testid="upload-progress">
             загружено {progress.done} из {progress.total}
+            {progress.note === null ? '' : ` — ${progress.note}`}
           </Typography.Text>
         )}
         <Button

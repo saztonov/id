@@ -86,6 +86,7 @@ import { IconAction, RowActions } from '../../shared/RowActions.js';
 import { TrashIcon } from '../../shared/icons.js';
 import { Link, useNavigate } from '../../app/router.js';
 import { useSession } from '../../app/session.js';
+import { uploadToTicket } from '../files/upload.js';
 
 /** Текущий месяц первым числом — то, что подставляется в форму по умолчанию. */
 function currentPeriod(): string {
@@ -741,15 +742,14 @@ function NewWorkWithFileCard({
       // С этого места комплект уже существует. Любой дальнейший отказ оставляет
       // его черновиком, а не мусором, — и форма обязана сказать, куда идти.
       try {
-        const put = await fetch(created.upload.uploadUrl, {
-          method: created.upload.method,
-          headers: created.upload.headers,
-          body: file,
-          credentials: 'same-origin',
+        // Заливка — общая с вкладкой «Файлы» и с заменой файла: собственная
+        // копия этих строк здесь уже была и успела разойтись с оригиналом,
+        // оставшись без повторов и без разбора отказа хранилища.
+        await uploadToTicket(created.upload, file, (attempt, total) => {
+          message.warning(
+            `Хранилище не приняло файл, повтор ${String(attempt)} из ${String(total)}…`,
+          );
         });
-        if (!put.ok) {
-          throw new Error(`Хранилище не приняло байты: HTTP ${String(put.status)}`);
-        }
         const stored = await files.completeUpload(created.revisionId, created.upload.uploadId);
         return { created, stored };
       } catch (error) {

@@ -93,6 +93,9 @@ function isNoise(error: unknown): boolean {
 export interface ReportOptions {
   readonly kind: ClientErrorKind;
   readonly componentStack?: string | undefined;
+  /** Статус и код отказа чужого сервиса — см. `ClientErrorReport`. */
+  readonly statusCode?: number | undefined;
+  readonly errorCode?: string | undefined;
 }
 
 /**
@@ -129,6 +132,8 @@ export function reportClientError(error: unknown, options: ReportOptions): strin
     repeatCount: 1,
     ...(stack === undefined ? {} : { stack }),
     ...(options.componentStack === undefined ? {} : { componentStack: options.componentStack }),
+    ...(options.statusCode === undefined ? {} : { statusCode: options.statusCode }),
+    ...(options.errorCode === undefined ? {} : { errorCode: options.errorCode }),
     ...(BUILD_ID === undefined ? {} : { buildId: BUILD_ID }),
     ...(typeof location === 'undefined' ? {} : { url: location.href }),
   };

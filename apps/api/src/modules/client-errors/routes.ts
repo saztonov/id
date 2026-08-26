@@ -86,6 +86,27 @@ const bodySchema = z.object({
   clientEventId: z.uuid(),
   /** Сколько раз вкладка наблюдала эту ошибку до отправки. */
   repeatCount: z.coerce.number().int().min(1).max(10_000).default(1),
+  /**
+   * Статус чужого сервиса, отказ которого и есть эта ошибка.
+   *
+   * Появляется там, где браузер ходит МИМО портала: единственный такой путь —
+   * заливка байтов в S3 по presigned-адресу (§4.2). У отказа обращения к самому
+   * порталу этих полей нет: он приезжает в журнал со стороны сервера вместе с
+   * `request_id`, и брать статус из тела значило бы позволить клиенту назвать
+   * его самому.
+   */
+  statusCode: z.coerce.number().int().min(100).max(599).optional(),
+  /**
+   * Код отказа чужого сервиса: `InternalError`, `SlowDown`, `AccessDenied`.
+   *
+   * Форма проверяется жёстко, потому что значение приходит СНАРУЖИ и становится
+   * осью `error_code` журнала: ось — это идентификатор, по которому группируют,
+   * а не место для текста, тем более пользовательского.
+   */
+  errorCode: z
+    .string()
+    .regex(/^[A-Za-z][A-Za-z0-9_]{0,63}$/u, 'errorCode — идентификатор из латиницы и цифр')
+    .optional(),
 });
 
 /**
@@ -166,9 +187,24 @@ function pathOfUrl(url: string | undefined): string | undefined {
  * подставляется уже нормализованным — сервер не доверяет исходному тексту.
  */
 class ClientError extends Error {
-  constructor(name: string, message: string, frames: readonly string[]) {
+  /**
+   * Код отказа чужого сервиса.
+   *
+   * Именно `code`, а не собственное поле: ось `error_code` журнала выводится
+   * `fieldInChain(error, 'code')` — тем же способом, что SQLSTATE у отказов
+   * базы. Своё имя потребовало бы правки общего разбора ради одного источника.
+   */
+  readonly code: string | undefined;
+
+  constructor(
+    name: string,
+    message: string,
+    frames: readonly string[],
+    code: string | undefined,
+  ) {
     super(message);
     this.name = name;
+    this.code = code;
     this.stack = [`${name}: ${message}`, ...frames.map((frame) => `    ${frame}`)].join('\n');
   }
 }
@@ -207,6 +243,7 @@ export function registerClientErrorRoutes(app: AppInstance): void {
         // безобидно, а вот текст из ответа сервера — нет).
         normalizeErrorMessage(body.message),
         frames,
+        body.errorCode,
       );
 
       await app.errorReporter.report(error, {
@@ -218,6 +255,7 @@ export function registerClientErrorRoutes(app: AppInstance): void {
         severity: 'error',
         clientEventId: body.clientEventId,
         repeatCount: body.repeatCount,
+        ...(body.statusCode === undefined ? {} : { statusCode: body.statusCode }),
         // Пользователь — из сессии, если она есть. Из тела его брать нельзя:
         // это позволило бы приписать чужую ошибку кому угодно.
         ...(request.authContext?.user.id === undefined
