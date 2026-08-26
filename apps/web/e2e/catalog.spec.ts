@@ -140,7 +140,9 @@ test('объект заводится формой и появляется в р
   await expect(page.getByRole('cell', { name: 'E2E77', exact: true })).toBeVisible();
 
   await page.goto('/ids');
-  await expect(page.getByRole('cell', { name: 'Объект из формы', exact: true })).toBeVisible();
+  // Раздел ИД показывает объекты галереей карточек, а не таблицей: карточка — это
+  // ссылка, и её доступное имя складывается из наименования и строки «код · адрес».
+  await expect(page.getByRole('link', { name: /Объект из формы/u })).toBeVisible();
 });
 
 test('удаление объекта со связями отклоняется с названной причиной', async ({ page }) => {
