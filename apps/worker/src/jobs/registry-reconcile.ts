@@ -33,6 +33,8 @@
  */
 
 import {
+  documentNumbersOf,
+  DOCUMENT_NUMBER_FIELD_CODES,
   matchRegistryRows,
   matchTransferGroups,
   normalizeRegistryName,
@@ -147,7 +149,12 @@ export interface RegistryReconcileDeps {
  * `issuer` значило бы поднимать расхождение на паспорте качества, где выдал
  * изготовитель.
  */
-const FIELD_CODES = ['number', 'issued_at', 'issuer', 'manufacturer'] as const;
+const FIELD_CODES = [
+  ...DOCUMENT_NUMBER_FIELD_CODES,
+  'issued_at',
+  'issuer',
+  'manufacturer',
+] as const;
 
 /** Коды расхождений реквизитов; попадают в `field_mismatches` строки. */
 const MISMATCH_ISSUED_AT = 'issued_at';
@@ -155,31 +162,38 @@ const MISMATCH_ORGANIZATION = 'organization';
 const MISMATCH_SHEETS = 'sheets';
 
 interface DocumentFacts {
-  readonly number: string | null;
+  /** Все номера документа; первый — для показа в строке «лишний документ». */
+  readonly numbers: readonly string[];
   readonly issuedAt: string | null;
   readonly organizations: readonly string[];
 }
 
+const ORGANIZATION_CODES: ReadonlySet<string> = new Set(['issuer', 'manufacturer']);
+
 function factsByDocument(
   values: readonly DocumentFieldValue[],
 ): ReadonlyMap<string, DocumentFacts> {
-  const collected = new Map<
-    string,
-    { number: string | null; issuedAt: string | null; orgs: string[] }
-  >();
-
+  const grouped = new Map<string, DocumentFieldValue[]>();
   for (const value of values) {
-    const entry = collected.get(value.documentId) ?? { number: null, issuedAt: null, orgs: [] };
-    if (value.fieldCode === 'number') entry.number = value.valueText;
-    else if (value.fieldCode === 'issued_at') entry.issuedAt = value.valueDate;
-    else if (value.valueText !== null && value.valueText !== '') entry.orgs.push(value.valueText);
-    collected.set(value.documentId, entry);
+    const bucket = grouped.get(value.documentId);
+    if (bucket === undefined) grouped.set(value.documentId, [value]);
+    else bucket.push(value);
   }
 
   return new Map(
-    [...collected].map(([id, entry]) => [
+    [...grouped].map(([id, own]) => [
       id,
-      { number: entry.number, issuedAt: entry.issuedAt, organizations: entry.orgs },
+      {
+        numbers: documentNumbersOf(own),
+        issuedAt: own.find((value) => value.fieldCode === 'issued_at')?.valueDate ?? null,
+        // Организации перечислены ПОИМЁННО, а не «всё, что не номер и не дата».
+        // Прежняя редакция брала остаток, и расширение списка номеров тут же
+        // подмешало бы шифр схемы в наименования организаций.
+        organizations: own
+          .filter((value) => ORGANIZATION_CODES.has(value.fieldCode))
+          .map((value) => value.valueText ?? '')
+          .filter((text) => text !== ''),
+      },
     ]),
   );
 }
@@ -412,8 +426,9 @@ export function createRegistryReconcileHandler(
         .filter(
           (document) => document.docTypeCode !== null && document.docTypeCode.startsWith('aosr'),
         )
-        .map((document) => facts.get(document.id)?.number)
-        .filter((number): number is string => number !== undefined && number !== null),
+        // Номера АОСР — все формы, какие у документа нашлись: группа описи
+        // называет акт одним номером, а комплект мог записать его и бланком.
+        .flatMap((document) => facts.get(document.id)?.numbers ?? []),
     }));
 
     // ---------------------------------------------------------------
@@ -446,7 +461,7 @@ export function createRegistryReconcileHandler(
       const matchable: readonly MatchableDocument[] = revisionDocuments.map((document) => ({
         documentId: document.id,
         docTypeCode: document.docTypeCode,
-        number: facts.get(document.id)?.number ?? null,
+        numbers: facts.get(document.id)?.numbers ?? [],
         title: document.title,
       }));
       const byId = new Map(revisionDocuments.map((document) => [document.id, document]));
@@ -531,7 +546,7 @@ export function createRegistryReconcileHandler(
           workId: complect.workId,
           revisionId: complect.revisionId,
           contractorId: complect.contractorId,
-          docNoRaw: facts.get(document.id)?.number ?? null,
+          docNoRaw: facts.get(document.id)?.numbers[0] ?? null,
           docNameRaw: document.title,
           docTypeCode: document.docTypeCode,
         });

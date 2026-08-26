@@ -57,9 +57,7 @@ import {
   dedupeKeyFor,
   enqueueSystemJob,
   ensureDraftLayout,
-  findLayoutRevision,
   findSectionMarkers,
-  freezeLayout,
   JobRunner,
   LegacyRdWebAdapter,
   listFieldValues,
@@ -507,12 +505,6 @@ beforeAll(async () => {
   });
   await drainQueue();
 
-  const current = await findLayoutRevision(db, SCOPE, layout.id);
-  await freezeLayout(db, SCOPE, {
-    layoutRevisionId: layout.id,
-    expectedVersion: current?.version ?? 0,
-    actorUserId: USER_CONTRACTOR,
-  });
   const { run } = await startRecognitionRun(db, SCOPE, {
     layoutRevisionId: layout.id,
     requireRdDocument: true,

@@ -26,6 +26,7 @@ import {
 function stamp(patch: Partial<VlmStampResponse>): VlmStampResponse {
   return {
     document_code: null,
+    sheet_code: null,
     project_name: null,
     sheet_name: null,
     stage: null,

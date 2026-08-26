@@ -238,27 +238,13 @@ test.describe('экран разметки', () => {
     await expect(strip.getByTestId('page-type-badge-1')).toHaveCount(0);
   });
 
-  test('заморозка пиннит blocks_hash, после неё появляется отправка на распознавание', async ({
-    page,
-  }) => {
+  test('отправка на распознавание доступна сразу, без промежуточного шага', async ({ page }) => {
+    // Заморозки нет (0048): между правкой блоков и распознаванием больше нет
+    // необратимого шага, после которого разметка переставала правиться.
     await signIn(page, KC.engineer, MARKUP_URL);
 
-    await page.getByTestId('freeze-layout').click();
-    // `exact` обязателен: подпись самой кнопки — «Заморозить разметку», и без
-    // точного совпадения локатор находил бы и её, и кнопку подтверждения.
-    await page.getByRole('button', { name: 'Заморозить', exact: true }).click();
-
-    await expect
-      .poll(async () => {
-        const response = await page.request.get(`/api/v1/layouts/${IDS.layoutMarkup}`);
-        const body = (await response.json()) as { state: string; blocksHash: string | null };
-        return `${body.state}:${String(body.blocksHash !== null)}`;
-      })
-      .toBe('frozen:true');
-
     await expect(page.getByTestId('send-to-recognition')).toBeVisible();
-    // Замороженную разметку править нечем: инструменты выключены.
-    await expect(page.getByRole('button', { name: /Удалить выделенные/ })).toBeDisabled();
+    await expect(page.getByTestId('markup-disabled-reason')).toHaveCount(0);
   });
 
   test('отправка на распознавание создаёт прогон и ставит цикл сверки в очередь', async ({
@@ -269,8 +255,8 @@ test.describe('экран разметки', () => {
     await page.getByTestId('send-to-recognition').click();
     await expect(page.getByText(/распознавание/i).first()).toBeVisible();
 
-    // Последствие: прогон в базе, привязанный к ЗАМОРОЖЕННОЙ разметке, и
-    // локальный хэш разметки, по которому пойдёт сверка §5.2.
+    // Последствие: прогон в базе, привязанный к разметке, и снимок хэша набора
+    // блоков, по которому пойдёт сверка §5.2.
     await expect
       .poll(async () => {
         const response = await page.request.get(

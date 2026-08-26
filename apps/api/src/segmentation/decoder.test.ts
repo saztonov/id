@@ -101,16 +101,37 @@ describe('инвариант назначения страниц (§1.6)', () =>
 });
 
 describe('присоединение служебных страниц', () => {
-  it('пустая страница не присоединяется автоматически', () => {
-    // Пустой лист бывает и разделителем между документами, и оборотом листа
-    // внутри документа. Различить их структурой нельзя, поэтому решает
-    // человек, а не эвристика (§8.2, фаза 3).
+  it('пустой лист вплотную к документу становится его листом', () => {
+    // Пустой оборот листа с мелкой печатью стоит внутри документа, и его уход
+    // в непривязанные разрывал набор страниц: нарезка режет ОДИН отрезок и на
+    // разрывном наборе отказывала, лишая выдачи весь комплект.
     const result = decodeSegmentation(
-      [page('p1', 'ПАСПОРТ КАЧЕСТВА № 7'), page('p2')],
-      [opensKnown('p1', 'quality_passport'), cls('p2', { label: 'A-ROLE', pageRoleCode: 'blank' })],
+      [page('p1', 'ПАСПОРТ КАЧЕСТВА № 7'), page('p2'), page('p3')],
+      [
+        opensKnown('p1', 'quality_passport'),
+        cls('p2', { label: 'A-ROLE', pageRoleCode: 'blank' }),
+        cls('p3', { label: 'I-DOC', confidence: 0.7 }),
+      ],
+    );
+    expect(result.documents[0]?.pages.map((p) => p.sourcePageId)).toEqual(['p1', 'p2', 'p3']);
+    expect(result.documents[0]?.pages[1]?.pageRoleCode).toBe('blank');
+    expect(result.unassigned).toHaveLength(0);
+  });
+
+  it('пустая страница, оторванная от документа, остаётся ничьей', () => {
+    // Между документами пустой лист — разделитель, и присоединять его не к
+    // чему: предыдущая страница текущему документу уже не принадлежит.
+    const result = decodeSegmentation(
+      [page('p1', 'ПАСПОРТ КАЧЕСТВА № 7'), page('p2'), page('p3')],
+      [
+        opensKnown('p1', 'quality_passport'),
+        cls('p2', { label: 'A-ROLE', pageRoleCode: 'signature_visual' }),
+        cls('p3', { label: 'A-ROLE', pageRoleCode: 'blank' }),
+      ],
     );
     expect(result.documents[0]?.pages).toHaveLength(1);
-    expect(result.unassigned[0]?.reason).toContain('разделитель');
+    expect(result.unassigned.map((u) => u.sourcePageId)).toEqual(['p2', 'p3']);
+    expect(result.unassigned[1]?.reason).toContain('разделитель');
   });
 
   it('лист визуализации подписи не присоединяется автоматически', () => {

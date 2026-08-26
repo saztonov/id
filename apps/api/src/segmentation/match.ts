@@ -27,6 +27,20 @@
  * факт: строка реестра получила бы `matched` и конкретный документ, которого
  * никто не проверял. `ambiguous` — честный результат: сверка нашла кандидатов,
  * но различить их не может, и это решает человек.
+ *
+ * ## Лестница ступеней и почему частичное совпадение — последняя из них
+ *
+ * Точное совпадение → фолдинг гомоглифов → частичное вхождение номера. Порядок
+ * фиксирован, и каждая следующая ступень видит только те строки, которым не
+ * ответила предыдущая: иначе кусок номера конкурировал бы с точным совпадением.
+ *
+ * Частичная ступень заведена не «на всякий случай». Номер листа приходит из
+ * штампа, и там он печатается то с приставкой раздела, то без неё, а OCR
+ * дополнительно теряет края ячейки. Строгое сравнение на таких парах даёт
+ * `missing` — то есть «документа нет в комплекте» про документ, который в
+ * комплекте лежит; это ровно тот ложный вывод, который §9.1 запрещает.
+ * Плата за ступень — низкий счёт и единственность кандидата: два кандидата
+ * дают `ambiguous`, а не выбор наугад.
  */
 
 import { normalizeDocNo } from '@id/contracts';
@@ -40,9 +54,54 @@ export interface MatchableDocument {
    * будущей аналитики расхождений «реестр назвал так, документ назвался так».
    */
   readonly docTypeCode: string | null;
-  /** Номер документа из реквизита `number`; `null` — номер не извлечён. */
-  readonly number: string | null;
+  /**
+   * Все номера, которыми документ себя называет.
+   *
+   * Не одно значение, потому что «номер документа» — это не один реквизит.
+   * У исполнительной схемы он приходит из штампа (`scheme_number`), у
+   * генплана — `plan_number`, у бланочных документов рядом с `number` стоит
+   * `blank_number`. Пока сверка смотрела ровно в `number`, ни одна схема
+   * комплекта не находила свою строку реестра: у неё этого реквизита нет.
+   *
+   * Пустой список — номера не извлечены; такой документ не найдётся ни по
+   * одной строке, и это честный результат, а не повод искать по прозе.
+   */
+  readonly numbers: readonly string[];
   readonly title: string | null;
+}
+
+/**
+ * Реквизиты, значение которых является номером САМОГО документа.
+ *
+ * Список закрыт и назван здесь один раз: его читают обе сверки — реестра
+ * приложений внутри акта и описи папки, — а разойдясь, они начали бы находить
+ * разные документы по одной и той же строке.
+ *
+ * Критерий отбора один: реквизит называет ЭТОТ документ. Поэтому здесь нет
+ * `act_number` (у реестра приложений это номер чужого акта), `batch_number` и
+ * `serial_number` (номер партии и заводской номер изделия — не документа):
+ * попав сюда, они выдавали бы совпадения между несвязанными бумагами.
+ */
+export const DOCUMENT_NUMBER_FIELD_CODES = [
+  'number',
+  'blank_number',
+  'scheme_number',
+  'plan_number',
+] as const;
+
+/** Номера документа из его реквизитов, в порядке значимости кодов выше. */
+export function documentNumbersOf(
+  values: readonly { readonly fieldCode: string; readonly valueText: string | null }[],
+): readonly string[] {
+  const numbers: string[] = [];
+  for (const code of DOCUMENT_NUMBER_FIELD_CODES) {
+    for (const value of values) {
+      if (value.fieldCode !== code) continue;
+      const text = value.valueText?.trim() ?? '';
+      if (text !== '' && !numbers.includes(text)) numbers.push(text);
+    }
+  }
+  return numbers;
 }
 
 export interface RegistryMatch {
@@ -78,7 +137,26 @@ const EXACT_SCORE = 1;
  */
 const FOLDED_SCORE = 0.85;
 
-/** Индекс документов по одной из форм номера. */
+/**
+ * Счёт частичного совпадения номера.
+ *
+ * Заметно ниже фолдинга: совпал не номер, а его КУСОК. Так бывает штатно —
+ * реестр пишет «К14/ДК2-СЦ4», а в штампе номер напечатан с приставкой раздела
+ * либо наоборот, — но утверждать по куску «это тот самый документ» нельзя, и
+ * §9.1 обязан видеть по счёту, что решение требует глаз человека.
+ */
+const PARTIAL_SCORE = 0.6;
+
+/**
+ * Короче этого номера в частичном сравнении не участвуют.
+ *
+ * «1», «7», «А» входят подстрокой в половину номеров комплекта, и разрешить их
+ * значило бы выдавать случайные пары за находки. Ступень существует ради
+ * длинных шифров, где потерян префикс или хвост.
+ */
+const MIN_PARTIAL_LENGTH = 4;
+
+/** Индекс документов по одной из форм номера: у документа их может быть несколько. */
 function indexBy(
   documents: readonly MatchableDocument[],
   form: (value: string) => string,
@@ -86,16 +164,44 @@ function indexBy(
   const index = new Map<string, string[]>();
 
   for (const document of documents) {
-    if (document.number === null) continue;
-    const key = form(document.number);
-    if (key === '') continue;
+    for (const number of document.numbers) {
+      const key = form(number);
+      if (key === '') continue;
 
-    const bucket = index.get(key);
-    if (bucket === undefined) index.set(key, [document.documentId]);
-    else bucket.push(document.documentId);
+      const bucket = index.get(key);
+      // Один документ не попадает в свою же корзину дважды: две формы номера
+      // могут нормализоваться одинаково, и тогда он выглядел бы коллизией сам
+      // с собой, то есть строка получала бы `ambiguous` на ровном месте.
+      if (bucket === undefined) index.set(key, [document.documentId]);
+      else if (!bucket.includes(document.documentId)) bucket.push(document.documentId);
+    }
   }
 
   return index;
+}
+
+/**
+ * Документы, чей номер содержит номер строки (или содержится в нём).
+ *
+ * Сравнение идёт по фолдингу: ступень и без того нестрогая, а гомоглифы к её
+ * вопросу отношения не имеют.
+ */
+function partialCandidates(
+  rowFolded: string,
+  documents: readonly MatchableDocument[],
+): readonly string[] {
+  if (rowFolded.length < MIN_PARTIAL_LENGTH) return [];
+
+  const found: string[] = [];
+  for (const document of documents) {
+    const hit = document.numbers.some((number) => {
+      const key = normalizeDocNo(number).folded;
+      if (key.length < MIN_PARTIAL_LENGTH) return false;
+      return key.includes(rowFolded) || rowFolded.includes(key);
+    });
+    if (hit && !found.includes(document.documentId)) found.push(document.documentId);
+  }
+  return found;
 }
 
 /**
@@ -184,6 +290,34 @@ export function matchRegistryRows(
         matchedDocumentId: null,
         matchScore: null,
         reason: `после фолдинга гомоглифов номеру соответствуют ${folded.length} документов: различить их сверка не может`,
+      });
+      continue;
+    }
+
+    // Последняя ступень: номер совпал КУСКОМ. Идёт после точной и фолдинга,
+    // поэтому обесценить их не может — сюда доходят только строки, которым
+    // целиком не соответствует ни один документ комплекта.
+    const partial = partialCandidates(row.docNoFolded, documents);
+    for (const id of partial) named.add(id);
+
+    if (partial.length === 1) {
+      matches.push({
+        rowNo: row.rowNo,
+        matchState: 'matched',
+        matchedDocumentId: partial[0] ?? null,
+        matchScore: PARTIAL_SCORE,
+        reason: 'номер совпал частично: полного совпадения в комплекте нет, кандидат единственный',
+      });
+      continue;
+    }
+
+    if (partial.length > 1) {
+      matches.push({
+        rowNo: row.rowNo,
+        matchState: 'ambiguous',
+        matchedDocumentId: null,
+        matchScore: null,
+        reason: `номер частично совпал у ${partial.length} документов: выбрать один сверка не вправе`,
       });
       continue;
     }

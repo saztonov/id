@@ -225,9 +225,9 @@ const FIXTURE: readonly string[] = [
      VALUES ('${BUNDLE_A}', '${REVISION_A}', 2, '${PAGE_A2}')`,
   `INSERT INTO layout_revisions (id, revision_id, object_id, bundle_id, revision_no, state)
      VALUES ('${LAYOUT_A}', '${REVISION_A}', '${OBJECT}', '${BUNDLE_A}', 1, 'draft')`,
-  // Заморозка отдельным UPDATE: `layout_revisions_frozen_chk` требует хэш и
-  // отметку времени вместе с состоянием, и одной вставкой это не выражается.
-  `UPDATE layout_revisions SET state = 'frozen', blocks_hash = '${SHA('7')}', frozen_at = now()
+  // Хэш набора блоков отдельным UPDATE: он появляется у разметки не при
+  // создании, а когда по ней стартовал прогон распознавания.
+  `UPDATE layout_revisions SET blocks_hash = '${SHA('7')}'
      WHERE id = '${LAYOUT_A}'`,
   `INSERT INTO rd_run_documents (id, layout_revision_id, rd_document_id, rd_project_id)
      VALUES ('${RUN_DOC_A}', '${LAYOUT_A}', 'doc_a', 'prj-portal')`,

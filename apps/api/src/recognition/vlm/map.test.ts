@@ -23,6 +23,7 @@ const context: VlmBlockContext = {
 function stamp(patch: Partial<VlmStampResponse>): VlmStampResponse {
   return {
     document_code: null,
+    sheet_code: null,
     project_name: null,
     sheet_name: null,
     stage: null,
@@ -51,7 +52,7 @@ describe('map: общая идентичность блока', () => {
   });
 
   it('версия адаптера VLM-пути зафиксирована', () => {
-    expect(ADAPTER_VERSION_OPENROUTER_VLM).toBe('openrouter-vlm.v2');
+    expect(ADAPTER_VERSION_OPENROUTER_VLM).toBe('openrouter-vlm.v3');
   });
 });
 
@@ -133,6 +134,7 @@ describe('map: stamp', () => {
     const block = mapStampResponse(
       stamp({
         document_code: 'СТ26/01-14-АР5-3-РД',
+        sheet_code: 'К14/ДК2-СЦ4',
         project_name: 'Жилой дом',
         sheet_name: 'План на отм. 0,000',
         stage: 'РД',
@@ -153,6 +155,7 @@ describe('map: stamp', () => {
 
     expect(block.stamp).toEqual({
       code: 'СТ26/01-14-АР5-3-РД',
+      sheetCode: 'К14/ДК2-СЦ4',
       stage: 'РД',
       sheet: '3 из 12',
       object: 'Жилой дом',
@@ -203,6 +206,7 @@ describe('map: stamp', () => {
     const block = mapStampResponse(stamp({}), context);
     expect(block.stamp).toEqual({
       code: null,
+      sheetCode: null,
       stage: null,
       sheet: null,
       object: null,

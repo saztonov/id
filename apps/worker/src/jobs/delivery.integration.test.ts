@@ -23,8 +23,9 @@
  *    в БД и отметка в метаданных файла, найденная чтением самого файла;
  * 3. нарезка КОРРЕКТНА: в ней ровно страницы документа, а не соседние;
  * 4. повтор задачи безопасен и ничего не теряет;
- * 5. разрывный набор страниц — отказ с названной причиной, а не молча чужой
- *    лист в выдаче;
+ * 5. пропуск внутри диапазона нарезке не мешает и объявляется событием, а
+ *    пересечение с чужим документом — отказ с названной причиной, а не молча
+ *    чужой лист в выдаче;
  * 6. архив собран, читается нашим же разбором, содержит манифест и все
  *    нарезки, записан одной строкой; повтор его не пересобирает;
  * 7. **non-degradable гейт S10**: согласованная ревизия неизменяема на уровне
@@ -89,12 +90,24 @@ const DOC_B = id(111);
 const VALIDATION_RUN = id(120);
 const RULESET_VERSION = id(121);
 
-/** Поставка с разрывным документом: страницы 0 и 2 у одного документа. */
+/**
+ * Поставка с пропуском внутри документа: страницы 0 и 2 у одного документа, а
+ * страница 1 не отнесена никуда. Так выглядит пустой оборот листа — нарезке он
+ * не мешает.
+ */
 const SUBMISSION_BROKEN = id(200);
 const REVISION_BROKEN = id(201);
 const FILE_BROKEN = id(202);
 const BUNDLE_BROKEN = id(203);
 const DOC_C = id(210);
+
+/** Поставка с пересекающимися документами: страница 1 принадлежит соседу. */
+const SUBMISSION_OVERLAP = id(400);
+const REVISION_OVERLAP = id(401);
+const FILE_OVERLAP = id(402);
+const BUNDLE_OVERLAP = id(403);
+const DOC_D = id(410);
+const DOC_E = id(411);
 
 const PAGE = (revision: number, index: number): string => id(revision * 10 + 300 + index);
 
@@ -262,13 +275,38 @@ beforeAll(async () => {
       revisionId: REVISION_BROKEN,
       documentId: DOC_C,
       ordinal: 0,
-      title: 'Разрывный документ',
+      title: 'Документ с пропуском',
       pageIds: [PAGE(2, 0), PAGE(2, 2)],
       confirmed: true,
     }),
-    // Подача обеих ревизий последним шагом: состав заперт с этого момента.
+    ...submissionStatements({
+      submissionId: SUBMISSION_OVERLAP,
+      revisionId: REVISION_OVERLAP,
+      fileId: FILE_OVERLAP,
+      bundleId: BUNDLE_OVERLAP,
+      revisionKey: 3,
+    }),
+    // Страница 1 отнесена к соседу: диапазоны документов пересекаются, и
+    // нарезка первого включила бы чужой лист.
+    ...documentStatements({
+      revisionId: REVISION_OVERLAP,
+      documentId: DOC_D,
+      ordinal: 0,
+      title: 'Документ, охватывающий чужой лист',
+      pageIds: [PAGE(3, 0), PAGE(3, 2)],
+      confirmed: true,
+    }),
+    ...documentStatements({
+      revisionId: REVISION_OVERLAP,
+      documentId: DOC_E,
+      ordinal: 1,
+      title: 'Сосед',
+      pageIds: [PAGE(3, 1)],
+      confirmed: true,
+    }),
+    // Подача всех ревизий последним шагом: состав заперт с этого момента.
     `UPDATE submission_revisions SET status = 'in_review', submitted_at = now(), submitted_by = '${USER_CONTRACTOR}'
-       WHERE id IN ('${REVISION_MAIN}', '${REVISION_BROKEN}')`,
+       WHERE id IN ('${REVISION_MAIN}', '${REVISION_BROKEN}', '${REVISION_OVERLAP}')`,
   ]) {
     await testDb.query(statement);
   }
@@ -458,43 +496,75 @@ describe('нарезка логических документов (задача
     ).toBe(0);
   }, 120_000);
 
-  it('разрывный набор страниц — отказ с названной причиной, а не чужой лист в выдаче', async () => {
+  it('пропуск внутри диапазона нарезке не мешает, но назван в ленте', async () => {
+    // Непривязанная страница между листами документа — это пустой оборот или
+    // штамп ЭП, а не чужой документ. Отказ на ней лишал выдачи весь комплект
+    // из-за одного листа, поэтому нарезка идёт, а факт объявляется событием.
     await enqueueSystemJob(db, {
       type: 'doc.materialize_pdf',
       payload: { revisionId: REVISION_BROKEN, documentId: DOC_C },
-      dedupeKey: 'doc.materialize_pdf:broken',
+      dedupeKey: 'doc.materialize_pdf:gaps',
+    });
+    await drainQueue();
+
+    const [job] = await rows<{ status: string; last_error: string | null }>(
+      `SELECT status, last_error FROM jobs WHERE dedupe_key = 'doc.materialize_pdf:gaps'`,
+    );
+    expect(job?.status).toBe('done');
+
+    // В нарезке ВЕСЬ отрезок 0..2, включая непривязанный лист: страница
+    // физически лежит внутри документа, и выкидывать её из выдачи нечем.
+    const [document] = await rows<{ derived_pdf_page_count: number }>(
+      `SELECT derived_pdf_page_count FROM logical_documents WHERE id = '${DOC_C}'`,
+    );
+    expect(Number(document?.derived_pdf_page_count)).toBe(3);
+    expect((await storedBytes(`documents/${DOC_C}.pdf`)).length).toBeGreaterThan(0);
+
+    const events = await rows<{ payload: Record<string, unknown> }>(
+      `SELECT payload FROM revision_events
+        WHERE revision_id = '${REVISION_BROKEN}' AND event_type = 'document.materialize.gaps'`,
+    );
+    expect(events).toHaveLength(1);
+    expect(events[0]?.payload).toMatchObject({ assignedPages: 2, unassignedPages: 1 });
+  }, 120_000);
+
+  it('пересечение с чужим документом — отказ с названной причиной', async () => {
+    await enqueueSystemJob(db, {
+      type: 'doc.materialize_pdf',
+      payload: { revisionId: REVISION_OVERLAP, documentId: DOC_D },
+      dedupeKey: 'doc.materialize_pdf:overlap',
     });
     await drainQueue();
 
     const [job] = await rows<{ status: string; last_error: string }>(
-      `SELECT status, last_error FROM jobs WHERE dedupe_key = 'doc.materialize_pdf:broken'`,
+      `SELECT status, last_error FROM jobs WHERE dedupe_key = 'doc.materialize_pdf:overlap'`,
     );
     // `failed` — терминальный статус строки задачи; «dead» это его имя в
     // журнале раннера. Повтора не будет: отказ объявлен неповторяемым самим
     // классом ошибки, а не перечислением в обработчике.
     expect(job?.status).toBe('failed');
-    expect(job?.last_error).toContain('непрерывный отрезок');
+    expect(job?.last_error).toContain('пересекается');
 
     // Ни строки в БД, ни объекта в хранилище: отказ обязан не оставлять следа
     // в виде «наполовину нарезанного» документа.
     expect(
       await count(
-        `SELECT count(*)::int AS value FROM logical_documents WHERE id = '${DOC_C}' AND derived_pdf_blob_sha256 IS NOT NULL`,
+        `SELECT count(*)::int AS value FROM logical_documents WHERE id = '${DOC_D}' AND derived_pdf_blob_sha256 IS NOT NULL`,
       ),
     ).toBe(0);
-    await expect(storedBytes(`documents/${DOC_C}.pdf`)).rejects.toThrow();
+    await expect(storedBytes(`documents/${DOC_D}.pdf`)).rejects.toThrow();
   }, 120_000);
 
   it('исчерпание попыток оставляет в ленте ревизии названную причину', async () => {
     const events = await rows<{ event_type: string; payload: Record<string, unknown> }>(
       `SELECT event_type, payload FROM revision_events
-        WHERE revision_id = '${REVISION_BROKEN}' AND event_type = 'document.materialize.failed'`,
+        WHERE revision_id = '${REVISION_OVERLAP}' AND event_type = 'document.materialize.failed'`,
     );
     // Общее правило `withDeliveryTermination`, а не перечисление классов
     // ошибок: ревизия не имеет права остаться в состоянии, о котором ничего не
     // сказано (урок S7).
     expect(events).toHaveLength(1);
-    expect(String(events[0]?.payload.reason)).toContain('непрерывный отрезок');
+    expect(String(events[0]?.payload.reason)).toContain('пересекается');
   });
 });
 

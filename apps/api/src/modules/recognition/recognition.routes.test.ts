@@ -9,7 +9,7 @@
  * 2. **`Idempotency-Key` обязателен**, а повторный запрос не заводит второй
  *    прогон: один прогон на ревизию разметки — это второй заезд GPU, которого
  *    §5.2 не допускает.
- * 3. **Незамороженная разметка на распознавание не уходит** (§5.2, шаг 5–6).
+ * 3. **Разметка без единого блока на распознавание не уходит** (§5.2, шаг 5–6).
  * 4. **Изоляция подрядчиков** (§1.6, non-degradable): чужой прогон не виден ни
  *    списком, ни по прямому идентификатору, ни через выдачу файла артефакта.
  * 5. **Права**: `recognition.start` есть у подрядчика и инженера и нет у
@@ -74,8 +74,7 @@ const PAGE_B0 = id(42);
 
 const BUNDLE_A = id(50);
 const BUNDLE_B = id(51);
-const LAYOUT_FROZEN = id(60);
-const LAYOUT_DRAFT = id(61);
+const LAYOUT_WITH_BLOCKS = id(60);
 const LAYOUT_B = id(62);
 const BLOCK_A0 = id(70);
 const BLOCK_A1 = id(71);
@@ -168,7 +167,7 @@ const FIXTURE: readonly string[] = [
   `INSERT INTO user_roles (user_id, role) VALUES ('${USER_ENGINEER_NO_SCOPE}', 'engineer')`,
   `INSERT INTO user_object_scopes (user_id, object_id) VALUES ('${USER_ENGINEER}', '${OBJECT}')`,
 
-  // --- Подрядчик А: замороженная разметка и черновик ------------------------
+  // --- Подрядчик А: разметка с блоками и прогонами --------------------------
   `INSERT INTO object_contractors (object_id, contractor_id)
        VALUES ('${OBJECT}', '${ORG_A}') ON CONFLICT DO NOTHING`,
   `INSERT INTO works
@@ -193,26 +192,23 @@ const FIXTURE: readonly string[] = [
   `INSERT INTO processing_bundle_pages (bundle_id, revision_id, working_page_index, source_page_id)
      VALUES ('${BUNDLE_A}', '${REVISION_A}', 1, '${PAGE_A1}')`,
 
-  // Блоки пишутся ДО заморозки: после неё их запирает триггер.
+  // Блоки нужны прогону: снимок набора считается по ним на старте.
   `INSERT INTO layout_revisions (id, revision_id, object_id, bundle_id, revision_no, state)
-     VALUES ('${LAYOUT_FROZEN}', '${REVISION_A}', '${OBJECT}', '${BUNDLE_A}', 1, 'draft')`,
+     VALUES ('${LAYOUT_WITH_BLOCKS}', '${REVISION_A}', '${OBJECT}', '${BUNDLE_A}', 1, 'draft')`,
   `INSERT INTO layout_blocks (id, layout_revision_id, revision_id, bundle_id, source_page_id,
                               working_page_index, object_id, block_type, shape_type,
                               x0, y0, x1, y1, sort_order, source, detector_provenance)
-     VALUES ('${BLOCK_A0}', '${LAYOUT_FROZEN}', '${REVISION_A}', '${BUNDLE_A}', '${PAGE_A0}',
+     VALUES ('${BLOCK_A0}', '${LAYOUT_WITH_BLOCKS}', '${REVISION_A}', '${BUNDLE_A}', '${PAGE_A0}',
              0, '${OBJECT}', 'text', 'rectangle', 0.1, 0.1, 0.9, 0.4, 0, 'auto', 'rf_detr')`,
   `INSERT INTO layout_blocks (id, layout_revision_id, revision_id, bundle_id, source_page_id,
                               working_page_index, object_id, block_type, shape_type,
                               x0, y0, x1, y1, sort_order, source, detector_provenance)
-     VALUES ('${BLOCK_A1}', '${LAYOUT_FROZEN}', '${REVISION_A}', '${BUNDLE_A}', '${PAGE_A1}',
+     VALUES ('${BLOCK_A1}', '${LAYOUT_WITH_BLOCKS}', '${REVISION_A}', '${BUNDLE_A}', '${PAGE_A1}',
              1, '${OBJECT}', 'text', 'rectangle', 0.1, 0.5, 0.9, 0.8, 0, 'auto', 'rf_detr')`,
-  `UPDATE layout_revisions SET state = 'frozen', blocks_hash = '${SHA('7')}', frozen_at = now()
-     WHERE id = '${LAYOUT_FROZEN}'`,
+  `UPDATE layout_revisions SET blocks_hash = '${SHA('7')}'
+     WHERE id = '${LAYOUT_WITH_BLOCKS}'`,
   `INSERT INTO rd_run_documents (id, layout_revision_id, rd_document_id, rd_project_id)
-     VALUES ('${RUN_DOC_A}', '${LAYOUT_FROZEN}', 'doc_a', 'prj-portal')`,
-  // Черновик второй ревизии разметки: на распознавание уходить не должен.
-  `INSERT INTO layout_revisions (id, revision_id, object_id, bundle_id, revision_no, state)
-     VALUES ('${LAYOUT_DRAFT}', '${REVISION_A}', '${OBJECT}', '${BUNDLE_A}', 2, 'draft')`,
+     VALUES ('${RUN_DOC_A}', '${LAYOUT_WITH_BLOCKS}', 'doc_a', 'prj-portal')`,
 
   // --- Подрядчик Б: готовый чужой прогон с артефактом и текстом -------------
   `INSERT INTO object_contractors (object_id, contractor_id)
@@ -241,7 +237,7 @@ const FIXTURE: readonly string[] = [
                               x0, y0, x1, y1, sort_order, source, detector_provenance)
      VALUES ('${BLOCK_B0}', '${LAYOUT_B}', '${REVISION_B}', '${BUNDLE_B}', '${PAGE_B0}',
              0, '${OBJECT}', 'text', 'rectangle', 0.1, 0.1, 0.9, 0.4, 0, 'auto', 'rf_detr')`,
-  `UPDATE layout_revisions SET state = 'frozen', blocks_hash = '${LOCAL_HASH_B}', frozen_at = now()
+  `UPDATE layout_revisions SET blocks_hash = '${LOCAL_HASH_B}'
      WHERE id = '${LAYOUT_B}'`,
   `INSERT INTO rd_run_documents (id, layout_revision_id, rd_document_id, rd_project_id)
      VALUES ('${RUN_DOC_B}', '${LAYOUT_B}', 'doc_b', 'prj-portal')`,
@@ -403,26 +399,16 @@ describe('POST /revisions/{id}/recognize', () => {
   it('без Idempotency-Key отвечает 400 и НИЧЕГО не ставит в очередь', async () => {
     const before = await jobRows('layout.reconcile');
     const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_A}/recognize`, {
-      body: { frozenLayoutId: LAYOUT_FROZEN },
+      body: { layoutId: LAYOUT_WITH_BLOCKS },
     });
     expect(response.statusCode).toBe(400);
     expect(await jobRows('layout.reconcile')).toHaveLength(before.length);
     expect(await runRows()).toHaveLength(0);
   });
 
-  it('незамороженная разметка на распознавание не уходит', async () => {
-    const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_A}/recognize`, {
-      body: { frozenLayoutId: LAYOUT_DRAFT },
-      idempotencyKey: 'draft-attempt',
-    });
-    expect(response.statusCode).toBe(409);
-    expect(await runRows()).toHaveLength(0);
-    expect(await jobRows('layout.reconcile')).toHaveLength(0);
-  });
-
   it('чужая ревизия разметки не распознаётся даже по прямому идентификатору', async () => {
     const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_A}/recognize`, {
-      body: { frozenLayoutId: LAYOUT_B },
+      body: { layoutId: LAYOUT_B },
       idempotencyKey: 'foreign-layout',
     });
     expect(response.statusCode).toBe(404);
@@ -431,7 +417,7 @@ describe('POST /revisions/{id}/recognize', () => {
 
   it('руководителю запуск распознавания не разрешён', async () => {
     const response = await as(KC.manager, 'POST', `/api/v1/revisions/${REVISION_A}/recognize`, {
-      body: { frozenLayoutId: LAYOUT_FROZEN },
+      body: { layoutId: LAYOUT_WITH_BLOCKS },
       idempotencyKey: 'manager-attempt',
     });
     expect(response.statusCode).toBe(403);
@@ -444,7 +430,7 @@ describe('POST /revisions/{id}/recognize', () => {
    */
   it('создаёт прогон и кладёт задачу цикла сверки в jobs', async () => {
     const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_A}/recognize`, {
-      body: { frozenLayoutId: LAYOUT_FROZEN },
+      body: { layoutId: LAYOUT_WITH_BLOCKS },
       idempotencyKey: 'run-1',
     });
     expect(response.statusCode).toBe(202);
@@ -469,7 +455,7 @@ describe('POST /revisions/{id}/recognize', () => {
 
   it('повторный запрос не заводит второй прогон и второй job', async () => {
     const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_A}/recognize`, {
-      body: { frozenLayoutId: LAYOUT_FROZEN },
+      body: { layoutId: LAYOUT_WITH_BLOCKS },
       idempotencyKey: 'run-1',
     });
     expect(response.statusCode).toBe(202);

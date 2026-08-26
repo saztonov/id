@@ -441,7 +441,7 @@ export async function listLayoutRevisions(
     .orderBy(asc(layoutRevisions.revisionNo));
 }
 
-/** Единственная незамороженная ревизия разметки поставки (частичный UNIQUE, 0004). */
+/** Единственный черновик разметки поставки (частичный UNIQUE, 0004). */
 export async function findDraftLayout(
   db: Database,
   scope: AuthScope,
@@ -464,16 +464,13 @@ export async function findDraftLayout(
 }
 
 /**
- * Разморозить последнюю разметку ревизии и вернуть её как черновик.
+ * Вернуть последнюю разметку ревизии в работу как черновик.
  *
- * Только для режима тестирования (см. `ensureDraftLayout`). `null` — размораживать
- * нечего: разметки у ревизии ещё нет, и вызывающий заведёт первую обычным путём.
- *
- * Триггеры `layout_revisions_frozen_immutable` и `layout_revisions_supersede_only`
- * переходу `frozen → draft` не мешают: миграция 0035 добавила им ранний выход по
- * `immutability_enforced()`, а сюда мы попадаем только когда настройка выключена.
- * CHECK `layout_revisions_frozen_chk` тоже доволен: он требует `blocks_hash` и
- * `frozen_at` лишь у не-черновика.
+ * Осталось от заморозки (0048) и продолжает быть нужным по другой причине:
+ * `superseded`-ревизии есть в базах, работавших до отмены заморозки, и повторная
+ * разметка обязана попасть в ту же строку, а не заводить новую по номеру.
+ * `null` — размораживать нечего: разметки у ревизии ещё нет, и вызывающий
+ * заведёт первую обычным путём.
  *
  * `bundle_id` переписывается на текущий рабочий документ: комплект могли
  * пересобрать между нажатиями, и разметка обязана лежать на той карте страниц, по
@@ -554,13 +551,11 @@ export interface EnsureDraftLayoutResult {
  *
  * ## Одна разметка вместо ряда ревизий (режим тестирования)
  *
- * В строгом режиме замороженная разметка — доказательство: она названа в
- * `blocks_hash` прогона распознавания, и переразметка обязана завести СЛЕДУЮЩУЮ
- * ревизию, чтобы прежний результат остался объяснимым. При выключенной
- * неизменяемости доказывать нечего, а ряд «Ревизия 1, 2, 3…» превращает
- * повторное нажатие кнопки в накопление мусора и выносит наружу понятие, которого
- * на этапе тестирования не должно быть видно вовсе. Поэтому замороженная разметка
- * там РАЗМОРАЖИВАЕТСЯ и переиспользуется.
+ * Ряд «Ревизия 1, 2, 3…» превращал повторное нажатие кнопки в накопление мусора
+ * и выносил наружу понятие, которого на экране быть не должно. Поэтому повтор
+ * переиспользует ту же разметку. В базах, работавших до отмены заморозки (0048),
+ * последняя ревизия могла остаться `superseded` — её и возвращает в работу
+ * `thawLatestLayout`.
  *
  * Ручная правка при этом переживает переразметку: `importDetectedBlocks` сносит
  * только блоки `source='auto'` и целиком пропускает страницы с ручными.
@@ -574,8 +569,8 @@ export async function ensureDraftLayout(
   if (existing !== null) {
     if (existing.bundleId !== input.bundleId) {
       throw conflict(
-        'Для этой поставки уже есть незамороженная разметка по другому рабочему документу: ' +
-          'заморозьте её или отмените, прежде чем размечать новый.',
+        'Для этой поставки уже есть разметка по другому рабочему документу: ' +
+          'пересоберите комплект или разметьте тот же документ.',
       );
     }
     return { layout: existing, created: false };
@@ -825,7 +820,7 @@ export async function findLayoutBlock(
  * Ревизия разметки, пригодная для правки, с проверкой ожидаемой версии.
  *
  * Три отказа, и они разные по смыслу: `404` — не нашли или не наше, `409` —
- * разметка заморожена либо ревизия поставки закрыта, `412` — версия устарела.
+ * ревизия поставки закрыта либо разметка вытеснена, `412` — версия устарела.
  * Сваливать их в один код нельзя: на `412` клиент перечитывает и показывает
  * сравнение (§7.2), на `409` перечитывать бессмысленно.
  */
@@ -846,12 +841,20 @@ async function requireEditableLayout(
   return layout;
 }
 
+/**
+ * Можно ли править блоки этой разметки.
+ *
+ * Состояние разметки здесь БОЛЬШЕ НЕ СПРАШИВАЕТСЯ (0048). Прежде черновик был
+ * единственным правимым состоянием, и после отправки на распознавание портал
+ * отвечал «исправление — новая ревизия разметки», а маршрута такой правки не
+ * было вовсе: один клик закрывал возможность поправить рамку до конца жизни
+ * комплекта. Заморозки не существует, а `superseded` — история уже работавших
+ * баз: её нет ни у одной разметки, которую портал сейчас отдаёт на правку.
+ *
+ * Остаётся один запрет, и он про поставку, а не про разметку: в терминальном
+ * статусе ревизии её содержимое заперто целиком (класс `derived`, 0008).
+ */
 export function assertEditableLayout(layout: LayoutRevisionView): void {
-  if (layout.state !== 'draft') {
-    throw conflict(
-      `Разметка в состоянии «${layout.state}» неизменяема: правка создаёт новую ревизию разметки.`,
-    );
-  }
   if (!LAYOUT_MUTABLE_STATUSES.has(layout.submissionStatus)) {
     throw conflict(
       `Ревизия поставки в статусе «${layout.submissionStatus}»: её разметка больше не правится.`,
@@ -1658,90 +1661,6 @@ export async function applyTextCoverageFallback(
   });
 
   return { version, pages: targets };
-}
-
-// =====================================================================
-// Заморозка
-// =====================================================================
-
-export interface FreezeLayoutResult {
-  readonly layoutRevisionId: string;
-  readonly blocksHash: string;
-  readonly version: number;
-  readonly blockCount: number;
-}
-
-/**
- * Заморозка разметки с вычислением `blocks_hash` (§6.2).
- *
- * Набор блоков читается ДО транзакции, и это осознанно: `listLayoutBlocks()`
- * работает с областью видимости и двумя запросами, а тащить их внутрь
- * транзакции ради чтения, которое всё равно не блокирует строки, смысла нет.
- * Окно «блок добавлен после чтения, а хэш уже посчитан» закрывает не
- * транзакция, а условие `and version = expectedVersion` в самом UPDATE: любая
- * правка блоков поднимает версию ревизии (`bumpVersion`), поэтому заморозка по
- * устаревшему набору не проходит вовсе и отвечает 412. После заморозки блоки
- * заперты триггером `layout_blocks_frozen_content_immutable` — но это второй
- * рубеж, а не первый.
- */
-export async function freezeLayout(
-  db: Database,
-  scope: AuthScope,
-  input: {
-    readonly layoutRevisionId: string;
-    readonly expectedVersion: number;
-    readonly actorUserId: string;
-  },
-): Promise<FreezeLayoutResult> {
-  const layout = await requireEditableLayout(
-    db,
-    scope,
-    input.layoutRevisionId,
-    input.expectedVersion,
-  );
-
-  const blocks = await listLayoutBlocks(db, scope, layout.id);
-  if (blocks.length === 0) {
-    throw conflict('Разметка без единого блока не замораживается: распознавать было бы нечего.');
-  }
-  const blocksHash = computeBlocksHash(blocks);
-
-  return db.transaction(async (tx) => {
-    const updated = await tx.execute<{ version: number }>(sql`
-      update ${layoutRevisions}
-         set state = 'frozen',
-             blocks_hash = ${blocksHash},
-             version = ${layoutRevisions.version} + 1,
-             frozen_at = now(),
-             frozen_by = ${input.actorUserId}::uuid,
-             updated_at = now()
-       where ${layoutRevisions.id} = ${layout.id}::uuid
-         and ${layoutRevisions.state} = 'draft'
-         and ${layoutRevisions.version} = ${input.expectedVersion}
-      returning version
-    `);
-    const row = updated.rows[0];
-    if (row === undefined) {
-      throw preconditionFailed('Разметка изменилась между проверкой версии и заморозкой.');
-    }
-
-    await appendRevisionEvent(tx, {
-      revisionId: layout.revisionId,
-      eventType: 'layout.frozen',
-      payload: {
-        layoutRevisionId: layout.id,
-        blocksHash,
-        blockCount: blocks.length,
-      },
-    });
-
-    return {
-      layoutRevisionId: layout.id,
-      blocksHash,
-      version: Number(row.version),
-      blockCount: blocks.length,
-    };
-  });
 }
 
 // =====================================================================

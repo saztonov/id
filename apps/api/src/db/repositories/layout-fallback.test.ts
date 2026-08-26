@@ -188,7 +188,7 @@ describe('applyTextCoverageFallback', () => {
     });
 
     expect([...result.pages].sort()).toEqual([PAGE_EMPTY, PAGE_SPARSE]);
-    // Версия поднята: заморозка обязана идти по ней, иначе ответит 412 на
+    // Версия поднята: вызывающий обязан идти по ней, иначе получит 412 на
     // изменение, сделанное этим же нажатием.
     expect(result.version).toBeGreaterThan(layout?.version ?? 0);
 
@@ -253,11 +253,11 @@ describe('applyTextCoverageFallback', () => {
     // Черновик у поставки ровно один (`ux_layout_revisions_single_draft`),
     // поэтому прежний сначала уступает место.
     const layout2 = id(9);
-    // `layout_revisions_frozen_chk` требует хэш и отметку у всякой нечерновой
-    // ревизии: состояние без доказательства заморозки схема не допускает.
+    // `layout_revisions_superseded_chk` требует у нечерновой ревизии хэш набора:
+    // вытесненная разметка описывает набор, по которому уже прошёл прогон.
     await testDb.query(
       `UPDATE layout_revisions
-          SET state = 'superseded', blocks_hash = '${'c'.repeat(64)}', frozen_at = now()
+          SET state = 'superseded', blocks_hash = '${'c'.repeat(64)}'
         WHERE id = '${LAYOUT}'`,
     );
     await testDb.query(

@@ -337,17 +337,28 @@ const HEAT = /плавк[аиуе][^0-9№]{0,15}(?:№|N)?\s*([0-9][^\s|,;]*)/d
 /** Аттестат либо запись в реестре аккредитованных лиц: форма `RA.RU.…`. */
 const ACCREDITATION = /((?:RA|РА)\.(?:RU|РУ)\.?[0-9A-ZА-Я]{2,12})/dgiu;
 
+/**
+ * Номер документа в тексте.
+ *
+ * Отдельной функцией, потому что вызывающих трое: базовый `number` и шифры
+ * листов (`scheme_number`, `plan_number`). Это разные коды каталога, но одно и
+ * то же место документа — строка с «№», — и вторая реализация того же поиска
+ * разошлась бы с первой на первом же уточнении шаблона.
+ */
+function findDocumentNumber(text: string): readonly RawHit[] {
+  // Значение НЕ чистится от кавычек — иначе `evidence` перестал бы совпадать
+  // со спаном текста; чистка участвует только в решении «номер ли это».
+  return firstOf(
+    sweep(text, NUMBER_STRONG, CONFIDENCE.labelled).filter(plausibleNumber),
+    sweep(text, NUMBER_WEAK, CONFIDENCE.weak).filter(plausibleNumber),
+  );
+}
+
 const BASE_RULES: readonly RuleSpec[] = [
   {
     fieldCode: 'number',
     merge: 'text',
-    // Значение НЕ чистится от кавычек — иначе `evidence` перестал бы совпадать
-    // со спаном текста; чистка участвует только в решении «номер ли это».
-    find: (text) =>
-      firstOf(
-        sweep(text, NUMBER_STRONG, CONFIDENCE.labelled).filter(plausibleNumber),
-        sweep(text, NUMBER_WEAK, CONFIDENCE.weak).filter(plausibleNumber),
-      ),
+    find: findDocumentNumber,
   },
   {
     fieldCode: 'blank_number',
@@ -607,6 +618,23 @@ const TYPE_RULES: readonly RuleSpec[] = [
     fieldCode: 'registry_number',
     merge: 'text',
     find: (text) => sweep(text, OGRN, CONFIDENCE.labelled),
+  },
+  // ── Шифры листов: исполнительная схема и генплан ─────────────────────────
+  //
+  // У чертежа нет ни заголовка, ни номера в теле страницы: он назван только
+  // штампом. Штамп попадает в текст страницы рендером v2, и номер листа стоит
+  // там в той же форме «№ …», что и любой другой номер документа. Каталог
+  // объявляет оба кода `extractor: 'rule'` — без правил здесь они не выдавались
+  // бы никем, а сверка с реестром искала бы схему по несуществующему реквизиту.
+  {
+    fieldCode: 'scheme_number',
+    merge: 'text',
+    find: findDocumentNumber,
+  },
+  {
+    fieldCode: 'plan_number',
+    merge: 'text',
+    find: findDocumentNumber,
   },
   // ── Реквизиты бланка АОСР ────────────────────────────────────────────────
   //

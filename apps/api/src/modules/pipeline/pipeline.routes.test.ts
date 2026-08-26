@@ -315,8 +315,8 @@ beforeAll(async () => {
                '${OBJECT}', 'text', 'rectangle', 0.1, 0.1, 0.9, 0.4, 0, 'auto', 'rf_detr')`,
   );
 
-  // Пачка детекции, исчерпавшая попытки. Ровно то, что осталось в проде после
-  // предыдущей заморозки: такие задачи не имеют права запереть кнопку навсегда.
+  // Пачка детекции, исчерпавшая попытки. Ровно то, что осталось в проде от
+  // предыдущего нажатия: такие задачи не имеют права запереть кнопку навсегда.
   await db.query(
     `INSERT INTO jobs (type, payload, status, attempts, max_attempts, last_error)
        VALUES ('layout.detect_local',
@@ -431,6 +431,14 @@ async function layoutStateOf(layoutId: string): Promise<string> {
   return rows[0]?.state ?? 'нет строки';
 }
 
+/** Снимок набора блоков: его пишет СТАРТ прогона распознавания (0048). */
+async function blocksHashOf(layoutId: string): Promise<string | null> {
+  const rows = await db.query<{ blocks_hash: string | null }>(
+    `SELECT blocks_hash FROM layout_revisions WHERE id = '${layoutId}'`,
+  );
+  return rows[0]?.blocks_hash ?? null;
+}
+
 // =====================================================================
 // Кнопка «Разметить»
 // =====================================================================
@@ -509,10 +517,10 @@ describe('POST /revisions/{id}/check', () => {
     expect(response.json<{ detail: string }>().detail).toContain('Разметить');
   });
 
-  it('не морозит разметку, пока детекция ещё идёт', async () => {
+  it('не отправляет на распознавание, пока детекция ещё идёт', async () => {
     // Задачи стадии разметки стоят в очереди с нажатия «1. Выделить блоки» выше
-    // по файлу — ровно та последовательность, что дала в проде 35 отказов
-    // «замороженная разметка не принимает результаты детекции» от ОДНОГО нажатия.
+    // по файлу: прогон, стартовавший сейчас, снял бы снимок половины набора, а
+    // доложенные позже блоки остались бы нераспознанными.
     const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_READY}/check`, {
       idempotencyKey: 'check-detecting-1',
     });
@@ -529,11 +537,11 @@ describe('POST /revisions/{id}/check', () => {
       idempotencyKey: 'check-stuck-1',
     });
     expect(response.statusCode).toBe(202);
-    expect(response.json<{ frozen: boolean }>().frozen).toBe(true);
-    expect(await layoutStateOf(LAYOUT_STUCK)).toBe('frozen');
+    expect(response.json<{ stage: string }>().stage).toBe('recognition');
+    expect(await blocksHashOf(LAYOUT_STUCK)).not.toBeNull();
   });
 
-  it('замораживает черновую разметку и ставит распознавание со сквозным признаком', async () => {
+  it('ставит распознавание со сквозным признаком, не трогая состояние разметки', async () => {
     await finishLayoutJobs(REVISION_READY);
     expect(await layoutStateOf(LAYOUT_READY)).toBe('draft');
 
@@ -544,15 +552,14 @@ describe('POST /revisions/{id}/check', () => {
 
     const body = response.json<{
       stage: string;
-      frozen: boolean;
       recognitionRunId: string | null;
     }>();
     expect(body.stage).toBe('recognition');
-    expect(body.frozen).toBe(true);
     expect(body.recognitionRunId).not.toBeNull();
 
-    // Заморозка — не обещание в ответе, а факт в таблице.
-    expect(await layoutStateOf(LAYOUT_READY)).toBe('frozen');
+    // Разметка осталась правимой, а снимок набора блоков записан прогоном.
+    expect(await layoutStateOf(LAYOUT_READY)).toBe('draft');
+    expect(await blocksHashOf(LAYOUT_READY)).not.toBeNull();
 
     // Признак сквозного прогона — то, ради чего кнопка существует: без него
     // цепочка встала бы после распознавания, и «Проверить» не проверяла бы.
@@ -673,8 +680,8 @@ describe('GET /recognition-runs/{id}/progress', () => {
  * из которой не было выхода: кнопка срабатывала, модель отрабатывала комплект,
  * деньги тратились — и вкладка «Проверка» оставалась пустой, потому что анализу
  * нечего было читать. Повторное нажатие отвечало «для повторного распознавания
- * нужна новая ревизия разметки», а завести её нельзя: блоки после заморозки
- * заперты триггером.
+ * нужна новая ревизия разметки», а завести её было нечем — тот же тупик, из-за
+ * которого заморозка в итоге и отменена (0048).
  *
  * Набор идёт в СТРОГОМ режиме намеренно — `done` вычисляется только при
  * `enforceGates`, и в режиме тестирования утверждения ниже проверяли бы не то.
@@ -687,7 +694,7 @@ describe('POST /revisions/{id}/check в shadow-режиме', () => {
     );
   };
 
-  it('dry-run отказывает ДО заморозки и объясняет, чем это кончится', async () => {
+  it('dry-run отказывает ДО правки разметки и объясняет, чем это кончится', async () => {
     await setDryRun(true);
 
     const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_DRY}/check`, {
@@ -696,8 +703,8 @@ describe('POST /revisions/{id}/check в shadow-режиме', () => {
 
     expect(response.statusCode).toBe(409);
     expect(response.json<{ detail: string }>().detail).toContain('dry-run');
-    // Отказ обязан быть ДО заморозки: она необратима для этой ревизии разметки,
-    // и замороженная ни за что разметка правкой уже не лечится.
+    // Отказ обязан быть ДО правки разметки: снятый остаток детекции и
+    // доклеенные полностраничные блоки — изменения, сделанные ни за что.
     expect(await layoutStateOf(LAYOUT_DRY)).toBe('draft');
     // И ни одного прогона: сквозной путь не начат вовсе.
     const runs = await db.query<{ count: string | number }>(
@@ -716,7 +723,7 @@ describe('POST /revisions/{id}/check в shadow-режиме', () => {
 
     expect(response.statusCode).toBe(202);
     expect(response.json<{ stage: string }>().stage).toBe('recognition');
-    expect(await layoutStateOf(LAYOUT_DRY)).toBe('frozen');
+    expect(await blocksHashOf(LAYOUT_DRY)).not.toBeNull();
   });
 
   it('завершённый БЕЗ публикации прогон не запирает разметку', async () => {
@@ -802,7 +809,7 @@ describe('POST /revisions/{id}/check при выключенной неизме�
   it('повторное выделение блоков перезаписывает разметку, а не заводит следующую', async () => {
     // REVISION_STUCK пришла сюда с ЗАМОРОЖЕННОЙ разметкой и прогоном по ней:
     // в строгом режиме это ровно тот случай, когда заводилась «Ревизия 2».
-    expect(await layoutStateOf(LAYOUT_STUCK)).toBe('frozen');
+    expect(await blocksHashOf(LAYOUT_STUCK)).not.toBeNull();
 
     const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_STUCK}/markup`);
     expect(response.statusCode).toBe(202);
@@ -836,10 +843,10 @@ describe('POST /revisions/{id}/check при выключенной неизме�
       idempotencyKey: 'check-soft-1',
     });
     expect(response.statusCode).toBe(202);
-    expect(await layoutStateOf(LAYOUT_STUCK)).toBe('frozen');
+    expect(await blocksHashOf(LAYOUT_STUCK)).not.toBeNull();
 
-    // Остаток снят явно: мёртвых задач «замороженная разметка не принимает
-    // результаты детекции» после этого не появляется.
+    // Остаток снят явно: пачки, которые доложили бы блоки уже после снимка
+    // набора, в очереди не остаются.
     const layoutPending = await db.query<{ count: string | number }>(
       `SELECT count(*) AS count FROM jobs
         WHERE payload->>'revisionId' = '${REVISION_STUCK}'

@@ -131,6 +131,16 @@ export const stampBlockSchema = z.object({
   blockType: z.literal('stamp'),
   stamp: z.object({
     code: z.string().nullable().default(null),
+    /**
+     * Собственный номер листа, напечатанный отдельной ячейкой рядом со штампом.
+     *
+     * Отдельно от `code` намеренно: `code` — «Обозначение» проекта по ГОСТ Р
+     * 21.101 (`СТ26/01-14-ДК2-РД`), общее у всех листов раздела, а здесь номер
+     * ЭТОГО листа (`К14/ДК2-СЦ4`) — тот самый, которым исполнительную схему
+     * называет реестр приложений. Пока их не различали, сверка не находила ни
+     * одной схемы: у документа не было номера вовсе.
+     */
+    sheetCode: z.string().nullable().default(null),
     stage: z.string().nullable().default(null),
     sheet: z.string().nullable().default(null),
     object: z.string().nullable().default(null),

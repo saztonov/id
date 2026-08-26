@@ -55,6 +55,7 @@ function stampResult(layoutBlockId: string, sortOrder: number): RecognitionBlock
     blockType: 'stamp',
     stamp: {
       code: null,
+      sheetCode: null,
       stage: null,
       sheet: null,
       object: null,
@@ -99,7 +100,7 @@ describe('assembleRecognitionResult: успех', () => {
     expect(result.schemaVersion).toBe('recognition.result.v2');
     expect(result.source).toEqual({
       provider: 'openrouter_vlm',
-      adapterVersion: 'openrouter-vlm.v2',
+      adapterVersion: 'openrouter-vlm.v3',
       modelId: 'actual/model',
       generatedAt: null,
     });

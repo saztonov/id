@@ -1196,11 +1196,11 @@ export function createVlmStartHandler(
       await deps.finishRun({
         runId: run.runId,
         status: 'integrity_error',
-        reason: 'локальный набор блоков изменился после заморозки: хэш не совпал перед стартом VLM',
+        reason: 'набор блоков изменился после старта прогона: хэш не совпал перед стартом VLM',
         counts: { frozenBlocks: frozen.length },
       });
       throw new VlmRecognitionIntegrityError(
-        `Хэш замороженных блоков не совпал: локальный ${run.localLayoutHash.slice(0, 12)}…, ` +
+        `Хэш набора блоков не совпал со снимком прогона: снимок ${run.localLayoutHash.slice(0, 12)}…, ` +
           `фактический ${actualHash.slice(0, 12)}…`,
       );
     }
@@ -1210,9 +1210,9 @@ export function createVlmStartHandler(
       await deps.finishRun({
         runId: run.runId,
         status: 'failed',
-        reason: 'в замороженной разметке нет блоков',
+        reason: 'в разметке нет блоков',
       });
-      throw new VlmRecognitionStateError('В замороженной разметке нет блоков: распознавать нечего');
+      throw new VlmRecognitionStateError('В разметке нет блоков: распознавать нечего');
     }
 
     // --- Версии промптов, которыми пойдёт этот прогон ---

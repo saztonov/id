@@ -455,11 +455,11 @@ export const layoutRevisions = pgTable("layout_revisions", {
 	unique("layout_revisions_scope_uq").on(table.bundleId, table.id, table.objectId, table.revisionId),
 	check("layout_revisions_revision_no_chk", sql`revision_no > 0`),
 	check("layout_revisions_version_chk", sql`version >= 0`),
-	check("layout_revisions_state_chk", sql`state = ANY (ARRAY['draft'::text, 'frozen'::text, 'superseded'::text])`),
 	check("layout_revisions_blocks_hash_chk", sql`blocks_hash ~ '^[0-9a-f]{64}$'::text`),
-	check("layout_revisions_frozen_chk", sql`(state = 'draft'::text) OR ((blocks_hash IS NOT NULL) AND (frozen_at IS NOT NULL))`),
 	check("layout_revisions_detector_profile_chk", sql`detector_profile = ANY (ARRAY['rf_detr'::text, 'full_page'::text])`),
 	check("layout_revisions_manual_edit_chk", sql`(first_manual_edit_at IS NULL) = (first_manual_edit_by IS NULL)`),
+	check("layout_revisions_state_chk", sql`state = ANY (ARRAY['draft'::text, 'superseded'::text])`),
+	check("layout_revisions_superseded_chk", sql`(state = 'draft'::text) OR (blocks_hash IS NOT NULL)`),
 ]);
 
 export const artifactVersions = pgTable("artifact_versions", {

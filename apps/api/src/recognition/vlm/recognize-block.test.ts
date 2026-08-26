@@ -110,6 +110,7 @@ const validTextJson = JSON.stringify({
 
 const blankStampJson = JSON.stringify({
   document_code: null,
+  sheet_code: null,
   project_name: null,
   sheet_name: null,
   stage: null,

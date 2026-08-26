@@ -662,69 +662,32 @@ describe('изоляция подрядчиков', () => {
 });
 
 // =====================================================================
-// Заморозка
+// Правка не запирается состоянием разметки
 // =====================================================================
 
-describe('заморозка пиннит набор блоков', () => {
-  it('заморозка считает blocks_hash и запирает блоки', async () => {
+describe('разметка правится и после отправки на распознавание', () => {
+  it('блок добавляется по разметке, у которой уже есть хэш прогона', async () => {
+    // Хэш появляется у разметки, когда по ней стартовал прогон распознавания.
+    // Прежде он означал заморозку, и правка после него отвечала 409 «исправление
+    // — новая ревизия разметки»; выйти из этого состояния было нечем (0048).
+    await db.query(
+      `UPDATE layout_revisions SET blocks_hash = '${'a'.repeat(64)}' WHERE id = '${layoutId}'`,
+    );
+
     const detail = await layoutDetail(layoutId);
-    expect(detail.blockCount).toBeGreaterThan(0);
+    expect(detail.blocksHash).not.toBeNull();
 
-    const response = await as(KC.contractor, 'POST', `/api/v1/layouts/${layoutId}/freeze`, {
-      ifMatch: detail.version,
-    });
-    expect(response.statusCode).toBe(200);
-    const body = response.json<{ blocksHash: string; blockCount: number }>();
-    expect(body.blocksHash).toMatch(/^[0-9a-f]{64}$/);
-    expect(body.blockCount).toBe(detail.blockCount);
-
-    const frozen = await layoutDetail(layoutId);
-    expect(frozen.state).toBe('frozen');
-    expect(frozen.blocksHash).toBe(body.blocksHash);
-  });
-
-  it('замороженная разметка не принимает правок', async () => {
-    const detail = await layoutDetail(layoutId);
     const response = await as(KC.contractor, 'POST', `/api/v1/layouts/${layoutId}/blocks`, {
       body: { workingPageIndex: 0, blockType: 'text', shapeType: 'rectangle', coords: RECT },
       ifMatch: detail.version,
     });
-    expect(response.statusCode).toBe(409);
+    expect(response.statusCode).toBe(201);
   });
 
-  it('замороженная разметка не детектируется заново', async () => {
+  it('детекция по такой разметке тоже повторяется', async () => {
     const response = await as(KC.contractor, 'POST', `/api/v1/layouts/${layoutId}/detect`, {
       body: {},
     });
-    expect(response.statusCode).toBe(409);
-  });
-
-  it('пустая разметка не замораживается: распознавать было бы нечего', async () => {
-    const started = await as(KC.other, 'POST', `/api/v1/revisions/${REVISION_OTHER}/layout`);
-    expect(started.statusCode).toBe(202);
-    const other = started.json<StartResponse>();
-
-    // Разметку этой ревизии наполнил режим full-page-text выше; убираем блоки
-    // тем же путём, каким их убрал бы человек.
-    const listed = await as(KC.other, 'GET', `/api/v1/layouts/${other.layoutRevisionId}/blocks`);
-    for (const block of listed.json<{ items: { id: string }[] }>().items) {
-      const before = await as(KC.other, 'GET', `/api/v1/layouts/${other.layoutRevisionId}`);
-      const removed = await as(
-        KC.other,
-        'DELETE',
-        `/api/v1/layouts/${other.layoutRevisionId}/blocks/${block.id}`,
-        { ifMatch: before.json<LayoutDetail>().version },
-      );
-      expect(removed.statusCode).toBe(200);
-    }
-
-    const current = await as(KC.other, 'GET', `/api/v1/layouts/${other.layoutRevisionId}`);
-    const response = await as(
-      KC.other,
-      'POST',
-      `/api/v1/layouts/${other.layoutRevisionId}/freeze`,
-      { ifMatch: current.json<LayoutDetail>().version },
-    );
-    expect(response.statusCode).toBe(409);
+    expect(response.statusCode).toBe(202);
   });
 });

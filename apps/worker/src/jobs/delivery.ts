@@ -37,6 +37,7 @@ import { finished } from 'node:stream/promises';
 import {
   classifyFailure,
   isContiguous,
+  overlappingTargets,
   writeZipStream,
   type ArchivePlan,
   type ArchiveView,
@@ -250,11 +251,12 @@ async function materializeOne(
       `Границы документа ${target.documentId} не подтверждены: нарезка выполняется после подтверждения.`,
     );
   }
-  if (!isContiguous(target)) {
+  const overlapping = overlappingTargets(target, plan.targets);
+  if (overlapping.length > 0) {
     throw new DeliveryStateError(
-      `Страницы документа ${target.documentId} не образуют непрерывный отрезок ` +
-        `(${target.firstWorkingPageIndex}..${target.lastWorkingPageIndex}, страниц ${target.pageCount}): ` +
-        'нарезка по такому диапазону включила бы чужие листы.',
+      `Диапазон документа ${target.documentId} ` +
+        `(${target.firstWorkingPageIndex}..${target.lastWorkingPageIndex}) пересекается ` +
+        `с документом ${overlapping[0]?.documentId ?? '—'}: нарезка включила бы чужие листы.`,
     );
   }
   if (plan.source === null) {
@@ -267,6 +269,36 @@ async function materializeOne(
       `Документ ${target.documentId} ссылается на страницу ${target.lastWorkingPageIndex} ` +
         `рабочего документа, в котором ${plan.source.pageCount} страниц.`,
     );
+  }
+
+  /**
+   * Страницы отрезка, не отнесённые ни к какому документу.
+   *
+   * Считается ЗДЕСЬ, а не выводится из `pageCount` внизу: там `produced` — это
+   * то, что вернул qpdf, и сравнивать его надо с ожиданием, а не с ожиданием,
+   * выведенным из него же. Пропуск не отказ (см. `isContiguous`), но выдача
+   * получает листы, о которых портал ничего не утверждает, и молчать об этом
+   * нельзя — ни в журнале, ни в ленте ревизии.
+   */
+  const sliceLength = target.lastWorkingPageIndex - target.firstWorkingPageIndex + 1;
+  const unassignedInRange = sliceLength - target.pageCount;
+  if (!isContiguous(target)) {
+    ctx.logger.warn(
+      {
+        event: 'derived_pdf_range_has_gaps',
+        document_id: target.documentId,
+        first_page: target.firstWorkingPageIndex,
+        last_page: target.lastWorkingPageIndex,
+        assigned_pages: target.pageCount,
+        unassigned_pages: unassignedInRange,
+      },
+      'в отрезок нарезки попадут непривязанные страницы',
+    );
+    await ctx.emit('document.materialize.gaps', {
+      documentId: target.documentId,
+      assignedPages: target.pageCount,
+      unassignedPages: unassignedInRange,
+    });
   }
 
   const startedAt = Date.now();
@@ -284,9 +316,12 @@ async function materializeOne(
       derivedNote: DERIVED_DOCUMENT_NOTE,
     });
 
-    if (produced.pageCount !== target.pageCount) {
+    // Ожидание — длина ОТРЕЗКА, а не число привязанных страниц: при пропуске
+    // внутри диапазона эти числа расходятся законно, и сравнение с `pageCount`
+    // объявляло бы отказом ровно то, о чём выше уже сказано предупреждением.
+    if (produced.pageCount !== sliceLength) {
       throw new DeliveryStateError(
-        `Нарезка документа ${target.documentId} дала ${produced.pageCount} страниц вместо ${target.pageCount}.`,
+        `Нарезка документа ${target.documentId} дала ${produced.pageCount} страниц вместо ${sliceLength}.`,
       );
     }
 

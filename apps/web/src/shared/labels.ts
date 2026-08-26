@@ -72,7 +72,6 @@ export const VERIFY_STATE_LABELS: Record<VerifyState, string> = {
 
 export const LAYOUT_STATE_LABELS: Record<LayoutRevisionState, string> = {
   draft: 'Черновик',
-  frozen: 'Заморожена',
   superseded: 'Заменена',
 };
 

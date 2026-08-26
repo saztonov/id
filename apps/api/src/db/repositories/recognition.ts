@@ -49,6 +49,7 @@ import { conflict, internal, notFound } from '../../lib/problem.js';
 import { artifactKey, type ArtifactKind } from '../../storage/keys.js';
 import { withScope, type ScopeTarget } from '../scoped.js';
 import { appendRevisionEvent, cancelJobsOfRecognitionRun, enqueueSystemJob } from './jobs.js';
+import { computeBlocksHash, listLayoutBlocks } from './layout.js';
 import type { Database } from './users.js';
 
 const REVISION_SCOPE: ScopeTarget = {
@@ -268,12 +269,25 @@ export interface StartRunResult {
 }
 
 /**
- * Создание прогона по ЗАМОРОЖЕННОЙ ревизии разметки.
+ * Создание прогона по текущему набору блоков разметки.
  *
- * Все входные пины (`local_layout_hash`, `working_pdf_sha256`,
- * `rd_run_document_id`) читаются здесь из БД, а не приходят параметрами: они
- * доказывают, ЧТО заказано, и принимать их от вызывающего значило бы позволить
- * ему заказать одно, а записать другое.
+ * ## Хэш блоков считает прогон, а не заморозка (0048)
+ *
+ * Прежде распознавание принимало только `frozen`-разметку и брало готовый
+ * `blocks_hash` из её строки. Заморозки больше нет: блоки правятся всегда, а
+ * снимок набора нужен по-прежнему — им прогон доказывает, ЧТО он распознавал.
+ * Поэтому хэш вычисляется здесь, в момент старта, и пишется прогону; строка
+ * разметки получает его копией — как отметку «по этому набору уже распознавали».
+ *
+ * Второе следствие: повторный прогон по той же разметке РАЗРЕШЁН. Прежний
+ * запрет («для повторного распознавания нужна новая ревизия разметки») вместе с
+ * запертыми блоками закрывал цикл «поправил рамку — распознал заново» наглухо,
+ * а завести новую ревизию можно было только полной переразметкой.
+ *
+ * Остальные входные пины (`working_pdf_sha256`, `rd_run_document_id`) читаются
+ * здесь из БД, а не приходят параметрами: они доказывают, ЧТО заказано, и
+ * принимать их от вызывающего значило бы позволить ему заказать одно, а
+ * записать другое.
  *
  * Идемпотентность — по домену, а не по заголовку: незавершённый прогон этой
  * ревизии разметки возвращается как есть. Повторное нажатие кнопки — это второй
@@ -300,12 +314,14 @@ export async function startRecognitionRun(
 
   const found = layout[0];
   if (found === undefined) throw notFound('Ревизия разметки не найдена.');
-  if (found.state !== 'frozen' || found.blocksHash === null) {
-    throw conflict(
-      'На распознавание отправляется только замороженная ревизия разметки: ' +
-        'сначала POST /layouts/{id}/freeze.',
-    );
+
+  // Снимок набора блоков на момент старта. Пустая разметка отвергается здесь:
+  // распознавать было бы нечего, а прогон родился бы только чтобы умереть.
+  const blocks = await listLayoutBlocks(db, scope, found.id);
+  if (blocks.length === 0) {
+    throw conflict('В разметке нет ни одного блока: распознавать нечего.');
   }
+  const blocksHash = computeBlocksHash(blocks);
 
   const existing = await findRunForLayout(db, scope, input.layoutRevisionId);
   if (existing !== null && !TERMINAL_RUN_STATUSES.has(existing.status)) {
@@ -319,32 +335,6 @@ export async function startRecognitionRun(
         'а RD-документ закрыт: для нового распознавания нужна новая ревизия разметки.',
     );
   }
-  if (!input.requireRdDocument && existing !== null && existing.status === 'done') {
-    /**
-     * Зеркало легаси-дисциплины: у RD WEB повторный прогон done-разметки
-     * запирает закрытый документ, у VLM запирать нечем — запрет явный.
-     * Результаты неизменяемы, повторное распознавание = новая ревизия разметки.
-     *
-     * Спрашивается при этом не статус, а ПУБЛИКАЦИЯ. Запрет защищает
-     * неизменяемость результатов, поэтому там, где результатов нет, защищать
-     * нечего: прогон в режиме dry-run завершается честным `done`, не
-     * опубликовав ни строки, — и, считая его успешным, запрет запирал разметку
-     * навсегда за прогон, который ничего не оставил. Выйти из этого было
-     * нельзя: новая ревизия разметки требует правки блоков, а блоки после
-     * заморозки заперты триггером.
-     */
-    const published = await hasPublishedRecognition(db, scope, {
-      revisionId: found.revisionId,
-      layoutRevisionId: input.layoutRevisionId,
-    });
-    if (published) {
-      throw conflict(
-        'Прогон по этой ревизии разметки уже завершён успешно: ' +
-          'для повторного распознавания нужна новая ревизия разметки.',
-      );
-    }
-  }
-
   let rdRunDocumentId: string | null = null;
   if (input.requireRdDocument) {
     const runDocument = await db
@@ -386,7 +376,7 @@ export async function startRecognitionRun(
         revisionId: found.revisionId,
         layoutRevisionId: found.id,
         rdRunDocumentId,
-        localLayoutHash: found.blocksHash as string,
+        localLayoutHash: blocksHash,
         workingPdfSha256,
         settingsSnapshot: input.settingsSnapshot,
         status: 'running',
@@ -410,13 +400,27 @@ export async function startRecognitionRun(
         ? 0
         : await cancelJobsOfRecognitionRun(tx, found.revisionId, input.repairOfRunId);
 
+    /**
+     * Снимок хэша копируется и в строку разметки — той же транзакцией.
+     *
+     * Читается он как «по этому набору блоков распознавание уже запускали», и
+     * экран разметки показывает его рядом с числом блоков. Версия ревизии при
+     * этом НЕ поднимается: набор блоков не изменился, а поднятая версия
+     * отвергла бы `If-Match` у пользователя, который в этот момент правит
+     * рамку, — то есть старт прогона выглядел бы чужой правкой.
+     */
+    await tx
+      .update(layoutRevisions)
+      .set({ blocksHash, updatedAt: sql`now()` })
+      .where(eq(layoutRevisions.id, found.id));
+
     await appendRevisionEvent(tx, {
       revisionId: found.revisionId,
       eventType: 'recognition.started',
       payload: {
         layoutRevisionId: found.id,
         recognitionRunId: rows[0]?.id ?? null,
-        localLayoutHash: found.blocksHash,
+        localLayoutHash: blocksHash,
         ...(input.repairOfRunId != null
           ? { repairOfRunId: input.repairOfRunId, cancelledParentJobs }
           : {}),
@@ -790,7 +794,7 @@ export interface SaveResultsOutcome {
   readonly blocksWritten: number;
   /** Результат блока в этом прогоне уже записан: штатный повтор задачи. */
   readonly blocksAlreadyPresent: number;
-  /** Блок не принадлежит замороженной разметке прогона. */
+  /** Блок не принадлежит разметке прогона. */
   readonly blocksUnknown: number;
 }
 

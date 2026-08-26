@@ -153,6 +153,8 @@ const STAMP_KEYS: ReadonlyMap<string, string> = new Map([
 
 type StampFields = {
   code: string | null;
+  /** Легаси-строка штампа своего номера листа не несёт: ключа под него нет. */
+  sheetCode: string | null;
   stage: string | null;
   sheet: string | null;
   object: string | null;
@@ -166,6 +168,7 @@ type StampFields = {
 export function parseStampLine(line: string): StampFields {
   const fields: StampFields = {
     code: null,
+    sheetCode: null,
     stage: null,
     sheet: null,
     object: null,
@@ -398,6 +401,7 @@ function buildPage(
         source === null
           ? {
               code: null,
+              sheetCode: null,
               stage: null,
               sheet: null,
               object: null,

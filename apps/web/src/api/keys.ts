@@ -33,6 +33,12 @@ export const pipelineKeys = {
   recognitionProgress: (runId: string) => ['recognition-runs', runId, 'progress'] as const,
 };
 
+/** Опубликованный результат прогона: текст страниц и текст блоков. */
+export const recognitionKeys = {
+  pages: (runId: string) => ['recognition-runs', runId, 'pages'] as const,
+  blocks: (runId: string) => ['recognition-runs', runId, 'blocks'] as const,
+};
+
 export const documentKeys = {
   detail: (documentId: string) => ['documents', documentId] as const,
   fields: (documentId: string) => ['documents', documentId, 'fields'] as const,

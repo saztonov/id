@@ -47,7 +47,6 @@ export const layoutRevisionViewSchema = z.object({
    * `full-page-text`: он удаляет прежние блоки страницы (§5.3).
    */
   manuallyEdited: z.boolean(),
-  frozenAt: z.string().nullable(),
   createdAt: z.string(),
 });
 
@@ -124,13 +123,6 @@ export const blockMutationResponseSchema = z.object({
 });
 
 export const versionResponseSchema = z.object({ version: z.int().nonnegative() });
-
-export const freezeResponseSchema = z.object({
-  layoutRevisionId: z.uuid(),
-  blocksHash: z.string(),
-  version: z.int().nonnegative(),
-  blockCount: z.int().positive(),
-});
 
 export const detectRequestSchema = z.object({
   /**

@@ -1,5 +1,5 @@
 /**
- * Разметка: старт цепочки, чтение, правка блоков, заморозка (§6.1, §7, §14).
+ * Разметка: старт цепочки, чтение и правка блоков (§6.1, §7, §14).
  *
  * ## Кнопка «Разметить файл» ставит задачу, а не отвечает 202 в пустоту
  *
@@ -21,9 +21,9 @@
  * ## Права
  *
  * Чтение — `markup.read` (видят все роли в пределах своей области), правка —
- * `markup.edit` (подрядчик и инженер), заморозка — `markup.freeze`. Область
- * видимости применяется в репозитории на КАЖДОМ пути: подрядчик не видит чужую
- * разметку ни списком, ни по прямому идентификатору.
+ * `markup.edit` (подрядчик и инженер). Область видимости применяется в
+ * репозитории на КАЖДОМ пути: подрядчик не видит чужую разметку ни списком, ни
+ * по прямому идентификатору.
  */
 import type { FastifyReply } from 'fastify';
 import type { Logger } from 'pino';
@@ -39,7 +39,6 @@ import {
   createLayoutBlock,
   deleteLayoutBlock,
   findLayoutRevision,
-  freezeLayout,
   listLayoutBlocks,
   listLayoutRevisions,
   listPageAttentionFlags,
@@ -56,7 +55,6 @@ import {
   blockUpdateSchema,
   detectRequestSchema,
   detectResponseSchema,
-  freezeResponseSchema,
   fullPageTextResponseSchema,
   layoutBlockListSchema,
   layoutDetailSchema,
@@ -73,14 +71,12 @@ const PREFIX = '/api/v1';
 
 const readMarkup = requirePermission('markup.read');
 const editMarkup = requirePermission('markup.edit');
-const freezeMarkup = requirePermission('markup.freeze');
 
 export function registerLayoutRoutes(app: AppInstance): void {
   registerStartRoute(app);
   registerReadRoutes(app);
   registerBlockRoutes(app);
   registerPageRoutes(app);
-  registerFreezeRoute(app);
 }
 
 // =====================================================================
@@ -93,12 +89,11 @@ function toView(layout: LayoutRevisionView) {
     revisionId: layout.revisionId,
     bundleId: layout.bundleId,
     revisionNo: layout.revisionNo,
-    state: layout.state as 'draft' | 'frozen' | 'superseded',
+    state: layout.state as 'draft' | 'superseded',
     blocksHash: layout.blocksHash,
     version: layout.version,
     detectorProfile: layout.detectorProfile as 'rf_detr' | 'full_page',
     manuallyEdited: layout.firstManualEditAt !== null,
-    frozenAt: layout.frozenAt,
     createdAt: layout.createdAt,
   };
 }
@@ -435,14 +430,15 @@ function registerPageRoutes(app: AppInstance): void {
         /**
          * Ручной путь инженера — тот же ответ, что у кнопки.
          *
-         * В строгом режиме заново детектировать замороженную разметку нельзя: по
-         * ней уже считан `blocks_hash`, и прогон распознавания ссылается именно на
-         * этот набор блоков. В режиме тестирования доказывать нечего, и «создайте
-         * новую ревизию» — совет ровно про то понятие, которое там убрано. Разметка
-         * размораживается и перезаписывается, как это делает «1. Выделить блоки».
+         * Сюда попадают только `superseded`-ревизии из баз, работавших до отмены
+         * заморозки (0048): их содержимое заперто, по нему уже прошёл прогон. В
+         * строгом режиме это отказ, в режиме тестирования разметка возвращается в
+         * работу и перезаписывается — ровно как это делает «1. Выделить блоки».
          */
         if (await readImmutabilityEnforced(app.db)) {
-          throw conflict('Замороженную разметку заново не детектируют: создайте новую ревизию.');
+          throw conflict(
+            'Вытесненную разметку заново не детектируют: она описывает набор, по которому уже прошёл прогон.',
+          );
         }
         const restarted = await startMarkupOnBundle(app.db, scope, {
           revisionId: layout.revisionId,
@@ -483,34 +479,6 @@ function registerPageRoutes(app: AppInstance): void {
         batches: jobIds.length,
         jobIds,
       });
-    },
-  );
-}
-
-// =====================================================================
-// Заморозка
-// =====================================================================
-
-function registerFreezeRoute(app: AppInstance): void {
-  app.post(
-    `${PREFIX}/layouts/:layoutId/freeze`,
-    {
-      preHandler: freezeMarkup,
-      schema: { params: layoutIdParamSchema, response: { 200: freezeResponseSchema } },
-    },
-    async (request, reply) => {
-      const { scope, user } = currentAuth(request);
-      const expectedVersion = requireIfMatch(request, 'разметки');
-      const result = await freezeLayout(app.db, scope, {
-        layoutRevisionId: request.params.layoutId,
-        expectedVersion,
-        actorUserId: user.id,
-      });
-      request.log.info(
-        { event: 'layout_frozen', layout_revision_id: result.layoutRevisionId },
-        'разметка заморожена',
-      );
-      return withVersion(reply, result.version).code(200).send(result);
     },
   );
 }

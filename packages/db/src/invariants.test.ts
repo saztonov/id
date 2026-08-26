@@ -147,7 +147,7 @@ const ID = {
   page2: id(10),
   bundle: id(11),
   layoutDraft: id(12),
-  layoutFrozen: id(13),
+  layoutSuperseded: id(13),
   polygonBlock: id(14),
   document1: id(15),
   document2: id(16),
@@ -214,8 +214,8 @@ const FIXTURE: readonly string[] = [
      VALUES ('${ID.layoutDraft}', '${ID.revision}', '${ID.object}', '${ID.bundle}', 1)`,
   `INSERT INTO layout_revisions (id, revision_id, object_id, bundle_id, revision_no,
                                  state, blocks_hash, frozen_at, frozen_by)
-     VALUES ('${ID.layoutFrozen}', '${ID.revision}', '${ID.object}', '${ID.bundle}', 2,
-             'frozen', '${sha('c')}', now(), '${ID.user}')`,
+     VALUES ('${ID.layoutSuperseded}', '${ID.revision}', '${ID.object}', '${ID.bundle}', 2,
+             'superseded', '${sha('c')}', now(), '${ID.user}')`,
   `INSERT INTO layout_blocks (id, layout_revision_id, revision_id, bundle_id, source_page_id, working_page_index,
                               object_id, block_type, shape_type, x0, y0, x1, y1,
                               sort_order, source, detector_provenance)
@@ -226,10 +226,10 @@ const FIXTURE: readonly string[] = [
   `INSERT INTO logical_documents (id, revision_id, object_id, contractor_id, ordinal)
      VALUES ('${ID.document2}', '${ID.revision}', '${ID.object}', '${ID.contractor}', 1)`,
   `INSERT INTO rd_run_documents (id, layout_revision_id, rd_document_id, rd_project_id)
-     VALUES ('${ID.rdRunDocument}', '${ID.layoutFrozen}', 'rd-doc-1', 'rd-project-1')`,
+     VALUES ('${ID.rdRunDocument}', '${ID.layoutSuperseded}', 'rd-doc-1', 'rd-project-1')`,
   `INSERT INTO recognition_runs (id, revision_id, layout_revision_id, rd_run_document_id,
                                  local_layout_hash, working_pdf_sha256)
-     VALUES ('${ID.recognitionRun}', '${ID.revision}', '${ID.layoutFrozen}',
+     VALUES ('${ID.recognitionRun}', '${ID.revision}', '${ID.layoutSuperseded}',
              '${ID.rdRunDocument}', '${sha('c')}', '${sha('a')}')`,
   `INSERT INTO artifact_versions (id, recognition_run_id, kind, s3_key, artifact_sha256, byte_size)
      VALUES ('${ID.artifact}', '${ID.recognitionRun}', 'md', 'artifacts/md', '${sha('d')}', 4096)`,
@@ -640,13 +640,15 @@ describe('неизменяемость на уровне БД (§3.9)', () => {
     ).rejects.toThrow(/логический документ/u);
   });
 
-  it('запрещает UPDATE замороженной ревизии разметки', async () => {
+  it('запрещает UPDATE вытесненной ревизии разметки', async () => {
+    // Заморозки нет (0048), но `superseded` осталась запертой: по её
+    // `blocks_hash` уже прошёл прогон, и артефакты обязаны воспроизводиться.
     await expect(
       db.query(
         `UPDATE layout_revisions SET blocks_hash = '${sha('e')}'
-           WHERE id = '${ID.layoutFrozen}'`,
+           WHERE id = '${ID.layoutSuperseded}'`,
       ),
-    ).rejects.toThrow(/замороженную ревизию разметки/u);
+    ).rejects.toThrow(/вытесненную ревизию разметки/u);
   });
 
   it('разрешает UPDATE черновика ревизии разметки', async () => {
@@ -719,7 +721,7 @@ describe('неизменяемость на уровне БД (§3.9)', () => {
       `INSERT INTO layout_revisions (id, revision_id, object_id, bundle_id, revision_no,
                                      state, blocks_hash, frozen_at, frozen_by)
          VALUES ('${own(5)}', '${own(1)}', '${ID.object}', '${own(4)}', 1,
-                 'frozen', '${sha('c')}', now(), '${ID.user}')`,
+                 'superseded', '${sha('c')}', now(), '${ID.user}')`,
       `INSERT INTO rd_run_documents (id, layout_revision_id, rd_document_id, rd_project_id)
          VALUES ('${own(6)}', '${own(5)}', 'rd-doc-2', 'rd-project-2')`,
       `INSERT INTO recognition_runs (id, revision_id, layout_revision_id, rd_run_document_id,

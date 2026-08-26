@@ -57,8 +57,13 @@ import type { VlmImageResponse, VlmStampResponse, VlmTextResponse } from './sche
  * изменился, но изменилось то, чем ограничена модель и что ей сказано, — значит
  * при тех же пикселях ответ может отличаться, и старые артефакты обязаны быть
  * отличимы от новых.
+ *
+ * `v3` — штамп отдаёт собственный номер листа (`sheet_code` → `stamp.sheetCode`).
+ * Здесь меняется уже сам канон: у stamp-блока появилось поле, которого раньше не
+ * было, и текст страницы (рендер v2) его печатает. Прогоны до и после этой
+ * строки дают разный canonical-артефакт на одних и тех же пикселях.
  */
-export const ADAPTER_VERSION_OPENROUTER_VLM = 'openrouter-vlm.v2';
+export const ADAPTER_VERSION_OPENROUTER_VLM = 'openrouter-vlm.v3';
 
 export type CanonicalTextBlock = z.infer<typeof textBlockSchema>;
 export type CanonicalImageBlock = z.infer<typeof imageBlockSchema>;
@@ -209,6 +214,7 @@ export function mapStampResponse(
     blockType: 'stamp',
     stamp: {
       code: response.document_code,
+      sheetCode: response.sheet_code,
       stage: response.stage,
       sheet: buildSheet(response),
       object: response.project_name,

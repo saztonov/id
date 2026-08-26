@@ -601,27 +601,22 @@ describe('цепочка «Разметить файл» доводит комп
     expect(Number(survived[0]?.count ?? 0)).toBe(1);
   });
 
-  it('заморозка после детекции даёт хэш по всему набору', async () => {
-    const before = await testDb.query<{ version: number }>(
-      `SELECT version FROM layout_revisions WHERE id = '${layoutRevisionId}'`,
-    );
-    const { freezeLayout } = await import('@id/api');
-    const result = await freezeLayout(
+  it('хэш набора блоков считается по всей разметке, а не по последней пачке', async () => {
+    // Заморозки нет (0048): хэш снимает прогон распознавания в момент старта.
+    // Проверяется здесь то же, ради чего он существует, — что он описывает ВЕСЬ
+    // набор блоков ревизии, а не тот, что пришёл последней пачкой детекции.
+    const { computeBlocksHash, listLayoutBlocks } = await import('@id/api');
+    const blocks = await listLayoutBlocks(
       db,
       { kind: 'admin', userId: USER_CONTRACTOR },
-      {
-        layoutRevisionId,
-        expectedVersion: Number(before[0]?.version ?? 0),
-        actorUserId: USER_CONTRACTOR,
-      },
+      layoutRevisionId,
     );
-    expect(result.blocksHash).toMatch(/^[0-9a-f]{64}$/);
+    const stored = await testDb.query<{ count: number }>(
+      `SELECT count(*)::int AS count FROM layout_blocks WHERE layout_revision_id = '${layoutRevisionId}'`,
+    );
 
-    const stored = await testDb.query<{ state: string; blocks_hash: string }>(
-      `SELECT state, blocks_hash FROM layout_revisions WHERE id = '${layoutRevisionId}'`,
-    );
-    expect(stored[0]?.state).toBe('frozen');
-    expect(stored[0]?.blocks_hash).toBe(result.blocksHash);
+    expect(blocks.length).toBe(Number(stored[0]?.count ?? 0));
+    expect(computeBlocksHash(blocks)).toMatch(/^[0-9a-f]{64}$/);
   });
 
   /**
@@ -637,11 +632,23 @@ describe('цепочка «Разметить файл» доводит комп
    * разметку сама. Обе стороны этого правила проверяет
    * `packages/db/src/invariants.test.ts`, где живут инварианты схемы.
    */
-  it('после заморозки блоки не правятся: blocks_hash не должен разъехаться', async () => {
-    await expect(
-      testDb.query(
-        `UPDATE layout_blocks SET x0 = 0.42 WHERE layout_revision_id = '${layoutRevisionId}'`,
-      ),
-    ).rejects.toThrow();
+  it('блоки правятся и после того, как по разметке считали хэш', async () => {
+    // Обратная сторона отмены заморозки (0048): правка блоков больше не
+    // запрещена ничем, кроме терминального статуса самой поставки. Прогон,
+    // стартовавший по прежнему набору, поймает расхождение своим гейтом
+    // целостности — а не запретом на правку.
+    await testDb.query(
+      `UPDATE layout_revisions SET blocks_hash = '${'a'.repeat(64)}' WHERE id = '${layoutRevisionId}'`,
+    );
+
+    await testDb.query(
+      `UPDATE layout_blocks SET x0 = 0.42 WHERE layout_revision_id = '${layoutRevisionId}'`,
+    );
+
+    const moved = await testDb.query<{ count: number }>(
+      `SELECT count(*)::int AS count FROM layout_blocks
+        WHERE layout_revision_id = '${layoutRevisionId}' AND x0 = 0.42`,
+    );
+    expect(Number(moved[0]?.count ?? 0)).toBeGreaterThan(0);
   });
 });

@@ -488,19 +488,32 @@ class ReportFacts {
         ? null
         : this.pageOf(this.context.documents.get(matched)?.firstPageId ?? null);
 
+    /**
+     * Совпадение по КУСКУ номера не выдаётся за проверенный факт.
+     *
+     * Сверка отдаёт такие строки с пониженным счётом (`match.ts`, последняя
+     * ступень лестницы): документ найден, но совпал не весь номер. Показать это
+     * как «данные верны» значило бы скрыть от проверяющего единственное место,
+     * где решение принял порог, а не равенство.
+     */
+    const partial = row.matchState === 'matched' && (row.matchScore ?? 1) < 1;
+
     const status: ReportRowStatus =
       row.matchState === 'matched'
-        ? 'ok'
+        ? partial
+          ? 'warning'
+          : 'ok'
         : row.matchState === 'missing'
           ? 'error'
           : row.matchState === 'ambiguous'
             ? 'warning'
             : 'warning';
+    const where = page === null ? '' : `, стр. ${String(page.number)}`;
     const statusText =
       row.matchState === 'matched'
-        ? page === null
-          ? 'найден в комплекте'
-          : `найден в комплекте, стр. ${String(page.number)}`
+        ? partial
+          ? `номер совпал не полностью — проверьте документ${where}`
+          : `найден в комплекте${where}`
         : row.matchState === 'missing'
           ? 'нет в комплекте'
           : row.matchState === 'ambiguous'

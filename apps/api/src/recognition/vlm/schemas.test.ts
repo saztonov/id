@@ -158,6 +158,7 @@ const validImage = {
 
 const validStamp = {
   document_code: 'СТ26/01-14-АР5-3-РД',
+  sheet_code: 'К14/ДК2-СЦ4',
   project_name: null,
   sheet_name: 'План на отм. 0,000',
   stage: 'РД',

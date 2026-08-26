@@ -54,8 +54,6 @@ export const startMarkupPipelineResponseSchema = z.object({
 
 export const checkResponseSchema = z.object({
   stage: pipelineStageSchema,
-  /** Заморожена ли разметка этим нажатием (а не раньше, руками). */
-  frozen: z.boolean(),
   recognitionRunId: z.string().nullable(),
   jobId: z.string(),
   jobCreated: z.boolean(),

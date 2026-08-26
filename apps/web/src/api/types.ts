@@ -168,7 +168,6 @@ export interface LayoutRevision {
   version: number;
   detectorProfile: 'rf_detr' | 'full_page';
   manuallyEdited: boolean;
-  frozenAt: string | null;
   createdAt: string;
 }
 
@@ -228,13 +227,6 @@ export interface BlockMutationResult {
   version: number;
 }
 
-export interface FreezeResult {
-  layoutRevisionId: string;
-  blocksHash: string;
-  version: number;
-  blockCount: number;
-}
-
 export interface DetectResult {
   layoutRevisionId: string;
   batches: number;
@@ -271,7 +263,7 @@ export interface RecognitionRun {
    *
    * Раньше поле было объявлено как `unknown[]` и не рендерилось ни одним
    * экраном, поэтому «Отказ» за 0.1 с оставался без объяснения: узнать, что
-   * упало (не настроен VLM-порт, нет блоков в замороженной разметке, не
+   * упало (не настроен VLM-порт, нет блоков в разметке, не
    * опубликованы промты стадии `recognize`), можно было только в админ-консоли
    * задач.
    */

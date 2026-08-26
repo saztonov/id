@@ -65,12 +65,12 @@ afterEach(() => {
 describe('readEventStream', () => {
   it('собирает кадр, разрезанный границей чанка', async () => {
     const { frames } = await collect([
-      'event: layout.fro',
-      'zen\ndata: {"seq":18',
+      'event: recognition.sta',
+      'rted\ndata: {"seq":18',
       '}\n\nevent: job.succeeded\ndata: {"seq":19}\n\n',
     ]);
 
-    expect(frames.map((frame) => frame.event)).toEqual(['layout.frozen', 'job.succeeded']);
+    expect(frames.map((frame) => frame.event)).toEqual(['recognition.started', 'job.succeeded']);
     expect(frames[0]?.data).toBe('{"seq":18}');
   });
 

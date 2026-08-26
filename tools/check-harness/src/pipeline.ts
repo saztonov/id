@@ -20,6 +20,7 @@ import {
   decodeSegmentation,
   extractFields,
   KNOWN_TYPE_MIN_CONFIDENCE,
+  documentNumbersOf,
   matchRegistryRows,
   pagesNeedingLlm,
   parseAnnexRegistry,
@@ -232,7 +233,9 @@ export function runPackage(dir: string, options: HarnessOptions): PackageRunResu
       .map((candidate) => ({
         documentId: candidate.id,
         docTypeCode: candidate.docTypeCode,
-        number: candidate.fields.find((field) => field.fieldCode === 'number')?.valueText ?? null,
+        // Все формы номера, а не один `number`: у исполнительной схемы он
+        // приходит шифром из штампа, и сверка обязана видеть его тоже.
+        numbers: documentNumbersOf(candidate.fields),
         title: candidate.title,
       }));
 

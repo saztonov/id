@@ -273,6 +273,15 @@ export type VlmStampRevision = z.infer<typeof vlmStampRevisionSchema>;
  */
 export const vlmStampResponseSchema = z.strictObject({
   document_code: z.string().nullable(),
+  /**
+   * Собственный номер листа из отдельной ячейки рядом со штампом.
+   *
+   * Отдельное поле, а не «ещё один вид `document_code`»: на исполнительных
+   * схемах в штампе стоит «Обозначение» проекта (общее у всех листов раздела),
+   * а номер, которым лист назван в реестре приложений, напечатан выше штампа
+   * своей ячейкой. Пока их не различали, у схемы не было номера вовсе.
+   */
+  sheet_code: z.string().nullable(),
   project_name: z.string().nullable(),
   sheet_name: z.string().nullable(),
   stage: z.string().nullable(),
@@ -345,6 +354,7 @@ export const IMAGE_BLOCK_RESULT_SCHEMA: JsonSchema = strictObjectSchema({
 
 export const STAMP_BLOCK_RESULT_SCHEMA: JsonSchema = strictObjectSchema({
   document_code: nullableStringSchema,
+  sheet_code: nullableStringSchema,
   project_name: nullableStringSchema,
   sheet_name: nullableStringSchema,
   stage: nullableStringSchema,

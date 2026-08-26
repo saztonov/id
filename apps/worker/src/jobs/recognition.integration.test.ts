@@ -47,9 +47,8 @@ import {
   dedupeKeyFor,
   enqueueSystemJob,
   ensureDraftLayout,
-  findLayoutRevision,
   findRecognitionRun,
-  freezeLayout,
+  listLayoutBlocks,
   JobRunner,
   LegacyRdWebAdapter,
   listArtifacts,
@@ -295,13 +294,25 @@ async function drainQueue(maxRounds = 120): Promise<void> {
 }
 
 /**
- * Новая замороженная ревизия разметки: полный проход цепочки §6.1.
+ * Новая ревизия разметки: полный проход цепочки §6.1.
  *
  * Каждый сценарий получает СВОЮ ревизию разметки и свой RD-документ. Иначе
  * первый же успешный прогон закрыл бы документ (§5.2, шаг 9), и остальные
  * сценарии проверяли бы отказ «документ закрыт», а не то, ради чего написаны.
+ *
+ * Прежняя разметка уступает место явно. До отмены заморозки (0048) её вытесняла
+ * сама заморозка: `ensureDraftLayout` не находил черновика и заводил следующую
+ * ревизию по номеру. Теперь разметка остаётся черновой, а черновик у поставки
+ * один (`ux_layout_revisions_single_draft`), — и без этого шага все сценарии
+ * работали бы с одной ревизией и одним закрытым RD-документом.
  */
 async function freshFrozenLayout(): Promise<string> {
+  await testDb.query(
+    `UPDATE layout_revisions
+        SET state = 'superseded',
+            blocks_hash = coalesce(blocks_hash, '${'c'.repeat(64)}')
+      WHERE revision_id = '${REVISION}' AND state = 'draft'`,
+  );
   const { layout } = await ensureDraftLayout(db, SCOPE, { revisionId: REVISION, bundleId });
   await enqueueSystemJob(db, {
     type: 'rd.create_run_document',
@@ -310,13 +321,10 @@ async function freshFrozenLayout(): Promise<string> {
   });
   await drainQueue();
 
-  const current = await findLayoutRevision(db, SCOPE, layout.id);
-  const frozen = await freezeLayout(db, SCOPE, {
-    layoutRevisionId: layout.id,
-    expectedVersion: current?.version ?? 0,
-    actorUserId: USER_CONTRACTOR,
-  });
-  expect(frozen.blockCount).toBeGreaterThan(0);
+  // Заморозки нет (0048): прогон берёт набор блоков как есть. Проверяем, что
+  // детекция их вообще положила, — иначе распознавать было бы нечего.
+  const blocks = await listLayoutBlocks(db, SCOPE, layout.id);
+  expect(blocks.length).toBeGreaterThan(0);
   return layout.id;
 }
 

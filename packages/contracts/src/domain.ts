@@ -701,11 +701,16 @@ export const layoutRevisionSchema = z
     state: layoutRevisionStateSchema,
     blocksHash: sha256Schema.nullable(),
     version: rowVersionSchema,
-    frozenAt: isoDateTimeSchema.nullable(),
-    frozenBy: uuidSchema.nullable(),
   })
-  .refine((r) => r.state === 'draft' || (r.blocksHash !== null && r.frozenAt !== null), {
-    message: 'Замороженная ревизия разметки обязана иметь хэш блоков и время заморозки',
+  /**
+   * Вытесненная ревизия обязана нести хэш блоков.
+   *
+   * Заморозки больше нет (0048), но `superseded` осталось у ревизий старых баз,
+   * и по их `blocks_hash` уже прошли прогоны: ревизия без хэша не описывала бы
+   * набор, к которому привязаны результаты.
+   */
+  .refine((r) => r.state === 'draft' || r.blocksHash !== null, {
+    message: 'Вытесненная ревизия разметки обязана иметь хэш блоков',
     path: ['blocksHash'],
   });
 export type LayoutRevision = z.infer<typeof layoutRevisionSchema>;

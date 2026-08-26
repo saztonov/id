@@ -53,6 +53,7 @@ import {
   classifyPages,
   classifyPageWithLlm,
   decodeSegmentation,
+  documentNumbersOf,
   extractFields,
   extractFieldsWithLlm,
   llmFieldsFor,
@@ -1275,11 +1276,12 @@ export function createMatchRegistryHandler(
       return;
     }
 
-    const numbers = new Map<string, string | null>();
+    // Номеров у документа может быть несколько: у исполнительной схемы он
+    // приходит шифром схемы из штампа, у бланочных форм рядом с `number` стоит
+    // номер бланка. Список кодов — общий для обеих сверок (`documentNumbersOf`).
+    const numbers = new Map<string, readonly string[]>();
     for (const document of documents) {
-      const fields = await deps.listFieldValues(document.id);
-      const number = fields.find((field) => field.fieldCode === 'number');
-      numbers.set(document.id, number?.valueText ?? null);
+      numbers.set(document.id, documentNumbersOf(await deps.listFieldValues(document.id)));
     }
 
     const registryDocumentIds = new Set(stored.map((row) => row.documentId));
@@ -1289,7 +1291,7 @@ export function createMatchRegistryHandler(
       .map((document) => ({
         documentId: document.id,
         docTypeCode: document.docTypeCode,
-        number: numbers.get(document.id) ?? null,
+        numbers: numbers.get(document.id) ?? [],
         title: document.title,
       }));
 

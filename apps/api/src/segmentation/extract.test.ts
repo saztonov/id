@@ -116,6 +116,25 @@ describe('типо-специфичная схема — только при у�
       extractTypeFields(input(PROTOCOL, { docTypeCode: 'нет_такого_типа', typeConfident: true })),
     ).toEqual([]);
   });
+
+  it('номер исполнительной схемы читается из штампа страницы', () => {
+    // Лист схемы не назван нигде, кроме штампа: ни заголовка, ни номера в теле
+    // страницы у чертежа нет. Штамп попадает в текст рендером v2 — и номер
+    // берут оба кода, базовый `number` и `scheme_number` каталога.
+    const scheme =
+      '**[STAMP]** | № К14/ДК2-СЦ4 | Code: СТ26/01-14-ДК2-РД | Stage: ИД | Sheet: 1 из 1\n\n' +
+      '**Name:** Исполнительная схема стяжки в/о П.Д-П.Ж\n\n' +
+      '**Organization:** ООО «ЭМДМ-СТРОЙ»';
+    const fields = extractFields(
+      input(scheme, { docTypeCode: 'exec_scheme', typeConfident: true }),
+    );
+
+    expect(valueOf(fields, 'number')).toMatchObject({ valueText: 'К14/ДК2-СЦ4' });
+    expect(valueOf(fields, 'scheme_number')).toMatchObject({ valueText: 'К14/ДК2-СЦ4' });
+    // «Обозначение» проекта печатается без «№» и номером документа не является:
+    // оно общее у всех листов раздела.
+    expect(valueOf(fields, 'number')).not.toMatchObject({ valueText: 'СТ26/01-14-ДК2-РД' });
+  });
 });
 
 // =====================================================================

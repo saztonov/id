@@ -46,7 +46,6 @@ import type {
   FieldValue,
   CheckReport,
   FindingList,
-  FreezeResult,
   JobRunView,
   JobView,
   LayoutBlock,
@@ -236,7 +235,6 @@ export interface StartMarkupPipelineResult {
 
 export interface CheckPipelineResult {
   readonly stage: 'recognition' | 'analysis' | 'checks';
-  readonly frozen: boolean;
   readonly recognitionRunId: string | null;
   readonly jobId: string;
   readonly jobCreated: boolean;
@@ -381,11 +379,6 @@ export const layout = {
       body: workingPageIndices === undefined ? {} : { workingPageIndices: [...workingPageIndices] },
     }).then((r) => r.data),
 
-  freeze: (layoutId: string, version: number) =>
-    request<FreezeResult>('POST', `${V1}/layouts/${layoutId}/freeze`, {
-      ifMatch: version,
-      idempotencyKey: newIdempotencyKey('freeze'),
-    }).then((r) => r.data),
 };
 
 export type BlockMutationResponse = ApiResponse<BlockMutationResult>;
@@ -395,9 +388,9 @@ export type BlockMutationResponse = ApiResponse<BlockMutationResult>;
 // =====================================================================
 
 export const recognition = {
-  start: (revisionId: string, frozenLayoutId: string) =>
+  start: (revisionId: string, layoutId: string) =>
     request<RecognizeResult>('POST', `${V1}/revisions/${revisionId}/recognize`, {
-      body: { frozenLayoutId },
+      body: { layoutId },
       idempotencyKey: newIdempotencyKey('recognize'),
     }).then((r) => r.data),
 

@@ -193,7 +193,7 @@ export async function startMarkupOnBundle(
   const { jobId, created: jobCreated } = await enqueueJob(db, scope, {
     type: 'rd.create_run_document',
     // Ревизия разметки — в payload, а не «найдётся по bundle»: пока задача ждёт
-    // в очереди, черновик может смениться (заморозка №1 → создание №2), и
+    // в очереди, черновик может смениться (вытеснение №1 → создание №2), и
     // задача отработала бы по чужой цели.
     payload: tracePayload({
       revisionId: input.revisionId,

@@ -19,12 +19,13 @@
  * пропорции страницы из карты и вьюпорта pdf.js, и расхождение показывается
  * пользователю, а не игнорируется.
  *
- * ## Заморозка и распознавание
+ * ## Распознавание
  *
  * Две кнопки §6 разнесены: «Разметить файл» живёт на вкладке «Файлы» (там же,
- * где собирается рабочий документ), а здесь — заморозка разметки и отправка на
- * распознавание. `frozenLayoutId` передаётся явно (§14): «возьми текущую
- * замороженную» распознало бы не то, что видел пользователь.
+ * где собирается рабочий документ), а здесь — отправка на распознавание.
+ * Идентификатор разметки передаётся явно (§14): «возьми текущую» распознало бы
+ * не то, что видел пользователь. Заморозки перед отправкой больше нет (0048):
+ * блоки правятся всегда, и отправить их можно повторно.
  */
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
@@ -45,11 +46,12 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { AttentionFlag, BlockType } from '@id/contracts';
 
 import { bundles, catalog, documents, layout, recognition } from '../../api/endpoints.js';
-import { catalogKeys, layoutKeys, revisionKeys } from '../../api/keys.js';
+import { catalogKeys, layoutKeys, recognitionKeys, revisionKeys } from '../../api/keys.js';
 import { describeError } from '../../api/problem.js';
 import type { LayoutBlock, PageClassification } from '../../api/types.js';
 import { files as filesApi } from '../../api/endpoints.js';
 import { useSession } from '../../app/session.js';
+import { RecognizedText } from './RecognizedText.js';
 import { useQueryParam } from '../../app/router.js';
 import { ErrorState, LoadingState } from '../../shared/ui.js';
 import { LAYOUT_STATE_LABELS } from '../../shared/labels.js';
@@ -88,9 +90,8 @@ export function MarkupScreen({ revisionId }: MarkupScreenProps): ReactNode {
    *
    * Прежде здесь стоял выпадающий список «Ревизия 3 — Заморожена»: повторное
    * выделение блоков заводило следующую ревизию разметки, и человеку приходилось
-   * держать в голове, какая из них сейчас настоящая. Теперь повтор перезаписывает
-   * ту же (`ensureDraftLayout` размораживает её), поэтому берётся последняя — она
-   * же единственная, — а выбор из списка убран вместе с самим понятием.
+   * держать в голове, какая из них сейчас настоящая. Теперь разметка у поставки
+   * одна и всегда правимая, поэтому берётся последняя — она же единственная.
    */
   const layoutId = revisions.data?.[revisions.data.length - 1]?.id ?? null;
 
@@ -116,7 +117,6 @@ export function MarkupScreen({ revisionId }: MarkupScreenProps): ReactNode {
       revisionId={revisionId}
       layoutId={layoutId}
       canEdit={can('markup.edit')}
-      canFreeze={can('markup.freeze')}
       canRecognize={can('recognition.start')}
       canLabelPages={can('document.edit')}
       onAfterRecognize={() => {
@@ -133,7 +133,6 @@ interface WorkspaceProps {
   readonly revisionId: string;
   readonly layoutId: string;
   readonly canEdit: boolean;
-  readonly canFreeze: boolean;
   readonly canRecognize: boolean;
   /** Право `document.edit`: ручная метка типа страницы (§8.2), не связана с правкой блоков. */
   readonly canLabelPages: boolean;
@@ -142,7 +141,7 @@ interface WorkspaceProps {
 }
 
 function LayoutWorkspace(props: WorkspaceProps): ReactNode {
-  const { revisionId, layoutId, canEdit, canFreeze, canRecognize, canLabelPages, notify } = props;
+  const { revisionId, layoutId, canEdit, canRecognize, canLabelPages, notify } = props;
 
   const detail = useQuery({
     queryKey: layoutKeys.detail(layoutId),
@@ -168,6 +167,34 @@ function LayoutWorkspace(props: WorkspaceProps): ReactNode {
   const docTypes = useQuery({
     queryKey: catalogKeys.docTypes(false),
     queryFn: () => catalog.docTypes(false),
+  });
+
+  /**
+   * Распознанный текст последнего завершённого прогона.
+   *
+   * Прогон выбирается ЗДЕСЬ, а не на сервере: маршрута «дай текст ревизии» нет,
+   * а заводить его ради экрана значило бы решать за все будущие экраны, какой
+   * прогон считать настоящим. Список прогонов уже читается вкладкой и
+   * обесценивается после нажатия «Распознать».
+   */
+  const runs = useQuery({
+    queryKey: revisionKeys.recognitionRuns(revisionId),
+    queryFn: () => recognition.runs(revisionId),
+  });
+  const latestRunId =
+    [...(runs.data ?? [])]
+      .filter((run) => run.status === 'done')
+      .sort((a, b) => (a.finishedAt ?? a.startedAt).localeCompare(b.finishedAt ?? b.startedAt))
+      .at(-1)?.id ?? null;
+  const pageTexts = useQuery({
+    queryKey: recognitionKeys.pages(latestRunId ?? 'none'),
+    queryFn: () => recognition.pages(latestRunId ?? ''),
+    enabled: latestRunId !== null,
+  });
+  const blockTexts = useQuery({
+    queryKey: recognitionKeys.blocks(latestRunId ?? 'none'),
+    queryFn: () => recognition.blocks(latestRunId ?? ''),
+    enabled: latestRunId !== null,
   });
 
   const store = useMarkupStore();
@@ -203,16 +230,6 @@ function LayoutWorkspace(props: WorkspaceProps): ReactNode {
     retainExisting(blockIdsKey === '' ? [] : blockIdsKey.split(' '));
   }, [blockIdsKey, retainExisting]);
 
-  const freeze = useMutation({
-    mutationFn: () => layout.freeze(layoutId, editing.version),
-    onSuccess: async (result) => {
-      notify.success(`Разметка заморожена: блоков ${String(result.blockCount)}`);
-      await detail.refetch();
-      await blockList.refetch();
-    },
-    onError: (error) => notify.error(describeError(error)),
-  });
-
   const detect = useMutation({
     mutationFn: (workingPageIndices?: readonly number[]) =>
       layout.detect(layoutId, workingPageIndices),
@@ -239,26 +256,26 @@ function LayoutWorkspace(props: WorkspaceProps): ReactNode {
   if (blockList.isError) return <ErrorState error={blockList.error} />;
 
   const layoutDetail = detail.data;
-  const frozen = layoutDetail.state !== 'draft';
-  const editable = canEdit && !frozen;
+  /**
+   * Разметка правится всегда, пока правится сама поставка.
+   *
+   * Состояние разметки в это решение больше не входит (0048): заморозки нет, а
+   * `superseded` — историческое состояние старых баз, до которого экран не
+   * доводит. Осталось одно условие — право.
+   */
+  const superseded = layoutDetail.state === 'superseded';
+  const editable = canEdit && !superseded;
   /**
    * Почему панель инструментов недоступна — текстом, а не молча.
    *
    * Панель рисуется всегда, и `editable` гасит в ней ВСЁ разом: выбор
-   * инструмента, тип блока, повтор детекции, замену страницы, заморозку.
-   * Серая панель без объяснения неотличима от неработающего экрана — с этого
-   * началось замечание «нет инструментов ручного выделения», хотя инструменты
-   * были на месте и просто не были разрешены роли.
-   *
-   * Порядок причин не произволен: заморозка сильнее прав. У человека без
-   * `markup.edit` на замороженной ревизии верны обе, но правки не будет и
-   * после выдачи права, поэтому называется та, которую он увидит первой.
+   * инструмента, тип блока, повтор детекции, замену страницы. Серая панель без
+   * объяснения неотличима от неработающего экрана — с этого началось замечание
+   * «нет инструментов ручного выделения», хотя инструменты были на месте и
+   * просто не были разрешены роли.
    */
-  const disabledReason: string | null = frozen
-    ? layoutDetail.state === 'superseded'
-      ? 'Эта ревизия разметки заменена более поздней — правки идут в неё.'
-      : 'Разметка заморожена: блоки этой ревизии не правятся. ' +
-        'Исправление — новая ревизия разметки.'
+  const disabledReason: string | null = superseded
+    ? 'Эта ревизия разметки заменена более поздней — правки идут в неё.'
     : canEdit
       ? null
       : 'Недостаточно прав: правка разметки требует markup.edit. ' +
@@ -318,6 +335,18 @@ function LayoutWorkspace(props: WorkspaceProps): ReactNode {
   const ranks = readingRanks(blocks);
   const visibleBlocks = applyFilter(pageBlocks, store.filter, store.selection);
   const selectedOnPage = pageBlocks.filter((block) => store.selection.has(block.id));
+
+  // Текст прогона ложится на блоки по `layoutBlockId`, а на страницу — по
+  // индексу страницы рабочего документа: обе связи прямые, сопоставлять нечего.
+  const currentPageText =
+    (pageTexts.data ?? []).find(
+      (item) => item.workingPageIndex === (currentPage?.workingPageIndex ?? -1),
+    ) ?? null;
+  const textByBlock = new Map<string, string>();
+  for (const result of blockTexts.data ?? []) {
+    if (!result.isCurrent || result.contentMd === null) continue;
+    textByBlock.set(result.layoutBlockId, result.contentMd);
+  }
 
   return (
     <>
@@ -420,6 +449,11 @@ function LayoutWorkspace(props: WorkspaceProps): ReactNode {
                   void editing.updateBlock(blockId, { coords });
                 }}
               />
+              <RecognizedText
+                text={currentPageText}
+                loading={runs.isPending || pageTexts.isPending}
+                hasRun={latestRunId !== null}
+              />
             </>
           )}
         </Col>
@@ -431,6 +465,7 @@ function LayoutWorkspace(props: WorkspaceProps): ReactNode {
             ranks={ranks}
             selection={store.selection}
             filter={store.filter}
+            textByBlock={textByBlock}
             onFilterChange={store.setFilter}
             onToggle={store.toggle}
             onSelectMany={store.selectMany}
@@ -438,14 +473,10 @@ function LayoutWorkspace(props: WorkspaceProps): ReactNode {
         </Col>
       </Row>
 
-      <FreezeAndRecognize
-        frozen={frozen}
+      <SendToRecognition
         blockCount={blocks.length}
-        canFreeze={canFreeze}
         canRecognize={canRecognize}
-        freezing={freeze.isPending}
         recognizing={recognize.isPending}
-        onFreeze={() => freeze.mutate()}
         onRecognize={() => recognize.mutate()}
       />
 
@@ -640,7 +671,7 @@ function CanvasArea(props: CanvasAreaProps): ReactNode {
 // =====================================================================
 
 interface ToolbarProps {
-  readonly state: 'draft' | 'frozen' | 'superseded';
+  readonly state: 'draft' | 'superseded';
   readonly revisionNo: number;
   readonly blocksHash: string | null;
   readonly blockCount: number;
@@ -800,17 +831,22 @@ function MarkupToolbar(props: ToolbarProps): ReactNode {
 }
 
 // =====================================================================
-// Нижняя панель: заморозка и отправка на распознавание (§6.2)
+// Нижняя панель: отправка на распознавание (§6.2)
 // =====================================================================
 
-function FreezeAndRecognize(props: {
-  readonly frozen: boolean;
+/**
+ * Кнопка одна, и заморозки перед ней больше нет (0048).
+ *
+ * Прежде здесь стояли две кнопки подряд: сначала «Заморозить разметку», и
+ * только после неё появлялась «Отправить на распознавание». Заморозка была
+ * необратимой — поправить рамку после неё было нельзя ничем, кроме полной
+ * переразметки. Теперь прогон сам снимает хэш набора блоков на старте, поэтому
+ * отправлять можно сколько угодно раз: поправил — отправил снова.
+ */
+function SendToRecognition(props: {
   readonly blockCount: number;
-  readonly canFreeze: boolean;
   readonly canRecognize: boolean;
-  readonly freezing: boolean;
   readonly recognizing: boolean;
-  readonly onFreeze: () => void;
   readonly onRecognize: () => void;
 }): ReactNode {
   return (
@@ -828,38 +864,18 @@ function FreezeAndRecognize(props: {
       {/* Текст нейтрален к провайдеру: сверка хэшей с RD WEB — деталь одной из
           веток, а не свойство распознавания вообще (ADR-0007). */}
       <Typography.Text type="secondary">
-        Распознавание идёт по замороженной разметке; провайдер и модель задаются в настройках
-        портала.
+        Распознавание идёт по текущему набору блоков; провайдер и модель задаются в настройках
+        портала. Блоки можно править и отправлять на распознавание повторно.
       </Typography.Text>
-      {!props.frozen ? (
-        <Popconfirm
-          title="Заморозить разметку?"
-          description="После заморозки блоки этой ревизии не правятся; исправление — новая ревизия разметки."
-          okText="Заморозить"
-          cancelText="Отмена"
-          onConfirm={props.onFreeze}
-          disabled={!props.canFreeze || props.blockCount === 0}
-        >
-          <Button
-            type="primary"
-            data-testid="freeze-layout"
-            loading={props.freezing}
-            disabled={!props.canFreeze || props.blockCount === 0}
-          >
-            Заморозить разметку
-          </Button>
-        </Popconfirm>
-      ) : (
-        <Button
-          type="primary"
-          data-testid="send-to-recognition"
-          loading={props.recognizing}
-          disabled={!props.canRecognize}
-          onClick={props.onRecognize}
-        >
-          Отправить на распознавание
-        </Button>
-      )}
+      <Button
+        type="primary"
+        data-testid="send-to-recognition"
+        loading={props.recognizing}
+        disabled={!props.canRecognize || props.blockCount === 0}
+        onClick={props.onRecognize}
+      >
+        Отправить на распознавание
+      </Button>
     </div>
   );
 }

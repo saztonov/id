@@ -123,7 +123,16 @@ export type AttentionFlag = z.infer<typeof attentionFlagSchema>;
 
 // --- Разметка (§3.4, §5.3) ---
 
-export const layoutRevisionStateSchema = z.enum(['draft', 'frozen', 'superseded']);
+/**
+ * Состояние ревизии разметки.
+ *
+ * `frozen` больше нет (миграция 0048): заморозка была отменена вместе со всем
+ * циклом «правка после распознавания — только новой ревизией». Блоки правятся
+ * всегда, а хэш набора фиксирует прогон распознавания в момент старта.
+ * `superseded` осталось историческим: такие ревизии существуют в уже
+ * работавших базах, и их содержимое по-прежнему неизменяемо.
+ */
+export const layoutRevisionStateSchema = z.enum(['draft', 'superseded']);
 export type LayoutRevisionState = z.infer<typeof layoutRevisionStateSchema>;
 
 export const blockTypeSchema = z.enum(['text', 'image', 'stamp']);

@@ -140,7 +140,6 @@ export {
   findLayoutBlock,
   findLayoutRevision,
   findRunDocument,
-  freezeLayout,
   importDetectedBlocks,
   listLayoutBlocks,
   listLayoutRevisions,
@@ -364,6 +363,7 @@ export {
   isContiguous,
   loadArchivePlan,
   loadMaterializationPlan,
+  overlappingTargets,
   recordArchive,
   requireVisibleRevisionOfDocument,
   saveDerivedPdf,
@@ -489,7 +489,11 @@ export type {
   RegistryParseInput,
   RegistryParseResult,
 } from './segmentation/registry.js';
-export { matchRegistryRows } from './segmentation/match.js';
+export {
+  DOCUMENT_NUMBER_FIELD_CODES,
+  documentNumbersOf,
+  matchRegistryRows,
+} from './segmentation/match.js';
 export type {
   MatchableDocument,
   MatchRegistryResult,

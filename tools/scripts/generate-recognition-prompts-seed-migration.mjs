@@ -57,8 +57,8 @@ const API_DIR = join(ROOT, 'apps', 'api');
  * то есть всегда на ПОСЛЕДНЮЮ сид-миграцию: «в БД уезжает то, что лежит в коде»
  * — утверждение про неё, а не про историю.
  */
-export const SEED_VERSION = 2;
-export const TARGET = join(ROOT, 'migrations', '0037_reseed_recognition_prompts.sql');
+export const SEED_VERSION = 3;
+export const TARGET = join(ROOT, 'migrations', '0049_reseed_recognition_prompts_v3.sql');
 
 const BLOCK_TYPES = ['text', 'image', 'stamp'];
 const STAGE = 'recognize';

@@ -30,9 +30,9 @@ import { tracePayload } from '../../observability/context.js';
  *
  * Отдельная функция, а не строчки внутри `startRecognition`, потому что
  * вызывающих у проверки двое, и второй обязан спросить РАНЬШЕ. Кнопка
- * «2. Распознать» по дороге замораживает черновую разметку (`modules/pipeline`), и
- * отказ после заморозки оставил бы ревизию с необратимо замороженной разметкой
- * ни за что — правкой это уже не лечится, только новой ревизией разметки.
+ * «2. Распознать» по дороге правит разметку (`modules/pipeline`: снимает остаток
+ * детекции с очереди, доклеивает полностраничные блоки), и отказ после этого
+ * оставил бы комплект изменённым ни за что.
  *
  * `requirePublication` различает двух вызывающих, и различие существенное.
  * Сквозной прогон обещает довести комплект до замечаний, поэтому в shadow-режиме
@@ -138,7 +138,7 @@ export async function startRecognition(
   scope: AuthScope,
   input: {
     readonly revisionId: string;
-    readonly frozenLayoutId: string;
+    readonly layoutId: string;
     readonly idempotencyKey: string;
     readonly autoContinue: boolean;
     /**
@@ -194,7 +194,7 @@ export async function startRecognition(
   }
 
   const { run, created } = await startRecognitionRun(db, scope, {
-    layoutRevisionId: input.frozenLayoutId,
+    layoutRevisionId: input.layoutId,
     settingsSnapshot,
     // Ветке RD WEB без RD-документа OCR запускать негде; у VLM-прогона его нет
     // по построению (ADR-0007).

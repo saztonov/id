@@ -15,7 +15,7 @@
  *
  * Метка — свойство РЕВИЗИИ ПОСТАВКИ, а не ревизии разметки: она хранится в
  * `page_classifications` по `source_page_id` и переживает пересборку. Поэтому
- * хук не знает ни про состояние разметки, ни про заморозку.
+ * хук не знает про состояние разметки вовсе.
  */
 import { App as AntApp } from 'antd';
 import { useMutation, useQueryClient } from '@tanstack/react-query';

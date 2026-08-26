@@ -7,7 +7,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { matchRegistryRows, type MatchableDocument } from './match.js';
+import { documentNumbersOf, matchRegistryRows, type MatchableDocument } from './match.js';
 import type { ParsedRegistryRow } from './types.js';
 import { normalizeDocNo } from '@id/contracts';
 
@@ -38,7 +38,7 @@ function doc(
   number: string | null,
   title = 'СЕРТИФИКАТ КАЧЕСТВА',
 ): MatchableDocument {
-  return { documentId, docTypeCode: null, number, title };
+  return { documentId, docTypeCode: null, numbers: number === null ? [] : [number], title };
 }
 
 describe('matchRegistryRows', () => {
@@ -67,7 +67,7 @@ describe('matchRegistryRows', () => {
         {
           documentId: 'd1',
           docTypeCode: 'mill_certificate',
-          number: '16005',
+          numbers: ['16005'],
           title: 'СЕРТИФИКАТ КАЧЕСТВА',
         },
       ],
@@ -189,5 +189,106 @@ describe('matchRegistryRows', () => {
     const result = matchRegistryRows([], [doc('d1', 'A-1')]);
 
     expect(result).toEqual({ rows: [], extraDocumentIds: ['d1'] });
+  });
+
+  describe('несколько номеров у документа', () => {
+    it('документ находится по любому из своих номеров', () => {
+      // У исполнительной схемы номер приходит шифром схемы из штампа, а не
+      // реквизитом `number`: пока сверка смотрела только в него, ни одна схема
+      // комплекта не находила свою строку реестра.
+      const scheme: MatchableDocument = {
+        documentId: 'd1',
+        docTypeCode: 'exec_scheme',
+        numbers: ['К14/ДК2-СЦ4'],
+        title: null,
+      };
+      const result = matchRegistryRows([row(1, '№ К14/ДК2-СЦ4')], [scheme]);
+
+      expect(result.rows[0]).toMatchObject({ matchState: 'matched', matchedDocumentId: 'd1' });
+      expect(result.extraDocumentIds).toEqual([]);
+    });
+
+    it('две формы номера одного документа не делают его коллизией с самим собой', () => {
+      const both: MatchableDocument = {
+        documentId: 'd1',
+        docTypeCode: null,
+        numbers: ['A-10001', 'A 10001'],
+        title: null,
+      };
+      const result = matchRegistryRows([row(1, 'A-10001')], [both]);
+
+      expect(result.rows[0]?.matchState).toBe('matched');
+      expect(result.rows[0]?.matchScore).toBe(1);
+    });
+  });
+
+  describe('частичное совпадение номера', () => {
+    it('единственный кандидат по куску номера — matched с низким счётом', () => {
+      // Номер листа приходит из штампа то с приставкой раздела, то без неё.
+      // Строгое сравнение объявляло бы «нет в комплекте» документ, который в
+      // комплекте лежит, — ложный вывод, запрещённый §9.1.
+      const result = matchRegistryRows([row(1, '№ К14/ДК2-СЦ4')], [doc('d1', 'ДК2-СЦ4')]);
+
+      expect(result.rows[0]).toMatchObject({
+        matchState: 'matched',
+        matchedDocumentId: 'd1',
+        matchScore: 0.6,
+      });
+      expect(result.rows[0]?.reason).toContain('частично');
+    });
+
+    it('несколько кандидатов по куску — ambiguous, а не выбор наугад', () => {
+      const result = matchRegistryRows(
+        [row(1, 'ДК2-СЦ4')],
+        [doc('d1', 'К14/ДК2-СЦ4'), doc('d2', 'К15/ДК2-СЦ4')],
+      );
+
+      expect(result.rows[0]?.matchState).toBe('ambiguous');
+      expect(result.rows[0]?.matchedDocumentId).toBeNull();
+      // Оба кандидата названы описью, и лишними их объявлять нельзя.
+      expect(result.extraDocumentIds).toEqual([]);
+    });
+
+    it('точное совпадение сильнее частичного', () => {
+      const result = matchRegistryRows(
+        [row(1, 'ДК2-СЦ4')],
+        [doc('d1', 'ДК2-СЦ4'), doc('d2', 'К14/ДК2-СЦ4')],
+      );
+
+      expect(result.rows[0]).toMatchObject({ matchedDocumentId: 'd1', matchScore: 1 });
+    });
+
+    it('короткие номера в частичное сравнение не берутся', () => {
+      // «1» входит подстрокой в половину номеров комплекта: разрешить такое
+      // сравнение значило бы выдавать случайные пары за находки.
+      const result = matchRegistryRows([row(1, '1')], [doc('d1', 'A-1')]);
+
+      expect(result.rows[0]?.matchState).toBe('missing');
+    });
+  });
+});
+
+describe('documentNumbersOf', () => {
+  it('собирает номера в порядке кодов и без повторов', () => {
+    const numbers = documentNumbersOf([
+      { fieldCode: 'scheme_number', valueText: 'К14/ДК2-СЦ4' },
+      { fieldCode: 'issuer', valueText: 'ООО «СУ-10»' },
+      { fieldCode: 'number', valueText: '336' },
+      { fieldCode: 'blank_number', valueText: '  ' },
+      { fieldCode: 'number', valueText: '336' },
+    ]);
+
+    // `number` первым — он и есть основной реквизит; пустые и повторы отброшены.
+    expect(numbers).toEqual(['336', 'К14/ДК2-СЦ4']);
+  });
+
+  it('чужие номера — партии, заводской, номер акта в реестре — не берутся', () => {
+    const numbers = documentNumbersOf([
+      { fieldCode: 'batch_number', valueText: '7' },
+      { fieldCode: 'serial_number', valueText: 'SN-1' },
+      { fieldCode: 'act_number', valueText: '01-ДК2-СЦ' },
+    ]);
+
+    expect(numbers).toEqual([]);
   });
 });

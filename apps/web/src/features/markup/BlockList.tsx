@@ -25,12 +25,41 @@ export interface BlockListProps {
   readonly ranks: ReadonlyMap<string, number>;
   readonly selection: ReadonlySet<string>;
   readonly filter: BlockFilter;
+  /** Распознанный текст блока последнего завершённого прогона. */
+  readonly textByBlock: ReadonlyMap<string, string>;
   readonly onFilterChange: (patch: Partial<BlockFilter>) => void;
   readonly onToggle: (blockId: string) => void;
   readonly onSelectMany: (blockIds: readonly string[]) => void;
 }
 
 const ALL_TYPES: readonly BlockType[] = ['text', 'image', 'stamp'];
+
+/**
+ * Сколько текста показывать у невыделенного блока.
+ *
+ * Список — второй путь к тем же действиям, а не читалка: развёрнутый текст у
+ * каждого блока вытеснил бы из колонки сами блоки. У выделенного текст виден
+ * целиком — именно его человек сейчас и проверяет.
+ */
+const PREVIEW_LIMIT = 120;
+
+const TEXT_STYLE = {
+  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+  fontSize: 11,
+  lineHeight: 1.45,
+  color: '#262626',
+  whiteSpace: 'pre-wrap',
+  wordBreak: 'break-word',
+  margin: '4px 0 0',
+  paddingLeft: 24,
+  maxHeight: '24vh',
+  overflowY: 'auto',
+} as const;
+
+function previewOf(text: string): string {
+  const flat = text.replace(/\s+/gu, ' ').trim();
+  return flat.length > PREVIEW_LIMIT ? `${flat.slice(0, PREVIEW_LIMIT)}…` : flat;
+}
 
 export function BlockList(props: BlockListProps): ReactNode {
   const { blocks, visible, ranks, selection, filter } = props;
@@ -99,6 +128,8 @@ export function BlockList(props: BlockListProps): ReactNode {
             {visible.map((block) => {
               const rank = ranks.get(block.id) ?? 0;
               const style = BLOCK_STYLES[block.blockType];
+              const recognized = props.textByBlock.get(block.id);
+              const selected = selection.has(block.id);
               return (
                 <li
                   key={block.id}
@@ -128,6 +159,11 @@ export function BlockList(props: BlockListProps): ReactNode {
                       `, уверенность ${block.detectionScore.toFixed(2)}`}
                     {block.shapeType === 'polygon' && ', полигон'}
                   </div>
+                  {recognized !== undefined && recognized.trim() !== '' && (
+                    <div style={TEXT_STYLE} data-testid={`block-text-${block.id}`}>
+                      {selected ? recognized : previewOf(recognized)}
+                    </div>
+                  )}
                 </li>
               );
             })}

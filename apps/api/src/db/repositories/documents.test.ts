@@ -202,7 +202,7 @@ const FIXTURE: readonly string[] = [
                               x0, y0, x1, y1, sort_order, source, detector_provenance)
      VALUES ('${BLOCK_A2}', '${LAYOUT_A}', '${REVISION_A}', '${BUNDLE_A}', '${PAGE_A2}',
              2, '${OBJECT}', 'text', 'rectangle', 0.1, 0.1, 0.9, 0.4, 0, 'auto', 'rf_detr')`,
-  `UPDATE layout_revisions SET state = 'frozen', blocks_hash = '${SHA('7')}', frozen_at = now()
+  `UPDATE layout_revisions SET blocks_hash = '${SHA('7')}'
      WHERE id = '${LAYOUT_A}'`,
   `INSERT INTO rd_run_documents (id, layout_revision_id, rd_document_id, rd_project_id)
      VALUES ('${RUN_DOC_A}', '${LAYOUT_A}', 'doc_a', 'prj-portal')`,
