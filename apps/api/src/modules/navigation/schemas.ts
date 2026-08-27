@@ -118,6 +118,32 @@ export const workIdParamSchema = z.object({ workId: uuidSchema });
  * посчитать их ему нечем. Диалог удаления обязан назвать, что именно исчезнет, —
  * иначе «Удалить комплект?» это вопрос, на который нельзя ответить осознанно.
  */
+/**
+ * Что исчезнет вместе с реестром.
+ *
+ * `worksDetached` и удаляемое названы РАЗНЫМИ полями намеренно: комплекты
+ * состава только отвязываются, и склеить их в один счётчик «будет удалено»
+ * значило бы напугать человека тем, чего не произойдёт.
+ */
+export const registryDeletionPreviewSchema = z.object({
+  registryId: uuidSchema,
+  number: z.string().nullable(),
+  status: registryStatusSchema,
+  worksDetached: z.int().nonnegative(),
+  registryItems: z.int().nonnegative(),
+  reconciliations: z.int().nonnegative(),
+  file: z
+    .object({
+      workId: uuidSchema,
+      title: z.string(),
+      revisions: z.int().nonnegative(),
+      files: z.int().nonnegative(),
+      pages: z.int().nonnegative(),
+    })
+    .nullable(),
+  blockers: z.array(z.string()),
+});
+
 export const workDeletionPreviewSchema = z.object({
   workId: uuidSchema,
   title: z.string(),

@@ -33,7 +33,12 @@ import { afterAll, beforeAll, expect, it } from 'vitest';
 import { createPgliteDatabase, type TestDatabase } from '@id/db-harness';
 import { loadMigrations } from '@id/migrator';
 
-import { DERIVED_DELETES, PIPELINE_RESET_DELETES, REVISION_DELETES } from './purge.js';
+import {
+  DERIVED_DELETES,
+  PIPELINE_RESET_DELETES,
+  REGISTRY_DELETES,
+  REVISION_DELETES,
+} from './purge.js';
 
 const MIGRATIONS_DIR = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -128,6 +133,52 @@ it('список сброса покрывает весь подграф ссы�
   ).toEqual([]);
 });
 
+/**
+ * То же утверждение для подграфа РЕЕСТРА (S37).
+ *
+ * Реестр — второй корень удаления в портале, и подграф у него свой: комплекты
+ * состава реестром не держатся (`registry_id` обнуляется), а снимок состава и
+ * прогоны сверки — держатся и удаление отвергнут.
+ *
+ * Ценность та же, что у первого теста: таблица, которая завтра сошлётся на
+ * `registries`, ломает этот тест в день миграции, а не отказом внешнего ключа
+ * у пользователя.
+ */
+it('список удаления реестра покрывает подграф ссылок на реестр', async () => {
+  const edges = await db.query<{ child: string; parent: string }>(`
+    select tc.table_name as child, ccu.table_name as parent
+      from information_schema.table_constraints tc
+      join information_schema.constraint_column_usage ccu
+        on ccu.constraint_name = tc.constraint_name
+     where tc.constraint_type = 'FOREIGN KEY' and tc.table_schema = 'public'
+       and ccu.table_name = 'registries'
+     group by 1, 2
+  `);
+
+  const children = new Set(
+    edges.map((edge) => edge.child).filter((child) => child !== 'registries'),
+  );
+
+  /**
+   * Чем закрыта каждая ссылка, кроме перечисленных в `REGISTRY_DELETES`.
+   *
+   * `works` — отвязкой: комплект переживает удаление папки, это и есть смысл
+   * действия. Файл описи (`kind = 'registry'`) отвязать нельзя —
+   * `works_registry_kind_chk`, — поэтому `deleteRegistry` удаляет его целиком
+   * через `purgeRevisionEntirely`; таблица в списке та же.
+   */
+  const detached = new Set(['works']);
+
+  const covered = new Set([...REGISTRY_DELETES.map((step) => step.table), ...detached]);
+  const missing = [...children].filter((table) => !covered.has(table)).sort();
+
+  expect(
+    missing,
+    `Эти таблицы ссылаются на реестр, но при удалении не обрабатываются: ${missing.join(', ')}. ` +
+      'Добавьте их в REGISTRY_DELETES либо отвяжите явно в deleteRegistry.',
+  ).toEqual([]);
+});
+
 it('в списке сброса нет таблиц, которых нет в схеме', async () => {
   // Обратная сторона: опечатка в имени таблицы дала бы `DELETE` по
   // несуществующему отношению — то есть отказ посреди транзакции удаления,
@@ -138,7 +189,7 @@ it('в списке сброса нет таблиц, которых нет в �
   );
   const known = new Set(tables.map((row) => row.table_name));
 
-  const unknown = [...DERIVED_DELETES, ...REVISION_DELETES]
+  const unknown = [...DERIVED_DELETES, ...REVISION_DELETES, ...REGISTRY_DELETES]
     .map((step) => step.table)
     .filter((table) => !known.has(table));
 

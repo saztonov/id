@@ -113,7 +113,7 @@ import { withScope, type ScopeTarget } from '../scoped.js';
 import { appendAudit, type AuditActor } from './audit.js';
 import { findConstructionObject, objectVisibility, visibleWhere } from './catalog.js';
 import { appendRevisionEvent } from './jobs.js';
-import { purgeRevisionEntirely } from './purge.js';
+import { purgeRegistryTail, purgeRevisionEntirely } from './purge.js';
 import type { Database } from './users.js';
 
 const WORK_SCOPE: ScopeTarget = {
@@ -2056,6 +2056,236 @@ export async function acceptRegistry(
   const accepted = await findRegistry(db, scope, registryId);
   if (accepted === null) throw notFound('Реестр не найден.');
   return accepted;
+}
+
+/**
+ * Что исчезнет вместе с реестром.
+ *
+ * Числа названы двумя РАЗНЫМИ глаголами, и это не стилистика. Комплекты состава
+ * только ОТВЯЗЫВАЮТСЯ: ни одна их ревизия, страница или проверка не трогается,
+ * и после удаления папки они остаются на объекте как «в реестр не включён».
+ * Удаляется лишь то, что без реестра существовать не может, — файл описи со
+ * своими ревизиями и прогоны сверки этого скана.
+ */
+export interface RegistryDeletionPreview {
+  readonly registryId: string;
+  readonly number: string | null;
+  readonly status: Registry['status'];
+  /** Комплектов будет отвязано (не удалено). */
+  readonly worksDetached: number;
+  /** Строк снимка состава. У черновика их нет по построению. */
+  readonly registryItems: number;
+  /** Прогонов сверки описи будет снесено. */
+  readonly reconciliations: number;
+  /**
+   * Файл описи и его содержимое, либо `null`, если файл не заводили.
+   *
+   * Вложенным объектом, а не пятью нулями рядом: «файла нет» и «файл есть, но
+   * пустой» — разные ответы, и нули их не различают.
+   */
+  readonly file: {
+    readonly workId: string;
+    readonly title: string;
+    readonly revisions: number;
+    readonly files: number;
+    readonly pages: number;
+  } | null;
+  readonly blockers: readonly string[];
+}
+
+/**
+ * Помехи удалению реестра.
+ *
+ * ## Почему «не черновик» проверяется в КОДЕ, а не оставлено триггеру
+ *
+ * Триггер `registries_no_delete` (0028) исполняет `deny_modification`, а та с
+ * миграции 0035 начинается с раннего выхода при выключенном
+ * `immutability_enforced()`. То есть в режиме тестирования база переданный
+ * реестр снести РАЗРЕШИТ. Здесь помеха безусловна и от выключателя не зависит —
+ * по той же доктрине, что и у `workDeletionBlockers`: режим тестирования
+ * ослабляет запреты СВОЕЙ базы, а не обязательства перед второй стороной.
+ * Переданная опись подписана обеими сторонами.
+ *
+ * ## Почему помехи файла описи приходят целиком
+ *
+ * Файл описи — обычный комплект вида `registry`, и удаляется он теми же
+ * правилами. Его поданная ревизия — частый случай: опись подают прямо перед
+ * передачей. Без явной помехи удаление дошло бы до триггеров 0008 и упало бы
+ * `restrict_violation` из драйвера, то есть пятисотым кодом без объяснения.
+ *
+ * ## Чего в помехах НЕТ
+ *
+ * Ни «в реестре есть комплекты», ни «есть прогоны сверки». Разобрать собранную
+ * не из тех комплектов папку — штатная работа ПТО, а сверка описывает КОНКРЕТНЫЙ
+ * скан, который исчезает вместе с реестром. Оба числа уходят в предпросмотр,
+ * чтобы решение принималось осознанно, но запретом не являются.
+ */
+async function registryDeletionBlockers(
+  db: Database,
+  scope: AuthScope,
+  registry: Registry,
+  enforceImmutability: boolean,
+): Promise<readonly string[]> {
+  if (registry.status !== 'draft') {
+    return [
+      registry.status === 'issued'
+        ? 'реестр передан — подписанная опись и её состав неизменяемы'
+        : 'реестр принят — подписанная опись и её состав неизменяемы',
+    ];
+  }
+
+  const file = await findRegistryFile(db, scope, registry.id);
+  if (file === null) return [];
+
+  const own = await workDeletionBlockers(db, file.id, enforceImmutability);
+  return own.map((blocker) => `файл описи: ${blocker}`);
+}
+
+export async function previewRegistryDeletion(
+  db: Database,
+  scope: AuthScope,
+  registryId: string,
+  enforceImmutability: boolean,
+): Promise<RegistryDeletionPreview | null> {
+  const registry = await findRegistry(db, scope, registryId);
+  if (registry === null) return null;
+
+  const counts = await db.execute<{
+    works: number;
+    items: number;
+    reconciliations: number;
+  }>(sql`
+    select
+      (select count(*) from works
+        where registry_id = ${registryId}::uuid and kind = 'complect')::int as works,
+      (select count(*) from registry_items
+        where registry_id = ${registryId}::uuid)::int as items,
+      (select count(*) from registry_reconciliations
+        where registry_id = ${registryId}::uuid)::int as reconciliations
+  `);
+  const row = counts.rows[0];
+
+  // Числа файла описи считает существующий предпросмотр комплекта: второй
+  // счётчик тех же величин разошёлся бы с первым при первой же новой таблице.
+  const file = await findRegistryFile(db, scope, registryId);
+  const filePreview =
+    file === null ? null : await previewWorkDeletion(db, scope, file.id, enforceImmutability);
+
+  return {
+    registryId,
+    number: registry.number,
+    status: registry.status,
+    worksDetached: row?.works ?? 0,
+    registryItems: row?.items ?? 0,
+    reconciliations: row?.reconciliations ?? 0,
+    file:
+      file === null || filePreview === null
+        ? null
+        : {
+            workId: file.id,
+            title: file.title,
+            revisions: filePreview.revisions,
+            files: filePreview.files,
+            pages: filePreview.pages,
+          },
+    blockers: await registryDeletionBlockers(db, scope, registry, enforceImmutability),
+  };
+}
+
+/**
+ * Удалить реестр: отвязать комплекты, снести файл описи и сверки.
+ *
+ * `null` — реестра нет или он вне области видимости; различать их снаружи
+ * нельзя (§1.6).
+ *
+ * Порядок в транзакции значим целиком:
+ *
+ * 1. `bumpRegistryVersion` — сравнение с обменом по версии и блокировка строки.
+ *    Статус меняется ТОЛЬКО через неё, поэтому проверка версии закрывает и
+ *    гонку со статусом: соперник, успевший передать папку, уже поднял версию, и
+ *    мы получим 412 вместо удаления подписанной описи.
+ * 2. Комплекты отвязываются. Составной ключ `works_registry_fk` при `NULL` не
+ *    проверяется, а `ux_works_registry_ordinal` освобождается вместе с
+ *    `ordinal`.
+ * 3. Файл описи удаляется ЦЕЛИКОМ, а не отвязывается: `works_registry_kind_chk`
+ *    запрещает `kind = 'registry'` без `registry_id`, и обнулить ссылку у него
+ *    нельзя по построению.
+ * 4. `purgeRegistryTail` — снимок состава и прогоны сверки, которые ссылаются
+ *    на сам реестр, а не на ревизию.
+ * 5. Строка реестра.
+ *
+ * Всё одной транзакцией: реестр, у которого комплекты отвязаны, а строка
+ * осталась, — состояние, которого в модели нет.
+ */
+export async function deleteRegistry(
+  db: Database,
+  scope: AuthScope,
+  registryId: string,
+  expectedVersion: number,
+  actor: AuditActor,
+  enforceImmutability: boolean,
+): Promise<{ readonly deleted: boolean; readonly blockers: readonly string[] } | null> {
+  const preview = await previewRegistryDeletion(db, scope, registryId, enforceImmutability);
+  if (preview === null) return null;
+  if (preview.blockers.length > 0) return { deleted: false, blockers: preview.blockers };
+
+  const registry = await findRegistry(db, scope, registryId);
+  if (registry === null) return null;
+
+  await guardNavigation(() =>
+    db.transaction(async (tx) => {
+      await bumpRegistryVersion(tx, registryId, expectedVersion, {});
+
+      await tx
+        .update(works)
+        .set({ registryId: null, ordinal: null, updatedAt: sql`now()` })
+        .where(allOf(eq(works.registryId, registryId), eq(works.kind, 'complect')));
+
+      const fileWorkId = preview.file?.workId ?? null;
+      if (fileWorkId !== null) {
+        const revisions = await tx
+          .select({ id: submissionRevisions.id })
+          .from(submissionRevisions)
+          .where(eq(submissionRevisions.workId, fileWorkId));
+
+        // Указатель обнуляется ПЕРВЫМ по той же причине, что и у комплекта:
+        // `works.current_revision_id` ссылается на строку, которую сейчас
+        // удалим.
+        await tx.update(works).set({ currentRevisionId: null }).where(eq(works.id, fileWorkId));
+        for (const revision of revisions) {
+          await purgeRevisionEntirely(tx, revision.id);
+        }
+        await tx.execute(
+          sql`delete from registry_reconciliation_works where work_id = ${fileWorkId}::uuid`,
+        );
+        await tx.delete(works).where(eq(works.id, fileWorkId));
+      }
+
+      await purgeRegistryTail(tx, registryId);
+      await tx.delete(registries).where(eq(registries.id, registryId));
+
+      // Одна запись, а не N штук `registry.work_excluded`: отвязка здесь — часть
+      // одного действия, а не N решений человека. Номер и месяц попадают в след:
+      // после удаления узнать, что именно исчезло, будет неоткуда.
+      await appendAudit(tx, scope, {
+        ...actor,
+        action: 'registry.deleted',
+        entityType: 'registry',
+        entityId: registryId,
+        objectId: registry.objectId,
+        payload: {
+          number: registry.number,
+          sectionCode: registry.sectionCode,
+          period: registry.period,
+          worksDetached: preview.worksDetached,
+          fileWorkId,
+          reconciliations: preview.reconciliations,
+        },
+      });
+    }),
+  );
+
+  return { deleted: true, blockers: [] };
 }
 
 /**

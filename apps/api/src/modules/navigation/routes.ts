@@ -64,6 +64,7 @@ import {
   createRegistry,
   createWork,
   deleteRevision,
+  deleteRegistry,
   deleteWork,
   excludeWork,
   findRegistry,
@@ -77,6 +78,7 @@ import {
   listRegistryWorks,
   listWorkRevisions,
   listWorks,
+  previewRegistryDeletion,
   previewWorkDeletion,
   updateRegistry,
   updateWork,
@@ -112,6 +114,7 @@ import {
   sectionCountsSchema,
   updateRegistryBodySchema,
   updateWorkBodySchema,
+  registryDeletionPreviewSchema,
   workDeletionPreviewSchema,
   workIdParamSchema,
   workListQuerySchema,
@@ -130,12 +133,14 @@ const PREFIX = '/api/v1';
 const readWorks = requirePermission('submission.read');
 const uploadWorks = requirePermission('submission.upload');
 /**
- * Удаление комплекта — администраторское действие.
+ * Удаление комплекта, ревизии и черновика реестра — у всех пяти ролей (S37).
  *
- * Не `submission.upload`, которым заводят и наполняют комплекты: завести свой
- * и стереть чужую работу вместе с историей проверок — разные по весу действия.
+ * Отдельное право, а не `submission.upload`: это разные действия, и матрица
+ * обязана называть каждое своим именем. Общее у трёх удалений одно — вес: что
+ * именно удалять нельзя, решают помехи (`workDeletionBlockers`,
+ * `registryDeletionBlockers`), и они одинаковы для всех ролей.
  */
-const manageWorks = requirePermission('settings.manage');
+const deleteContent = requirePermission('submission.delete');
 const manageRegistry = requirePermission('registry.manage');
 const acceptRegistryPermission = requirePermission('registry.accept');
 /** Чтение реестра доступно всем, кто вообще видит ИД. */
@@ -270,7 +275,7 @@ function registerWorkRoutes(app: AppInstance): void {
   app.get(
     `${PREFIX}/works/:workId/deletion-preview`,
     {
-      preHandler: manageWorks,
+      preHandler: deleteContent,
       schema: { params: workIdParamSchema, response: { 200: workDeletionPreviewSchema } },
     },
     async (request, reply) => {
@@ -300,7 +305,7 @@ function registerWorkRoutes(app: AppInstance): void {
   app.route({
     method: 'DELETE',
     url: `${PREFIX}/works/:workId`,
-    preHandler: manageWorks,
+    preHandler: deleteContent,
     schema: { params: workIdParamSchema },
     handler: async (request, reply) => {
       const { scope } = currentAuth(request);
@@ -374,7 +379,7 @@ function registerRevisionRoutes(app: AppInstance): void {
   app.route({
     method: 'DELETE',
     url: `${PREFIX}/revisions/:revisionId`,
-    preHandler: manageWorks,
+    preHandler: deleteContent,
     schema: { params: revisionIdParamSchema },
     handler: async (request, reply) => {
       const { scope } = currentAuth(request);
@@ -573,6 +578,71 @@ function registerRegistryRoutes(app: AppInstance): void {
       return reply.code(201).send(created);
     },
   );
+
+  /**
+   * Что исчезнет вместе с реестром.
+   *
+   * Тот же приём, что у комплекта: числа знает только БД, а «нельзя» без
+   * причины отправляет человека искать её по схеме. Право на просмотр то же,
+   * что на удаление, — иначе предпросмотр рассказывал бы о папке больше, чем
+   * само действие с ней позволяет.
+   */
+  app.get(
+    `${PREFIX}/registries/:registryId/deletion-preview`,
+    {
+      preHandler: deleteContent,
+      schema: {
+        params: registryIdParamSchema,
+        response: { 200: registryDeletionPreviewSchema },
+      },
+    },
+    async (request, reply) => {
+      const { scope } = currentAuth(request);
+      const preview = await previewRegistryDeletion(
+        app.db,
+        scope,
+        request.params.registryId,
+        await readImmutabilityEnforced(app.db),
+      );
+      if (preview === null) throw notFound('Реестр не найден.');
+      return reply.code(200).send({ ...preview, blockers: [...preview.blockers] });
+    },
+  );
+
+  /**
+   * Удаление реестра: папка снимается с объекта, комплекты остаются.
+   *
+   * `app.route`, а не `app.delete`, — по той же причине, что у комплекта:
+   * правило eslint, запрещающее запросы к БД вне `db/repositories/`, ищет
+   * вызовы `.delete()` по имени метода и не отличает `db.delete` от
+   * `app.delete`.
+   *
+   * `If-Match` обязателен, как у всех правящих маршрутов реестра. Здесь он
+   * нужен сильнее прочих: между «увидел состав» и «нажал удалить» папку могли
+   * передать, и версия — единственное, что об этом скажет.
+   */
+  app.route({
+    method: 'DELETE',
+    url: `${PREFIX}/registries/:registryId`,
+    preHandler: deleteContent,
+    schema: { params: registryIdParamSchema },
+    handler: async (request, reply) => {
+      const { scope } = currentAuth(request);
+      const result = await deleteRegistry(
+        app.db,
+        scope,
+        request.params.registryId,
+        requireIfMatch(request, 'реестра'),
+        auditActor(app, request),
+        await readImmutabilityEnforced(app.db),
+      );
+      if (result === null) throw notFound('Реестр не найден.');
+      if (!result.deleted) {
+        throw conflict(`Реестр удалить нельзя: ${result.blockers.join('; ')}.`);
+      }
+      return reply.code(204).send();
+    },
+  });
 
   app.post(
     `${PREFIX}/registries/:registryId/issue`,

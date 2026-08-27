@@ -168,6 +168,8 @@ export const NAVIGATION_ROUTES = {
   registryIssue: (registryId: string) => `${V1}/registries/${registryId}/issue`,
   registryAccept: (registryId: string) => `${V1}/registries/${registryId}/accept`,
   registryItems: (registryId: string) => `${V1}/registries/${registryId}/items`,
+  registryDeletionPreview: (registryId: string) =>
+    `${V1}/registries/${registryId}/deletion-preview`,
   registryReconcile: (registryId: string) => `${V1}/registries/${registryId}/reconcile`,
   registryReconciliation: (registryId: string) => `${V1}/registries/${registryId}/reconciliation`,
   registryReconciliationReview: (registryId: string) =>
@@ -404,13 +406,57 @@ export async function getWorkDeletionPreview(workId: string): Promise<WorkDeleti
 /**
  * Удаление комплекта со всем содержимым.
  *
- * Право — `settings.manage` (администратор). Сервер отвергает удаление 409 с
- * перечислением помех, если у комплекта есть согласованная ревизия, он включён в
- * переданный реестр или на ревизию наложен юридический запрет: это уже ушло
- * наружу и перестало быть внутренним делом портала.
+ * Право — `submission.delete`, оно есть у всех пяти ролей (S37). Сервер
+ * отвергает удаление 409 с перечислением помех, если у комплекта есть
+ * согласованная ревизия, он включён в переданный реестр или на ревизию наложен
+ * юридический запрет: это уже ушло наружу и перестало быть внутренним делом
+ * портала.
  */
 export async function deleteWork(workId: string): Promise<void> {
   await request<void>('DELETE', NAVIGATION_ROUTES.work(workId));
+}
+
+/**
+ * Что исчезнет вместе с реестром.
+ *
+ * Два счётчика намеренно про разное: `worksDetached` — сколько комплектов
+ * ОТВЯЖЕТСЯ (они останутся на объекте), а `file` и `reconciliations` — что
+ * будет удалено безвозвратно. Экран обязан печатать их разными глаголами.
+ */
+export interface RegistryDeletionPreview {
+  registryId: string;
+  number: string | null;
+  status: Registry['status'];
+  worksDetached: number;
+  registryItems: number;
+  reconciliations: number;
+  file: {
+    workId: string;
+    title: string;
+    revisions: number;
+    files: number;
+    pages: number;
+  } | null;
+  blockers: string[];
+}
+
+export async function getRegistryDeletionPreview(
+  registryId: string,
+): Promise<RegistryDeletionPreview> {
+  return get<RegistryDeletionPreview>(NAVIGATION_ROUTES.registryDeletionPreview(registryId));
+}
+
+/**
+ * Удаление реестра.
+ *
+ * Версия обязательна, как у всех правящих маршрутов реестра, и здесь сильнее
+ * прочих: между «увидел состав» и «нажал удалить» папку могли передать, а
+ * переданную удалять нельзя.
+ */
+export async function deleteRegistry(registryId: string, version: number): Promise<void> {
+  await request<void>('DELETE', NAVIGATION_ROUTES.registry(registryId), {
+    headers: ifMatch(version),
+  });
 }
 
 // =====================================================================

@@ -30,6 +30,7 @@ import {
   Descriptions,
   Form,
   Input,
+  Modal,
   Popconfirm,
   Select,
   Space,
@@ -43,8 +44,10 @@ import { catalogKeys, navigationKeys } from '../../api/keys.js';
 import {
   acceptRegistry,
   attachRegistryFile,
+  deleteRegistry,
   excludeWork,
   getRegistry,
+  getRegistryDeletionPreview,
   getRegistryReconciliation,
   includeWork,
   issueRegistry,
@@ -76,8 +79,10 @@ import {
   UnavailableState,
 } from '../../shared/ui.js';
 import { REGISTRY_STATUS_LABELS, labelOf } from '../../shared/labels.js';
-import { Link } from '../../app/router.js';
+import { Link, useNavigate } from '../../app/router.js';
 import { useSession } from '../../app/session.js';
+import { IconAction, RowActions } from '../../shared/RowActions.js';
+import { TrashIcon } from '../../shared/icons.js';
 import { periodLabel } from './ObjectScreen.js';
 
 export function RegistryScreen({ registryId }: { registryId: string }): ReactNode {
@@ -149,7 +154,18 @@ function RegistryBody({
     <>
       <ScreenHeading
         title={`Реестр ${registry.number ?? 'без номера'} — ${sectionName}`}
-        extra={<Tag>{labelOf(REGISTRY_STATUS_LABELS, registry.status)}</Tag>}
+        extra={
+          <>
+            <Tag>{labelOf(REGISTRY_STATUS_LABELS, registry.status)}</Tag>
+            {/*
+              Кнопка появляется только у черновика — СКРЫВАЕТСЯ, а не гасится,
+              по тому же основанию, что и форма шапки: заблокированный элемент
+              на переданной папке читался бы как поломка, а не как свойство
+              подписанного документа.
+            */}
+            {draft && <DeleteRegistryAction registry={registry} />}
+          </>
+        }
       />
 
       <Descriptions size="small" column={3} bordered style={{ marginBottom: 16 }}>
@@ -219,6 +235,107 @@ interface HeaderValues {
   building?: string;
   floor?: string;
   structure?: string;
+}
+
+/**
+ * Удалить папку.
+ *
+ * Копия `DeleteWorkAction` с одним отличием, ради которого она и написана
+ * отдельно: предпросмотр здесь говорит ДВУМЯ глаголами. Комплекты состава
+ * отвязываются и остаются на объекте; удаляются только файл описи и прогоны
+ * сверки — то, что без реестра существовать не может. Один счётчик «будет
+ * удалено» напугал бы человека тем, чего не произойдёт.
+ *
+ * Предпросмотр грузится ПО ОТКРЫТИЮ, а не вместе с экраном: числа знает только
+ * БД, а спрашивать их у каждого, кто просто смотрит папку, незачем.
+ */
+function DeleteRegistryAction({ registry }: { registry: Registry }): ReactNode {
+  const { message } = AntApp.useApp();
+  const queryClient = useQueryClient();
+  const navigate = useNavigate();
+  const [open, setOpen] = useState(false);
+
+  const preview = useQuery({
+    queryKey: navigationKeys.registryDeletionPreview(registry.id),
+    queryFn: () => getRegistryDeletionPreview(registry.id),
+    enabled: open,
+  });
+
+  const remove = useMutation({
+    mutationFn: () => deleteRegistry(registry.id, registry.version),
+    onSuccess: async () => {
+      message.success(`Реестр ${registry.number ?? 'без номера'} удалён`);
+      setOpen(false);
+      await queryClient.invalidateQueries({ queryKey: navigationKeys.root });
+      // Экран удалённой папки показывать нечего: уходим на объект, где видно и
+      // отвязанные комплекты.
+      navigate(`/ids/objects/${registry.objectId}`);
+    },
+    onError: (error) => message.error(describeError(error)),
+  });
+
+  const blockers = preview.data?.blockers ?? [];
+
+  return (
+    <>
+      <RowActions>
+        <IconAction
+          icon={<TrashIcon />}
+          label={`Удалить реестр ${registry.number ?? 'без номера'}`}
+          danger
+          onClick={() => setOpen(true)}
+          testId={`delete-registry-${registry.id}`}
+        />
+      </RowActions>
+
+      <Modal
+        open={open}
+        title={`Удалить реестр ${registry.number ?? 'без номера'}?`}
+        okText="Удалить безвозвратно"
+        cancelText="Отмена"
+        okButtonProps={{
+          danger: true,
+          disabled: preview.isPending || preview.isError || blockers.length > 0,
+        }}
+        confirmLoading={remove.isPending}
+        onCancel={() => setOpen(false)}
+        onOk={() => remove.mutate()}
+        destroyOnHidden
+      >
+        {preview.isPending && <LoadingState label="Считаем, что будет удалено…" />}
+        {preview.isError && <ErrorState error={preview.error} />}
+        {preview.isSuccess &&
+          (blockers.length > 0 ? (
+            <ExplainedLimitation title="Этот реестр удалить нельзя">
+              <ul style={{ margin: '0 0 8px', paddingLeft: 18 }}>
+                {blockers.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+              Переданная опись подписана обеими сторонами: исправления оформляются новым реестром с
+              новым номером, а не правкой старого.
+            </ExplainedLimitation>
+          ) : (
+            <Space direction="vertical" size={8}>
+              <Typography.Text>
+                Комплектов будет отвязано: {preview.data.worksDetached} — сами комплекты, их ревизии
+                и проверки останутся на объекте.
+              </Typography.Text>
+              <Typography.Text>Будет удалено безвозвратно:</Typography.Text>
+              <ul style={{ margin: 0, paddingLeft: 18 }}>
+                <li>
+                  {preview.data.file === null
+                    ? 'файла описи нет'
+                    : `файл описи «${preview.data.file.title}»: ревизий ${preview.data.file.revisions}, ` +
+                      `файлов ${preview.data.file.files}, страниц ${preview.data.file.pages}`}
+                </li>
+                <li>прогонов сверки описи: {preview.data.reconciliations}</li>
+              </ul>
+            </Space>
+          ))}
+      </Modal>
+    </>
+  );
 }
 
 /**

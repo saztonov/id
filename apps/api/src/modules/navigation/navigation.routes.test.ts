@@ -98,6 +98,8 @@ const REV_B_FAR = id(41);
 const REGISTRY_1 = id(50);
 /** Реестр чужого объекта: его номер несёт маркер. */
 const REGISTRY_FAR = id(51);
+/** Переданная папка: помеха удалению, которую не снимает даже режим тестирования. */
+const REGISTRY_ISSUED = id(52);
 
 /**
  * Маркер чужих данных.
@@ -219,6 +221,12 @@ const FIXTURE: readonly string[] = [
      VALUES ('${REGISTRY_1}', '${OBJECT_1}', '${SECTION}', DATE '${PERIOD}', '${USER_GC}')`,
   `INSERT INTO registries (id, object_id, section_code, period, number, created_by)
      VALUES ('${REGISTRY_FAR}', '${OBJECT_2}', '${SECTION}', DATE '${PERIOD}', '${SECRET}', '${USER_ADMIN}')`,
+  // Номер обязателен к передаче (`registries_number_required_chk`), поэтому он
+  // задан вместе со статусом.
+  `INSERT INTO registries (id, object_id, section_code, period, number, status, issued_by,
+                           issued_at, created_by)
+     VALUES ('${REGISTRY_ISSUED}', '${OBJECT_1}', '${SECTION}', DATE '${PERIOD}', '770', 'issued',
+             '${USER_GC}', now(), '${USER_GC}')`,
 ];
 
 const STORAGE_DIR = mkdtempSync(join(tmpdir(), 'id-navigation-routes-'));
@@ -383,6 +391,13 @@ describe('регистрация маршрутов навигации', () => {
       ['DELETE', `/api/v1/registries/${REGISTRY_1}/works/${WORK_A_DRAFT}`, 403],
       ['POST', `/api/v1/registries/${REGISTRY_1}/file`, 403],
       ['POST', `/api/v1/registries/${REGISTRY_1}/issue`, 403],
+      // Удаление реестра — `submission.delete`, и оно у руководителя есть, в
+      // отличие от `registry.manage` строкой выше. Поэтому проба меряет не
+      // отказ права, а помеху: у реестра нет комплектов, но и удалению это не
+      // мешает — 204 означало бы, что папку снесли посреди набора. Берётся
+      // ПЕРЕДАННЫЙ реестр, у которого помеха безусловна.
+      ['GET', `/api/v1/registries/${REGISTRY_ISSUED}/deletion-preview`, 200],
+      ['DELETE', `/api/v1/registries/${REGISTRY_ISSUED}`, 409],
     ];
 
     const bodyFor = (method: Method, url: string): unknown => {
@@ -897,12 +912,14 @@ describe('GET /registries', () => {
     // поэтому список общий. Изоляция здесь держится не выборкой, а СОСТАВОМ
     // ответа: карточка подрядчику не отдаёт ни состава, ни блокеров — это
     // проверяет следующий набор.
+    const all = [REGISTRY_1, REGISTRY_FAR, REGISTRY_ISSUED].sort();
+
     const response = await as(KC.a, 'GET', '/api/v1/registries?limit=100');
     expect(response.statusCode).toBe(200);
-    expect([...idsOf(response)].sort()).toEqual([REGISTRY_1, REGISTRY_FAR].sort());
+    expect([...idsOf(response)].sort()).toEqual(all);
 
     const byManager = await as(KC.manager, 'GET', '/api/v1/registries?limit=100');
-    expect([...idsOf(byManager)].sort()).toEqual([REGISTRY_1, REGISTRY_FAR].sort());
+    expect([...idsOf(byManager)].sort()).toEqual(all);
   });
 
   it('карточка реестра подрядчику не раскрывает ни состава, ни блокеров', async () => {
@@ -1499,20 +1516,45 @@ describe('сверка описи передачи', () => {
  *
  * Три вопроса, на которые набор обязан ответить:
  *
- * 1. **Право.** Удаление — `settings.manage`. Подрядчик, заводящий и
- *    наполняющий комплекты, не должен уметь стереть чужую работу вместе с
- *    историей проверок.
+ * 1. **Право.** Удаление — `submission.delete`, и оно есть у всех пяти ролей
+ *    (S37). Подрядчик убирает СВОЙ черновик сам; чужой комплект он не удалит
+ *    не правом, а областью видимости — и ответ будет 404, как на
+ *    несуществующий.
  * 2. **Помехи названы ДО нажатия и совпадают с отказом.** Предпросмотр и 409
  *    обязаны говорить одно и то же: иначе экран покажет «можно», а сервер
- *    ответит «нельзя», и различие спишут на сбой.
+ *    ответит «нельзя», и различие спишут на сбой. Расширение права помехи не
+ *    ослабило ни одной строкой — это набор и проверяет.
  * 3. **Удаляется всё.** Комплект без ревизий, файлов и страниц — единственное
  *    доказательство, что порядок в `purgeRevisionEntirely` полон: забытая
  *    таблица дала бы отказ внешнего ключа, а не тихую грязь.
  */
 describe('DELETE /works/{id}', () => {
-  it('подрядчику удаление закрыто, даже в собственном комплекте', async () => {
-    const response = await as(KC.a, 'DELETE', `/api/v1/works/${WORK_A_DRAFT}`);
-    expect(response.statusCode).toBe(403);
+  it('подрядчик не удаляет ЧУЖОЙ комплект: 404, а не 403', async () => {
+    // Право у него теперь есть, и отказ приходит от области видимости.
+    // Различать «нет такого» и «не ваше» снаружи нельзя (§1.6), поэтому 404.
+    const response = await as(KC.a, 'DELETE', `/api/v1/works/${WORK_B}`);
+    expect(response.statusCode).toBe(404);
+
+    // И комплект на месте: отказ обязан быть без последствий.
+    expect((await as(KC.b, 'GET', `/api/v1/works/${WORK_B}`)).statusCode).toBe(200);
+  });
+
+  it('подрядчик удаляет СВОЙ черновик, не дожидаясь администратора', async () => {
+    // Комплект заводится здесь же: общие фикстуры нужны соседним наборам, а это
+    // утверждение по построению разрушает то, что проверяет.
+    const work = id(710);
+    const revision = id(711);
+    await db.query(`INSERT INTO works
+        (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title,
+         created_by)
+      VALUES ('${work}', '${OBJECT_1}', '${ORG_A}', '${ORG_A}', '${SECTION}', DATE '${PERIOD}',
+              'Черновик подрядчика А', '${USER_A}')`);
+    await db.query(`INSERT INTO submission_revisions
+        (id, work_id, object_id, contractor_id, revision_no, status)
+      VALUES ('${revision}', '${work}', '${OBJECT_1}', '${ORG_A}', 1, 'draft')`);
+
+    expect((await as(KC.a, 'DELETE', `/api/v1/works/${work}`)).statusCode).toBe(204);
+    expect((await as(KC.a, 'GET', `/api/v1/works/${work}`)).statusCode).toBe(404);
   });
 
   it('предпросмотр называет, что исчезнет', async () => {
@@ -1628,5 +1670,204 @@ describe('DELETE /works/{id} и поданные ревизии', () => {
       // того, работают ли триггеры.
       await db.query(`DELETE FROM app_settings WHERE key = 'core.enforce_immutability'`);
     }
+  });
+});
+
+/**
+ * Удаление реестра (S37).
+ *
+ * Набор отвечает на четыре вопроса, и порядок их важен.
+ *
+ * 1. **Переданную папку не удаляет никто** — ни правом, ни режимом. Второй
+ *    сценарий здесь главный: он выключает `core.enforce_immutability` и
+ *    убеждается, что отказ остался. Триггер `registries_no_delete` при
+ *    выключенном режиме пропустил бы удаление, и без этой проверки помеха
+ *    выглядела бы рабочей, ею не являясь.
+ * 2. **Комплекты состава отвязываются, а не гибнут.** Это единственное, ради
+ *    чего предпросмотр различает два глагола, и проверяется оно последствием в
+ *    базе, а не кодом ответа.
+ * 3. **Сверка уходит целиком.** Дети `registry_reconciliation_*` каскадны от
+ *    прогона; если каскад когда-нибудь снимут, останется висячая строка, и
+ *    именно этот счётчик её покажет.
+ * 4. **Версия обязательна.** Между «увидел состав» и «нажал удалить» папку
+ *    могли передать.
+ */
+describe('DELETE /registries/{id}', () => {
+  /** Черновик со своим комплектом и своим прогоном сверки. */
+  async function seedDraftRegistry(registry: string, work: string): Promise<void> {
+    await db.query(`INSERT INTO registries (id, object_id, section_code, period, created_by)
+      VALUES ('${registry}', '${OBJECT_1}', '${SECTION}', DATE '${PERIOD}', '${USER_GC}')`);
+    await db.query(`INSERT INTO works
+        (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title,
+         created_by, registry_id, ordinal)
+      VALUES ('${work}', '${OBJECT_1}', '${ORG_A}', '${ORG_A}', '${SECTION}', DATE '${PERIOD}',
+              'Комплект в удаляемой папке', '${USER_A}', '${registry}', 1)`);
+  }
+
+  it('предпросмотр различает отвязываемое и удаляемое', async () => {
+    const registry = id(720);
+    const work = id(721);
+    await seedDraftRegistry(registry, work);
+
+    const response = await as(KC.gc, 'GET', `/api/v1/registries/${registry}/deletion-preview`);
+    expect(response.statusCode).toBe(200);
+
+    const preview = response.json<{
+      worksDetached: number;
+      registryItems: number;
+      reconciliations: number;
+      file: unknown;
+      blockers: readonly string[];
+    }>();
+    expect(preview.worksDetached).toBe(1);
+    // Снимок состава пишется при передаче, у черновика его нет по построению.
+    expect(preview.registryItems).toBe(0);
+    expect(preview.file).toBeNull();
+    expect(preview.blockers).toEqual([]);
+  });
+
+  it('удаляет папку, отвязывая комплекты и снося сверку', async () => {
+    const registry = id(730);
+    const work = id(731);
+    const reconciliation = id(732);
+    await seedDraftRegistry(registry, work);
+    // Сверка привязана к файлу описи, а не к комплекту состава: сверяется
+    // КОНКРЕТНЫЙ скан. Поэтому файл заводится здесь же — заодно проверяется,
+    // что он удаляется целиком вместе с ревизией.
+    const fileWork = id(733);
+    const fileRevision = id(734);
+    await db.query(`INSERT INTO works
+        (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title,
+         created_by, registry_id, kind)
+      VALUES ('${fileWork}', '${OBJECT_1}', '${ORG_GC}', '${ORG_GC}', '${SECTION}',
+              DATE '${PERIOD}', 'Файл описи', '${USER_GC}', '${registry}', 'registry')`);
+    await db.query(`INSERT INTO submission_revisions
+        (id, work_id, object_id, contractor_id, revision_no, status)
+      VALUES ('${fileRevision}', '${fileWork}', '${OBJECT_1}', '${ORG_GC}', 1, 'draft')`);
+    await db.query(`UPDATE works SET current_revision_id = '${fileRevision}'
+                     WHERE id = '${fileWork}'`);
+    await db.query(`INSERT INTO registry_reconciliations
+        (id, object_id, registry_id, work_id, revision_id, verdict, parser_version,
+         matcher_version)
+      VALUES ('${reconciliation}', '${OBJECT_1}', '${registry}', '${fileWork}',
+              '${fileRevision}', 'clean', 'test', 'test')`);
+
+    const version = await registryVersion(KC.gc, registry);
+    const response = await as(KC.gc, 'DELETE', `/api/v1/registries/${registry}`, undefined, {
+      ...ifMatch(version),
+    });
+    expect(response.statusCode).toBe(204);
+
+    const left = await db.query<{
+      registries: number;
+      reconciliations: number;
+      works: number;
+      detached: number;
+      fileWorks: number;
+      fileRevisions: number;
+    }>(`
+      select
+        (select count(*) from registries where id = '${registry}')::int as registries,
+        (select count(*) from registry_reconciliations
+          where registry_id = '${registry}')::int as reconciliations,
+        (select count(*) from works where id = '${work}')::int as works,
+        (select count(*) from works
+          where id = '${work}' and registry_id is null and ordinal is null)::int as detached,
+        (select count(*) from works where id = '${fileWork}')::int as "fileWorks",
+        (select count(*) from submission_revisions
+          where id = '${fileRevision}')::int as "fileRevisions"
+    `);
+    // Комплект ЖИВ и отвязан, файл описи — исчез целиком. Ровно то, что обещал
+    // предпросмотр двумя разными глаголами.
+    expect(left[0]).toEqual({
+      registries: 0,
+      reconciliations: 0,
+      works: 1,
+      detached: 1,
+      fileWorks: 0,
+      fileRevisions: 0,
+    });
+
+    const audit = await db.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM audit_log
+        WHERE action = 'registry.deleted' AND entity_id = '${registry}'`,
+    );
+    expect(audit[0]?.n).toBe('1');
+  });
+
+  it('без If-Match — 400, с устаревшей версией — 412', async () => {
+    const registry = id(740);
+    const work = id(741);
+    await seedDraftRegistry(registry, work);
+
+    expect((await as(KC.gc, 'DELETE', `/api/v1/registries/${registry}`)).statusCode).toBe(400);
+
+    const stale = await as(KC.gc, 'DELETE', `/api/v1/registries/${registry}`, undefined, {
+      ...ifMatch(99),
+    });
+    expect(stale.statusCode).toBe(412);
+
+    // Папка на месте: оба отказа обязаны быть без последствий.
+    expect((await as(KC.gc, 'GET', `/api/v1/registries/${registry}`)).statusCode).toBe(200);
+  });
+
+  it('переданный реестр не удаляется, и помеха названа в предпросмотре', async () => {
+    const preview = await as(
+      KC.gc,
+      'GET',
+      `/api/v1/registries/${REGISTRY_ISSUED}/deletion-preview`,
+    );
+    expect(preview.statusCode).toBe(200);
+    expect(preview.json<{ blockers: readonly string[] }>().blockers.join(' ')).toMatch(
+      /реестр передан/u,
+    );
+
+    const version = await registryVersion(KC.gc, REGISTRY_ISSUED);
+    const attempt = await as(KC.gc, 'DELETE', `/api/v1/registries/${REGISTRY_ISSUED}`, undefined, {
+      ...ifMatch(version),
+    });
+    expect(attempt.statusCode).toBe(409);
+    expect(attempt.json<{ detail: string }>().detail).toMatch(/реестр передан/u);
+    expect((await as(KC.gc, 'GET', `/api/v1/registries/${REGISTRY_ISSUED}`)).statusCode).toBe(200);
+  });
+
+  it('в режиме тестирования переданный реестр ВСЁ РАВНО не удаляется', async () => {
+    // Главный тест набора. Триггер `registries_no_delete` исполняет
+    // `deny_modification`, а та с 0035 при выключенной неизменяемости выходит
+    // рано и удаление пропускает. Помеха обязана держаться кодом, а не базой:
+    // режим тестирования ослабляет запреты СВОЕЙ базы, а не обязательства
+    // перед второй стороной.
+    await db.query(
+      `INSERT INTO app_settings (key, value, updated_by)
+       VALUES ('core.enforce_immutability', 'false'::jsonb, '${USER_ADMIN}')
+       ON CONFLICT (key) DO UPDATE SET value = 'false'::jsonb`,
+    );
+    try {
+      const version = await registryVersion(KC.gc, REGISTRY_ISSUED);
+      const attempt = await as(
+        KC.gc,
+        'DELETE',
+        `/api/v1/registries/${REGISTRY_ISSUED}`,
+        undefined,
+        {
+          ...ifMatch(version),
+        },
+      );
+      expect(attempt.statusCode).toBe(409);
+      expect((await as(KC.gc, 'GET', `/api/v1/registries/${REGISTRY_ISSUED}`)).statusCode).toBe(
+        200,
+      );
+    } finally {
+      await db.query(
+        `UPDATE app_settings SET value = 'true'::jsonb WHERE key = 'core.enforce_immutability'`,
+      );
+    }
+  });
+
+  it('несуществующий реестр — 404, а не 409 и не 500', async () => {
+    const response = await as(KC.gc, 'DELETE', `/api/v1/registries/${id(994)}`, undefined, {
+      ...ifMatch(0),
+    });
+    expect(response.statusCode).toBe(404);
   });
 });

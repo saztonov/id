@@ -72,6 +72,8 @@ export const navigationKeys = {
   root: ['nav'] as const,
   works: (filter: string) => ['nav', 'works', filter] as const,
   workDeletionPreview: (workId: string) => ['nav', 'works', 'one', workId, 'deletion'] as const,
+  registryDeletionPreview: (registryId: string) =>
+    ['nav', 'registries', 'one', registryId, 'deletion'] as const,
   work: (workId: string) => ['nav', 'works', 'one', workId] as const,
   sectionCounts: (objectId: string, filter: string) =>
     ['nav', 'works', 'counts', objectId, filter] as const,

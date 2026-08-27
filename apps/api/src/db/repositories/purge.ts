@@ -198,6 +198,28 @@ export const REVISION_DELETES: readonly PurgeStep[] = [
   { table: 'source_files', where: (id: SQL) => sql`revision_id = ${id}` },
 ];
 
+/**
+ * Что держит РЕЕСТР помимо ревизий его файла описи (S37).
+ *
+ * Отдельный список, потому что растёт он от другого корня: `registries`, а не
+ * `submission_revisions`. Комплекты состава реестром не держатся — у них
+ * `registry_id` обнуляется, — а вот снимок состава и прогоны сверки ссылаются
+ * на сам реестр и удаление отвергнут.
+ *
+ * `registry_reconciliation_works/_groups/_rows/_extra_docs` здесь НЕ
+ * перечислены: все четыре объявлены `ON DELETE CASCADE` от
+ * `registry_reconciliations` (0030), и повторять каскад руками значило бы
+ * держать второй порядок удаления рядом с настоящим.
+ *
+ * Список живёт здесь, а не в `navigation.ts`, по той же причине, по которой
+ * здесь живут остальные: порядок удаления обязан быть в одном месте, и его
+ * полноту сверяет `purge.test.ts`.
+ */
+export const REGISTRY_DELETES: readonly PurgeStep[] = [
+  { table: 'registry_reconciliations', where: (id: SQL) => sql`registry_id = ${id}` },
+  { table: 'registry_items', where: (id: SQL) => sql`registry_id = ${id}` },
+];
+
 async function runDeletes(
   executor: Executor,
   steps: readonly PurgeStep[],
@@ -247,6 +269,21 @@ export async function resetPipelineForRevision(
     stages: ['recognition', 'analysis', 'checks'],
   });
   await runDeletes(executor, PIPELINE_RESET_DELETES, revisionId);
+}
+
+/**
+ * Снести то, что держит реестр, кроме комплектов его состава.
+ *
+ * Зовётся из `deleteRegistry` последним шагом перед удалением самой строки:
+ * комплекты к этому моменту уже отвязаны, а файл описи удалён целиком вместе со
+ * своими ревизиями. Остаются снимок состава и прогоны сверки — они ссылаются на
+ * реестр, а не на ревизию, и `purgeRevisionEntirely` их не касается.
+ */
+export async function purgeRegistryTail(executor: Executor, registryId: string): Promise<void> {
+  const id = sql`${registryId}::uuid`;
+  for (const step of REGISTRY_DELETES) {
+    await executor.execute(sql`delete from ${sql.raw(step.table)} where ${step.where(id)}`);
+  }
 }
 
 /**

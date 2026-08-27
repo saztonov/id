@@ -287,6 +287,36 @@ test('передача фиксирует опись, приёмку делае�
   await expect(page.getByText('Папка принята')).toBeVisible();
 });
 
+test('черновик реестра удаляется, а комплекты остаются на объекте', async ({ page }) => {
+  // Сценарий идёт ПОСЛЕ сборки: к этому моменту в реестре есть комплект и файл
+  // описи, и предпросмотр обязан назвать оба — разными глаголами.
+  await signIn(page, KC.general, `/ids/registries/${IDS.registry}`);
+
+  await page.getByTestId(`delete-registry-${IDS.registry}`).click();
+  const dialog = page.getByRole('dialog');
+  await expect(dialog).toContainText('Комплектов будет отвязано: 1');
+  await expect(dialog).toContainText('файл описи');
+  await dialog.getByRole('button', { name: 'Удалить безвозвратно' }).click();
+
+  // Экран уходит на объект: показывать удалённую папку нечего.
+  await expect(page).toHaveURL(new RegExp(`/ids/objects/${IDS.object}`, 'u'));
+
+  // Последствие в базе, а не надпись: реестра нет, комплект жив и отвязан.
+  const registry = await page.request.get(`/api/v1/registries/${IDS.registry}`);
+  expect(registry.status()).toBe(404);
+
+  const work = await page.request.get(`/api/v1/works/${IDS.workReview}`);
+  expect(work.status()).toBe(200);
+  expect(((await work.json()) as { registryId: string | null }).registryId).toBeNull();
+});
+
+test('у переданной папки кнопки удаления нет вовсе', async ({ page }) => {
+  // Скрыта, а не заблокирована: заблокированная кнопка на подписанном документе
+  // читается как поломка, а не как свойство документа.
+  await signIn(page, KC.general, `/ids/registries/${IDS.registryReady}`);
+  await expect(page.getByTestId(`delete-registry-${IDS.registryReady}`)).toHaveCount(0);
+});
+
 test('подрядчик видит реестр, но не состав чужой папки', async ({ page }) => {
   await signIn(page, KC.contractor, `/ids/registries/${IDS.registryReady}`);
 
