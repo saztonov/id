@@ -128,7 +128,7 @@ const SHA = (letter: string): string => letter.repeat(64);
 const ADMIN: AuthScope = { kind: 'admin', userId: USER };
 const CONTRACTOR_A: AuthScope = { kind: 'contractor', userId: USER, contractorId: ORG_A };
 const CONTRACTOR_B: AuthScope = { kind: 'contractor', userId: USER, contractorId: ORG_B };
-const ENGINEER_BLANK: AuthScope = { kind: 'engineer', userId: USER, objectIds: [] };
+const ENGINEER: AuthScope = { kind: 'engineer', userId: USER };
 
 const TEXT_ACT = 'АКТ освидетельствования скрытых работ № 336';
 const TEXT_CERT = 'СЕРТИФИКАТ СООТВЕТСТВИЯ № РОСС RU Д-RU.РА01.В.17254/23';
@@ -1107,10 +1107,14 @@ describe('изоляция подрядчиков', () => {
     expect(await listPageAssignments(db, CONTRACTOR_A, REVISION_A)).toHaveLength(4);
   });
 
-  it('инженер без назначенных объектов не видит ничего', async () => {
-    expect(await listLogicalDocuments(db, ENGINEER_BLANK, REVISION_A)).toEqual([]);
-    expect(await listPageAssignments(db, ENGINEER_BLANK, REVISION_A)).toEqual([]);
-    expect(await listPageClassifications(db, ENGINEER_BLANK, REVISION_A)).toEqual([]);
+  it('инженеру видны документы любого объекта', async () => {
+    // Прежде это утверждение читалось наоборот: инженер без назначенных
+    // объектов не видел ничего. Назначений больше нет (S37), и проверяющий
+    // видит стройку целиком — иначе он не мог бы проверить комплект, который
+    // ему принесли.
+    expect(await listLogicalDocuments(db, ENGINEER, REVISION_A)).not.toEqual([]);
+    expect(await listPageAssignments(db, ENGINEER, REVISION_A)).not.toEqual([]);
+    expect(await listPageClassifications(db, ENGINEER, REVISION_A)).not.toEqual([]);
   });
 
   it('в чужую ревизию нельзя ни записать классификацию, ни применить сегментацию', async () => {

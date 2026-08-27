@@ -30,7 +30,6 @@ import { z } from 'zod';
 import {
   appSettings,
   auditLog,
-  constructionObjects,
   counterparties,
   promptTemplates,
   ruleDefinitions,
@@ -50,7 +49,7 @@ import {
 } from '@id/contracts';
 import { isUnrestricted, type AuthScope } from '../../auth/scope.js';
 import { badRequest, forbidden } from '../../lib/problem.js';
-import { withScope, type ScopeTarget } from '../scoped.js';
+import { withScope } from '../scoped.js';
 import type { Database } from './users.js';
 
 /**
@@ -269,6 +268,10 @@ const scopedObjectScopes = alias(userObjectScopes, 'scoped_user_object_scopes');
  * таблицам, и без переименования условие области сцепилось бы с внешними
  * строками. LEFT JOIN — чтобы пользователь без назначений остался видимым для
  * неограниченной области (то же обоснование, что в `users.ts`).
+ *
+ * Соединение с назначениями с S37 ничего не сужает: ограничивает только
+ * `contractorId`. Оно остаётся потому, что `ScopeTarget` требует обеих колонок —
+ * см. разбор у `USERS_SCOPE_TARGET`.
  */
 function visibleUserIds(executor: Executor, scope: AuthScope, userId: string) {
   return executor
@@ -282,33 +285,6 @@ function visibleUserIds(executor: Executor, scope: AuthScope, userId: string) {
         eq(scopedUsers.id, userId),
       ),
     );
-}
-
-const OBJECT_SCOPE_TARGET: ScopeTarget = {
-  objectId: userObjectScopes.objectId,
-  contractorId: users.contractorId,
-};
-
-/**
- * Объекты, назначенные пользователю.
- *
- * Строки фильтруются областью ЗАПРАШИВАЮЩЕГО, а не только видимостью самого
- * пользователя: инженер не должен узнавать состав назначений на объектах, к
- * которым сам не допущен.
- */
-export async function listUserObjectScopes(
-  db: Database,
-  scope: AuthScope,
-  userId: string,
-): Promise<readonly string[]> {
-  const rows = await db
-    .select({ objectId: userObjectScopes.objectId })
-    .from(userObjectScopes)
-    .innerJoin(users, eq(users.id, userObjectScopes.userId))
-    .where(withScope(scope, OBJECT_SCOPE_TARGET, eq(userObjectScopes.userId, userId)))
-    .orderBy(asc(userObjectScopes.objectId));
-
-  return rows.map((row) => row.objectId);
 }
 
 export type RolesUpdate =
@@ -367,59 +343,6 @@ export async function replaceUserRoles(
     }
 
     return { status: 'ok', roles };
-  });
-}
-
-export type ObjectScopesUpdate =
-  | { readonly status: 'ok'; readonly objectIds: readonly string[] }
-  | { readonly status: 'not_found' }
-  | { readonly status: 'unknown_objects'; readonly missing: readonly string[] };
-
-export async function replaceUserObjectScopes(
-  db: Database,
-  scope: AuthScope,
-  userId: string,
-  objectIds: readonly string[],
-): Promise<ObjectScopesUpdate> {
-  return db.transaction(async (tx) => {
-    const target = await tx
-      .select({ id: users.id })
-      .from(users)
-      .where(inArray(users.id, visibleUserIds(tx, scope, userId)))
-      .for('update');
-    if (target[0] === undefined) return { status: 'not_found' };
-
-    if (objectIds.length > 0) {
-      const known = await tx
-        .select({ id: constructionObjects.id })
-        .from(constructionObjects)
-        .where(inArray(constructionObjects.id, [...objectIds]));
-      const knownIds = new Set(known.map((entry) => entry.id));
-      const missing = objectIds.filter((id) => !knownIds.has(id));
-      // Явный отказ вместо 23503: администратор должен увидеть, какой именно
-      // идентификатор объекта не существует.
-      if (missing.length > 0) return { status: 'unknown_objects', missing };
-    }
-
-    await tx
-      .delete(userObjectScopes)
-      .where(
-        objectIds.length === 0
-          ? eq(userObjectScopes.userId, userId)
-          : and(
-              eq(userObjectScopes.userId, userId),
-              notInArray(userObjectScopes.objectId, [...objectIds]),
-            ),
-      );
-
-    if (objectIds.length > 0) {
-      await tx
-        .insert(userObjectScopes)
-        .values(objectIds.map((objectId) => ({ userId, objectId })))
-        .onConflictDoNothing();
-    }
-
-    return { status: 'ok', objectIds };
   });
 }
 

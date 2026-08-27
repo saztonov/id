@@ -132,9 +132,6 @@ type PrincipalRow = {
   is_active: boolean;
   contractor_id: string | null;
   roles: string[];
-  object_ids: string[];
-  /** Объекты, где организация пользователя названа генподрядчиком (0028). */
-  gc_object_ids: string[];
   must_change_password: boolean | null;
 };
 
@@ -154,20 +151,10 @@ export async function buildScope(pool: Pool, userId: string): Promise<ScopeResol
     `select u.id, u.kc_sub, u.email, u.full_name, u.position, u.is_active, u.contractor_id,
             coalesce(array_agg(distinct r.role) filter (where r.role is not null),
                      '{}'::text[]) as roles,
-            coalesce(array_agg(distinct s.object_id::text) filter (where s.object_id is not null),
-                     '{}'::text[]) as object_ids,
-            -- Область генподрядчика ВЫВОДИТСЯ из карточек объектов, а не
-            -- назначается: второй источник той же истины разошёлся бы с первым
-            -- молча — генподрядчика сменили в карточке, область осталась старой.
-            coalesce(array_agg(distinct g.id::text) filter (where g.id is not null),
-                     '{}'::text[]) as gc_object_ids,
             bool_or(c.must_change_password) as must_change_password
        from users u
        left join user_roles r on r.user_id = u.id
-       left join user_object_scopes s on s.user_id = u.id
        left join user_credentials c on c.user_id = u.id
-       left join construction_objects g
-              on g.general_contractor_id = u.contractor_id and g.is_active
       where u.id = $1
       group by u.id`,
     [userId],
@@ -215,14 +202,16 @@ export async function buildScope(pool: Pool, userId: string): Promise<ScopeResol
     case 'manager':
       return { granted: true, user, roles, principal, scope: { kind: 'manager', userId: user.id } };
     case 'engineer':
-      // Пустой список объектов — законная ситуация: инженер без назначений
-      // ничего не видит. scopeWhere() превращает её в FALSE, а не в TRUE.
+      // Списка объектов у области больше нет (S37): инженер видит всю стройку.
+      // Прежде пустой список означал «не видит ничего», и это было не
+      // ограничение, а тупик — портал показывал такому инженеру пустой
+      // справочник и не давал завести ни одного комплекта.
       return {
         granted: true,
         user,
         roles,
         principal,
-        scope: { kind: 'engineer', userId: user.id, objectIds: row.object_ids },
+        scope: { kind: 'engineer', userId: user.id },
       };
     case 'general_contractor':
       if (user.contractorId === null) {
@@ -237,8 +226,10 @@ export async function buildScope(pool: Pool, userId: string): Promise<ScopeResol
           principal,
         };
       }
-      // Пустой список объектов — законное состояние: генподрядчик заведён, но
-      // ни на одном объекте генподрядчиком ещё не назван.
+      // Объекты в области больше не перечисляются: их выводили из карточек
+      // (`construction_objects.general_contractor_id`), и вывод был верен, но
+      // ограничивать им перестали (S37). Организация осталась — она отвечает не
+      // на «что он видит», а на «от чьего имени он действует».
       return {
         granted: true,
         user,
@@ -247,7 +238,6 @@ export async function buildScope(pool: Pool, userId: string): Promise<ScopeResol
         scope: {
           kind: 'general_contractor',
           userId: user.id,
-          objectIds: row.gc_object_ids,
           contractorId: user.contractorId,
         },
       };

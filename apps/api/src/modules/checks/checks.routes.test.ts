@@ -654,23 +654,20 @@ describe('GET /api/v1/revisions/{id}/findings', () => {
     expect(b.body).toContain(SECRET);
   });
 
-  it('инженер без назначенных объектов не видит ничего', async () => {
+  it('инженеру без назначений замечания видны на обоих объектах', async () => {
+    // Прежде здесь проверялась «пустая область»: инженер, которому не назначили
+    // ни одного объекта, не видел ничего. Назначений больше нет (S37) — теперь
+    // утверждение сторожит обратное, потому что молчаливый возврат ограничения
+    // выглядел бы на экране как исчезнувшие замечания.
     for (const revision of [REVISION_A, REVISION_B]) {
       const response = await as(
         KC.engineerNoScope,
         'GET',
         `/api/v1/revisions/${revision}/findings`,
       );
-      // 200 с пустым списком, а не 403: право `submission.read` у роли есть,
-      // пуста именно область видимости (§4.1, второй уровень).
       expect(response.statusCode).toBe(200);
-      expect(items(response)).toEqual([]);
-      expect(response.body).not.toContain(SECRET);
+      expect(items(response)).toHaveLength(1);
     }
-
-    // Положительный контроль: те же URL под инженером с объектом непусты.
-    const scoped = await as(KC.engineer, 'GET', `/api/v1/revisions/${REVISION_B}/findings`);
-    expect(items(scoped)).toHaveLength(1);
   });
 
   it('время чужого прогона не утекает в сводку', async () => {
@@ -847,10 +844,10 @@ describe('GET /api/v1/revisions/{id}/checks', () => {
     expect(items(own)).toHaveLength(1);
   });
 
-  it('инженер без назначенных объектов не видит прогонов, инженер объекта — видит', async () => {
-    const empty = await as(KC.engineerNoScope, 'GET', `/api/v1/revisions/${REVISION_A}/checks`);
-    expect(empty.statusCode).toBe(200);
-    expect(items(empty)).toEqual([]);
+  it('прогоны видны любому инженеру, а не только назначенному на объект', async () => {
+    const any = await as(KC.engineerNoScope, 'GET', `/api/v1/revisions/${REVISION_A}/checks`);
+    expect(any.statusCode).toBe(200);
+    expect(items(any)).toHaveLength(1);
 
     const scoped = await as(KC.engineer, 'GET', `/api/v1/revisions/${REVISION_A}/checks`);
     expect(items(scoped)).toHaveLength(1);
@@ -901,19 +898,18 @@ describe('POST /api/v1/revisions/{id}/checks', () => {
     expect(await totalCheckJobs()).toBe(before);
   });
 
-  it('инженер без назначенных объектов получает 404 и ничего не ставит в очередь', async () => {
+  it('несуществующая ревизия даёт 404 и ничего не ставит в очередь', async () => {
+    // Прежде эту ветку закрывал инженер с пустой областью. Пустых областей не
+    // осталось (S37), и «нет такой ревизии» проверяется прямо — иначе ветка
+    // 404 у постановки задачи не проверялась бы вовсе.
     const before = await totalCheckJobs();
-    const response = await as(
-      KC.engineerNoScope,
-      'POST',
-      `/api/v1/revisions/${REVISION_B}/checks`,
-      { body: {}, idempotencyKey: 'foreign-revision' },
-    );
-    // 404, а не 403: обработчик сам ищет ревизию через `findRevisionForFiles`
-    // и не находит её в пустой области. Отвечать 403 значило бы подтверждать
-    // существование чужой ревизии.
+    const missing = '00000000-0000-4000-8000-00000000dead';
+    const response = await as(KC.engineerNoScope, 'POST', `/api/v1/revisions/${missing}/checks`, {
+      body: {},
+      idempotencyKey: 'missing-revision',
+    });
     expect(response.statusCode).toBe(404);
-    expect(await jobsByKey(dedupeKey(REVISION_B, 'foreign-revision'))).toHaveLength(0);
+    expect(await jobsByKey(dedupeKey(missing, 'missing-revision'))).toHaveLength(0);
     expect(await totalCheckJobs()).toBe(before);
   });
 
@@ -1218,8 +1214,8 @@ describe('GET /revisions/:id/check-report', () => {
     expect(body.runId).toBeNull();
   });
 
-  it('инженер без назначенных объектов не видит отчёт', async () => {
+  it('отчёт открыт любому инженеру, а не только назначенному на объект', async () => {
     const body = await report(KC.engineerNoScope, REVISION_D);
-    expect(body.sections).toHaveLength(0);
+    expect(body.sections.length).toBeGreaterThan(0);
   });
 });

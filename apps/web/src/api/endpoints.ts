@@ -894,11 +894,6 @@ export const admin = {
       body: { roles: [...roles] },
     }).then((r) => r.data),
 
-  setObjectScopes: (userId: string, objectIds: readonly string[]) =>
-    request<UserCard>('PUT', `${V1}/admin/users/${userId}/object-scopes`, {
-      body: { objectIds: [...objectIds] },
-    }).then((r) => r.data),
-
   activate: (userId: string) =>
     request<UserCard>('POST', `${V1}/admin/users/${userId}/activate`).then((r) => r.data),
 
@@ -942,7 +937,6 @@ export const admin = {
     input: {
       roles: readonly UserRole[];
       contractorId?: string | null;
-      objectIds?: readonly string[];
       credential: 'temporary' | 'as-requested';
     },
   ) =>
@@ -950,11 +944,7 @@ export const admin = {
       'POST',
       `${V1}/admin/registration-requests/${requestId}/approve`,
       {
-        body: {
-          ...input,
-          roles: [...input.roles],
-          ...(input.objectIds === undefined ? {} : { objectIds: [...input.objectIds] }),
-        },
+        body: { ...input, roles: [...input.roles] },
       },
     ).then((r) => r.data),
 

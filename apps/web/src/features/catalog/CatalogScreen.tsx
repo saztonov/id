@@ -195,7 +195,7 @@ function ObjectsTable(): ReactNode {
         size="small"
         pagination={false}
         dataSource={query.data.items}
-        locale={{ emptyText: 'Объектов в вашей области видимости нет' }}
+        locale={{ emptyText: 'В справочнике нет ни одного объекта' }}
         columns={[
           {
             title: 'Код',
@@ -320,7 +320,7 @@ function CounterpartiesTable(): ReactNode {
         size="small"
         pagination={false}
         dataSource={query.data.items}
-        locale={{ emptyText: 'Контрагентов в вашей области видимости нет' }}
+        locale={{ emptyText: 'В справочнике нет ни одного контрагента' }}
         columns={[
           { title: 'Наименование', dataIndex: 'name', key: 'name' },
           {
@@ -545,7 +545,7 @@ function RdDocumentsTable(): ReactNode {
   if (objects.isError) return <ErrorState error={objects.error} />;
   if (objects.data.items.length === 0) {
     return (
-      <EmptyState label="Объектов в вашей области видимости нет: реестр РД читается по объекту" />
+      <EmptyState label="В справочнике нет ни одного объекта: реестр РД читается по объекту" />
     );
   }
 

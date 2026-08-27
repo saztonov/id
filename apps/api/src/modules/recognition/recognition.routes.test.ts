@@ -529,9 +529,12 @@ describe('изоляция прогонов, артефактов и текст�
    * ему не назначено. Первый уровень изоляции пропускает, второй обязан не
    * пропустить — и проверяется именно это, а не «инженеру можно всё».
    */
-  it('инженер без назначенных объектов не видит ни прогона, ни текста', async () => {
+  it('инженеру без назначений прогон и текст видны', async () => {
+    // Прежде утверждение было обратным и сторожило «пустая область — это
+    // ничего». Пустых областей не осталось (S37); гейтом изоляции здесь
+    // остаётся подрядчик, и его проверяет соседний набор.
     const direct = await as(KC.engineerNoScope, 'GET', `/api/v1/recognition-runs/${RUN_B}`);
-    expect(direct.statusCode).toBe(404);
+    expect(direct.statusCode).toBe(200);
 
     const list = await as(
       KC.engineerNoScope,
@@ -539,41 +542,9 @@ describe('изоляция прогонов, артефактов и текст�
       `/api/v1/revisions/${REVISION_B}/recognition-runs`,
     );
     expect(list.statusCode).toBe(200);
-    expect(list.json<{ items: unknown[] }>().items).toEqual([]);
-
-    const artifacts = await as(
-      KC.engineerNoScope,
-      'GET',
-      `/api/v1/recognition-runs/${RUN_B}/artifacts`,
-    );
-    expect(artifacts.json<{ items: unknown[] }>().items).toEqual([]);
-
-    const content = await as(
-      KC.engineerNoScope,
-      'GET',
-      `/api/v1/recognition-runs/${RUN_B}/artifacts/md/content`,
-    );
-    expect(content.statusCode).toBe(404);
-    expect(content.body).not.toContain('Секретный текст');
-
-    const pages = await as(KC.engineerNoScope, 'GET', `/api/v1/recognition-runs/${RUN_B}/pages`);
-    expect(pages.json<{ items: unknown[] }>().items).toEqual([]);
-    expect(pages.body).not.toContain('Секретный текст');
+    expect(list.json<{ items: unknown[] }>().items).not.toEqual([]);
   });
-});
 
-/**
- * Подписанные ссылки RD WEB наружу не выходят (§11, ADR-0005 п. 9).
- *
- * Ссылка на кроп — бессрочная и подписанная, а отдача кропа у них публичная,
- * то есть попавший наружу URL даёт чтение фрагмента чужой ИД в обход их RBAC.
- * Вырезание из `page_text_versions.text_md` эту дыру НЕ закрывало: выдача
- * содержимого артефакта отдавала те же ссылки в четырёх видах сразу.
- *
- * Проверяется с двух сторон: ссылки в ответе нет И содержимое, ради которого
- * артефакт запрашивают, на месте.
- */
-describe('выдача содержимого артефакта санируется', () => {
   it('в хранимых байтах ссылка ЕСТЬ — иначе проверять было бы нечего', async () => {
     for (const body of [ARTIFACT_MD_BODY, ARTIFACT_HTML_BODY, ARTIFACT_QA_BODY]) {
       expect(body).toContain('api/crops');

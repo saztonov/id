@@ -899,19 +899,21 @@ describe('профили правил объекта и разрешение д�
     expect(rows[0]?.payload['overrides']).toMatchObject({ relevantDateBasis: 'delivery' });
   });
 
-  it('область видимости: чтение сужено объектом, запись — правом администратора', async () => {
+  it('чтение профилей открыто, запись — только правом администратора', async () => {
     // Инженер объекта А профили этого объекта читает.
     expect(
       (await as(KC.engineer, 'GET', `${P}/objects/${OBJECT_A}/rule-profiles`)).statusCode,
     ).toBe(200);
-    // Инженер без назначений не видит и самого объекта (§1.6).
+    // Инженер без назначений — тоже: областей по объектам не осталось (S37).
     expect(
       (await as(KC.engineerBlank, 'GET', `${P}/objects/${OBJECT_A}/rule-profiles`)).statusCode,
-    ).toBe(404);
-    // Подрядчик без поставок на объекте связан с ним ничем.
+    ).toBe(200);
+    // И подрядчик: профиль раздела задаёт, что портал потребует от комплекта,
+    // и знать это обязан тот, кто комплект собирает. Запись при этом закрыта
+    // правом администратора — её проверяет цикл ниже.
     expect(
       (await as(KC.contractor, 'GET', `${P}/objects/${OBJECT_A}/rule-profiles`)).statusCode,
-    ).toBe(404);
+    ).toBe(200);
 
     for (const kcSub of [KC.engineer, KC.manager, KC.contractor]) {
       const response = await as(kcSub, 'POST', `${P}/objects/${OBJECT_A}/rule-profiles`, {

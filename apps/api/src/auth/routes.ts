@@ -90,7 +90,6 @@ const meResponseSchema = z.object({
   scope: z
     .object({
       kind: z.enum(['contractor', 'general_contractor', 'engineer', 'manager', 'admin']),
-      objectIds: z.array(z.uuid()).nullable(),
       contractorId: z.uuid().nullable(),
     })
     .nullable(),
@@ -417,15 +416,10 @@ function registerSharedAuthRoutes(app: AppInstance): void {
       scope: resolution.granted
         ? {
             kind: resolution.scope.kind,
-            // Инженер и генподрядчик оба ограничены объектами; у второго список
-            // выведен из карточек, а не назначен, но клиенту это безразлично —
-            // ему нужен сам перечень.
-            objectIds:
-              resolution.scope.kind === 'engineer' || resolution.scope.kind === 'general_contractor'
-                ? [...resolution.scope.objectIds]
-                : null,
-            // У генподрядчика заполнены ОБА поля, и это не оплошность: объекты
-            // задают, что он видит, организация — от чьего имени он действует.
+            // Перечня объектов здесь больше нет: областей по объектам не
+            // осталось (S37). Организация — единственное, что область о себе
+            // сообщает, и отвечает она не на «что он видит», а на «от чьего
+            // имени он действует».
             contractorId:
               resolution.scope.kind === 'contractor' ||
               resolution.scope.kind === 'general_contractor'

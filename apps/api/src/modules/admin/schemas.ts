@@ -397,13 +397,6 @@ export const userRolesBodySchema = z
     path: ['roles'],
   });
 
-export const userObjectScopesBodySchema = z
-  .object({ objectIds: z.array(uuidSchema).max(500) })
-  .refine((body) => new Set(body.objectIds).size === body.objectIds.length, {
-    message: 'Объект указан дважды',
-    path: ['objectIds'],
-  });
-
 export const userContractorBodySchema = z.object({ contractorId: uuidSchema.nullable() });
 
 export const userSummaryResponseSchema = z.object({
@@ -433,9 +426,15 @@ export const userSummaryResponseSchema = z.object({
 
 export const userPageResponseSchema = cursorPageSchema(userSummaryResponseSchema);
 
+/**
+ * Карточка пользователя.
+ *
+ * Списка объектов в ней больше нет: областей по объектам не осталось (S37), и
+ * поле, которое клиент показывает, а сервер ничем не ограничивает, было бы
+ * обещанием несуществующего правила доступа.
+ */
 export const userCardResponseSchema = z.object({
   user: userSummaryResponseSchema,
-  objectIds: z.array(uuidSchema),
 });
 
 // =====================================================================

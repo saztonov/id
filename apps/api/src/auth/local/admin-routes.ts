@@ -18,7 +18,7 @@ import { z } from 'zod';
 import type { PoolClient } from 'pg';
 
 import type { AppInstance } from '../../app.js';
-import { auditEmailHmac, listUserObjectScopes } from '../../db/repositories/admin.js';
+import { auditEmailHmac } from '../../db/repositories/admin.js';
 import { findUserById } from '../../db/repositories/users.js';
 import { conflict, notFound, unprocessable } from '../../lib/problem.js';
 import { currentAuth } from '../../middleware/require-auth.js';
@@ -230,7 +230,6 @@ export function registerLocalAdminRoutes(app: AppInstance): void {
         body: z.object({
           roles: userRolesBodySchema.shape.roles,
           contractorId: z.uuid().nullable().optional(),
-          objectIds: z.array(z.uuid()).max(500).optional(),
           /**
            * Чем закрыть учётную запись.
            *
@@ -261,7 +260,7 @@ export function registerLocalAdminRoutes(app: AppInstance): void {
       const pending = rows[0];
       if (pending === undefined) throw notFound('Заявка не найдена или уже рассмотрена.');
 
-      const { roles, contractorId, objectIds, credential } = request.body;
+      const { roles, contractorId, credential } = request.body;
       assertRolesConsistent(roles, contractorId ?? null);
 
       if (credential === 'as-requested' && pending.password_hash === null) {
@@ -301,12 +300,6 @@ export function registerLocalAdminRoutes(app: AppInstance): void {
             created,
             role,
           ]);
-        }
-        for (const objectId of objectIds ?? []) {
-          await tx.query(
-            'insert into user_object_scopes (user_id, object_id) values ($1::uuid, $2::uuid)',
-            [created, objectId],
-          );
         }
         await tx.query(
           `update registration_requests
@@ -416,12 +409,8 @@ async function loadCard(
   const { scope } = currentAuth(request);
   const user = await findUserById(app.db, scope, userId);
   if (user === null) throw notFound('Пользователь не найден.');
-  const objectIds = await listUserObjectScopes(app.db, scope, userId);
 
-  return {
-    user: userSummaryResponseSchema.parse({ ...user, roles: [...user.roles] }),
-    objectIds: [...objectIds],
-  };
+  return { user: userSummaryResponseSchema.parse({ ...user, roles: [...user.roles] }) };
 }
 
 async function auditAdminAction(

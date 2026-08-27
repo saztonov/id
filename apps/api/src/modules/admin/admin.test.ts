@@ -414,12 +414,6 @@ const ADMIN_PROBES: readonly AdminProbe[] = [
   },
   {
     method: 'PUT',
-    route: `${P}/users/:id/object-scopes`,
-    url: `${P}/users/${USER_PLAIN}/object-scopes`,
-    body: { objectIds: [OBJECT_1] },
-  },
-  {
-    method: 'PUT',
     route: `${P}/users/:id/contractor`,
     url: `${P}/users/${USER_PLAIN}/contractor`,
     body: { contractorId: ORG_CONTRACTOR },
@@ -667,55 +661,39 @@ describe('назначение и снятие бизнес-роли дейст�
   });
 });
 
-describe('назначение области видимости немедленно расширяет выборку', () => {
+/**
+ * Область видимости по объектам снята (S37).
+ *
+ * Прежде здесь стояли два сценария: «инженер без объектов не видит справочник;
+ * после назначения — видит сразу» и «снятие области закрывает выборку так же
+ * немедленно». Оба проверяли маршрут `PUT /users/{id}/object-scopes`, которого
+ * больше нет вместе с самими областями.
+ *
+ * Набор оставлен и перевёрнут: он сторожит, что справочник открыт инженеру БЕЗ
+ * всяких назначений, и что `/me` не обещает клиенту перечня объектов, которого
+ * сервер ничем не подкрепляет.
+ */
+describe('справочник открыт инженеру без назначений', () => {
   const OBJECTS = '/api/v1/catalog/objects';
 
-  /**
-   * Выборка справочника меняется скачком, а не построчно, и это не упрощение
-   * теста. `catalogVisibility()` в репозитории справочников превращает пустую
-   * область в `false` целиком: инженер без назначенных объектов видит НИЧЕГО
-   * (§1.6), а инженер хотя бы с одним объектом видит справочник. Построчное
-   * сужение проверяется на данных ИД, где у строк есть `object_id`.
-   */
-  it('инженер без объектов не видит справочник; после назначения — видит сразу', async () => {
+  it('инженер видит справочник сразу, без назначения объектов', async () => {
     const session = await sessionFor(KC.scoped);
 
-    const empty = await call('GET', OBJECTS, session);
-    expect(empty.statusCode).toBe(200);
-    expect(empty.json<{ items: unknown[] }>().items).toEqual([]);
-
-    const assigned = await asAdmin('PUT', `${P}/users/${USER_SCOPED}/object-scopes`, {
-      objectIds: [OBJECT_1],
-    });
-    expect(assigned.statusCode).toBe(200);
-
-    const widened = await call('GET', OBJECTS, session);
-    expect(widened.statusCode).toBe(200);
-    expect(widened.json<{ items: { id: string }[] }>().items.map((item) => item.id)).toContain(
+    const response = await call('GET', OBJECTS, session);
+    expect(response.statusCode).toBe(200);
+    expect(response.json<{ items: { id: string }[] }>().items.map((item) => item.id)).toContain(
       OBJECT_1,
     );
-
-    // Область в /me — то же значение, что применил репозиторий.
-    const me = await call('GET', '/me', session);
-    expect(me.json<{ scope: { kind: string; objectIds: string[] | null } }>().scope).toEqual({
-      kind: 'engineer',
-      objectIds: [OBJECT_1],
-      contractorId: null,
-    });
   });
 
-  it('снятие области закрывает выборку так же немедленно', async () => {
+  it('область в /me называет только организацию, и та у инженера пуста', async () => {
     const session = await sessionFor(KC.scoped);
 
-    const cleared = await asAdmin('PUT', `${P}/users/${USER_SCOPED}/object-scopes`, {
-      objectIds: [],
+    const me = await call('GET', '/me', session);
+    expect(me.json<{ scope: unknown }>().scope).toEqual({
+      kind: 'engineer',
+      contractorId: null,
     });
-    expect(cleared.statusCode).toBe(200);
-    expect(cleared.json<{ objectIds: string[] }>().objectIds).toEqual([]);
-
-    const narrowed = await call('GET', OBJECTS, session);
-    expect(narrowed.statusCode).toBe(200);
-    expect(narrowed.json<{ items: unknown[] }>().items).toEqual([]);
   });
 });
 
@@ -827,25 +805,14 @@ describe('пользователи: роли, области, организац
     expect(response.statusCode).toBe(409);
   });
 
-  it('неизвестный объект в области видимости отклоняется, известный назначается', async () => {
-    const unknown = await asAdmin('PUT', `${P}/users/${USER_ENGINEER}/object-scopes`, {
-      objectIds: [OBJECT_1, id(999)],
+  it('маршрут назначения областей снят вместе с самими областями', async () => {
+    // 404 от МАРШРУТИЗАТОРА, а не от обработчика: снятая возможность обязана
+    // исчезнуть целиком, иначе администратор продолжал бы «назначать» области,
+    // которые ничего не ограничивают.
+    const response = await asAdmin('PUT', `${P}/users/${USER_ENGINEER}/object-scopes`, {
+      objectIds: [OBJECT_1],
     });
-    expect(unknown.statusCode).toBe(422);
-
-    const assigned = await asAdmin('PUT', `${P}/users/${USER_ENGINEER}/object-scopes`, {
-      objectIds: [OBJECT_1, OBJECT_2],
-    });
-    expect(assigned.statusCode).toBe(200);
-    expect(assigned.json<{ objectIds: string[] }>().objectIds.sort()).toEqual(
-      [OBJECT_1, OBJECT_2].sort(),
-    );
-
-    // Замена набора, а не добавление: прежнее назначение обязано исчезнуть.
-    const replaced = await asAdmin('PUT', `${P}/users/${USER_ENGINEER}/object-scopes`, {
-      objectIds: [OBJECT_2],
-    });
-    expect(replaced.json<{ objectIds: string[] }>().objectIds).toEqual([OBJECT_2]);
+    expect(response.statusCode).toBe(404);
   });
 
   it('администратор не может снять роль admin с себя и отключить себя', async () => {
@@ -1586,7 +1553,6 @@ describe('журнал аудита', () => {
     for (const expected of [
       'user.roles_changed',
       'user.contractor_changed',
-      'user.object_scopes_changed',
       'user.activated',
       'user.deactivated',
       'setting.updated',

@@ -25,7 +25,7 @@ import { and, desc, eq, gte, lte, sql, type SQL } from 'drizzle-orm';
 import { z } from 'zod';
 import { processingFeedback } from '@id/db';
 import type { JsonValue } from '@id/contracts';
-import { isEmptyScope, isUnrestricted, type AuthScope } from '../../auth/scope.js';
+import { isUnrestricted, type AuthScope } from '../../auth/scope.js';
 import { badRequest } from '../../lib/problem.js';
 import type { Database } from './users.js';
 
@@ -100,7 +100,7 @@ function visible(scope: AuthScope): boolean {
   // Право `diagnostics.read` выдано только администратору, у которого область
   // неограниченная. Ветвь отсечения — гарантия на случай расширения матрицы:
   // сопоставить дефект конвейера с областью инженера нечем.
-  return !isEmptyScope(scope) && isUnrestricted(scope);
+  return isUnrestricted(scope);
 }
 
 function conditions(params: FeedbackFilters): (SQL | undefined)[] {

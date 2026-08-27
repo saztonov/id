@@ -45,7 +45,13 @@ export interface Me {
   roles: UserRole[];
   scope: {
     kind: 'contractor' | 'general_contractor' | 'engineer' | 'manager' | 'admin';
-    objectIds: string[] | null;
+    /**
+     * Организация пользователя.
+     *
+     * Единственное, что область о себе сообщает: перечня объектов в ней больше
+     * нет (S37). У подрядчика она же и ограничивает выборку, у генподрядчика
+     * отвечает на «от чьего имени он действует».
+     */
     contractorId: string | null;
   } | null;
   denial:
@@ -884,7 +890,6 @@ export interface PortalUser {
 
 export interface UserCard {
   user: PortalUser;
-  objectIds: string[];
 }
 
 export interface AppSetting {

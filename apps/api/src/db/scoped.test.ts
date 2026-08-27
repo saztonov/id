@@ -121,8 +121,12 @@ const CONTRACTOR_B_SCOPE: AuthScope = {
   userId: USER,
   contractorId: CONTRACTOR_B,
 };
-const ENGINEER_ON_B_SCOPE: AuthScope = { kind: 'engineer', userId: USER, objectIds: [OBJECT_B] };
-const ENGINEER_WITHOUT_OBJECTS: AuthScope = { kind: 'engineer', userId: USER, objectIds: [] };
+const ENGINEER_SCOPE: AuthScope = { kind: 'engineer', userId: USER };
+const GENERAL_CONTRACTOR_SCOPE: AuthScope = {
+  kind: 'general_contractor',
+  userId: USER,
+  contractorId: CONTRACTOR_A,
+};
 const MANAGER_SCOPE: AuthScope = { kind: 'manager', userId: USER };
 const ADMIN_SCOPE: AuthScope = { kind: 'admin', userId: USER };
 
@@ -188,27 +192,19 @@ describe('scopeWhere на настоящей БД', () => {
     expect(await workIds(scopeWhere(CONTRACTOR_B_SCOPE, WORK_SCOPE))).toEqual([WORK_B_ON_B]);
   });
 
-  it('инженер с одним объектом видит только строки этого объекта', async () => {
-    // Обе организации на объекте Б и ни одной строки объекта А: инженер
-    // ограничен объектом, а не подрядчиком.
-    expect(await workIds(scopeWhere(ENGINEER_ON_B_SCOPE, WORK_SCOPE))).toEqual([
-      WORK_A_ON_B,
-      WORK_B_ON_B,
-    ]);
-  });
-
-  it('инженер с пустым списком объектов не видит ни одной строки', async () => {
-    const visible = await workIds(scopeWhere(ENGINEER_WITHOUT_OBJECTS, WORK_SCOPE));
-    expect(visible).toEqual([]);
-    // Сравнение с полным составом, а не только с длиной: дефект «пустой список
-    // вырождается в отсутствие ограничения» даёт именно все строки.
-    expect(visible).not.toEqual(ALL_WORKS);
-  });
-
   it.each([
+    ['engineer', ENGINEER_SCOPE],
+    ['general_contractor', GENERAL_CONTRACTOR_SCOPE],
     ['manager', MANAGER_SCOPE],
     ['admin', ADMIN_SCOPE],
-  ] as const)('%s видит все поставки', async (_kind, scope) => {
+  ] as const)('%s видит все поставки на обоих объектах', async (_kind, scope) => {
+    // Утверждение про инженера прежде было обратным: он видел строки только
+    // назначенных объектов. Деления стройки на объекты больше нет (S37), и
+    // теперь этот набор сторожит обратное — что ограничение не вернулось молча.
+    //
+    // Генподрядчик здесь важен отдельно: у его области есть `contractorId`, и
+    // фильтр по нему оставил бы ему одну строку из трёх. Он отвечает на «от
+    // чьего имени», а не на «что видно».
     expect(await workIds(scopeWhere(scope, WORK_SCOPE))).toEqual(ALL_WORKS);
   });
 
@@ -219,9 +215,12 @@ describe('scopeWhere на настоящей БД', () => {
     ]);
   });
 
-  it('пустая область даёт FALSE, а не IN () и не TRUE', () => {
-    const rendered = new PgDialect().sqlToQuery(scopeWhere(ENGINEER_WITHOUT_OBJECTS, WORK_SCOPE));
-    expect(rendered.sql).toBe('false');
+  it('область без ограничения даёт TRUE, а не пустое условие', () => {
+    // Условие обязано быть выражением, а не `undefined`: необязательное
+    // условие пришлось бы проверять на каждом вызове, и пропущенная проверка
+    // означала бы выборку без ограничения там, где оно есть.
+    const rendered = new PgDialect().sqlToQuery(scopeWhere(ENGINEER_SCOPE, WORK_SCOPE));
+    expect(rendered.sql).toBe('true');
     expect(rendered.sql).not.toContain('in (');
   });
 
@@ -259,16 +258,10 @@ describe('withScope: область плюс прикладное условие
     ).toEqual([]);
   });
 
-  it('пустая область не открывается прикладным условием', async () => {
-    expect(
-      await workIds(withScope(ENGINEER_WITHOUT_OBJECTS, WORK_SCOPE, eq(works.id, WORK_A_ON_A))),
-    ).toEqual([]);
-  });
-
   it('совмещает несколько условий, сохраняя область', async () => {
     const both = await workIds(
       withScope(
-        ENGINEER_ON_B_SCOPE,
+        ENGINEER_SCOPE,
         WORK_SCOPE,
         eq(works.contractorId, CONTRACTOR_A),
         eq(works.id, WORK_A_ON_B),
@@ -276,14 +269,15 @@ describe('withScope: область плюс прикладное условие
     );
     expect(both).toEqual([WORK_A_ON_B]);
 
-    // То же условие, но объект вне области инженера: ни одной строки.
+    // Та же пара условий у ПОДРЯДЧИКА Б: область режет её насухо, хотя оба
+    // прикладных условия по отдельности строку находят.
     expect(
       await workIds(
         withScope(
-          ENGINEER_ON_B_SCOPE,
+          CONTRACTOR_B_SCOPE,
           WORK_SCOPE,
           eq(works.contractorId, CONTRACTOR_A),
-          eq(works.id, WORK_A_ON_A),
+          eq(works.id, WORK_A_ON_B),
         ),
       ),
     ).toEqual([]);

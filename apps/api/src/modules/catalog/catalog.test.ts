@@ -411,19 +411,22 @@ describe('права на справочники: чтение всем, зап�
     expect((await asAdmin('GET', `${P}/doc-type-candidates`)).statusCode).toBe(200);
   });
 
-  it('инженер без назначенных объектов не видит и справочников', async () => {
-    // §1.6: пустая область видимости означает «ничего», а не «всё». Решение
-    // принимает `isEmptyScope()`, а не собственная проверка роли в репозитории.
+  it('инженеру без назначений справочники видны целиком', async () => {
+    // Прежде это утверждение было обратным и опиралось на «пустую область»
+    // (§1.6). Заказчик снял деление стройки на назначенные и прочие объекты
+    // (S37) — именно с этого экрана и началась правка: инженер видел
+    // «Объектов в вашей области видимости нет» и не мог завести ни одного
+    // комплекта.
     const types = await as(KC.engineerBlank, 'GET', `${P}/doc-types`);
     expect(types.statusCode).toBe(200);
-    expect(types.json<unknown[]>()).toEqual([]);
+    expect(types.json<unknown[]>()).not.toEqual([]);
 
     const objects = await as(KC.engineerBlank, 'GET', `${P}/objects`);
-    expect(objects.json<{ items: unknown[] }>().items).toEqual([]);
+    expect(objects.json<{ items: unknown[] }>().items).not.toEqual([]);
 
     expect(
       (await as(KC.engineerBlank, 'GET', `${P}/doc-types/${DOC_TYPE_SYSTEM}`)).statusCode,
-    ).toBe(404);
+    ).toBe(200);
   });
 });
 

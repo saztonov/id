@@ -772,13 +772,12 @@ describe('изоляция подрядчиков', () => {
     expect(order.statusCode).toBe(404);
   });
 
-  it('инженер объекта видит файлы, инженер без объектов — нет', async () => {
-    const assigned = await as(KC.engineer, 'GET', `/api/v1/revisions/${REVISION_DRAFT}/files`);
-    expect(assigned.statusCode).toBe(200);
-    expect(assigned.json<{ items: FileView[] }>().items.length).toBeGreaterThan(0);
-
-    const blank = await as(KC.engineerBlank, 'GET', `/api/v1/revisions/${REVISION_DRAFT}/files`);
-    expect(blank.statusCode).toBe(404);
+  it('файлы ревизии видны любому инженеру', async () => {
+    for (const kc of [KC.engineer, KC.engineerBlank]) {
+      const response = await as(kc, 'GET', `/api/v1/revisions/${REVISION_DRAFT}/files`);
+      expect([kc, response.statusCode]).toEqual([kc, 200]);
+      expect(response.json<{ items: FileView[] }>().items.length).toBeGreaterThan(0);
+    }
   });
 
   // До S21 инженер получал здесь 403: состав поставки формировал только тот,
@@ -795,14 +794,15 @@ describe('изоляция подрядчиков', () => {
     expect(response.statusCode).toBe(201);
   });
 
-  it('инженер без назначенных объектов файлы не загружает', async () => {
+  it('несуществующая ревизия даёт 404 на выдаче талона', async () => {
+    // Ветку 404 прежде закрывал инженер с пустой областью; областей по
+    // объектам не осталось (S37), и «нет такой ревизии» проверяется прямо.
     const response = await as(
       KC.engineerBlank,
       'POST',
-      `/api/v1/revisions/${REVISION_DRAFT}/files/upload/init`,
-      { fileName: 'Чужая правка.pdf', sizeBytes: 1024 },
+      `/api/v1/revisions/00000000-0000-4000-8000-00000000dead/files/upload/init`,
+      { fileName: 'Правка.pdf', sizeBytes: 1024 },
     );
-    // 404, а не 403: ревизии вне области видимости для него не существует.
     expect(response.statusCode).toBe(404);
   });
 

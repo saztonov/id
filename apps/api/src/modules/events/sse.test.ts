@@ -583,21 +583,25 @@ describe('изоляция потока событий', () => {
     });
     expect(crossed.statusCode).toBe(404);
 
-    // Инженер без назначенных объектов видит ничего, а не всё (§1.6).
-    const blank = await app.inject({
+    // Инженеру и сводка, и поток открыты на любой ревизии: областей по
+    // объектам не осталось (S37). Изоляция, которую этот набор сторожит, —
+    // подрядчик, и она проверена парой выше.
+    const byEngineer = await app.inject({
       method: 'GET',
       url: `/api/v1/revisions/${REVISION_A}/processing-status`,
       headers: { cookie: engineer.cookie },
     });
-    expect(blank.statusCode).toBe(404);
+    expect(byEngineer.statusCode).toBe(200);
 
-    const blankStream = await app.inject({
-      method: 'GET',
-      url: eventsPath(REVISION_A),
-      headers: { cookie: engineer.cookie },
+    // Поток читается `readStream`, а не `inject`: открытое соединение
+    // `inject` не завершает, и утверждение о коде ответа повисло бы до
+    // таймаута.
+    const engineerStream = await readStream(eventsPath(REVISION_A), {
+      cookie: engineer.cookie,
+      wantFrames: 1,
     });
-    expect(blankStream.statusCode).toBe(404);
-  });
+    expect(engineerStream.status).toBe(200);
+  }, 30_000);
 
   it('без сессии поток не открывается вовсе', async () => {
     const response = await fetch(`${baseUrl}${eventsPath(REVISION_A)}`, {

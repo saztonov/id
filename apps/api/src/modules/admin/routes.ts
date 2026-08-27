@@ -38,13 +38,11 @@ import {
   listRuleDefinitions,
   listRulesetRules,
   listRulesetVersions,
-  listUserObjectScopes,
   PG_RESTRICT_VIOLATION,
   pgErrorCode,
   publishRulesetVersion,
   readSetting,
   readSettings,
-  replaceUserObjectScopes,
   replaceUserRoles,
   setUserContractor,
   transitionPrompt,
@@ -100,7 +98,6 @@ import {
   userCardResponseSchema,
   userContractorBodySchema,
   userListQuerySchema,
-  userObjectScopesBodySchema,
   userPageResponseSchema,
   userRolesBodySchema,
   type IntegrationName,
@@ -199,52 +196,6 @@ function registerUserRoutes(app: AppInstance): void {
         entityType: 'user',
         entityId: userId,
         payload: { roles: [...roles] },
-      });
-      return userCard(app, request, userId);
-    },
-  );
-
-  app.put(
-    `${PREFIX}/users/:id/object-scopes`,
-    {
-      schema: {
-        params: idParamsSchema,
-        body: userObjectScopesBodySchema,
-        response: { 200: userCardResponseSchema },
-      },
-      preHandler: manage,
-    },
-    async (request) => {
-      const auth = currentAuth(request);
-      const userId = request.params.id;
-
-      const result = await replaceUserObjectScopes(
-        app.db,
-        auth.scope,
-        userId,
-        request.body.objectIds,
-      );
-      switch (result.status) {
-        case 'not_found':
-          throw notFound('Пользователь не найден.');
-        case 'unknown_objects':
-          throw unprocessable(
-            result.missing.map((id) => ({
-              pointer: '/objectIds',
-              code: 'unknown-object',
-              message: `Объект ${id} не существует`,
-            })),
-            'В списке есть объекты, которых нет в справочнике.',
-          );
-        case 'ok':
-          break;
-      }
-
-      await audit(app, request, {
-        action: 'user.object_scopes_changed',
-        entityType: 'user',
-        entityId: userId,
-        payload: { objectIds: [...request.body.objectIds] },
       });
       return userCard(app, request, userId);
     },
@@ -364,8 +315,7 @@ async function userCard(app: AppInstance, request: FastifyRequest, userId: strin
   const { scope } = currentAuth(request);
   const user = await findUserById(app.db, scope, userId);
   if (user === null) throw notFound('Пользователь не найден.');
-  const objectIds = await listUserObjectScopes(app.db, scope, userId);
-  return { user: toUserResponse(user), objectIds: [...objectIds] };
+  return { user: toUserResponse(user) };
 }
 
 function toUserResponse(user: UserSummary) {

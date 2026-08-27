@@ -29,25 +29,27 @@
  * любом состоянии справочников (у таблицы нет ни одного FK на них). Подставить в
  * `contractorId` «что-нибудь похожее» значило бы написать превращение области в
  * SQL второй раз, вне `db/scoped.ts`, то есть завести второй источник правды для
- * правила доступа. Поэтому условие собирается здесь явно, но РЕШЕНИЯ принимают
- * те же `isEmptyScope()` и `isUnrestricted()`, что и `scopeWhere()`:
+ * правила доступа. Поэтому условие собирается здесь явно, но РЕШЕНИЕ принимает
+ * тот же `isUnrestricted()`, что и `scopeWhere()`:
  *
- *   • пустая область (инженер без назначений) — ничего, а не всё (§1.6);
- *   • неограниченная (admin, manager) — весь журнал;
- *   • инженер — только записи по назначенным ему объектам;
+ *   • неограниченная область (все, кроме подрядчика) — весь журнал;
  *   • подрядчик — ничего: сопоставить запись журнала с его организацией нечем,
  *     а «показать всё, раз фильтровать не по чему» — это утечка.
+ *
+ * Ветки «инженер по назначенным объектам» здесь больше нет: объектных областей
+ * не осталось (S37), и записывать её значило бы держать фильтр по величине,
+ * которой в области больше нет.
  *
  * Право `audit.read` выдано только `admin` (§4.1), поэтому на практике сюда
  * приходит неограниченная область; остальные ветви — не мёртвый код, а гарантия
  * того, что расширение матрицы прав не откроет журнал целиком.
  */
-import { and, desc, eq, inArray, sql, type SQL } from 'drizzle-orm';
+import { and, desc, eq, sql, type SQL } from 'drizzle-orm';
 import { isIP } from 'node:net';
 import { z } from 'zod';
 import { auditLog } from '@id/db';
 import type { JsonValue } from '@id/contracts';
-import { isEmptyScope, isUnrestricted, type AuthScope } from '../../auth/scope.js';
+import { isUnrestricted, type AuthScope } from '../../auth/scope.js';
 import { badRequest } from '../../lib/problem.js';
 import type { Database } from './users.js';
 
@@ -238,9 +240,7 @@ export async function listAuditEntries(
 
 /** Условие видимости журнала. Разбор — в заголовке файла. */
 function auditVisibility(scope: AuthScope): SQL {
-  if (isEmptyScope(scope)) return sql`false`;
   if (isUnrestricted(scope)) return sql`true`;
-  if (scope.kind === 'engineer') return inArray(auditLog.objectId, [...scope.objectIds]);
   // Подрядчик и всякая область, добавленная без правки этой функции: закрыто.
   return sql`false`;
 }

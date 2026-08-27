@@ -39,10 +39,9 @@
  * проверке комплекта. То же у профилей разделов: они задают, что портал требует
  * от комплекта, и знать это требование должен тот, кто комплект собирает.
  *
- * Одно исключение класс 2 всё же делает — вырожденная ПУСТАЯ область (инженер
- * без назначенных объектов, §1.6): такому пользователю портал не отдаёт ничего
- * вовсе, и решение принимает тот же `isEmptyScope()`, а не собственная проверка
- * роли.
+ * Исключение «вырожденная пустая область» класс 2 больше не делает: с S37
+ * пустых областей не бывает — деление стройки на назначенные и прочие объекты
+ * снято, и «инженера без назначений» как состояния не существует.
  *
  * Класс каждой выборки назван на месте вызова: `objectVisibility()`,
  * `counterpartyVisibility()`, `configVisibility()`. Поэтому пропуска области не
@@ -144,9 +143,9 @@ import type {
   SectionProfile,
 } from '@id/contracts';
 import type { DocTypeGroup, DocTypeKind } from '@id/doc-types';
-import { isEmptyScope, type AuthScope } from '../../auth/scope.js';
+import { type AuthScope } from '../../auth/scope.js';
 import { driverField } from '../driver-errors.js';
-import { withScope, type ScopeTarget } from '../scoped.js';
+import { withScope } from '../scoped.js';
 import { appendAudit, type AuditActor } from './audit.js';
 import {
   badRequest,
@@ -253,21 +252,8 @@ export interface DocTypeCandidateView {
  * псевдонимом такая ошибка невозможна — имена различны.
  */
 const scopeWorks = alias(works, 'scope_works');
-const scopeObjectContractors = alias(objectContractors, 'scope_object_contractors');
 const scopeObjects = alias(constructionObjects, 'scope_objects');
 const scopeRdDocuments = alias(rdDocuments, 'scope_rd_documents');
-
-/**
- * Цель области для подзапроса по комплектам.
- *
- * Единственная таблица в этом файле, где обе колонки области лежат в самой
- * строке, — поэтому именно через неё выражается косвенная связь подрядчика с
- * объектом «у меня здесь есть работа».
- */
-const WORK_SCOPE_TARGET: ScopeTarget = {
-  objectId: scopeWorks.objectId,
-  contractorId: scopeWorks.contractorId,
-};
 
 /**
  * Построитель подзапросов без соединения с БД.
@@ -283,49 +269,27 @@ const PRESENT = sql`1`;
 /**
  * Класс 1: объект строительства в области видимости.
  *
- * Форм SQL две, потому что «объект в области» у ролей означает разное:
+ * Область по объектам снята заказчиком (S37), поэтому условие одно на все роли —
+ * `TRUE`. Функция при этом ОСТАЁТСЯ, и не по инерции: она — имя границы. Пока
+ * граница названа, её видно в двадцати с лишним местах вызова; растворив её в
+ * отсутствии условия, вернуть или сузить пришлось бы поиском по всем
+ * репозиториям.
  *
- * - **Подрядчик** связан с объектом двумя способами, и оба нужны. Прямой —
- *   закрепление `object_contractors` (0028): именно оно делает объект видимым
- *   ДО первого комплекта и тем закрывает долг «первую поставку завести нельзя».
- *   Косвенный — собственные комплекты: закрепление могли снять, а работа,
- *   сданная до этого, обязана остаться доступной ему самому. Убрать второй
- *   способ значило бы, что снятие закрепления стирает у подрядчика его же
- *   историю; убрать первый — вернуть прежний тупик.
- * - **Генподрядчик, инженер, руководитель, администратор** ограничены (или не
- *   ограничены) прямо по объекту, и это уже умеет `withScope()`: список
- *   объектов, пустая область и отсутствие ограничения — всё там.
+ * Что здесь было и почему исчезло. У подрядчика объект считался видимым по двум
+ * признакам: закрепление `object_contractors` (оно делало объект видимым ДО
+ * первого комплекта) и наличие собственных комплектов (чтобы снятие закрепления
+ * не стирало ему его же историю). У остальных ролей объект брался из списка
+ * назначений. Обе конструкции отвечали на вопрос «этот объект — ваш?», а
+ * заказчик ответил, что такого вопроса на его стройке нет: портал внутренний, и
+ * перечень объектов не является сведениями об участниках.
  *
- * `contractorId` в цели второй ветки указывает на колонку подзапроса, которой в
- * этом запросе нет, и это не небрежность: ветка подрядчика обработана выше, а
- * для остальных областей `scopeWhere()` колонку подрядчика не читает. Если
- * правило области когда-нибудь начнёт читать её и для инженера, PostgreSQL
- * ответит «missing FROM-clause entry» — то есть расхождение станет отказом
- * сразу, а не лишними строками в ответе.
+ * **Что НЕ снято.** Комплекты подрядчика по-прежнему видит только он сам —
+ * граница живёт в `scopeWhere()` и режет `works`, а не `construction_objects`.
+ * Поэтому «объект видно всем» и «чужую ИД видно всем» — разные утверждения, и
+ * второе ложно.
  */
-export function objectVisibility(scope: AuthScope, objectId: PgColumn): SQL {
-  if (scope.kind === 'contractor') {
-    const assigned = exists(
-      subquery
-        .select({ present: PRESENT })
-        .from(scopeObjectContractors)
-        .where(
-          and(
-            eq(scopeObjectContractors.objectId, objectId),
-            eq(scopeObjectContractors.contractorId, scope.contractorId),
-            eq(scopeObjectContractors.isActive, true),
-          ),
-        ),
-    );
-    const hasWork = exists(
-      subquery
-        .select({ present: PRESENT })
-        .from(scopeWorks)
-        .where(withScope(scope, WORK_SCOPE_TARGET, eq(scopeWorks.objectId, objectId))),
-    );
-    return or(assigned, hasWork) ?? sql`false`;
-  }
-  return withScope(scope, { objectId, contractorId: scopeWorks.contractorId });
+export function objectVisibility(_scope: AuthScope, _objectId: PgColumn): SQL {
+  return sql`true`;
 }
 
 /**
@@ -339,8 +303,8 @@ export function objectVisibility(scope: AuthScope, objectId: PgColumn): SQL {
  * Подрядчику отдаётся ровно то, что он и так видит в своих документах:
  *
  * 1. он сам — его собственная строка справочника;
- * 2. участники объектов, где у него есть поставки: застройщик, технический
- *    заказчик, генподрядчик — они печатаются в шапке его же актов;
+ * 2. участники объектов: застройщик, технический заказчик, генподрядчик — они
+ *    печатаются в шапке его же актов;
  * 3. проектировщики РД этих объектов — шифр РД он видит, и `designerId` в нём
  *    обязан быть разрешим.
  *
@@ -348,6 +312,11 @@ export function objectVisibility(scope: AuthScope, objectId: PgColumn): SQL {
  * когда его идентификатор уже встречается в видимой пользователю строке. Иначе
  * справочник либо отдаёт реквизиты конкурентов, либо оставляет в ответе
  * неразрешимые идентификаторы.
+ *
+ * Инвариант пережил снятие объектных областей (S37) без правки: объекты стали
+ * видны все, и вместе с ними расширилось множество «уже видимых строк». Не
+ * расширилось только одно — соседние субподрядчики в этот список по-прежнему не
+ * входят, потому что в документах подрядчика они не встречаются.
  */
 function counterpartyVisibility(scope: AuthScope): SQL {
   if (scope.kind !== 'contractor') return configVisibility(scope);
@@ -395,11 +364,11 @@ function counterpartyVisibility(scope: AuthScope): SQL {
  *
  * Разбор, почему область здесь не применяется, — в заголовке файла. Короткая
  * версия: это настройка поведения портала, а не сведения об участниках, и
- * интерфейсу она нужна целиком. Единственная проверка — вырожденная пустая
- * область (§1.6), и её принимает `isEmptyScope()`, а не сверка роли.
+ * интерфейсу она нужна целиком. Проверки на вырожденную пустую область здесь
+ * больше нет: пустых областей не осталось вовсе (S37).
  */
-function configVisibility(scope: AuthScope): SQL {
-  return isEmptyScope(scope) ? sql`false` : sql`true`;
+function configVisibility(_scope: AuthScope): SQL {
+  return sql`true`;
 }
 
 /**

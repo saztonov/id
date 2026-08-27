@@ -1108,8 +1108,10 @@ describe('processing_status ревизии', () => {
     // Подстановка чужого идентификатора: `null` — это 404 на маршруте, а не
     // «есть, но не ваша» (§16).
     expect(await computeProcessingStatus(app.db, CONTRACTOR_A_SCOPE, REVISION_B)).toBeNull();
-    const emptyEngineer: AuthScope = { kind: 'engineer', userId: USER_ADMIN, objectIds: [] };
-    expect(await computeProcessingStatus(app.db, emptyEngineer, REVISION_C)).toBeNull();
+    // Инженеру же состояние конвейера видно на любой ревизии: областей по
+    // объектам больше нет (S37).
+    const engineer: AuthScope = { kind: 'engineer', userId: USER_ADMIN };
+    expect(await computeProcessingStatus(app.db, engineer, REVISION_C)).not.toBeNull();
   });
 });
 

@@ -1,17 +1,24 @@
 /**
- * Пользователи, роли и области видимости (§4.1, §14).
+ * Пользователи и роли (§4.1, §14).
  *
  * Роль `contractor` не совмещается с другими — это требование сервера
  * (`userRolesBodySchema`), и причина названа там же: при нескольких ролях один
  * человек и подаёт комплект, и согласует его. Форма подсказывает это ДО отправки,
  * но не является защитой: отвергает сервер.
+ *
+ * ## Назначения объектов здесь больше нет (S37)
+ *
+ * Раскрывающаяся строка с мультиселектом объектов удалена вместе с областями по
+ * объектам и маршрутом `PUT /users/{id}/object-scopes`. Оставить её значило бы
+ * держать экран, на котором администратор что-то назначает, а сервер этого
+ * не читает, — то есть обещать правило доступа, которого нет.
  */
 import { useState, type ReactNode } from 'react';
 import { App as AntApp, Button, Input, Popconfirm, Select, Space, Table, Tag, Tooltip } from 'antd';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { UserRole } from '@id/contracts';
 import { admin, catalog } from '../../api/endpoints.js';
-import { adminKeys, catalogKeys } from '../../api/keys.js';
+import { adminKeys } from '../../api/keys.js';
 import { describeError } from '../../api/problem.js';
 import type { PortalUser } from '../../api/types.js';
 import { ErrorState, LoadingState } from '../../shared/ui.js';
@@ -46,15 +53,10 @@ export function UsersPanel(): ReactNode {
   const { message } = AntApp.useApp();
   const queryClient = useQueryClient();
   const [search, setSearch] = useState('');
-  const [expanded, setExpanded] = useState<string | null>(null);
 
   const users = useQuery({
     queryKey: adminKeys.users(search),
     queryFn: () => admin.users(search === '' ? undefined : search),
-  });
-  const objects = useQuery({
-    queryKey: catalogKeys.objects(''),
-    queryFn: () => catalog.objects({}),
   });
 
   // Управление паролями существует только там, где портал ими распоряжается.
@@ -78,16 +80,6 @@ export function UsersPanel(): ReactNode {
       admin.setRoles(input.userId, input.roles),
     onSuccess: async () => {
       message.success('Роли сохранены');
-      await invalidate();
-    },
-    onError: (error) => message.error(describeError(error)),
-  });
-
-  const setScopes = useMutation({
-    mutationFn: (input: { userId: string; objectIds: string[] }) =>
-      admin.setObjectScopes(input.userId, input.objectIds),
-    onSuccess: async () => {
-      message.success('Области видимости сохранены');
       await invalidate();
     },
     onError: (error) => message.error(describeError(error)),
@@ -123,11 +115,6 @@ export function UsersPanel(): ReactNode {
 
   if (users.isPending) return <LoadingState />;
   if (users.isError) return <ErrorState error={users.error} />;
-
-  const objectOptions = (objects.data?.items ?? []).map((object) => ({
-    value: object.id,
-    label: `${object.code} — ${object.name}`,
-  }));
 
   const contractorOptions = (counterparties.data?.items ?? []).map((party) => ({
     value: party.id,
@@ -176,19 +163,6 @@ export function UsersPanel(): ReactNode {
         pagination={false}
         dataSource={users.data.items}
         locale={{ emptyText: 'Пользователей нет' }}
-        expandable={{
-          expandedRowKeys: expanded === null ? [] : [expanded],
-          onExpand: (open, row) => setExpanded(open ? row.id : null),
-          expandedRowRender: (row) => (
-            <ScopeEditor
-              userId={row.id}
-              roles={row.roles}
-              objectOptions={objectOptions}
-              busy={setScopes.isPending}
-              onSave={(objectIds) => setScopes.mutate({ userId: row.id, objectIds })}
-            />
-          ),
-        }}
         columns={[
           { title: 'ФИО', dataIndex: 'fullName', key: 'fullName' },
           { title: 'Почта', dataIndex: 'email', key: 'email', render: (v) => v ?? '—' },
@@ -252,65 +226,6 @@ export function UsersPanel(): ReactNode {
         ]}
       />
     </>
-  );
-}
-
-/**
- * Назначение объектов.
- *
- * Читается сервером только для инженера и руководителя. У подрядчика область
- * выводится из его организации, у генподрядчика — из карточек объектов, где его
- * организация указана генподрядчиком. Сохранённые здесь строки в этих двух
- * случаях не читает никто, поэтому редактор не показывается вовсе: список,
- * который ничего не меняет, — худший из возможных ответов на вопрос «что видит
- * этот человек».
- */
-function ScopeEditor(props: {
-  readonly userId: string;
-  readonly roles: readonly UserRole[];
-  readonly objectOptions: readonly { value: string; label: string }[];
-  readonly busy: boolean;
-  readonly onSave: (objectIds: string[]) => void;
-}): ReactNode {
-  const card = useQuery({
-    queryKey: adminKeys.user(props.userId),
-    queryFn: () => admin.user(props.userId),
-  });
-  const [draft, setDraft] = useState<string[] | null>(null);
-
-  if (props.roles.includes('contractor') || props.roles.includes('general_contractor')) {
-    return (
-      <Space direction="vertical" size={4}>
-        <span>Область видимости выводится, а не назначается.</span>
-        <span>
-          {props.roles.includes('general_contractor')
-            ? 'Генподрядчик видит объекты, где его организация указана генподрядчиком в карточке объекта.'
-            : 'Подрядчик видит объекты, за которыми закреплена его организация, и объекты со своими комплектами.'}
-        </span>
-      </Space>
-    );
-  }
-
-  if (card.isPending) return <LoadingState />;
-  if (card.isError) return <ErrorState error={card.error} />;
-
-  const value = draft ?? card.data.objectIds;
-
-  return (
-    <Space wrap>
-      <Select<string[]>
-        mode="multiple"
-        style={{ minWidth: 420 }}
-        value={value}
-        onChange={setDraft}
-        options={[...props.objectOptions]}
-        placeholder="Объекты, назначенные инженеру"
-        aria-label="Области видимости по объектам"
-      />
-      <Button type="primary" size="small" loading={props.busy} onClick={() => props.onSave(value)}>
-        Сохранить области
-      </Button>
-    </Space>
   );
 }
 

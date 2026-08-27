@@ -614,13 +614,16 @@ describe('путь 3: поток событий', () => {
     expect(response.body).toContain(EVENT_MARKER_A);
   });
 
-  it('инженер объекта А не получает поток ревизии объекта Б', async () => {
+  it('инженер получает поток ревизии любого объекта', async () => {
+    // Прежде здесь стоял отказ: инженеру был назначен объект А, а ревизия
+    // принадлежит объекту Б. Областей по объектам не осталось (S37), и
+    // проверяющему поток открыт — иначе он не увидел бы хода разбора
+    // комплекта, который сам же и запустил.
     const response = await get(
       `/api/v1/_isolation/revisions/${REVISION_B}/events`,
       await sessionFor(KC.engineerA),
     );
-    expect([403, 404]).toContain(response.statusCode);
-    expectNoLeak(response, SECRETS_OF_B);
+    expect(response.statusCode).toBe(200);
   });
 });
 
@@ -650,10 +653,9 @@ describe('путь 4: файл и presigned URL', () => {
     expect(response.json<{ presignedUrl: string }>().presignedUrl).toContain(S3_KEY_A);
   });
 
-  it('инженер объекта А не получает ссылку на файл объекта Б', async () => {
+  it('инженер получает ссылку на файл любого объекта', async () => {
     const response = await get(`/api/v1/files/${FILE_B}/download`, await sessionFor(KC.engineerA));
-    expect([403, 404]).toContain(response.statusCode);
-    expectNoLeak(response, ['presignedUrl', S3_KEY_B, SHA_B]);
+    expect(response.statusCode).toBe(200);
   });
 });
 
@@ -661,36 +663,40 @@ describe('путь 4: файл и presigned URL', () => {
 // Область видимости инженера
 // =====================================================================
 
-describe('инженер и область объектов', () => {
-  it('видит поставку своего объекта и не видит поставку чужого', async () => {
+/**
+ * Инженер и объекты: набор оставлен, а его утверждения перевёрнуты (S37).
+ *
+ * Он проверял, что инженер ограничен назначенными объектами, а инженер без
+ * назначений не видит ничего. Заказчик снял и то и другое. Удалить набор было
+ * бы потерей: ровно эти три вызова показывают, что снятие сработало и что
+ * назначения (или их отсутствие) больше ни на что не влияют.
+ *
+ * Гейтом §1.6 остаётся соседний набор про подрядчика — он не тронут.
+ */
+describe('инженер и объекты', () => {
+  it('видит поставки обоих объектов', async () => {
     const response = await get('/api/v1/_isolation/works', await sessionFor(KC.engineerA));
     expect(response.statusCode).toBe(200);
-    // Инженер видит всех подрядчиков, но только на назначенных объектах (§4.1).
-    expect(submissionIds(response)).toEqual([SUBMISSION_A]);
-    expectNoLeak(response, SECRETS_OF_B);
+    expect([...submissionIds(response)].sort()).toEqual([SUBMISSION_A, SUBMISSION_B].sort());
   });
 
-  it('не получает поставку чужого объекта по прямому id', async () => {
+  it('получает поставку любого объекта по прямому id', async () => {
     const response = await get(
       `/api/v1/_isolation/works/${SUBMISSION_B}`,
       await sessionFor(KC.engineerA),
     );
-    expect([403, 404]).toContain(response.statusCode);
-    expectNoLeak(response, SECRETS_OF_B);
+    expect(response.statusCode).toBe(200);
   });
 
-  it('инженер без назначенных объектов не видит ни одной поставки', async () => {
+  it('инженер без назначений видит ровно то же, что и назначенный', async () => {
     const session = await sessionFor(KC.engineerWithoutObjects);
 
     const list = await get('/api/v1/_isolation/works', session);
     expect(list.statusCode).toBe(200);
-    // Пустая область — это ноль строк, а не отсутствие ограничения.
-    expect(submissionIds(list)).toEqual([]);
-    expectNoLeak(list, [TITLE_A, TITLE_B]);
+    expect([...submissionIds(list)].sort()).toEqual([SUBMISSION_A, SUBMISSION_B].sort());
 
     const direct = await get(`/api/v1/_isolation/works/${SUBMISSION_A}`, session);
-    expect([403, 404]).toContain(direct.statusCode);
-    expectNoLeak(direct, [TITLE_A]);
+    expect(direct.statusCode).toBe(200);
   });
 });
 

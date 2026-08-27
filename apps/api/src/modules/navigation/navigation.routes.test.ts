@@ -436,21 +436,22 @@ describe('GET /works', () => {
     expect(owner.body).toContain(SECRET);
   });
 
-  it('генподрядчик видит все комплекты своих объектов и только их', async () => {
+  it('генподрядчик видит комплекты ВСЕХ подрядчиков, включая чужие организации', async () => {
+    // Ограничение по объектам снято (S37), а вот его собственная организация
+    // выборку не режет и не резала: она отвечает на «от чьего имени», а не на
+    // «что видно». Комплект чужой организации в ответе — гарантия этого.
     const response = await as(KC.gc, 'GET', '/api/v1/works?limit=100');
     expect(response.statusCode).toBe(200);
     expect([...idsOf(response)].sort()).toEqual(
-      [WORK_A_DRAFT, WORK_A_APPROVED, WORK_A_PENDING, WORK_A_RETURNED, WORK_B].sort(),
+      [WORK_A_DRAFT, WORK_A_APPROVED, WORK_A_PENDING, WORK_A_RETURNED, WORK_B, WORK_B_FAR].sort(),
     );
-    // Комплект Б на общем объекте виден, его двойник на чужом — нет.
     expect(response.body).toContain(`${SECRET} на общем объекте`);
-    expect(response.body).not.toContain(`${SECRET} на чужом объекте`);
   });
 
-  it('инженер видит всех подрядчиков, но только на назначенных объектах', async () => {
+  it('инженер видит всех подрядчиков на всех объектах', async () => {
     const response = await as(KC.engineer, 'GET', '/api/v1/works?limit=100');
     expect([...idsOf(response)].sort()).toEqual(
-      [WORK_A_DRAFT, WORK_A_APPROVED, WORK_A_PENDING, WORK_A_RETURNED, WORK_B].sort(),
+      [WORK_A_DRAFT, WORK_A_APPROVED, WORK_A_PENDING, WORK_A_RETURNED, WORK_B, WORK_B_FAR].sort(),
     );
   });
 
@@ -461,9 +462,14 @@ describe('GET /works', () => {
     );
   });
 
-  it('инженер без назначенных объектов не видит ни одного комплекта', async () => {
+  it('инженеру без назначений видны все комплекты стройки', async () => {
+    // Прежде это утверждение было обратным и служило гейтом «пустая область —
+    // это ничего, а не всё». Пустых областей не осталось (S37); гейтом
+    // изоляции остаётся подрядчик, и его проверяют соседние наборы.
     const response = await as(KC.engineerNoScope, 'GET', '/api/v1/works?limit=100');
-    expect(idsOf(response)).toEqual([]);
+    expect([...idsOf(response)].sort()).toEqual(
+      [WORK_A_DRAFT, WORK_A_APPROVED, WORK_A_PENDING, WORK_A_RETURNED, WORK_B, WORK_B_FAR].sort(),
+    );
   });
 
   it('фильтр по объекту сужает выдачу и не расширяет её', async () => {
@@ -550,10 +556,11 @@ describe('GET /works/{id}', () => {
     expect(owner.body).toContain(SECRET);
   });
 
-  it('инженер не получает комплект с объекта вне назначений', async () => {
-    expect((await as(KC.engineer, 'GET', `/api/v1/works/${WORK_B_FAR}`)).statusCode).toBe(404);
-    // Положительный контроль: на назначенном объекте чужой комплект ему виден.
+  it('инженеру виден комплект на любом объекте, а несуществующий даёт 404', async () => {
+    expect((await as(KC.engineer, 'GET', `/api/v1/works/${WORK_B_FAR}`)).statusCode).toBe(200);
     expect((await as(KC.engineer, 'GET', `/api/v1/works/${WORK_B}`)).statusCode).toBe(200);
+    const missing = '00000000-0000-4000-8000-00000000dead';
+    expect((await as(KC.engineer, 'GET', `/api/v1/works/${missing}`)).statusCode).toBe(404);
   });
 });
 
@@ -570,9 +577,10 @@ describe('GET /works/{id}/revisions', () => {
     expect(idsOf(owner)).toEqual([REV_B]);
   });
 
-  it('инженер без объектов получает 404 на существующем комплекте', async () => {
+  it('инженеру без назначений ревизии существующего комплекта видны', async () => {
     const response = await as(KC.engineerNoScope, 'GET', `/api/v1/works/${WORK_A_DRAFT}/revisions`);
-    expect(response.statusCode).toBe(404);
+    expect(response.statusCode).toBe(200);
+    expect(idsOf(response)).toEqual([REV_A_DRAFT]);
   });
 });
 
@@ -883,17 +891,18 @@ describe('POST /works/{id}/revisions', () => {
 // =====================================================================
 
 describe('GET /registries', () => {
-  it('подрядчик видит реестры своих объектов и не видит чужих', async () => {
+  it('подрядчик видит реестры всех объектов — но только их шапки', async () => {
+    // У реестра нет `contractor_id` по построению (ADR-0011): в нём работы
+    // разных организаций. Он резался областью объекта, а её больше нет (S37),
+    // поэтому список общий. Изоляция здесь держится не выборкой, а СОСТАВОМ
+    // ответа: карточка подрядчику не отдаёт ни состава, ни блокеров — это
+    // проверяет следующий набор.
     const response = await as(KC.a, 'GET', '/api/v1/registries?limit=100');
     expect(response.statusCode).toBe(200);
-    expect(idsOf(response)).toEqual([REGISTRY_1]);
-    expect(response.body).not.toContain(SECRET);
+    expect([...idsOf(response)].sort()).toEqual([REGISTRY_1, REGISTRY_FAR].sort());
 
-    // Положительный контроль: реестр чужого объекта существует и виден
-    // руководителю вместе с маркером в номере.
     const byManager = await as(KC.manager, 'GET', '/api/v1/registries?limit=100');
     expect([...idsOf(byManager)].sort()).toEqual([REGISTRY_1, REGISTRY_FAR].sort());
-    expect(byManager.body).toContain(SECRET);
   });
 
   it('карточка реестра подрядчику не раскрывает ни состава, ни блокеров', async () => {
@@ -912,12 +921,15 @@ describe('GET /registries', () => {
     expect(forGc.json<{ blockers: unknown[] }>().blockers).toBeDefined();
   });
 
-  it('реестр чужого объекта неотличим от несуществующего', async () => {
-    const foreign = await as(KC.a, 'GET', `/api/v1/registries/${REGISTRY_FAR}`);
-    const missing = await as(KC.a, 'GET', `/api/v1/registries/${id(997)}`);
-    expect(foreign.statusCode).toBe(404);
-    expect(missing.statusCode).toBe(404);
-    expect(problemShape(foreign)).toEqual(problemShape(missing));
+  it('несуществующий реестр неотличим у подрядчика и у руководителя', async () => {
+    // Прежде здесь сравнивались «чужой» и «несуществующий». Чужих реестров у
+    // подрядчика больше нет (S37), но неразличимость отказа осталась
+    // требованием: форма ответа обязана не зависеть от того, кто спрашивает.
+    const byContractor = await as(KC.a, 'GET', `/api/v1/registries/${id(997)}`);
+    const byManager = await as(KC.manager, 'GET', `/api/v1/registries/${id(997)}`);
+    expect(byContractor.statusCode).toBe(404);
+    expect(byManager.statusCode).toBe(404);
+    expect(problemShape(byContractor)).toEqual(problemShape(byManager));
   });
 });
 
@@ -1239,30 +1251,32 @@ describe('POST /registries', () => {
     expect(response.statusCode).toBe(422);
   });
 
-  it('на чужом объекте ни реестр, ни комплект не заводятся', async () => {
-    // Раздел на объекте 2 включён, и подрядчик Б там закреплён: составные
-    // внешние ключи пропустили бы обе записи. Отказ даёт область видимости —
-    // 404, потому что «нет такого» и «не ваше» здесь неразличимы.
+  it('на несуществующем объекте ни реестр, ни комплект не заводятся', async () => {
+    // Прежде эту ветку закрывал «чужой объект»: генподрядчик получал 404 на
+    // объекте, где генподрядчиком назван не он. Деления на свои и чужие объекты
+    // больше нет (S37), и 404 остаётся ответом на «нет такого объекта» —
+    // проверку видимости в `createWork`/`createRegistry` это не отменяет.
+    const missing = id(996);
     const registry = await as(KC.gc, 'POST', '/api/v1/registries', {
-      objectId: OBJECT_2,
+      objectId: missing,
       sectionCode: SECTION,
       period: PERIOD,
     });
     expect(registry.statusCode).toBe(404);
 
     const work = await as(KC.gc, 'POST', '/api/v1/works', {
-      objectId: OBJECT_2,
+      objectId: missing,
       sectionCode: SECTION,
       period: PERIOD,
-      title: 'Комплект на чужом объекте',
+      title: 'Комплект на несуществующем объекте',
       contractorId: ORG_B,
     });
     expect(work.statusCode).toBe(404);
 
     const rows = await db.query<{ n: string }>(
-      `SELECT count(*)::text AS n FROM works WHERE object_id = '${OBJECT_2}'`,
+      `SELECT count(*)::text AS n FROM works WHERE object_id = '${missing}'`,
     );
-    expect(rows[0]?.n).toBe('1');
+    expect(rows[0]?.n).toBe('0');
   });
 });
 
@@ -1356,8 +1370,8 @@ describe('сверка описи передачи', () => {
     }
   });
 
-  it('сводка по чужому объекту — 404, а не 403', async () => {
-    const response = await as(KC.gc, 'GET', `/api/v1/registries/${REGISTRY_FAR}/reconciliation`);
+  it('сводка по несуществующему реестру — 404, а не 403', async () => {
+    const response = await as(KC.gc, 'GET', `/api/v1/registries/${id(995)}/reconciliation`);
     expect(response.statusCode).toBe(404);
   });
 

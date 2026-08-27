@@ -29,8 +29,8 @@
  *
  * У `error_issues` нет ни `object_id`, ни `contractor_id` — сопоставить
  * проблему с областью видимости нечем. Поэтому здесь тот же приём, что в
- * `audit.ts`: решения принимают `isEmptyScope()` и `isUnrestricted()`, а
- * ограниченная область не получает НИЧЕГО. Право `diagnostics.read` выдано
+ * `audit.ts`: решение принимает `isUnrestricted()`, а ограниченная область (то
+ * есть подрядчик) не получает НИЧЕГО. Право `diagnostics.read` выдано
  * только администратору, у которого область неограниченная, так что на практике
  * ветвь отсечения молчит; она существует, чтобы расширение матрицы прав не
  * открыло технические подробности всего портала инженеру одной строкой в
@@ -40,7 +40,7 @@ import { and, desc, eq, gte, lte, sql, type SQL } from 'drizzle-orm';
 import { z } from 'zod';
 import { errorIssueActions, errorIssues, errorSamples, errorSignatures } from '@id/db';
 import type { JsonValue } from '@id/contracts';
-import { isEmptyScope, isUnrestricted, type AuthScope } from '../../auth/scope.js';
+import { isUnrestricted, type AuthScope } from '../../auth/scope.js';
 import { badRequest } from '../../lib/problem.js';
 import type { Database } from './users.js';
 
@@ -100,11 +100,9 @@ const cursorSchema = z.object({ at: z.string().min(1), id: z.string().min(1) });
 
 /** Условие видимости. Разбор — в заголовке файла. */
 function visibility(scope: AuthScope): SQL {
-  if (isEmptyScope(scope)) return sql`false`;
-  if (isUnrestricted(scope)) return sql`true`;
-  // Инженер и подрядчик: сопоставить проблему с их областью нечем, а показать
-  // всё «раз фильтровать не по чему» — это утечка устройства портала.
-  return sql`false`;
+  // Подрядчик: сопоставить проблему с его организацией нечем, а показать всё
+  // «раз фильтровать не по чему» — это утечка устройства портала.
+  return isUnrestricted(scope) ? sql`true` : sql`false`;
 }
 
 function issueWhere(scope: AuthScope, ...conditions: (SQL | undefined)[]): SQL {
@@ -303,7 +301,7 @@ export async function journalSummary(
   scope: AuthScope,
   period: { readonly from: string; readonly to: string },
 ): Promise<JournalSummary> {
-  if (isEmptyScope(scope) || !isUnrestricted(scope)) {
+  if (!isUnrestricted(scope)) {
     return { issues: 0, newIssues: 0, events: 0, samples: 0, byDomain: [], bySource: [] };
   }
 
@@ -537,7 +535,7 @@ export async function issueSeries(
   issueId: string,
   period: { readonly from: string; readonly to: string },
 ): Promise<readonly SeriesPoint[]> {
-  if (isEmptyScope(scope) || !isUnrestricted(scope)) return [];
+  if (!isUnrestricted(scope)) return [];
 
   const rows = await db.execute<{ bucket_at: string; release: string; events: number }>(sql`
     SELECT to_char(bucket_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS bucket_at,
@@ -585,7 +583,7 @@ export async function listSamples(
   scope: AuthScope,
   params: ListSamplesParams,
 ): Promise<SamplePage> {
-  if (isEmptyScope(scope) || !isUnrestricted(scope)) return { items: [], nextCursor: null };
+  if (!isUnrestricted(scope)) return { items: [], nextCursor: null };
 
   const after = decodeCursor(params.cursor);
   const rows = await db
@@ -892,7 +890,7 @@ export async function listHttpAnomalies(
   scope: AuthScope,
   period: { readonly from: string; readonly to: string },
 ): Promise<readonly AnomalyRow[]> {
-  if (isEmptyScope(scope) || !isUnrestricted(scope)) return [];
+  if (!isUnrestricted(scope)) return [];
 
   const rows = await db.execute<{
     route: string;
@@ -928,7 +926,7 @@ export async function listSlowOperations(
   scope: AuthScope,
   period: { readonly from: string; readonly to: string; readonly kind?: string | undefined },
 ): Promise<readonly SlowOperationRow[]> {
-  if (isEmptyScope(scope) || !isUnrestricted(scope)) return [];
+  if (!isUnrestricted(scope)) return [];
 
   const kindFilter = period.kind === undefined ? sql`` : sql` AND kind = ${period.kind}`;
   const rows = await db.execute<{

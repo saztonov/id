@@ -95,8 +95,8 @@ const CONTRACTOR_B: AuthScope = {
   userId: USER,
   contractorId: ORG_CONTRACTOR_B,
 };
-const ENGINEER_A: AuthScope = { kind: 'engineer', userId: USER, objectIds: [OBJECT_A] };
-const ENGINEER_BLANK: AuthScope = { kind: 'engineer', userId: USER, objectIds: [] };
+/** Инженер: с S37 его область не делит стройку на объекты. */
+const ENGINEER: AuthScope = { kind: 'engineer', userId: USER };
 
 const FIXTURE: readonly string[] = [
   `INSERT INTO counterparties (id, name, kind) VALUES ('${ORG_DEVELOPER}', 'ООО «Застройщик»', 'customer')`,
@@ -233,13 +233,13 @@ describe('loadBundlePlan', () => {
     );
   });
 
-  it('чужая ревизия не читается ни подрядчиком, ни инженером без объекта', async () => {
+  it('чужая ревизия не читается подрядчиком, но читается инженером', async () => {
     expect(await loadBundlePlan(db, CONTRACTOR_B, REVISION_A)).toBeNull();
-    expect(await loadBundlePlan(db, ENGINEER_BLANK, REVISION_A)).toBeNull();
     expect(await loadBundlePlan(db, CONTRACTOR_A, REVISION_A)).not.toBeNull();
-    expect(await loadBundlePlan(db, ENGINEER_A, REVISION_A)).not.toBeNull();
-    // Тот же инженер на своём объекте видит только свой объект.
-    expect(await loadBundlePlan(db, ENGINEER_A, REVISION_B)).toBeNull();
+    // Инженер видит оба объекта: деления стройки на назначенные и прочие
+    // объекты больше нет (S37), и это утверждение — его гарантия.
+    expect(await loadBundlePlan(db, ENGINEER, REVISION_A)).not.toBeNull();
+    expect(await loadBundlePlan(db, ENGINEER, REVISION_B)).not.toBeNull();
   });
 
   it('файл в карантине и файл без страниц становятся препятствиями', async () => {
@@ -343,8 +343,8 @@ describe('createBundle', () => {
     expect(await listBundlePages(db, CONTRACTOR_B, bundle.id)).toEqual([]);
     expect(await findSourceOfWorkingPage(db, CONTRACTOR_B, bundle.id, 0)).toBeNull();
     expect(await listBundles(db, CONTRACTOR_B, REVISION_A)).toEqual([]);
-    // Инженер без назначенных объектов — пустая область, а не отсутствие ограничения.
-    expect(await findBundle(db, ENGINEER_BLANK, bundle.id)).toBeNull();
+    // Инженер рабочий документ видит: изоляция режет подрядчика, не его.
+    expect(await findBundle(db, ENGINEER, bundle.id)).not.toBeNull();
   });
 
   it('карта с дырой отвергается до записи', async () => {

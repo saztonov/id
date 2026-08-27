@@ -71,7 +71,14 @@ const CONTRACTOR_B: AuthScope = {
   userId: USER,
   contractorId: ORG_CONTRACTOR_B,
 };
-const ENGINEER_BLANK: AuthScope = { kind: 'engineer', userId: USER, objectIds: [] };
+/**
+ * Инженер без назначений.
+ *
+ * До S37 это была «пустая область», и она не видела ничего. Объектных областей
+ * больше нет, назначений тоже, и утверждения ниже перевёрнуты: инженер видит
+ * всю стройку, а изоляция осталась ровно одна — подрядчик и его организация.
+ */
+const ENGINEER: AuthScope = { kind: 'engineer', userId: USER };
 
 const FIXTURE: readonly string[] = [
   `INSERT INTO counterparties (id, name, kind) VALUES ('${ORG_CONTRACTOR_A}', 'ООО «Подрядчик А»', 'contractor')`,
@@ -265,9 +272,10 @@ describe('recordAiRun', () => {
     await expect(
       recordAiRun(db, CONTRACTOR_B, inputOf({ requestId: 'req-alien' })),
     ).rejects.toThrow(/Ревизия поставки не найдена/);
-    await expect(recordAiRun(db, ENGINEER_BLANK, inputOf())).rejects.toThrow(
-      /Ревизия поставки не найдена/,
-    );
+    // Инженеру ревизия видна, значит и запись прогона по ней проходит.
+    await expect(
+      recordAiRun(db, ENGINEER, inputOf({ requestId: 'req-eng' })),
+    ).resolves.toBeDefined();
   });
 });
 
@@ -288,8 +296,9 @@ describe('listAiRuns', () => {
     expect(await findAiRun(db, CONTRACTOR_A, alien.id)).toBeNull();
     expect(await findAiRun(db, CONTRACTOR_B, alien.id)).not.toBeNull();
 
-    const blank = await listAiRuns(db, ENGINEER_BLANK, { revisionId: REVISION_A, limit: 100 });
-    expect(blank.items).toStrictEqual([]);
+    // Инженер видит обе ревизии: изоляция режет подрядчика, а не его.
+    const engineer = await listAiRuns(db, ENGINEER, { revisionId: REVISION_B, limit: 100 });
+    expect(engineer.items.map((item) => item.id)).toContain(alien.id);
   });
 
   it('листается курсором без пропусков и без повторов', async () => {
@@ -365,7 +374,8 @@ describe('monthlyAiSpend', () => {
     // по чужим расходам.
     expect(await monthlyAiSpend(db, CONTRACTOR_A, MONTH)).toBeCloseTo(3.75, 4);
     expect(await monthlyAiSpend(db, CONTRACTOR_B, MONTH)).toBeCloseTo(7, 4);
-    expect(await monthlyAiSpend(db, ENGINEER_BLANK, MONTH)).toBe(0);
+    // Инженер видит расход по всей стройке — сумму обеих ревизий.
+    expect(await monthlyAiSpend(db, ENGINEER, MONTH)).toBeCloseTo(10.75, 4);
   });
 
   it('соседние месяцы считаются отдельно', async () => {

@@ -5,16 +5,21 @@
  * только про разрешённые строки, пропускает функцию, которая всегда возвращает
  * `true`, а это ровно тот дефект, который открывает доступ ко всему.
  *
- * Две ловушки проверяются отдельно, потому что на однородной фикстуре обе дают
- * зелёный прогон. Первая — инженер с пустым списком объектов: у него нет ни
- * одной разрешённой строки, и «нет ограничения» здесь неотличимо от «ограничение
- * выполнено», если не потребовать явного отказа. Вторая — путаница полей:
- * область, сравнивающая `contractor_id` со списком объектов, ведёт себя
- * правильно до тех пор, пока в данных нет строки, где эти значения перекрещены.
+ * ## Что изменилось в S37
+ *
+ * Областей по объектам не осталось: заказчик снял деление стройки на
+ * «назначенные» и «прочие» объекты. Утверждения про инженера здесь не удалены, а
+ * перевёрнуты — теперь они сторожат, что он видит стройку целиком, и падают,
+ * если ограничение вернётся молча.
+ *
+ * Ловушка «путаница полей» осталась и стала важнее прежнего: единственная
+ * оставшаяся граница сравнивает `contractor_id`, и область, читающая вместо неё
+ * `object_id`, ведёт себя правильно ровно до строки, где эти значения
+ * перекрещены. Такая строка в наборе есть.
  */
 import { describe, expect, it } from 'vitest';
 
-import { allowsRow, isEmptyScope, isUnrestricted, type AuthScope } from './scope.js';
+import { allowsRow, isUnrestricted, type AuthScope } from './scope.js';
 
 const USER = '00000000-0000-4000-8000-000000000001';
 const OBJECT_A = '00000000-0000-4000-8000-0000000000a1';
@@ -45,8 +50,12 @@ const CONTRACTOR_SCOPE: AuthScope = {
   userId: USER,
   contractorId: CONTRACTOR_A,
 };
-const ENGINEER_SCOPE: AuthScope = { kind: 'engineer', userId: USER, objectIds: [OBJECT_A] };
-const ENGINEER_WITHOUT_OBJECTS: AuthScope = { kind: 'engineer', userId: USER, objectIds: [] };
+const ENGINEER_SCOPE: AuthScope = { kind: 'engineer', userId: USER };
+const GENERAL_CONTRACTOR_SCOPE: AuthScope = {
+  kind: 'general_contractor',
+  userId: USER,
+  contractorId: CONTRACTOR_A,
+};
 const MANAGER_SCOPE: AuthScope = { kind: 'manager', userId: USER };
 const ADMIN_SCOPE: AuthScope = { kind: 'admin', userId: USER };
 
@@ -54,7 +63,7 @@ function allowed(scope: AuthScope): readonly ScopedRow[] {
   return ALL_ROWS.filter((row) => allowsRow(scope, row));
 }
 
-describe('allowsRow: подрядчик', () => {
+describe('allowsRow: подрядчик — единственная оставшаяся граница', () => {
   it('видит свои строки на любом объекте', () => {
     expect(allowsRow(CONTRACTOR_SCOPE, ROW_OBJECT_A_CONTRACTOR_A)).toBe(true);
     expect(allowsRow(CONTRACTOR_SCOPE, ROW_OBJECT_B_CONTRACTOR_A)).toBe(true);
@@ -84,97 +93,42 @@ describe('allowsRow: подрядчик', () => {
   });
 });
 
-describe('allowsRow: инженер', () => {
-  it('видит любого подрядчика на назначенном объекте', () => {
-    expect(allowsRow(ENGINEER_SCOPE, ROW_OBJECT_A_CONTRACTOR_A)).toBe(true);
-    expect(allowsRow(ENGINEER_SCOPE, ROW_OBJECT_A_CONTRACTOR_B)).toBe(true);
-  });
-
-  it('не видит строку объекта вне своего списка', () => {
-    expect(allowsRow(ENGINEER_SCOPE, ROW_OBJECT_B_CONTRACTOR_A)).toBe(false);
-    expect(allowsRow(ENGINEER_SCOPE, ROW_OBJECT_B_CONTRACTOR_B)).toBe(false);
-  });
-
-  it('видит все назначенные объекты и только их', () => {
-    const both: AuthScope = { kind: 'engineer', userId: USER, objectIds: [OBJECT_A, OBJECT_B] };
-    expect(allowed(both)).toEqual(ALL_ROWS);
-
-    const other: AuthScope = {
-      kind: 'engineer',
-      userId: USER,
-      objectIds: ['00000000-0000-4000-8000-0000000000c1'],
-    };
-    expect(allowed(other)).toEqual([]);
-  });
-
-  it('не путает объект с подрядчиком', () => {
-    const scope: AuthScope = { kind: 'engineer', userId: USER, objectIds: [CONTRACTOR_A] };
-    expect(allowsRow(scope, { objectId: OBJECT_B, contractorId: CONTRACTOR_A })).toBe(false);
-  });
-
-  it('ограничен ровно своим объектом', () => {
-    expect(allowed(ENGINEER_SCOPE)).toEqual([ROW_OBJECT_A_CONTRACTOR_A, ROW_OBJECT_A_CONTRACTOR_B]);
-  });
-});
-
-describe('allowsRow: инженер с пустым списком объектов', () => {
-  it.each(ALL_ROWS)('не видит строку %o', (row) => {
-    expect(allowsRow(ENGINEER_WITHOUT_OBJECTS, row)).toBe(false);
-  });
-
-  it('не видит ничего, а не всё', () => {
-    // Главная ловушка изоляции: пустой список объектов не является отсутствием
-    // ограничения. Проверка сравнением с ALL_ROWS, а не только с длиной, —
-    // чтобы падение показывало, что именно просочилось.
-    expect(allowed(ENGINEER_WITHOUT_OBJECTS)).toEqual([]);
-    expect(allowed(ENGINEER_WITHOUT_OBJECTS)).not.toEqual(ALL_ROWS);
-  });
-});
-
-describe('allowsRow: руководитель и администратор', () => {
+describe('allowsRow: объект больше не ограничивает', () => {
   it.each([
+    ['engineer', ENGINEER_SCOPE],
+    ['general_contractor', GENERAL_CONTRACTOR_SCOPE],
     ['manager', MANAGER_SCOPE],
     ['admin', ADMIN_SCOPE],
   ] as const)('%s видит все строки', (_kind, scope) => {
     expect(allowed(scope)).toEqual(ALL_ROWS);
   });
 
-  it('видят строку подрядчика, к которому не привязаны', () => {
-    // У этих областей нет ни contractorId, ни objectIds: доступ к данным ИД у
-    // них не ограничен, а разграничение действий делает permission на роуте.
+  it('генподрядчик видит комплекты ЧУЖОЙ организации', () => {
+    // Его `contractorId` отвечает не на «что он видит», а на «от чьего имени он
+    // действует». Фильтр по нему оставил бы ему видимым только файл реестра, а
+    // собрать папку из комплектов субподрядчиков стало бы нечем.
+    expect(allowsRow(GENERAL_CONTRACTOR_SCOPE, ROW_OBJECT_B_CONTRACTOR_B)).toBe(true);
+  });
+
+  it('руководитель и администратор видят строку любого подрядчика', () => {
+    // У этих областей нет ни contractorId, ни списка объектов: доступ к данным
+    // ИД у них не ограничен, а разграничение действий делает permission.
     expect(allowsRow(MANAGER_SCOPE, ROW_OBJECT_B_CONTRACTOR_B)).toBe(true);
     expect(allowsRow(ADMIN_SCOPE, ROW_OBJECT_B_CONTRACTOR_B)).toBe(true);
   });
 });
 
-describe('isEmptyScope', () => {
-  it('истинно только для инженера без объектов', () => {
-    expect(isEmptyScope(ENGINEER_WITHOUT_OBJECTS)).toBe(true);
-  });
-
-  it.each([
-    ['contractor', CONTRACTOR_SCOPE],
-    ['engineer с объектом', ENGINEER_SCOPE],
-    ['manager', MANAGER_SCOPE],
-    ['admin', ADMIN_SCOPE],
-  ] as const)('ложно для %s', (_kind, scope) => {
-    expect(isEmptyScope(scope)).toBe(false);
-  });
-});
-
 describe('isUnrestricted', () => {
   it.each([
+    ['engineer', ENGINEER_SCOPE],
+    ['general_contractor', GENERAL_CONTRACTOR_SCOPE],
     ['manager', MANAGER_SCOPE],
     ['admin', ADMIN_SCOPE],
   ] as const)('%s не ограничен', (_kind, scope) => {
     expect(isUnrestricted(scope)).toBe(true);
   });
 
-  it.each([
-    ['contractor', CONTRACTOR_SCOPE],
-    ['engineer с объектом', ENGINEER_SCOPE],
-    ['engineer без объектов', ENGINEER_WITHOUT_OBJECTS],
-  ] as const)('%s ограничен', (_kind, scope) => {
-    expect(isUnrestricted(scope)).toBe(false);
+  it('подрядчик ограничен', () => {
+    expect(isUnrestricted(CONTRACTOR_SCOPE)).toBe(false);
   });
 });

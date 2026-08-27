@@ -369,19 +369,23 @@ describe('POST /revisions/{id}/segment', () => {
   });
 
   /**
-   * Постановка задачи по чужой ревизии. Право `document.edit` у инженера есть,
-   * но область пуста — второй уровень изоляции обязан не пропустить.
+   * Постановка задачи по ревизии второго объекта.
+   *
+   * Прежде здесь проверялась пустая область: инженеру без назначений задача не
+   * ставилась. Назначений больше нет (S37), и утверждение перевёрнуто —
+   * проверяющий обязан уметь запустить разбор любого принесённого ему
+   * комплекта, иначе снятие областей сделано только на словах.
    */
-  it('инженер без назначенных объектов не может поставить задачу', async () => {
+  it('инженер ставит задачу по ревизии любого объекта', async () => {
     const before = await jobRows('doc.classify_pages');
     const response = await as(
       KC.engineerNoScope,
       'POST',
       `/api/v1/revisions/${REVISION_B}/segment`,
-      { body: {}, idempotencyKey: 'foreign-revision' },
+      { body: {}, idempotencyKey: 'other-object' },
     );
-    expect(response.statusCode).toBe(422);
-    expect(await jobRows('doc.classify_pages')).toHaveLength(before.length);
+    expect(response.statusCode).toBe(202);
+    expect((await jobRows('doc.classify_pages')).length).toBeGreaterThan(before.length);
   });
 });
 
@@ -541,12 +545,12 @@ describe('изоляция подрядчиков', () => {
     expect(classifications.body).not.toContain(SECRET);
   });
 
-  it('инженер без назначенных объектов не видит ничего', async () => {
+  it('инженеру без назначений документы видны', async () => {
     const list = await as(KC.engineerNoScope, 'GET', `/api/v1/revisions/${REVISION_A}/documents`);
-    expect(list.json<{ items: unknown[] }>().items).toEqual([]);
+    expect(list.json<{ items: unknown[] }>().items).not.toEqual([]);
 
     const direct = await as(KC.engineerNoScope, 'GET', `/api/v1/documents/${DOC_A1}`);
-    expect(direct.statusCode).toBe(404);
+    expect(direct.statusCode).toBe(200);
   });
 
   it('инженер объекта видит документы обоих подрядчиков', async () => {
@@ -580,8 +584,11 @@ describe('POST /documents/{id}/confirm', () => {
     expect(response.statusCode).toBe(403);
   });
 
-  it('чужой документ не подтверждается даже по прямому идентификатору', async () => {
-    const response = await as(KC.engineerNoScope, 'POST', `/api/v1/documents/${DOC_B}/confirm`, {
+  it('несуществующий документ даёт 404, а не молчаливый успех', async () => {
+    // Ветку 404 прежде закрывал инженер с пустой областью; областей не осталось
+    // (S37), и «нет такого» проверяется прямо.
+    const missing = '00000000-0000-4000-8000-00000000dead';
+    const response = await as(KC.engineerNoScope, 'POST', `/api/v1/documents/${missing}/confirm`, {
       body: {},
       ifMatch: '"0"',
     });
