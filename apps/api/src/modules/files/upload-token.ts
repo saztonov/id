@@ -56,6 +56,19 @@ export interface UploadTicket {
   readonly fileName: string;
   readonly key: string;
   readonly expiresAt: number;
+  /**
+   * Довести комплект до размеченного, не спрашивая (S36).
+   *
+   * Ставится ТОЛЬКО талоном `POST /works/with-file` — единственным приёмом, где
+   * комплект заводится вместе со своим файлом и разметке заведомо нечего
+   * затирать. Талон обычной догрузки (`upload/init`) этого признака не несёт:
+   * многофайловый комплект собирает человек, и автосборка после первого же
+   * файла закрыла бы приём остальных.
+   *
+   * Признак лежит ВНУТРИ подписи, а не приезжает полем запроса: иначе его можно
+   * было бы дописать к любому чужому талону.
+   */
+  readonly startMarkup?: boolean;
 }
 
 /** Ключ подписи талонов. Домен разделён назначением и версией формата. */
@@ -74,6 +87,9 @@ export function signUploadTicket(key: Buffer, ticket: UploadTicket): string {
       n: ticket.fileName,
       k: ticket.key,
       e: ticket.expiresAt,
+      // Ключ появляется только у талонов с признаком: талоны прежнего формата
+      // обязаны читаться как есть, а не переставать проходить проверку.
+      ...(ticket.startMarkup === true ? { m: true } : {}),
     }),
     'utf8',
   ).toString('base64url');
@@ -98,7 +114,7 @@ export function verifyUploadTicket(key: Buffer, token: string): UploadTicket | n
   }
   if (typeof parsed !== 'object' || parsed === null) return null;
 
-  const { u, r, s, n, k, e } = parsed as Record<string, unknown>;
+  const { u, r, s, n, k, e, m } = parsed as Record<string, unknown>;
   if (
     typeof u !== 'string' ||
     typeof r !== 'string' ||
@@ -111,7 +127,17 @@ export function verifyUploadTicket(key: Buffer, token: string): UploadTicket | n
   }
   if (e < Date.now()) return null;
 
-  return { uploadId: u, targetId: r, userId: s, fileName: n, key: k, expiresAt: e };
+  return {
+    uploadId: u,
+    targetId: r,
+    userId: s,
+    fileName: n,
+    key: k,
+    expiresAt: e,
+    // Отсутствие ключа — это `false`, а не негодность талона: признак появился
+    // позже формата, и выданные до него талоны обязаны дожить свой срок.
+    startMarkup: m === true,
+  };
 }
 
 function mac(key: Buffer, body: string): string {

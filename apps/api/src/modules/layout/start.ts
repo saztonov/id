@@ -36,6 +36,52 @@ import { dedupeKeyFor } from '../../jobs/types.js';
 import { conflict } from '../../lib/problem.js';
 import { tracePayload } from '../../observability/context.js';
 
+/**
+ * Сборка рабочего документа с продолжением разметкой.
+ *
+ * Вызывающих двое, и оба обязаны ставить ОДНУ И ТУ ЖЕ задачу: кнопка
+ * «1. Выделить блоки», когда собранного документа ещё нет, и приём файла
+ * комплекта, заведённого вместе со своим файлом (S36). Копия этой постановки во
+ * втором месте разошлась бы с первым ключом идемпотентности — то есть дала бы
+ * вторую сборку того же комплекта.
+ *
+ * Манифест в ключе: изменившийся состав обязан дать новую задачу, а не слиться с
+ * уже стоящей в очереди сборкой прежнего комплекта.
+ *
+ * Метка `markup` — по той же причине, что `overwrite` у повторной детекции: без
+ * неё постановка склеилась бы с уже стоящей сборкой от кнопки «Собрать рабочий
+ * документ», и признак `startMarkup` потерялся бы — сборка прошла бы, а разметка
+ * не началась. Второй сборки при этом не будет: обработчик переиспользует уже
+ * собранный документ того же манифеста.
+ */
+export async function enqueueMarkupBuild(
+  db: Database,
+  scope: AuthScope,
+  input: {
+    readonly revisionId: string;
+    readonly aggregateManifestHash: string;
+    readonly logger: Logger;
+  },
+): Promise<{ readonly jobId: string; readonly created: boolean }> {
+  const { jobId, created } = await enqueueJob(db, scope, {
+    type: 'bundle.build',
+    payload: tracePayload({ revisionId: input.revisionId, startMarkup: true }),
+    dedupeKey: dedupeKeyFor(
+      'bundle.build',
+      input.revisionId,
+      input.aggregateManifestHash,
+      'markup',
+    ),
+  });
+
+  input.logger.info(
+    { event: 'job_enqueued', job_type: 'bundle.build', job_id: jobId, created },
+    'сборка рабочего документа поставлена в очередь, за ней пойдёт разметка',
+  );
+
+  return { jobId, created };
+}
+
 export interface StartMarkupResult {
   readonly layoutRevisionId: string;
   readonly bundleId: string;

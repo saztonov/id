@@ -974,6 +974,108 @@ describe('приём ставит задачи конвейера', () => {
 });
 
 // =====================================================================
+// Комплект, заведённый вместе с файлом, размечается сам (S36)
+// =====================================================================
+
+/**
+ * Автозапуск привязан к ТАЛОНУ, и проверяется именно это.
+ *
+ * Признак «довести до разметки» едет внутри подписи талона, который выдаёт
+ * только `POST /works/with-file`. Привязка к самому факту загрузки была бы
+ * дефектом: `startMarkupOnBundle` в мягком режиме сносит распознавание и всё
+ * производное ниже разметки, а обычная догрузка идёт и в комплект, который уже
+ * разобран. Плюс автосборка после первого файла закрыла бы приём остальных —
+ * многофайловый комплект собрать стало бы нечем.
+ */
+describe('заведение комплекта с файлом доводит его до разметки', () => {
+  interface CreatedWork {
+    readonly workId: string;
+    readonly revisionId: string;
+    readonly upload: { readonly uploadId: string; readonly uploadUrl: string };
+  }
+
+  /** Полный путь «Нового комплекта»: заведение, байты, `complete`. */
+  async function createWorkWithFile(
+    title: string,
+    content: Buffer,
+  ): Promise<{ readonly work: CreatedWork; readonly complete: LightMyRequestResponse }> {
+    const created = await as(KC.engineer, 'POST', '/api/v1/works/with-file', {
+      objectId: OBJECT,
+      sectionCode: 'roofing',
+      title,
+      // Инженер обязан назвать исполнителя: своей организации у его области
+      // видимости нет.
+      contractorId: ORG_CONTRACTOR,
+      fileName: `${title}.pdf`,
+      sizeBytes: content.byteLength,
+    });
+    expect(created.statusCode).toBe(201);
+    const work = created.json<CreatedWork>();
+
+    const target = new URL(work.upload.uploadUrl);
+    const put = await app.inject({
+      method: 'PUT',
+      url: `${target.pathname}${target.search}`,
+      headers: { 'content-type': 'application/pdf' },
+      payload: content,
+    });
+    expect(put.statusCode).toBe(200);
+
+    const complete = await as(
+      KC.engineer,
+      'POST',
+      `/api/v1/revisions/${work.revisionId}/files/upload/complete`,
+      { uploadId: work.upload.uploadId },
+    );
+    return { work, complete };
+  }
+
+  async function buildJobsOf(revisionId: string): Promise<readonly { startMarkup?: boolean }[]> {
+    const rows = await db.query<{ payload: { startMarkup?: boolean } }>(
+      `SELECT payload FROM jobs
+        WHERE type = 'bundle.build' AND payload->>'revisionId' = '${revisionId}'`,
+    );
+    return rows.map((row) => row.payload);
+  }
+
+  it('после приёма файла в очереди стоит сборка с продолжением разметкой', async () => {
+    const { work, complete } = await createWorkWithFile('автостарт', fixture('multipage'));
+    expect(complete.statusCode).toBe(201);
+    expect(complete.json<FileView>().verifyState).toBe('ok');
+
+    const builds = await buildJobsOf(work.revisionId);
+    expect(builds).toHaveLength(1);
+    // Признак — единственное, что отличает эту сборку от «Собрать рабочий
+    // документ»: по нему обработчик поставит `layout.start`, и разметка пойдёт
+    // без единого нажатия.
+    expect(builds[0]?.startMarkup).toBe(true);
+  });
+
+  it('файл в карантине разметку не запускает', async () => {
+    const { work, complete } = await createWorkWithFile('карантин', fixture('malformed'));
+    expect(complete.statusCode).toBe(201);
+    expect(complete.json<FileView>().verifyState).toBe('quarantined');
+
+    expect(await buildJobsOf(work.revisionId)).toEqual([]);
+  });
+
+  it('обычная догрузка файла разметку не запускает', async () => {
+    // Талон `upload/init` признака не несёт, и это не забывчивость: комплект из
+    // нескольких файлов человек дособерёт, а собранный рабочий документ закрыл
+    // бы приём остальных.
+    const outcome = await upload(
+      KC.contractor,
+      REVISION_DRAFT,
+      'догрузка.pdf',
+      fixture('multipage'),
+    );
+    expect(outcome.complete.statusCode).toBe(201);
+
+    expect(await buildJobsOf(REVISION_DRAFT)).toEqual([]);
+  });
+});
+
+// =====================================================================
 // Presigned URL наружу не выходит
 // =====================================================================
 

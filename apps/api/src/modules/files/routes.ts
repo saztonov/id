@@ -40,6 +40,7 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { Readable } from 'node:stream';
 import type { FastifyRequest } from 'fastify';
+import type { Logger } from 'pino';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import type { AppInstance } from '../../app.js';
 import {
@@ -67,6 +68,8 @@ import {
   replaceSourceFile,
   requireEditableRevision,
 } from '../../db/repositories/files.js';
+import { loadBundlePlan } from '../../db/repositories/bundles.js';
+import { enqueueMarkupBuild } from '../layout/start.js';
 import { readImmutabilityEnforced } from '../../config/portal-settings.js';
 import { LOCAL_UPLOAD_PATH } from '../../storage/local.js';
 import { isStorageError, type ByteRange } from '../../storage/provider.js';
@@ -229,6 +232,9 @@ function registerUploadRoutes(app: AppInstance, ticketKey: Buffer): void {
         fileName: body.fileName,
         key,
         expiresAt: Date.parse(presigned.expiresAt),
+        // Комплект заводится вместе со своим файлом, и ждать от человека ещё
+        // одного нажатия незачем: за приёмом пойдут сборка и выделение блоков.
+        startMarkup: true,
       });
 
       return reply.code(201).send({
@@ -340,6 +346,9 @@ function registerUploadRoutes(app: AppInstance, ticketKey: Buffer): void {
 
       await discardStaged(app, request, ticket.key);
       await startFilePipeline(app, request, revision.id, file.id);
+      if (ticket.startMarkup === true) {
+        await continueWithMarkup(app, request, revision.id, file.verifyState);
+      }
       return reply.code(201).send(file);
     },
   );
@@ -591,6 +600,68 @@ async function startFilePipeline(
         'задача конвейера не поставлена',
       );
     }
+  }
+}
+
+/**
+ * Комплект, заведённый вместе с файлом, доводится до размеченного сам (S36).
+ *
+ * ## Почему это привязано к талону, а не к событию «файл проверен»
+ *
+ * `startMarkupOnBundle` в мягком режиме (`core.enforce_immutability = false`)
+ * зовёт `resetPipelineForRevision`, то есть сносит распознавание, документы и
+ * замечания. Автозапуск, срабатывающий на любую загрузку, однажды сделал бы это
+ * с комплектом, который уже разобран. Признак талона выдаётся ТОЛЬКО вместе с
+ * только что созданной ревизией (`POST /works/with-file`), а
+ * `requireEditableRevision` не пускает файл в ревизию с собранным рабочим
+ * документом, — значит разметки в этот момент существовать не может, и сносить
+ * нечего. Это условие и есть причина выбранной привязки.
+ *
+ * ## Почему отказ здесь не отказ приёма
+ *
+ * Файл уже записан и виден в составе ревизии. Ни карантин, ни недоступная на
+ * секунду очередь не имеют права превращаться в ошибку загрузки: комплект
+ * остаётся, а разметка запускается кнопкой «1. Выделить блоки», как и раньше.
+ * По той же причине препятствия проверяются списком `plan.blockers`, а не
+ * `assertPlanBuildable()`, — та бросает 409.
+ */
+async function continueWithMarkup(
+  app: AppInstance,
+  request: FastifyRequest,
+  revisionId: string,
+  verifyState: 'pending' | 'ok' | 'quarantined',
+): Promise<void> {
+  const { scope } = currentAuth(request);
+
+  if (verifyState !== 'ok') {
+    request.log.info(
+      { event: 'markup_autostart_skipped', reason: 'verify_state', verify_state: verifyState },
+      'разметка не запущена автоматически: файл не прошёл проверку',
+    );
+    return;
+  }
+
+  try {
+    const plan = await loadBundlePlan(app.db, scope, revisionId);
+    if (plan === null) return;
+    if (plan.blockers.length > 0) {
+      request.log.info(
+        { event: 'markup_autostart_skipped', reason: 'blockers', blockers: plan.blockers },
+        'разметка не запущена автоматически: рабочий документ пока собрать нельзя',
+      );
+      return;
+    }
+
+    await enqueueMarkupBuild(app.db, scope, {
+      revisionId,
+      aggregateManifestHash: plan.aggregateManifestHash,
+      logger: request.log as unknown as Logger,
+    });
+  } catch (error) {
+    request.log.error(
+      { event: 'markup_autostart_failed', error_class: errorClass(error) },
+      'разметка не запущена автоматически: комплект принят, запускать придётся кнопкой',
+    );
   }
 }
 

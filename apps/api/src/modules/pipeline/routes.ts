@@ -76,7 +76,11 @@ import {
   listRunPages,
 } from '../../db/repositories/recognition.js';
 import { dedupeKeyFor } from '../../jobs/types.js';
-import { detectionUnavailableReason, startMarkupOnBundle } from '../layout/start.js';
+import {
+  detectionUnavailableReason,
+  enqueueMarkupBuild,
+  startMarkupOnBundle,
+} from '../layout/start.js';
 import { readDetectionSettings, readImmutabilityEnforced } from '../../config/portal-settings.js';
 import { assertRecognitionStageReady, startRecognition } from '../recognition/start.js';
 import {
@@ -167,25 +171,13 @@ function registerMarkupRoute(app: AppInstance): void {
         });
       }
 
-      const { jobId, created } = await enqueueJob(app.db, scope, {
-        type: 'bundle.build',
-        payload: tracePayload({ revisionId, startMarkup: true }),
-        // Манифест в ключе: изменившийся состав обязан дать новую задачу, а не
-        // слиться с уже стоящей в очереди сборкой прежнего комплекта.
-        //
-        // Метка `markup` — по той же причине, что `overwrite` у повторной
-        // детекции: без неё нажатие «Разметить» склеилось бы с уже стоящей
-        // сборкой от кнопки «Собрать рабочий документ», и признак `startMarkup`
-        // потерялся бы — сборка прошла бы, а разметка не началась. Второй
-        // сборки при этом не будет: обработчик переиспользует уже собранный
-        // документ того же манифеста.
-        dedupeKey: dedupeKeyFor('bundle.build', revisionId, plan.aggregateManifestHash, 'markup'),
+      // Постановка — общей функцией с приёмом файла нового комплекта: обе двери
+      // ведут к одной задаче, и разойтись ключам идемпотентности негде.
+      const { jobId, created } = await enqueueMarkupBuild(app.db, scope, {
+        revisionId,
+        aggregateManifestHash: plan.aggregateManifestHash,
+        logger: request.log as unknown as Logger,
       });
-
-      request.log.info(
-        { event: 'job_enqueued', job_type: 'bundle.build', job_id: jobId, created },
-        'сборка рабочего документа поставлена в очередь, за ней пойдёт разметка',
-      );
 
       return reply.code(202).send({
         bundleReady: false,
