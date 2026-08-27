@@ -79,6 +79,7 @@ import {
   listWorkRevisions,
   listWorks,
   previewRegistryDeletion,
+  summarizeWorkPipeline,
   previewWorkDeletion,
   updateRegistry,
   updateWork,
@@ -116,6 +117,8 @@ import {
   updateWorkBodySchema,
   registryDeletionPreviewSchema,
   workDeletionPreviewSchema,
+  workPipelineQuerySchema,
+  workPipelineSchema,
   workIdParamSchema,
   workListQuerySchema,
   workPageSchema,
@@ -272,6 +275,35 @@ function registerWorkRoutes(app: AppInstance): void {
    * Право на просмотр то же, что на удаление: числа по чужому комплекту — это
    * сведения о чужой работе, и отдавать их шире, чем само действие, незачем.
    */
+  /**
+   * Состояние конвейера по комплектам ОДНОЙ страницы списка.
+   *
+   * Тот же приём, что у счётчиков разделов: величина, которую иначе пришлось бы
+   * получать по одному запросу на строку. Здесь это важнее — экран объекта
+   * обновляет её опросом, пока хоть что-то идёт.
+   *
+   * `submission.read`: сводка не рассказывает о комплекте ничего сверх того,
+   * что человек и так видит в его карточке.
+   */
+  app.get(
+    `${PREFIX}/objects/:objectId/works/pipeline`,
+    {
+      preHandler: readWorks,
+      schema: {
+        params: objectIdParamSchema,
+        querystring: workPipelineQuerySchema,
+        response: { 200: workPipelineSchema },
+      },
+    },
+    async (request, reply) => {
+      const { scope } = currentAuth(request);
+      const { objectId } = request.params;
+      updateContext({ objectId });
+      const summaries = await summarizeWorkPipeline(app.db, scope, objectId, request.query.workIds);
+      return reply.code(200).send([...summaries]);
+    },
+  );
+
   app.get(
     `${PREFIX}/works/:workId/deletion-preview`,
     {

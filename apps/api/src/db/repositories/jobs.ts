@@ -1673,14 +1673,139 @@ async function computeLayoutProgress(
  * попытки, не «на распознавании», он стоит и ждёт человека. В остальном берётся
  * самая дальняя стадия с активностью — конвейер линейный, и возврат к предыдущей
  * стадии означает новый прогон, который сам станет самой дальней.
+ *
+ * Экспортируется ради списка комплектов объекта (S37): та же величина, что
+ * печатает плашка на карточке ревизии, обязана печататься и в списке. Второе
+ * определение «сводной стадии» разошлось бы с первым молча — список сказал бы
+ * «распознано» там, где карточка говорит «обработка остановлена».
+ *
+ * Аргумент сужен до `{ stage }` намеренно: массовому агрегату остальные поля
+ * `StageSummary` не нужны, а требовать их значило бы заставлять его считать то,
+ * чего он не читает.
  */
-function summaryStage(stages: readonly StageSummary[], dead: number): ProcessingStage {
+export function summaryStage(
+  stages: readonly { readonly stage: ProcessingStage }[],
+  dead: number,
+): ProcessingStage {
   if (dead > 0) return 'failed';
   let result: ProcessingStage = 'uploaded';
   for (const stage of STAGE_ORDER) {
     if (stages.some((summary) => summary.stage === stage)) result = stage;
   }
   return result;
+}
+
+/**
+ * Сводная стадия конвейера сразу по НЕСКОЛЬКИМ ревизиям.
+ *
+ * Существует ради одного экрана: списка комплектов объекта, где стадия нужна у
+ * каждой строки страницы. `computeProcessingStatus` по каждой ревизии отдельно
+ * дал бы два запроса на строку плюс расчёт хода разметки — то есть до полусотни
+ * обращений на один экран, обновляемый опросом.
+ *
+ * Считается ровно то, что печатается: стадия, и числа ждущих, идущих и мёртвых
+ * задач. Всё остальное из `ProcessingStatus` — стадии по отдельности, типы
+ * задач, тексты ошибок, ход разметки — принадлежит карточке ревизии, и списку
+ * не нужно ни одного из них.
+ *
+ * Стадия берётся ТОЙ ЖЕ функцией `summaryStage`, что и в карточке. Это условие
+ * непротиворечивости экранов, а не удобство: разойдясь, два определения
+ * показали бы про один комплект разное на двух экранах подряд.
+ */
+export interface RevisionStageSummary {
+  readonly revisionId: string;
+  readonly stage: ProcessingStage;
+  readonly queued: number;
+  readonly running: number;
+  readonly dead: number;
+}
+
+export async function summarizeRevisionStages(
+  db: Database,
+  revisionIds: readonly string[],
+): Promise<readonly RevisionStageSummary[]> {
+  if (revisionIds.length === 0) return [];
+
+  // Отбор выражен `inArray`, а не `= any($1)`: связанный МАССИВ приходится
+  // объявлять типом на стороне SQL, и типов здесь два — `uuid` у попыток и
+  // `text` у выражения над payload. Список идентификаторов ограничен размером
+  // страницы (`MAX_PAGE_LIMIT`), поэтому развёрнутый `IN (...)` не растёт.
+  const ids = [...revisionIds];
+
+  // Первый агрегат: в каких стадиях по ревизии вообще была активность. Индекс
+  // `ix_job_runs_revision` (0007) закрывает отбор.
+  const runRows = await db
+    .select({
+      revisionId: jobRuns.revisionId,
+      jobTypes: sql<string[]>`array_agg(distinct ${jobRuns.jobType})`.as('job_types'),
+    })
+    .from(jobRuns)
+    .where(inArray(jobRuns.revisionId, ids))
+    .groupBy(jobRuns.revisionId);
+
+  // Второй: что ещё стоит в очереди, идёт или умерло. Очередь ссылается на
+  // ревизию через payload, без внешнего ключа, поэтому отбор текстовый — его и
+  // закрывает частичный индекс `ix_jobs_revision` (0054).
+  const revisionOfJob = sql<string>`${jobs.payload} ->> 'revisionId'`;
+  const pendingRows = await db
+    .select({
+      revisionId: revisionOfJob.as('revision_id'),
+      status: jobs.status,
+      type: jobs.type,
+      count: sql<number>`count(*)::int`.as('count'),
+    })
+    .from(jobs)
+    .where(
+      and(
+        inArray(revisionOfJob, ids),
+        inArray(jobs.status, ['queued', 'running', 'failed'] as const),
+      ),
+    )
+    .groupBy(revisionOfJob, jobs.status, jobs.type);
+
+  const stagesOf = new Map<string, Set<ProcessingStage>>();
+  const add = (revisionId: string, stage: ProcessingStage | null): void => {
+    if (stage === null) return;
+    const bucket = stagesOf.get(revisionId) ?? new Set<ProcessingStage>();
+    bucket.add(stage);
+    stagesOf.set(revisionId, bucket);
+  };
+
+  for (const row of runRows) {
+    // `job_runs.revision_id` объявлен nullable (системные задачи ревизии не
+    // имеют), но отбор выше оставил только те строки, чей идентификатор в
+    // списке. Проверка нужна типу, а не данным.
+    if (row.revisionId === null) continue;
+    for (const jobType of row.jobTypes) {
+      add(row.revisionId, isJobType(jobType) ? stageOf(jobType) : null);
+    }
+  }
+
+  const counts = new Map<string, { queued: number; running: number; dead: number }>();
+  for (const row of pendingRows) {
+    const bucket = counts.get(row.revisionId) ?? { queued: 0, running: 0, dead: 0 };
+    if (row.status === 'queued') bucket.queued += row.count;
+    if (row.status === 'running') bucket.running += row.count;
+    if (row.status === 'failed') bucket.dead += row.count;
+    counts.set(row.revisionId, bucket);
+    // Ждущая задача — это тоже активность стадии: комплект, у которого
+    // распознавание только поставлено в очередь, уже не «на разметке».
+    if (row.status !== 'failed') {
+      add(row.revisionId, isJobType(row.type) ? stageOf(row.type) : null);
+    }
+  }
+
+  return revisionIds.map((revisionId) => {
+    const bucket = counts.get(revisionId) ?? { queued: 0, running: 0, dead: 0 };
+    const stages = [...(stagesOf.get(revisionId) ?? [])].map((stage) => ({ stage }));
+    return {
+      revisionId,
+      stage: summaryStage(stages, bucket.dead),
+      queued: bucket.queued,
+      running: bucket.running,
+      dead: bucket.dead,
+    };
+  });
 }
 
 // =====================================================================

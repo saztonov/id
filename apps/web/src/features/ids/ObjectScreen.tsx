@@ -26,12 +26,17 @@
  * Удаление потребовало бы стирать строку аудита `work.created`, уже записанную
  * сервером, — то есть править журнал ради косметики.
  *
- * ## Исполнителя выбирает не подрядчик
+ * ## Исполнителя форма больше не спрашивает (S37)
  *
- * У подрядчика поля нет вовсе, и это не сокрытие возможности: сервер берёт его
- * организацию из области видимости, а поле в теле запроса отвергает как попытку
- * завести работу от чужого имени. У генподрядчика поле необязательно (пусто —
- * работал он сам), у проверяющего обязательно — своей организации у него нет.
+ * Поля нет ни у одной роли. У подрядчика и генподрядчика его не было и раньше:
+ * сервер берёт организацию из области видимости. У проверяющего оно было
+ * ОБЯЗАТЕЛЬНЫМ — и это была та же ошибка, что с месяцем до S30: портал требовал
+ * назвать то, чего человек в момент загрузки файла не знает, потому что файл
+ * ещё никто не читал.
+ *
+ * Теперь исполнителя выводит сервер из карточки объекта и помечает вывод
+ * признаком, а конвейер заменяет его организацией из акта. До тех пор в колонке
+ * стоит надпись, а не имя: догадка обязана быть отличима от прочитанного.
  *
  * ## Настройка объекта свёрнута
  *
@@ -65,6 +70,7 @@ import {
   getWorkDeletionPreview,
   listRegistries,
   listSectionCounts,
+  listWorkPipeline,
   listWorks,
   pagesBlocked,
   pagesItems,
@@ -87,42 +93,19 @@ import { TrashIcon } from '../../shared/icons.js';
 import { Link, useNavigate } from '../../app/router.js';
 import { useSession } from '../../app/session.js';
 import { uploadToTicket } from '../files/upload.js';
+import {
+  contractorLabel,
+  monthLabel,
+  periodLabel,
+  pipelineBusy,
+  pipelineLabel,
+  type WorkPipeline,
+} from './pipelineState.js';
 
 /** Текущий месяц первым числом — то, что подставляется в форму по умолчанию. */
 function currentPeriod(): string {
   const now = new Date();
   return `${String(now.getUTCFullYear())}-${String(now.getUTCMonth() + 1).padStart(2, '0')}-01`;
-}
-
-/** `2026-08-01` → `август 2026`: месяц читают словом, а не датой. */
-const MONTHS = [
-  'январь',
-  'февраль',
-  'март',
-  'апрель',
-  'май',
-  'июнь',
-  'июль',
-  'август',
-  'сентябрь',
-  'октябрь',
-  'ноябрь',
-  'декабрь',
-];
-
-/**
- * `null` — портал ещё не прочитал акт (S30).
- *
- * Прочерк здесь читался бы как «портал не смог определить», а это не отказ, а
- * ещё не случившаяся работа: месяц выводится из самого раннего акта, и до
- * распознавания его просто нет. Разница важна — по прочерку идут разбираться,
- * по «После OCR» ждут.
- */
-export function periodLabel(period: string | null): string {
-  if (period === null) return 'После OCR';
-  const [year, month] = period.split('-');
-  const index = Number(month) - 1;
-  return MONTHS[index] === undefined ? period : `${MONTHS[index]} ${year ?? ''}`.trim();
 }
 
 /**
@@ -141,7 +124,7 @@ function periodOptions(): { value: string; label: string }[] {
   for (let shift = 1; shift >= -12; shift -= 1) {
     const date = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + shift, 1));
     const value = `${String(date.getUTCFullYear())}-${String(date.getUTCMonth() + 1).padStart(2, '0')}-01`;
-    options.push({ value, label: periodLabel(value) });
+    options.push({ value, label: monthLabel(value) });
   }
   return options;
 }
@@ -305,7 +288,7 @@ export function ObjectScreen({ objectId }: { objectId: string }): ReactNode {
                   title: 'Месяц',
                   dataIndex: 'period',
                   key: 'period',
-                  render: (period: string) => periodLabel(period),
+                  render: (period: string) => monthLabel(period),
                 },
                 {
                   title: 'Состояние',
@@ -580,16 +563,37 @@ function SectionPanel({
   });
 
   const blocked = pagesBlocked(works.data?.pages);
+  const items = works.isSuccess && blocked === null ? pagesItems(works.data.pages) : [];
+
+  /**
+   * Состояние конвейера по УЖЕ ОТРИСОВАННЫМ строкам.
+   *
+   * Идентификаторы берутся из загруженных страниц, а не отбираются заново:
+   * список листается курсором, и второй отбор отвечал бы про другую страницу.
+   *
+   * Опрос тикает, только пока по какому-то комплекту идёт работа, и замолкает
+   * после отказа — иначе экран объекта спрашивал бы сервер вечно на
+   * остановленном комплекте. Поток событий сюда не дотягивается: он смонтирован
+   * на экране ревизии.
+   */
+  const workIds = items.map((item) => item.id);
+  const pipeline = useQuery({
+    queryKey: navigationKeys.worksPipeline(objectId, workIds.join(',')),
+    queryFn: () => listWorkPipeline(objectId, workIds),
+    enabled: workIds.length > 0,
+    refetchInterval: (query) =>
+      (query.state.data ?? []).some((row) => pipelineBusy(row)) ? 5_000 : false,
+  });
+
+  const byWork = new Map<string, WorkPipeline>(
+    (pipeline.data ?? []).map((row) => [row.workId, row]),
+  );
+  /** `null` — сводки нет: комплект без ревизии либо строка, которой не оказалось в ответе. */
+  const pipelineOf = (workId: string): WorkPipeline | null => byWork.get(workId) ?? null;
 
   return (
     <Space direction="vertical" size={12} style={{ width: '100%' }}>
-      {canUpload && (
-        <NewWorkWithFileCard
-          objectId={objectId}
-          sectionCode={section.sectionCode}
-          contractors={contractors}
-        />
-      )}
+      {canUpload && <NewWorkWithFileCard objectId={objectId} sectionCode={section.sectionCode} />}
 
       {works.isPending && <LoadingState label="Загрузка комплектов…" />}
       {works.isError && <ErrorState error={works.error} />}
@@ -607,7 +611,7 @@ function SectionPanel({
             rowKey="id"
             size="small"
             pagination={false}
-            dataSource={pagesItems(works.data.pages)}
+            dataSource={items}
             locale={{ emptyText: 'Комплектов в разделе нет' }}
             columns={[
               {
@@ -625,14 +629,28 @@ function SectionPanel({
                 title: 'Месяц',
                 dataIndex: 'period',
                 key: 'period',
-                render: (period: string | null) => periodLabel(period),
+                render: (period: string | null, row) => periodLabel(period, pipelineOf(row.id)),
               },
               {
                 title: 'Исполнитель',
-                dataIndex: 'contractorId',
                 key: 'contractorId',
-                render: (id: string) =>
-                  contractors.find((row) => row.contractorId === id)?.name ?? '—',
+                render: (_value: unknown, row) =>
+                  contractorLabel({
+                    // Полный список закреплений, а не только активные: у
+                    // комплекта с откреплённым позже подрядчиком имя иначе
+                    // превращалось в прочерк, будто исполнителя нет вовсе.
+                    name:
+                      contractors.find((party) => party.contractorId === row.contractorId)?.name ??
+                      null,
+                    assumed: row.contractorAssumed,
+                    raw: row.contractorRaw,
+                    pipeline: pipelineOf(row.id),
+                  }),
+              },
+              {
+                title: 'Распознавание',
+                key: 'pipeline',
+                render: (_value: unknown, row) => pipelineLabel(pipelineOf(row.id)),
               },
               {
                 title: 'Реестр',
@@ -680,7 +698,6 @@ function SectionPanel({
 
 interface WorkFormValues {
   title: string;
-  contractorId?: string;
 }
 
 /**
@@ -698,13 +715,10 @@ interface WorkFormValues {
 function NewWorkWithFileCard({
   objectId,
   sectionCode,
-  contractors,
 }: {
   objectId: string;
   sectionCode: string;
-  contractors: readonly ObjectContractor[];
 }): ReactNode {
-  const { me } = useSession();
   const { message } = AntApp.useApp();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -715,9 +729,6 @@ function NewWorkWithFileCard({
   /** Черновик, заведённый неудавшейся загрузкой: в него можно догрузить файл. */
   const [orphan, setOrphan] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
-
-  const isGeneralContractor = me.scope?.kind === 'general_contractor';
-  const namesExecutor = me.scope !== null && me.scope.kind !== 'contractor';
 
   const reset = (): void => {
     form.resetFields();
@@ -734,7 +745,6 @@ function NewWorkWithFileCard({
         objectId,
         sectionCode,
         title: values.title,
-        ...(values.contractorId === undefined ? {} : { contractorId: values.contractorId }),
         fileName: file.name,
         sizeBytes: file.size,
       });
@@ -859,25 +869,6 @@ function NewWorkWithFileCard({
               onChange={() => setTitleTouched(true)}
             />
           </Form.Item>
-          {namesExecutor && (
-            <Form.Item
-              name="contractorId"
-              label="Исполнитель"
-              rules={[{ required: !isGeneralContractor, message: 'Исполнитель обязателен' }]}
-              extra={
-                isGeneralContractor
-                  ? 'Пусто — работу выполнила ваша организация'
-                  : 'Комплект заводится за подрядчика; это будет видно в журнале'
-              }
-            >
-              <Select
-                allowClear={isGeneralContractor}
-                style={{ width: 260 }}
-                options={contractors.map((row) => ({ value: row.contractorId, label: row.name }))}
-                data-testid="work-contractor"
-              />
-            </Form.Item>
-          )}
           <Form.Item>
             <Button
               type="primary"

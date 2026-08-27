@@ -161,17 +161,17 @@ test('подрядчик заводит комплект одним файлом
   expect(body.items[0]?.parentRevisionId).toBeNull();
 });
 
-test('у подрядчика нет поля исполнителя, у генподрядчика — есть', async ({ page }) => {
-  await signIn(page, KC.contractor, `/ids/objects/${IDS.object}`);
-  await openSection(page, 'Кровля');
-  await page.getByTestId('new-work').click();
-  await expect(page.getByTestId('work-title')).toBeVisible();
-  await expect(page.getByTestId('work-contractor')).toHaveCount(0);
-
-  await signIn(page, KC.general, `/ids/objects/${IDS.object}`);
-  await openSection(page, 'Кровля');
-  await page.getByTestId('new-work').click();
-  await expect(page.getByTestId('work-contractor')).toBeVisible();
+test('поля исполнителя нет ни у одной роли: его выводит сервер', async ({ page }) => {
+  // До S37 поле было обязательным для проверяющего и необязательным для
+  // генподрядчика. Заказчик снял его совсем: в момент загрузки файла человек
+  // исполнителя не знает — файл ещё никто не читал.
+  for (const kc of [KC.contractor, KC.general, KC.engineer]) {
+    await signIn(page, kc, `/ids/objects/${IDS.object}`);
+    await openSection(page, 'Кровля');
+    await page.getByTestId('new-work').click();
+    await expect(page.getByTestId('work-title')).toBeVisible();
+    await expect(page.getByTestId('work-contractor')).toHaveCount(0);
+  }
 });
 
 test('файл, отвергнутый хранилищем, оставляет комплект черновиком со ссылкой на него', async ({

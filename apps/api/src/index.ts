@@ -610,12 +610,15 @@ export {
  * реестрами дела не имел. Теперь имеет, и нужное отдаётся поимённо, а не
  * `export *`: воркеру незачем уметь передавать папку.
  */
+export { listObjectContractorParties } from './db/repositories/catalog.js';
 export {
   fillWorkPeriodIfEmpty,
   findRegistry,
   findRegistryFile,
   findWork,
   listRegistryComplectRevisions,
+  rememberContractorRaw,
+  replaceAssumedContractor,
 } from './db/repositories/navigation.js';
 export type { RegistryComplectRevision } from './db/repositories/navigation.js';
 export {

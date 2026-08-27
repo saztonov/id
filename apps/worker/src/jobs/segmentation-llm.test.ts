@@ -82,6 +82,9 @@ function harness(behaviour: (index: number) => Promise<LlmCallResult>, pageCount
     listPageClassifications: () => Promise.resolve([]),
     // Месяц комплекта в этом наборе не выводится: набор про ступень модели.
     fillWorkPeriod: () => Promise.resolve(false),
+    replaceAssumedContractor: () => Promise.resolve(false),
+    rememberContractorRaw: () => Promise.resolve(false),
+    listObjectContractors: () => Promise.resolve([]),
     applySegmentation: () =>
       Promise.reject(new Error('задача 15 в этом наборе не участвует')) as never,
     listDocuments: () => Promise.resolve([]),

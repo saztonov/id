@@ -379,12 +379,15 @@ describe('регистрация маршрутов навигации', () => {
       // точным, иначе «не 404» пройдёт и на случайно сломанном обработчике.
       //
       // Руководителю с S21 выдано `submission.upload`, поэтому здесь уже не
-      // 403: заведение упирается в неназванного исполнителя (400 — своей
-      // организации у него нет), а новая ревизия — в уже открытый черновик
-      // (409). `registry.manage` ему по-прежнему не выдано, и там остался 403.
+      // 403. С S37 не 400 и не 201: исполнителя портал выводит из карточки
+      // объекта сам, поэтому проба берёт НЕСУЩЕСТВУЮЩИЙ объект — иначе она
+      // заводила бы комплект и портила соседние наборы. Новая ревизия
+      // упирается в уже открытый черновик (409); `registry.manage`
+      // руководителю по-прежнему не выдано, и там остался 403.
+      //
       // Тело валидно намеренно — схема Fastify проверяется ДО preHandler, и на
       // пустом теле пришёл бы 422, то есть проба измеряла бы валидацию.
-      ['POST', '/api/v1/works', 400],
+      ['POST', '/api/v1/works', 404],
       ['POST', `/api/v1/works/${WORK_A_DRAFT}/revisions`, 409],
       ['POST', '/api/v1/registries', 403],
       ['PUT', `/api/v1/registries/${REGISTRY_1}/works/${WORK_A_DRAFT}`, 403],
@@ -402,7 +405,7 @@ describe('регистрация маршрутов навигации', () => {
 
     const bodyFor = (method: Method, url: string): unknown => {
       if (method === 'POST' && url === '/api/v1/works') {
-        return { objectId: OBJECT_1, sectionCode: SECTION, period: PERIOD, title: 'Проба' };
+        return { objectId: id(992), sectionCode: SECTION, period: PERIOD, title: 'Проба' };
       }
       if (method === 'POST' && url === '/api/v1/registries') {
         return { objectId: OBJECT_1, sectionCode: SECTION, period: PERIOD };
@@ -579,6 +582,58 @@ describe('GET /works/{id}', () => {
   });
 });
 
+/**
+ * Состояние конвейера по странице списка (S37).
+ *
+ * Экран объекта печатает стадию у каждой строки, и величина обязана совпадать с
+ * той, что показывает плашка на карточке ревизии: иначе один комплект на двух
+ * экранах подряд описывается по-разному. Совпадение держится тем, что обе
+ * стороны зовут `summaryStage`; здесь проверяется остальное — область, потолок
+ * и то, что чужой идентификатор в ответ не попадает.
+ */
+describe('GET /objects/{id}/works/pipeline', () => {
+  const url = (ids: readonly string[]): string =>
+    `/api/v1/objects/${OBJECT_1}/works/pipeline?workIds=${ids.join(',')}`;
+
+  it('отдаёт стадию по комплекту с ревизией', async () => {
+    const response = await as(KC.engineer, 'GET', url([WORK_A_DRAFT]));
+    expect(response.statusCode).toBe(200);
+
+    const items = response.json<{ workId: string; stage: string }[]>();
+    expect(items).toHaveLength(1);
+    expect(items[0]?.workId).toBe(WORK_A_DRAFT);
+    // Задач по этой ревизии в фикстуре нет — стадия начальная, а не пустая.
+    expect(items[0]?.stage).toBe('uploaded');
+  });
+
+  it('чужой комплект в ответ не попадает — строка остаётся БЕЗ данных', async () => {
+    // Не «не запускалось»: о чужом комплекте портал не утверждает ничего, и
+    // отсутствие строки честнее выдуманной стадии.
+    const response = await as(KC.a, 'GET', url([WORK_A_DRAFT, WORK_B]));
+    expect(response.statusCode).toBe(200);
+    expect(response.json<{ workId: string }[]>().map((item) => item.workId)).toEqual([
+      WORK_A_DRAFT,
+    ]);
+  });
+
+  it('чужой объект — 404, а не пустой список', async () => {
+    const response = await as(
+      KC.a,
+      'GET',
+      `/api/v1/objects/${id(993)}/works/pipeline?workIds=${WORK_A_DRAFT}`,
+    );
+    expect(response.statusCode).toBe(404);
+  });
+
+  it('список сверх потолка страницы отвергается, а не считается', async () => {
+    const many = Array.from({ length: 201 }, (_value, index) => id(800 + index));
+    const response = await as(KC.engineer, 'GET', url(many));
+    // 422 — отказ схемы запроса: список длиннее страницы не является
+    // осмысленным вопросом, и считать его портал не начинает.
+    expect(response.statusCode).toBe(422);
+  });
+});
+
 describe('GET /works/{id}/revisions', () => {
   it('отдаёт ревизии своего комплекта, чужой даёт 404, а не пустой список', async () => {
     const own = await as(KC.a, 'GET', `/api/v1/works/${WORK_A_DRAFT}/revisions`);
@@ -604,27 +659,63 @@ describe('GET /works/{id}/revisions', () => {
 // =====================================================================
 
 describe('POST /works', () => {
-  // До S21 всем троим отвечали 403: комплект заводит тот, кто его выполнил.
-  // Заказчик посылку снял — заводить и загружать вправе все пять ролей. Но
-  // ПРИДУМАТЬ организацию за проверяющего портал по-прежнему не может, поэтому
-  // исполнитель обязателен, и без него отказ теперь 400, а не 403: это разные
-  // ответы на разные вопросы («вам нельзя» против «не хватает поля»).
-  it('проверяющий обязан назвать исполнителя: без него 400', async () => {
+  /**
+   * Исполнителя проверяющий больше не называет (S37).
+   *
+   * До этого портал отвечал 400 «Укажите организацию-исполнителя», а человек в
+   * момент загрузки файла её не знает — файл ещё никто не читал. Теперь
+   * исполнитель ВЫВОДИТСЯ из карточки объекта и помечается признаком
+   * `contractor_assumed`, чтобы догадка портала осталась отличима от
+   * прочитанного факта.
+   */
+  it('исполнитель выводится из карточки объекта и помечается как подставленный', async () => {
     for (const kc of [KC.engineer, KC.manager, KC.admin]) {
       const response = await as(kc, 'POST', '/api/v1/works', {
         objectId: OBJECT_1,
         sectionCode: SECTION,
         period: PERIOD,
-        title: 'Комплект без исполнителя',
+        title: `Комплект без исполнителя от ${kc}`,
       });
-      expect([kc, response.statusCode]).toEqual([kc, 400]);
-      expect(response.headers['content-type']).toContain('application/problem+json');
+      expect([kc, response.statusCode]).toEqual([kc, 201]);
     }
 
+    const rows = await db.query<{ contractor: string; assumed: boolean }>(
+      `SELECT contractor_id AS contractor, contractor_assumed AS assumed
+         FROM works WHERE title LIKE 'Комплект без исполнителя от %'`,
+    );
+    expect(rows).toHaveLength(3);
+    // Генподрядчик из карточки объекта — это запись, которую кто-то сделал, а
+    // не догадка портала. Признак при этом поднят: назвал не человек.
+    for (const row of rows) expect(row).toEqual({ contractor: ORG_GC, assumed: true });
+  });
+
+  it('неоднозначный объект даёт 422 с названным действием, а не догадку', async () => {
+    // На объекте 2 генподрядчик не назван; добавим второго подрядчика — и
+    // выводить станет не из чего. Портал обязан сказать, что сделать, а не
+    // выбрать одного из двух.
+    await db.query(
+      `INSERT INTO object_contractors (object_id, contractor_id)
+       VALUES ('${OBJECT_2}', '${ORG_A}') ON CONFLICT DO NOTHING`,
+    );
+
+    const response = await as(KC.engineer, 'POST', '/api/v1/works', {
+      objectId: OBJECT_2,
+      sectionCode: SECTION,
+      period: PERIOD,
+      title: 'Комплект на неоднозначном объекте',
+    });
+    expect(response.statusCode).toBe(422);
+    expect(response.body).toContain('contractor_undetermined');
+
     const rows = await db.query<{ n: string }>(
-      `SELECT count(*)::text AS n FROM works WHERE title = 'Комплект без исполнителя'`,
+      `SELECT count(*)::text AS n FROM works WHERE title = 'Комплект на неоднозначном объекте'`,
     );
     expect(rows[0]?.n).toBe('0');
+
+    await db.query(
+      `DELETE FROM object_contractors
+        WHERE object_id = '${OBJECT_2}' AND contractor_id = '${ORG_A}'`,
+    );
   });
 
   it('инженер заводит комплект за подрядчика, и это помечено в аудите', async () => {
@@ -652,23 +743,24 @@ describe('POST /works', () => {
     expect(audit[0]?.flag).toBe('true');
   });
 
-  it('пользователю с ролями contractor+engineer организация не придумывается', async () => {
+  it('пользователю с ролями contractor+engineer организация не берётся из его роли', async () => {
     // Область строится по СТАРШЕЙ роли, то есть инженерская, и организации не
-    // содержит. Отказ по-прежнему есть, и он всё так же не подставляет чужую
-    // организацию — изменился только код: не хватает поля, а не права.
+    // содержит. Портал по-прежнему НЕ подставляет сюда организацию подрядчика
+    // из второй роли: исполнитель выводится из карточки объекта, а не из того,
+    // кем человек ещё числится.
     const response = await as(KC.mixed, 'POST', '/api/v1/works', {
       objectId: OBJECT_1,
       sectionCode: SECTION,
       period: PERIOD,
       title: 'Комплект от совмещающего роли',
     });
-    expect(response.statusCode).toBe(400);
-    expect(response.headers['content-type']).toContain('application/problem+json');
+    expect(response.statusCode).toBe(201);
 
-    const rows = await db.query<{ n: string }>(
-      `SELECT count(*)::text AS n FROM works WHERE title = 'Комплект от совмещающего роли'`,
+    const rows = await db.query<{ contractor: string; assumed: boolean }>(
+      `SELECT contractor_id AS contractor, contractor_assumed AS assumed
+         FROM works WHERE title = 'Комплект от совмещающего роли'`,
     );
-    expect(rows[0]?.n).toBe('0');
+    expect(rows[0]).toEqual({ contractor: ORG_GC, assumed: true });
   });
 
   it('подрядчик, назвавший чужого исполнителя, получает 400, а не чужой комплект', async () => {

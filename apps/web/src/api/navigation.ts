@@ -56,6 +56,7 @@
  * и она проходит наверх как есть. Чужое и несуществующее неразличимы по
  * построению сервера, и клиент не пытается их разделить.
  */
+import type { ProcessingStage } from '@id/contracts';
 import { isApiError } from './problem.js';
 import { get, newIdempotencyKey, request } from './http.js';
 
@@ -75,6 +76,16 @@ export interface Work {
   period: string | null;
   /** Исполнитель работы — он печатается в реестре. */
   contractorId: string;
+  /**
+   * Исполнитель подставлен ПОРТАЛОМ, а не назван человеком (S37).
+   *
+   * Пока признак поднят, экран печатает не имя организации, а надпись — ту же,
+   * что и у неизвестного месяца. Показать догадку именем значило бы выдать её
+   * за прочитанный факт.
+   */
+  contractorAssumed: boolean;
+  /** Наименование из акта, которого нет в справочнике объекта. */
+  contractorRaw: string | null;
   /** Организация, ведущая комплект: только она правит его состав. */
   managedByContractorId: string;
   kind: 'complect' | 'registry';
@@ -158,6 +169,7 @@ export const NAVIGATION_ROUTES = {
   works: `${V1}/works`,
   work: (workId: string) => `${V1}/works/${workId}`,
   sectionCounts: (objectId: string) => `${V1}/objects/${objectId}/sections/counts`,
+  worksPipeline: (objectId: string) => `${V1}/objects/${objectId}/works/pipeline`,
   revisionsOfWork: (workId: string) => `${V1}/works/${workId}/revisions`,
   workDeletionPreview: (workId: string) => `${V1}/works/${workId}/deletion-preview`,
   registries: `${V1}/registries`,
@@ -456,6 +468,34 @@ export async function getRegistryDeletionPreview(
 export async function deleteRegistry(registryId: string, version: number): Promise<void> {
   await request<void>('DELETE', NAVIGATION_ROUTES.registry(registryId), {
     headers: ifMatch(version),
+  });
+}
+
+/**
+ * Состояние конвейера по комплектам страницы списка.
+ *
+ * Идентификаторы уходят строкой через запятую: это `GET`, и повторяющийся ключ
+ * разные клиенты кодируют по-разному.
+ *
+ * Строка, которой в ответе нет, — это «нет данных», а не «не запускалось».
+ * Разбирает это `pipelineState`, здесь только транспорт.
+ */
+export interface WorkPipelineSummary {
+  workId: string;
+  revisionId: string;
+  stage: ProcessingStage;
+  queued: number;
+  running: number;
+  dead: number;
+}
+
+export async function listWorkPipeline(
+  objectId: string,
+  workIds: readonly string[],
+): Promise<readonly WorkPipelineSummary[]> {
+  if (workIds.length === 0) return [];
+  return get<WorkPipelineSummary[]>(NAVIGATION_ROUTES.worksPipeline(objectId), {
+    query: { workIds: workIds.join(',') },
   });
 }
 

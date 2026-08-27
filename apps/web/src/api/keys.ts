@@ -72,6 +72,14 @@ export const navigationKeys = {
   root: ['nav'] as const,
   works: (filter: string) => ['nav', 'works', filter] as const,
   workDeletionPreview: (workId: string) => ['nav', 'works', 'one', workId, 'deletion'] as const,
+  /**
+   * Состояние конвейера по странице списка комплектов.
+   *
+   * Идентификаторы входят в КЛЮЧ: страница «Показать ещё» меняет состав
+   * вопроса, и общий ключ отдал бы ответ про прежнюю страницу.
+   */
+  worksPipeline: (objectId: string, workIds: string) =>
+    ['nav', 'works', 'pipeline', objectId, workIds] as const,
   registryDeletionPreview: (registryId: string) =>
     ['nav', 'registries', 'one', registryId, 'deletion'] as const,
   work: (workId: string) => ['nav', 'works', 'one', workId] as const,

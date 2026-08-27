@@ -53,6 +53,7 @@ import {
   isIsoDate,
   listOf,
   listParam,
+  matchCounterparty,
   matrixFor,
   normalizeOrgName,
   standardWithoutYear,
@@ -614,26 +615,9 @@ function evaluateCounterpartyTriple(graph: CheckGraph): RuleResult {
     const ogrn = trimmedText(ogrnValue);
     if (name === null && inn === null && ogrn === null) continue;
 
-    const byInn =
-      inn === null
-        ? undefined
-        : graph.counterparties.find(
-            (party) => party.inn !== null && digitsOf(party.inn) === digitsOf(inn),
-          );
-    const byOgrn =
-      ogrn === null
-        ? undefined
-        : graph.counterparties.find(
-            (party) => party.ogrn !== null && digitsOf(party.ogrn) === digitsOf(ogrn),
-          );
-    const byName =
-      name === null
-        ? undefined
-        : graph.counterparties.find(
-            (party) => normalizeOrgName(party.name) === normalizeOrgName(name),
-          );
-
-    const party = byInn ?? byOgrn ?? byName;
+    // Сопоставление — общее с конвейером, который заполняет исполнителя
+    // комплекта той же тройкой (S37): два экземпляра разошлись бы молча.
+    const party = matchCounterparty(graph.counterparties, { name, inn, ogrn }) ?? undefined;
     if (party === undefined) {
       findings.push(
         unknown({

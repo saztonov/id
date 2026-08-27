@@ -63,7 +63,7 @@ import {
 import { useQueryClient, type QueryClient } from '@tanstack/react-query';
 import { revisionEvents } from '../../api/endpoints.js';
 import { readEventStream, StreamRejected } from '../../api/stream.js';
-import { layoutKeys, revisionKeys } from '../../api/keys.js';
+import { layoutKeys, navigationKeys, revisionKeys } from '../../api/keys.js';
 import { describeError } from '../../api/problem.js';
 
 export type StreamStatus =
@@ -179,6 +179,24 @@ function invalidateFor(
       break;
     case 'job':
       // Жизненный цикл задачи меняет только сводку — она уже обесценена выше.
+      break;
+    case 'work':
+      /**
+       * Конвейер дописал КАРТОЧКУ комплекта: месяц (S30) или исполнителя (S37).
+       *
+       * До S37 области `work` в этом разборе не было вовсе, и события падали в
+       * `default`, обесценивая только ветку ревизии. Карточка комплекта и
+       * список комплектов объекта живут в ветке `nav` и не перечитывались:
+       * человек, вернувшийся на объект, видел «После OCR» у комплекта, месяц
+       * которого портал уже прочитал.
+       *
+       * Обесценивается ПРЕФИКС `['nav','works']`, а не точный ключ: ключи
+       * списков содержат сериализованный фильтр раздела, и точное совпадение не
+       * нашло бы ни одного живого запроса. Идентификатор объекта в событии не
+       * приходит — поток адресуется ревизией, — поэтому и счётчики разделов
+       * обесцениваются целой веткой.
+       */
+      invalidate(navigationKeys.root);
       break;
     default:
       // Незнакомая область: перечитывается вся ветка ревизии. Пропустить её

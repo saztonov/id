@@ -1194,6 +1194,7 @@ export const jobs = pgTable("jobs", {
 }, (table) => [
 	index("ix_jobs_claim").using("btree", table.priority.desc().nullsFirst().op("int4_ops"), table.nextRunAt.asc().nullsLast().op("timestamptz_ops")).where(sql`(status = 'queued'::text)`),
 	index("ix_jobs_lease").using("btree", table.lockedUntil.asc().nullsLast().op("timestamptz_ops")).where(sql`(status = 'running'::text)`),
+	index("ix_jobs_revision").using("btree", sql`((payload ->> 'revisionId'::text))`).where(sql`(status = ANY (ARRAY['queued'::text, 'running'::text, 'failed'::text]))`),
 	index("ix_jobs_status_next_run").using("btree", table.status.asc().nullsLast().op("timestamptz_ops"), table.nextRunAt.asc().nullsLast().op("timestamptz_ops")),
 	uniqueIndex("ux_jobs_dedupe_key").using("btree", table.dedupeKey.asc().nullsLast().op("text_ops")).where(sql`((dedupe_key IS NOT NULL) AND (status <> ALL (ARRAY['done'::text, 'cancelled'::text])))`),
 	check("jobs_type_chk", sql`type ~ '^[a-z][a-z0-9_]*([.][a-z0-9_]+)*$'::text`),
@@ -1821,65 +1822,6 @@ export const sections = pgTable("sections", {
 	check("sections_sort_order_chk", sql`sort_order >= 0`),
 ]);
 
-export const works = pgTable("works", {
-	id: uuid().defaultRandom().primaryKey().notNull(),
-	objectId: uuid("object_id").notNull(),
-	contractorId: uuid("contractor_id").notNull(),
-	title: text().notNull(),
-	currentRevisionId: uuid("current_revision_id"),
-	createdBy: uuid("created_by").notNull(),
-	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-	sectionCode: text("section_code").notNull(),
-	period: date(),
-	managedByContractorId: uuid("managed_by_contractor_id").notNull(),
-	registryId: uuid("registry_id"),
-	kind: text().default('complect').notNull(),
-	ordinal: integer(),
-	autoRunEnabled: boolean("auto_run_enabled").default(false).notNull(),
-	updatedAt: timestamp("updated_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-}, (table) => [
-	index("ix_works_contractor").using("btree", table.contractorId.asc().nullsLast().op("uuid_ops")),
-	index("ix_works_created_by").using("btree", table.createdBy.asc().nullsLast().op("uuid_ops")),
-	index("ix_works_current_revision").using("btree", table.currentRevisionId.asc().nullsLast().op("uuid_ops")),
-	index("ix_works_managed_by").using("btree", table.managedByContractorId.asc().nullsLast().op("uuid_ops")),
-	index("ix_works_object").using("btree", table.objectId.asc().nullsLast().op("uuid_ops")),
-	index("ix_works_object_section_period").using("btree", table.objectId.asc().nullsLast().op("date_ops"), table.sectionCode.asc().nullsLast().op("uuid_ops"), table.period.asc().nullsLast().op("text_ops")),
-	index("ix_works_registry").using("btree", table.registryId.asc().nullsLast().op("uuid_ops")),
-	uniqueIndex("ux_works_registry_file").using("btree", table.registryId.asc().nullsLast().op("uuid_ops")).where(sql`(kind = 'registry'::text)`),
-	uniqueIndex("ux_works_registry_ordinal").using("btree", table.registryId.asc().nullsLast().op("uuid_ops"), table.ordinal.asc().nullsLast().op("int4_ops")).where(sql`(ordinal IS NOT NULL)`),
-	foreignKey({
-			columns: [table.managedByContractorId],
-			foreignColumns: [counterparties.id],
-			name: "works_managed_by_contractor_id_fkey"
-		}),
-	foreignKey({
-			columns: [table.id, table.currentRevisionId],
-			foreignColumns: [submissionRevisions.id, submissionRevisions.workId],
-			name: "works_current_revision_fk"
-		}),
-	foreignKey({
-			columns: [table.objectId],
-			foreignColumns: [constructionObjects.id],
-			name: "works_object_id_fkey"
-		}),
-	foreignKey({
-			columns: [table.contractorId],
-			foreignColumns: [counterparties.id],
-			name: "works_contractor_id_fkey"
-		}),
-	foreignKey({
-			columns: [table.createdBy],
-			foreignColumns: [users.id],
-			name: "works_created_by_fkey"
-		}),
-	unique("works_scope_uq").on(table.contractorId, table.id, table.objectId),
-	unique("works_registry_id_uq").on(table.id, table.registryId),
-	check("works_kind_chk", sql`kind = ANY (ARRAY['complect'::text, 'registry'::text])`),
-	check("works_ordinal_chk", sql`(ordinal IS NULL) OR (ordinal > 0)`),
-	check("works_registry_kind_chk", sql`(kind <> 'registry'::text) OR (registry_id IS NOT NULL)`),
-	check("works_period_chk", sql`(period IS NULL) OR (EXTRACT(day FROM period) = (1)::numeric)`),
-]);
-
 export const registries = pgTable("registries", {
 	id: uuid().defaultRandom().primaryKey().notNull(),
 	objectId: uuid("object_id").notNull(),
@@ -1938,6 +1880,73 @@ export const registries = pgTable("registries", {
 	check("registries_version_chk", sql`version >= 0`),
 	check("registries_period_chk", sql`EXTRACT(day FROM period) = (1)::numeric`),
 	check("registries_number_required_chk", sql`(status = 'draft'::text) OR (number IS NOT NULL)`),
+]);
+
+export const works = pgTable("works", {
+	id: uuid().defaultRandom().primaryKey().notNull(),
+	objectId: uuid("object_id").notNull(),
+	contractorId: uuid("contractor_id").notNull(),
+	title: text().notNull(),
+	currentRevisionId: uuid("current_revision_id"),
+	createdBy: uuid("created_by").notNull(),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	sectionCode: text("section_code").notNull(),
+	period: date(),
+	managedByContractorId: uuid("managed_by_contractor_id").notNull(),
+	registryId: uuid("registry_id"),
+	kind: text().default('complect').notNull(),
+	ordinal: integer(),
+	autoRunEnabled: boolean("auto_run_enabled").default(false).notNull(),
+	updatedAt: timestamp("updated_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	contractorAssumed: boolean("contractor_assumed").default(false).notNull(),
+	contractorRaw: text("contractor_raw"),
+}, (table) => [
+	index("ix_works_contractor").using("btree", table.contractorId.asc().nullsLast().op("uuid_ops")),
+	index("ix_works_created_by").using("btree", table.createdBy.asc().nullsLast().op("uuid_ops")),
+	index("ix_works_current_revision").using("btree", table.currentRevisionId.asc().nullsLast().op("uuid_ops")),
+	index("ix_works_managed_by").using("btree", table.managedByContractorId.asc().nullsLast().op("uuid_ops")),
+	index("ix_works_object").using("btree", table.objectId.asc().nullsLast().op("uuid_ops")),
+	index("ix_works_object_section_period").using("btree", table.objectId.asc().nullsLast().op("date_ops"), table.sectionCode.asc().nullsLast().op("uuid_ops"), table.period.asc().nullsLast().op("text_ops")),
+	index("ix_works_registry").using("btree", table.registryId.asc().nullsLast().op("uuid_ops")),
+	uniqueIndex("ux_works_registry_file").using("btree", table.registryId.asc().nullsLast().op("uuid_ops")).where(sql`(kind = 'registry'::text)`),
+	uniqueIndex("ux_works_registry_ordinal").using("btree", table.registryId.asc().nullsLast().op("uuid_ops"), table.ordinal.asc().nullsLast().op("int4_ops")).where(sql`(ordinal IS NOT NULL)`),
+	foreignKey({
+			columns: [table.managedByContractorId],
+			foreignColumns: [counterparties.id],
+			name: "works_managed_by_contractor_id_fkey"
+		}),
+	foreignKey({
+			columns: [table.objectId, table.registryId],
+			foreignColumns: [registries.id, registries.objectId],
+			name: "works_registry_fk"
+		}),
+	foreignKey({
+			columns: [table.id, table.currentRevisionId],
+			foreignColumns: [submissionRevisions.id, submissionRevisions.workId],
+			name: "works_current_revision_fk"
+		}),
+	foreignKey({
+			columns: [table.objectId],
+			foreignColumns: [constructionObjects.id],
+			name: "works_object_id_fkey"
+		}),
+	foreignKey({
+			columns: [table.contractorId],
+			foreignColumns: [counterparties.id],
+			name: "works_contractor_id_fkey"
+		}),
+	foreignKey({
+			columns: [table.createdBy],
+			foreignColumns: [users.id],
+			name: "works_created_by_fkey"
+		}),
+	unique("works_scope_uq").on(table.contractorId, table.id, table.objectId),
+	unique("works_registry_id_uq").on(table.id, table.registryId),
+	check("works_kind_chk", sql`kind = ANY (ARRAY['complect'::text, 'registry'::text])`),
+	check("works_ordinal_chk", sql`(ordinal IS NULL) OR (ordinal > 0)`),
+	check("works_registry_kind_chk", sql`(kind <> 'registry'::text) OR (registry_id IS NOT NULL)`),
+	check("works_period_chk", sql`(period IS NULL) OR (EXTRACT(day FROM period) = (1)::numeric)`),
+	check("works_contractor_assumed_chk", sql`(NOT contractor_assumed) OR (kind = 'complect'::text)`),
 ]);
 
 export const registryReconciliations = pgTable("registry_reconciliations", {

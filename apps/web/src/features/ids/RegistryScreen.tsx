@@ -83,7 +83,7 @@ import { Link, useNavigate } from '../../app/router.js';
 import { useSession } from '../../app/session.js';
 import { IconAction, RowActions } from '../../shared/RowActions.js';
 import { TrashIcon } from '../../shared/icons.js';
-import { periodLabel } from './ObjectScreen.js';
+import { monthLabel } from './pipelineState.js';
 
 export function RegistryScreen({ registryId }: { registryId: string }): ReactNode {
   const { can } = useSession();
@@ -173,7 +173,7 @@ function RegistryBody({
           <Link to={`/ids/objects/${registry.objectId}`}>карточка объекта</Link>
         </Descriptions.Item>
         <Descriptions.Item label="Раздел">{sectionName}</Descriptions.Item>
-        <Descriptions.Item label="Месяц">{periodLabel(registry.period)}</Descriptions.Item>
+        <Descriptions.Item label="Месяц">{monthLabel(registry.period)}</Descriptions.Item>
         <Descriptions.Item label="№ папки">{registry.folderNo ?? '—'}</Descriptions.Item>
         <Descriptions.Item label="Корпус">{registry.building ?? '—'}</Descriptions.Item>
         <Descriptions.Item label="Этаж">{registry.floor ?? '—'}</Descriptions.Item>

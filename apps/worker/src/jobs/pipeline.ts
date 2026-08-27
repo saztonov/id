@@ -112,6 +112,7 @@ import {
   listRegistryComplectRevisions,
   saveReconciliation,
   fillWorkPeriodIfEmpty,
+  listObjectContractorParties,
   listFieldValues,
   listLogicalDocuments,
   listPageAssignments,
@@ -124,6 +125,8 @@ import {
   savePageClassifications,
   saveDocumentRelations,
   saveFieldValues,
+  rememberContractorRaw,
+  replaceAssumedContractor,
   saveRegistryMatches,
   saveRegistryRows,
   type AuthScope,
@@ -1786,20 +1789,22 @@ async function* streamStorageObject(
 }
 
 /**
- * Область сверки описи — по ОБЪЕКТУ реестра, а не по подрядчику ревизии.
+ * Область сверки описи — НЕ область подрядчика ревизии.
  *
  * `pinScope` здесь не годится и это не мелочь: она даёт область подрядчика,
  * подавшего скан описи, а комплекты папки принадлежат ДРУГИМ субподрядчикам.
  * Под ней сверка увидела бы один комплект из семи и доложила бы «сошлась» —
  * то есть соврала бы ровно в том вопросе, ради которого её запускают.
  *
- * `SYSTEM_SCOPE` тоже не годится: он неограничен, а `works_registry_fk` (0028)
- * и так гарантирует, что все комплекты реестра лежат на объекте реестра.
- * Область по объекту не сужает выборку ни на строку, но превращает дефект в
- * join'е из «прочитали чужой объект» в «прочитали ноль строк».
+ * До S37 сужение шло по объекту: `{ kind: 'engineer', objectIds: [objectId] }`.
+ * Областей по объектам не осталось, и сужать больше нечем — целостность здесь
+ * и раньше держал `works_registry_fk` (0028), гарантирующий, что все комплекты
+ * реестра лежат на объекте реестра. Функция сохранена ИМЕНЕМ этого решения:
+ * подставить сюда `pinScope` по невнимательности нельзя, пока у места есть своё
+ * название и этот разбор рядом.
  */
-function objectScope(objectId: string): AuthScope {
-  return { kind: 'engineer', userId: WORKER_ACTOR_ID, objectIds: [objectId] };
+function objectScope(_objectId: string): AuthScope {
+  return { kind: 'engineer', userId: WORKER_ACTOR_ID };
 }
 
 function registryReconcileDeps(options: PipelineJobsOptions): RegistryReconcileDeps {
@@ -1938,6 +1943,20 @@ function segmentationDeps(options: PipelineJobsOptions): SegmentationDeps {
     // правами пользователя было бы подлогом. Запись идемпотентна и не трогает
     // уже определённый месяц — условие живёт в самом операторе.
     fillWorkPeriod: async (revisionId, period) => fillWorkPeriodIfEmpty(db, revisionId, period),
+
+    // Исполнитель — по тем же основаниям без области: он прочитан из акта, а
+    // не назван человеком. Условия «заменяется только подставленное» и «пока
+    // комплект не подан и не в папке» живут в самих операторах.
+    replaceAssumedContractor: async (revisionId, contractorId) =>
+      replaceAssumedContractor(db, revisionId, contractorId),
+
+    rememberContractorRaw: async (revisionId, raw) => rememberContractorRaw(db, revisionId, raw),
+
+    listObjectContractors: async (revisionId) => {
+      const scope = await scopeOf(revisionId);
+      const revision = await findRevisionForFiles(db, scope, revisionId);
+      return revision === null ? [] : listObjectContractorParties(db, revision.objectId);
+    },
 
     saveFieldValues: async (input) => saveFieldValues(db, await scopeOf(input.revisionId), input),
 

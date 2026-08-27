@@ -19,6 +19,7 @@ import {
   DEFAULT_PAGE_LIMIT,
   MAX_PAGE_LIMIT,
   periodSchema,
+  processingStageSchema,
   reconciliationExtraDocumentSchema,
   reconciliationGroupSchema,
   reconciliationRowSchema,
@@ -108,6 +109,34 @@ export const sectionCountsSchema = z.array(
   z.object({ sectionCode: sectionCodeSchema, works: z.int().min(0) }),
 );
 
+/**
+ * Состояние конвейера по комплектам страницы списка.
+ *
+ * Идентификаторы приходят строкой через запятую, а не массивом: это `GET`, и
+ * повторяющийся ключ (`?workIds=a&workIds=b`) разные клиенты кодируют
+ * по-разному. Ограничение сверху — `MAX_PAGE_LIMIT`: спрашивать про больше, чем
+ * помещается на странице, незачем, а без потолка запрос стал бы способом
+ * заказать произвольно тяжёлый агрегат.
+ */
+export const workPipelineQuerySchema = z.object({
+  workIds: z
+    .string()
+    .min(1)
+    .transform((value) => value.split(',').map((part) => part.trim()))
+    .pipe(z.array(uuidSchema).min(1).max(MAX_PAGE_LIMIT)),
+});
+
+export const workPipelineSchema = z.array(
+  z.object({
+    workId: uuidSchema,
+    revisionId: uuidSchema,
+    stage: processingStageSchema,
+    queued: z.int().min(0),
+    running: z.int().min(0),
+    dead: z.int().min(0),
+  }),
+);
+
 export const workIdParamSchema = z.object({ workId: uuidSchema });
 
 /**
@@ -168,7 +197,13 @@ export const workListSchema = z.array(workSchema);
  * его задавать нельзя вовсе: исполнитель берётся из его организации, а поле в
  * теле было бы приглашением завести работу от чужого имени. Генподрядчику,
  * наоборот, оно необходимо — субподрядчики учётных записей, как правило, не
- * имеют, и ПТО собирает их комплекты само. Разбор — в `resolveActingContractor`.
+ * имеют, и ПТО собирает их комплекты само.
+ *
+ * Проверяющему поле оставлено, но с S37 оно НЕОБЯЗАТЕЛЬНО и на экране не
+ * показывается: без него исполнитель выводится из карточки объекта и метится
+ * признаком «подставлен порталом». Схему при этом не сузили — человек, который
+ * знает исполнителя, вправе назвать его, и такое значение признаком не метится.
+ * Разбор — в `resolveActingContractor`.
  */
 export const createWorkBodySchema = z.object({
   objectId: uuidSchema,

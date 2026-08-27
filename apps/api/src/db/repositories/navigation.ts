@@ -80,6 +80,7 @@ import {
   eq,
   gte,
   ilike,
+  inArray,
   isNotNull,
   isNull,
   lte,
@@ -91,6 +92,7 @@ import {
 import { z } from 'zod';
 import { registries, registryItems, submissionRevisions, works } from '@id/db';
 import type {
+  ProcessingStage,
   Registry,
   RegistryItem,
   RegistryStatus,
@@ -112,7 +114,7 @@ import {
 import { withScope, type ScopeTarget } from '../scoped.js';
 import { appendAudit, type AuditActor } from './audit.js';
 import { findConstructionObject, objectVisibility, visibleWhere } from './catalog.js';
-import { appendRevisionEvent } from './jobs.js';
+import { appendRevisionEvent, summarizeRevisionStages } from './jobs.js';
 import { purgeRegistryTail, purgeRevisionEntirely } from './purge.js';
 import type { Database } from './users.js';
 
@@ -264,11 +266,25 @@ export interface ActingContractor {
   readonly managedByContractorId: string;
   /** Заведено ли от чужого имени — попадает в аудит. */
   readonly onBehalfOf: boolean;
+  /**
+   * Исполнитель ВЫВЕДЕН порталом, а не назван человеком (S37).
+   *
+   * Поднимается только у проверяющих: у подрядчика и генподрядчика организация
+   * есть, и подставлять нечего.
+   */
+  readonly assumed: boolean;
 }
 
 export function resolveActingContractor(
   scope: AuthScope,
   requested: string | null | undefined,
+  /**
+   * Кого портал подставит проверяющему, если тот исполнителя не назвал.
+   *
+   * Приходит из карточки объекта (`deriveObjectContractor`), а не выдумывается
+   * здесь: функция чистая, и ходить в базу ей нечем.
+   */
+  derived?: string | null,
 ): ActingContractor {
   if (scope.kind === 'contractor') {
     if (requested !== undefined && requested !== null && requested !== scope.contractorId) {
@@ -281,6 +297,7 @@ export function resolveActingContractor(
       contractorId: scope.contractorId,
       managedByContractorId: scope.contractorId,
       onBehalfOf: false,
+      assumed: false,
     };
   }
 
@@ -290,26 +307,93 @@ export function resolveActingContractor(
       contractorId,
       managedByContractorId: scope.contractorId,
       onBehalfOf: contractorId !== scope.contractorId,
+      assumed: false,
     };
   }
 
-  // Проверяющий (инженер, руководитель, администратор) организации не имеет, и
-  // придумать её здесь нечем: `managed_by_contractor_id` ссылается на
-  // `counterparties`, а область видимости у него объектная. Поэтому исполнитель
-  // ОБЯЗАН быть назван, и он же становится ведущей организацией — иначе
-  // подрядчик не смог бы потом дозагрузить в этот комплект исправленную версию,
-  // то есть портал завёл бы ему комплект, в который он не может писать.
-  if (requested === undefined || requested === null) {
-    throw badRequest(
-      'Укажите организацию-исполнителя: у вашей области видимости своей организации нет.',
-      { logDetail: `создание комплекта без contractorId при области ${scope.kind}` },
+  /**
+   * Проверяющий (инженер, руководитель, администратор) своей организации не
+   * имеет, и до S37 портал ТРЕБОВАЛ назвать исполнителя. Заказчик указал на
+   * это прямо: в момент загрузки файла человек исполнителя не знает — файл ещё
+   * никто не читал. Ровно та же ошибка, которую S30 уже исправил для месяца.
+   *
+   * Названный исполнитель по-прежнему принимается и признаком не помечается:
+   * человек, который знает, вправе сказать.
+   */
+  if (requested !== undefined && requested !== null) {
+    return {
+      contractorId: requested,
+      managedByContractorId: requested,
+      onBehalfOf: true,
+      assumed: false,
+    };
+  }
+
+  /**
+   * Не назвал — портал ВЫВОДИТ исполнителя из карточки объекта и помечает
+   * вывод признаком.
+   *
+   * Вывод, а не выдумка: генподрядчик объекта и закреплённые за ним подрядчики
+   * — записи, которые кто-то сделал, а не догадка портала. Признак `assumed`
+   * оставляет значение отличимым от прочитанного и разрешает конвейеру
+   * заменить его организацией из акта.
+   *
+   * Если вывести не из чего — отказ, а не догадка. Текст называет действие,
+   * которое исправляет положение, а не запрещённое состояние.
+   */
+  if (derived === undefined || derived === null) {
+    throw unprocessable(
+      [
+        {
+          pointer: '/contractorId',
+          code: 'contractor_undetermined',
+          message:
+            'Портал не может определить исполнителя: на объекте не назван генподрядчик и ' +
+            'закреплён не один подрядчик. Закрепите нужного в карточке объекта или назовите ' +
+            'исполнителя явно.',
+        },
+      ],
+      'Исполнителя не из чего вывести.',
     );
   }
+
   return {
-    contractorId: requested,
-    managedByContractorId: requested,
+    contractorId: derived,
+    managedByContractorId: derived,
     onBehalfOf: true,
+    assumed: true,
   };
+}
+
+/**
+ * Кого портал подставит исполнителем на этом объекте.
+ *
+ * Порядок предпочтения выражает, кто за объект отвечает: сначала генподрядчик
+ * из карточки, потом единственный закреплённый подрядчик. Оба обязаны быть
+ * АКТИВНЫ в `object_contractors` — иначе запись не прошла бы составной ключ
+ * `works_contractor_fk`, и отказ пришёл бы от базы вместо внятного объяснения.
+ *
+ * Неоднозначность (генподрядчика нет, подрядчиков несколько) даёт `null`:
+ * выбрать одного из нескольких — это уже догадка, а её портал не делает.
+ */
+async function deriveObjectContractor(db: Database, objectId: string): Promise<string | null> {
+  const result = await db.execute<{ contractor_id: string; is_general: boolean }>(sql`
+    select oc.contractor_id::text as contractor_id,
+           (oc.contractor_id = o.general_contractor_id) as is_general
+      from object_contractors oc
+      join construction_objects o on o.id = oc.object_id
+     where oc.object_id = ${objectId}::uuid and oc.is_active
+  `);
+
+  const rows = result.rows;
+  // Решение принимается в коде, а не в SQL, и это не вкусовщина: «единственный
+  // подрядчик» — условие на МОЩНОСТЬ множества, и выразить его подзапросом,
+  // возвращающим строку, можно только через `having`, где выбранная колонка
+  // обязана быть агрегатом. Такая запись читается как головоломка, а решает
+  // задачу в одну строку.
+  const general = rows.find((row) => row.is_general);
+  if (general !== undefined) return general.contractor_id;
+  return rows.length === 1 ? (rows[0]?.contractor_id ?? null) : null;
 }
 
 /**
@@ -378,6 +462,8 @@ const WORK_SELECTION = {
   objectId: works.objectId,
   sectionCode: works.sectionCode,
   period: date(works.period, 'period_date'),
+  contractorAssumed: works.contractorAssumed,
+  contractorRaw: works.contractorRaw,
   contractorId: works.contractorId,
   managedByContractorId: works.managedByContractorId,
   kind: works.kind,
@@ -547,6 +633,193 @@ export async function countWorksBySection(
     .orderBy(asc(works.sectionCode));
 }
 
+/**
+ * Состояние конвейера по комплектам ОДНОЙ страницы списка.
+ *
+ * ## Почему отдельный маршрут, а не поле `Work`
+ *
+ * `WORK_SELECTION` используется в `.returning(...)` на вставке комплекта, куда
+ * соединение не поставить, — пришлось бы разделить выборку надвое и завести ту
+ * самую вторую копию отбора, против которой написан докстринг
+ * `WorkFilterParams`. Плюс сводка меняется каждые секунды, а список — раз в
+ * заведение: сложив их, опрос тянул бы весь keyset-список с курсорами.
+ *
+ * ## Почему идентификаторы приходят от клиента
+ *
+ * Отбирать заново значило бы отвечать про другую страницу: список листается
+ * курсором, и между двумя запросами состав страницы мог измениться. Клиент
+ * присылает то, что УЖЕ отрисовал, и расхождение исключено по построению.
+ *
+ * Область при этом применяется здесь, а не подразумевается: присланный
+ * идентификатор чужого комплекта в ответ не попадёт, и строка на экране
+ * останется без данных — это честнее, чем «не запускалось», потому что о
+ * чужом комплекте портал не утверждает ничего.
+ */
+export interface WorkPipelineSummary {
+  readonly workId: string;
+  readonly revisionId: string;
+  readonly stage: ProcessingStage;
+  readonly queued: number;
+  readonly running: number;
+  readonly dead: number;
+}
+
+export async function summarizeWorkPipeline(
+  db: Database,
+  scope: AuthScope,
+  objectId: string,
+  workIds: readonly string[],
+): Promise<readonly WorkPipelineSummary[]> {
+  await requireVisibleObject(db, scope, objectId);
+  if (workIds.length === 0) return [];
+
+  const rows = await db
+    .select({ id: works.id, currentRevisionId: works.currentRevisionId })
+    .from(works)
+    .where(
+      withScope(
+        scope,
+        WORK_SCOPE,
+        allOf(eq(works.objectId, objectId), inArray(works.id, [...workIds])),
+      ),
+    );
+
+  // Комплект без ревизии в ответ не попадает: конвейер адресуется ревизией, и
+  // «стадия комплекта, которого некому обрабатывать» — величина без предмета.
+  const byRevision = new Map<string, string>();
+  for (const row of rows) {
+    if (row.currentRevisionId !== null) byRevision.set(row.currentRevisionId, row.id);
+  }
+
+  const summaries = await summarizeRevisionStages(db, [...byRevision.keys()]);
+  return summaries.flatMap((summary) => {
+    const workId = byRevision.get(summary.revisionId);
+    return workId === undefined ? [] : [{ workId, ...summary }];
+  });
+}
+
+/**
+ * Записать исполнителя, прочитанного из акта (S37).
+ *
+ * Пара к `fillWorkPeriodIfEmpty`: тот же вызывающий (конвейер, задача
+ * `doc.extract_fields`), та же область — без неё, потому что пишет не человек,
+ * — и та же идемпотентность условием В САМОМ операторе, а не договорённостью с
+ * вызывающим.
+ *
+ * ## Что именно ограничивает замену
+ *
+ * `contractor_assumed` — главное условие: заменяется только ПОДСТАВЛЕННОЕ
+ * порталом значение. Названное человеком портал не переписывает никогда, даже
+ * если акт говорит другое, — расхождение в этом случае выносит замечанием
+ * `AOSR.HDR.023`, и решает человек.
+ *
+ * `registry_id IS NULL` и «все ревизии черновые» повторяют то, что и так держит
+ * БД: `registry_items` — снимок момента передачи, а
+ * `submission_revisions_content_immutable` (0008) запирает `contractor_id`
+ * ревизии вне черновика. Проверка здесь нужна не вместо них, а чтобы отказ
+ * пришёл понятным «нечего менять», а не отказом триггера посреди задачи.
+ *
+ * ## Почему нужна отсрочка ключей
+ *
+ * `contractor_id` денормализован вниз по дереву четырьмя составными ключами, и
+ * все они `NOT DEFERRABLE` до миграции 0054. Порядка, в котором `UPDATE`
+ * проходит, не существует: `works` первым — отказ от ревизий, ревизии первыми —
+ * отказ от `works`. `SET CONSTRAINTS ... DEFERRED` переносит проверку на
+ * коммит, НЕ отменяя её: оборванная ссылка внутри транзакции всё равно не
+ * доживёт до конца. Ключи перечислены поимённо, а не `ALL`: отсрочить то, о чём
+ * никто не думал, — это уже другое решение.
+ *
+ * Возвращает `true`, если исполнитель был записан именно этим вызовом.
+ */
+export async function replaceAssumedContractor(
+  db: Database,
+  revisionId: string,
+  contractorId: string,
+): Promise<boolean> {
+  return db.transaction(async (tx) => {
+    await tx.execute(sql`
+      set constraints
+        submission_revisions_scope_fk,
+        logical_documents_scope_fk,
+        findings_scope_fk,
+        submission_archives_scope_fk
+        deferred
+    `);
+
+    // Комплект находится подзапросом, а не вторым чтением: между чтением и
+    // записью ревизию можно удалить, и исполнитель уехал бы в строку, которой
+    // больше нет предмета.
+    const updated = await tx.execute<{ id: string }>(sql`
+      update works w
+         set contractor_id = ${contractorId}::uuid,
+             contractor_assumed = false,
+             contractor_raw = null,
+             updated_at = now()
+       where w.contractor_assumed
+         and w.kind = 'complect'
+         and w.registry_id is null
+         and w.id = (select r.work_id from submission_revisions r where r.id = ${revisionId}::uuid)
+         and not exists (
+           select 1 from submission_revisions r
+            where r.work_id = w.id and r.status <> 'draft'
+         )
+      returning w.id
+    `);
+
+    const workId = updated.rows[0]?.id;
+    if (workId === undefined) return false;
+
+    // Денормализованные копии — тем же значением и в той же транзакции. Каждая
+    // из них закрыта своим составным ключом, и вне отсрочки ни один порядок
+    // этих трёх операторов не прошёл бы.
+    await tx.execute(sql`
+      update submission_revisions set contractor_id = ${contractorId}::uuid
+       where work_id = ${workId}::uuid
+    `);
+    await tx.execute(sql`
+      update logical_documents set contractor_id = ${contractorId}::uuid
+       where revision_id in (select id from submission_revisions where work_id = ${workId}::uuid)
+    `);
+    await tx.execute(sql`
+      update findings set contractor_id = ${contractorId}::uuid
+       where revision_id in (select id from submission_revisions where work_id = ${workId}::uuid)
+    `);
+    await tx.execute(sql`
+      update submission_archives set contractor_id = ${contractorId}::uuid
+       where revision_id in (select id from submission_revisions where work_id = ${workId}::uuid)
+    `);
+
+    return true;
+  });
+}
+
+/**
+ * Запомнить наименование исполнителя, которое не удалось сопоставить.
+ *
+ * Не отказ и не пустота: организация ПРОЧИТАНА, но закрепить её за объектом
+ * может только человек — автозакрепление было бы утверждением о стройке,
+ * которого никто не делал. Экран печатает это наименование вместо «После OCR»,
+ * то есть говорит, чего именно не хватает.
+ *
+ * Условие то же, что у замены: подставленное значение ещё не заменено человеком.
+ */
+export async function rememberContractorRaw(
+  db: Database,
+  revisionId: string,
+  raw: string,
+): Promise<boolean> {
+  const updated = await db.execute<{ id: string }>(sql`
+    update works w
+       set contractor_raw = ${raw}, updated_at = now()
+     where w.contractor_assumed
+       and w.kind = 'complect'
+       and w.id = (select r.work_id from submission_revisions r where r.id = ${revisionId}::uuid)
+       and w.contractor_raw is distinct from ${raw}
+    returning w.id
+  `);
+  return updated.rows.length > 0;
+}
+
 export async function findWork(
   db: Database,
   scope: AuthScope,
@@ -601,8 +874,22 @@ export async function createWork(
   input: CreateWorkInput,
   actor: AuditActor,
 ): Promise<CreatedWork> {
-  const acting = resolveActingContractor(scope, input.contractorId);
+  // Объект проверяется ПЕРВЫМ, и порядок значим: «такого объекта нет» — ответ
+  // сильнее, чем «исполнителя не из чего вывести». Иначе несуществующий объект
+  // получал бы 422 про закрепление подрядчиков, то есть подтверждал бы, что
+  // объект существует и дело только в его настройке.
   await requireVisibleObject(db, scope, input.objectId);
+
+  const acting = resolveActingContractor(
+    scope,
+    input.contractorId,
+    // Вывод считается ТОЛЬКО когда исполнитель не назван: лишний запрос на
+    // каждое заведение комплекта не нужен, а порядок предпочтения от него не
+    // зависит.
+    input.contractorId === undefined || input.contractorId === null
+      ? await deriveObjectContractor(db, input.objectId)
+      : null,
+  );
 
   return guardNavigation(() =>
     db.transaction(async (tx) => {
@@ -613,6 +900,7 @@ export async function createWork(
           sectionCode: input.sectionCode,
           period: input.period ?? null,
           contractorId: acting.contractorId,
+          contractorAssumed: acting.assumed,
           managedByContractorId: acting.managedByContractorId,
           kind: 'complect',
           title: input.title,
@@ -1792,7 +2080,15 @@ export async function attachRegistryFile(
   actor: AuditActor,
 ): Promise<CreatedWork> {
   const registry = await requireDraftRegistry(db, scope, registryId);
-  const acting = resolveActingContractor(scope, null);
+  // Администратору, ведущему папку за ПТО, исполнителя тоже выводит карточка
+  // объекта: своей организации у него нет, а описи без исполнителя не бывает.
+  // Признак `assumed` при этом НЕ ставится — файл описи не акт, и заменять по
+  // распознаванию его исполнителя нечему (`works_contractor_assumed_chk`).
+  const acting = resolveActingContractor(
+    scope,
+    null,
+    await deriveObjectContractor(db, registry.objectId),
+  );
 
   return guardNavigation(() =>
     db.transaction(async (tx) => {

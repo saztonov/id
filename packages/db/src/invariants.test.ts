@@ -1321,3 +1321,120 @@ describe('сверка описи: ключи, вердикт и отсутст�
     expect(rows[0]?.verdict).toBe('clean');
   });
 });
+
+/**
+ * Отсрочка составных ключей области (0054) НЕ отменяет их.
+ *
+ * `DEFERRABLE INITIALLY IMMEDIATE` выглядит послаблением, и именно поэтому его
+ * надо проверять: без теста конструкция кажется рабочей независимо от того,
+ * проверяется что-нибудь на коммите или нет. Здесь три утверждения подряд.
+ *
+ * 1. Вне явной отсрочки поведение прежнее: одиночный `UPDATE` отвергается
+ *    немедленно. То есть `INITIALLY IMMEDIATE` не превратился в `DEFERRED` для
+ *    всех остальных путей портала.
+ * 2. Внутри отсрочки промежуточное состояние допускается — ради этого замена
+ *    исполнителя и стала возможна.
+ * 3. Оборванная ссылка НЕ доживает до конца: транзакция падает на COMMIT.
+ *    Это и есть доказательство, что инвариант жив.
+ */
+describe('отсроченные ключи области (0054)', () => {
+  const OTHER_ORG = id(90);
+
+  beforeAll(async () => {
+    await db.query(
+      `INSERT INTO counterparties (id, name, kind)
+         VALUES ('${OTHER_ORG}', 'ООО «Второй подрядчик»', 'contractor')
+       ON CONFLICT DO NOTHING`,
+    );
+    await db.query(
+      `INSERT INTO object_contractors (object_id, contractor_id)
+         VALUES ('${ID.object}', '${OTHER_ORG}') ON CONFLICT DO NOTHING`,
+    );
+  });
+
+  it('без отсрочки одиночная правка исполнителя отвергается сразу', async () => {
+    await expect(
+      db.query(`UPDATE works SET contractor_id = '${OTHER_ORG}' WHERE id = '${ID.work}'`),
+    ).rejects.toThrow();
+  });
+
+  it('в отсрочке промежуточное состояние проходит, а оборванная ссылка падает на COMMIT', async () => {
+    await db.query('BEGIN');
+    await db.query(`
+      SET CONSTRAINTS
+        submission_revisions_scope_fk,
+        logical_documents_scope_fk,
+        findings_scope_fk,
+        submission_archives_scope_fk
+        DEFERRED
+    `);
+
+    // Промежуточное состояние: у комплекта новый исполнитель, у ревизий — ещё
+    // прежний. Вне отсрочки этот оператор не прошёл бы вовсе.
+    await db.query(`UPDATE works SET contractor_id = '${OTHER_ORG}' WHERE id = '${ID.work}'`);
+
+    // Копии НЕ обновлены намеренно: проверяется, что коммит это заметит.
+    await expect(db.query('COMMIT')).rejects.toThrow();
+    await db.query('ROLLBACK');
+
+    const rows = await db.query<{ contractor_id: string }>(
+      `SELECT contractor_id FROM works WHERE id = '${ID.work}'`,
+    );
+    expect(rows[0]?.contractor_id).toBe(ID.contractor);
+  });
+
+  it('в отсрочке согласованная правка обеих сторон проходит целиком', async () => {
+    await db.query('BEGIN');
+    await db.query(`
+      SET CONSTRAINTS
+        submission_revisions_scope_fk,
+        logical_documents_scope_fk,
+        findings_scope_fk,
+        submission_archives_scope_fk
+        DEFERRED
+    `);
+    await db.query(`UPDATE works SET contractor_id = '${OTHER_ORG}' WHERE id = '${ID.work}'`);
+    await db.query(
+      `UPDATE submission_revisions SET contractor_id = '${OTHER_ORG}' WHERE work_id = '${ID.work}'`,
+    );
+    await db.query(
+      `UPDATE logical_documents SET contractor_id = '${OTHER_ORG}'
+        WHERE revision_id IN (SELECT id FROM submission_revisions WHERE work_id = '${ID.work}')`,
+    );
+    await db.query(
+      `UPDATE findings SET contractor_id = '${OTHER_ORG}'
+        WHERE revision_id IN (SELECT id FROM submission_revisions WHERE work_id = '${ID.work}')`,
+    );
+    await db.query('COMMIT');
+
+    const rows = await db.query<{ contractor_id: string }>(
+      `SELECT contractor_id FROM works WHERE id = '${ID.work}'`,
+    );
+    expect(rows[0]?.contractor_id).toBe(OTHER_ORG);
+
+    // Возврат: соседние наборы этого файла читают ту же фикстуру.
+    await db.query('BEGIN');
+    await db.query(`
+      SET CONSTRAINTS
+        submission_revisions_scope_fk,
+        logical_documents_scope_fk,
+        findings_scope_fk,
+        submission_archives_scope_fk
+        DEFERRED
+    `);
+    await db.query(`UPDATE works SET contractor_id = '${ID.contractor}' WHERE id = '${ID.work}'`);
+    await db.query(
+      `UPDATE submission_revisions SET contractor_id = '${ID.contractor}'
+        WHERE work_id = '${ID.work}'`,
+    );
+    await db.query(
+      `UPDATE logical_documents SET contractor_id = '${ID.contractor}'
+        WHERE revision_id IN (SELECT id FROM submission_revisions WHERE work_id = '${ID.work}')`,
+    );
+    await db.query(
+      `UPDATE findings SET contractor_id = '${ID.contractor}'
+        WHERE revision_id IN (SELECT id FROM submission_revisions WHERE work_id = '${ID.work}')`,
+    );
+    await db.query('COMMIT');
+  });
+});

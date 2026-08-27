@@ -514,6 +514,65 @@ export function normalizeOrgName(value: string): string {
     .trim();
 }
 
+/**
+ * Организация из документа, найденная в справочнике контрагентов.
+ *
+ * Порядок сравнения выражает НАДЁЖНОСТЬ признака, а не удобство: ИНН и ОГРН —
+ * идентификаторы с контрольной суммой, наименование сравнивается нормализацией
+ * и совпадает у однофамильцев («ООО Стройсервис» в трёх регионах). Поэтому
+ * наименование стоит последним и решает только там, где номеров нет.
+ *
+ * ## Почему это отдельная функция
+ *
+ * До S37 тройка жила внутри `AOSR.HDR.023` (`aosr.ts`), где по ней выносится
+ * замечание «контрагента из шапки акта нет в справочнике». В S37 тем же
+ * сопоставлением конвейер стал ЗАПОЛНЯТЬ исполнителя комплекта. Второй
+ * экземпляр разошёлся бы с первым молча — правило говорило бы «нашли», а
+ * конвейер «не нашли», — и объяснить расхождение было бы нечем.
+ *
+ * `null` означает «не нашли», а не «не искали»: вызывающий отличает их сам по
+ * тому, была ли у него хоть одна непустая часть тройки.
+ */
+export interface CounterpartyTriple {
+  readonly name?: string | null | undefined;
+  readonly inn?: string | null | undefined;
+  readonly ogrn?: string | null | undefined;
+}
+
+interface MatchableParty {
+  readonly name: string;
+  readonly inn: string | null;
+  readonly ogrn: string | null;
+}
+
+export function matchCounterparty<T extends MatchableParty>(
+  parties: readonly T[],
+  triple: CounterpartyTriple,
+): T | null {
+  /** Пустое значение и отсутствующее здесь одно и то же: искать не по чему. */
+  const given = (value: string | null | undefined): string | null =>
+    value === null || value === undefined || value.trim() === '' ? null : value;
+
+  const inn = given(triple.inn);
+  const ogrn = given(triple.ogrn);
+  const name = given(triple.name);
+
+  const byInn =
+    inn === null
+      ? undefined
+      : parties.find((party) => party.inn !== null && digitsOf(party.inn) === digitsOf(inn));
+  const byOgrn =
+    ogrn === null
+      ? undefined
+      : parties.find((party) => party.ogrn !== null && digitsOf(party.ogrn) === digitsOf(ogrn));
+  const byName =
+    name === null
+      ? undefined
+      : parties.find((party) => normalizeOrgName(party.name) === normalizeOrgName(name));
+
+  return byInn ?? byOgrn ?? byName ?? null;
+}
+
 /** Нормализация марки продукции: `A240C` ↔ `А240С` (§9.4, `MILL`). */
 export function normalizeMark(value: string): string {
   return foldHomoglyphs(value).replace(/[\s.-]+/gu, '');

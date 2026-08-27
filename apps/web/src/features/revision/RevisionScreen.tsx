@@ -30,7 +30,7 @@ import { useSession } from '../../app/session.js';
 import { ErrorState, LoadingState, ScreenHeading } from '../../shared/ui.js';
 import { WORK_KIND_LABELS, WORKFLOW_STATUS_LABELS, labelOf } from '../../shared/labels.js';
 import { Link, useNavigate, useQueryParam } from '../../app/router.js';
-import { periodLabel } from '../ids/ObjectScreen.js';
+import { periodLabel } from '../ids/pipelineState.js';
 import { FilesTab } from '../files/FilesTab.js';
 import { MarkupScreen } from '../markup/MarkupScreen.js';
 import { ChecksTab } from '../checks/ChecksTab.js';

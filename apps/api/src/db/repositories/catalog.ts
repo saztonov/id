@@ -1579,6 +1579,38 @@ export async function listObjectContractors(
     .orderBy(asc(counterparties.name));
 }
 
+/**
+ * Организации, закреплённые за объектом, — с реквизитами для сопоставления.
+ *
+ * Отдельно от `listObjectContractors`, и по двум причинам сразу. Во-первых,
+ * здесь нужен ОГРН: сопоставление организации из акта идёт тройкой
+ * ИНН → ОГРН → наименование (`matchCounterparty`), и без третьего признака
+ * половина актов корпуса не сходится. Во-вторых, здесь нет области видимости:
+ * зовёт конвейер, у которого пользователя нет, и проверять его правами
+ * человека было бы подлогом — исполнитель не решение пользователя, а
+ * прочитанный факт (то же основание, что у `fillWorkPeriodIfEmpty`).
+ *
+ * Отбираются только АКТИВНЫЕ закрепления: неактивное не пройдёт составной ключ
+ * `works_contractor_fk`, и подставить его значило бы получить отказ базы вместо
+ * записи.
+ */
+export async function listObjectContractorParties(
+  db: Database,
+  objectId: string,
+): Promise<readonly { id: string; name: string; inn: string | null; ogrn: string | null }[]> {
+  return db
+    .select({
+      id: counterparties.id,
+      name: counterparties.name,
+      inn: counterparties.inn,
+      ogrn: counterparties.ogrn,
+    })
+    .from(objectContractors)
+    .innerJoin(counterparties, eq(counterparties.id, objectContractors.contractorId))
+    .where(and(eq(objectContractors.objectId, objectId), eq(objectContractors.isActive, true)))
+    .orderBy(asc(counterparties.name));
+}
+
 export async function setObjectContractor(
   db: Database,
   scope: AuthScope,

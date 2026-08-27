@@ -83,7 +83,7 @@ import {
   type SegmentationInput,
 } from '@id/api';
 import { isAnalysisAnchor } from '@id/doc-types';
-import { AOSR_FIELDS, periodOfEarliestAct } from '@id/rules';
+import { AOSR_FIELDS, matchCounterparty, periodOfEarliestAct } from '@id/rules';
 
 /**
  * Версия сегментатора и экстрактора.
@@ -179,6 +179,20 @@ export interface SegmentationDeps {
    * Возвращает `true`, если месяц записан именно этим вызовом.
    */
   readonly fillWorkPeriod: (revisionId: string, period: string) => Promise<boolean>;
+  /**
+   * Заменить ПОДСТАВЛЕННОГО порталом исполнителя организацией из акта (S37).
+   *
+   * Пара к `fillWorkPeriod` и по той же причине порт: обработчики этого файла
+   * написаны на портах целиком. Названного человеком исполнителя не трогает —
+   * условие живёт в самом операторе, а не в вызывающем.
+   */
+  readonly replaceAssumedContractor: (revisionId: string, contractorId: string) => Promise<boolean>;
+  /** Запомнить наименование из акта, которого нет в справочнике объекта. */
+  readonly rememberContractorRaw: (revisionId: string, raw: string) => Promise<boolean>;
+  /** Организации, закреплённые за объектом ревизии: с ними и сопоставляется акт. */
+  readonly listObjectContractors: (
+    revisionId: string,
+  ) => Promise<readonly { id: string; name: string; inn: string | null; ogrn: string | null }[]>;
   /** Вход сегментации: страницы ревизии, текст последнего успешного прогона. */
   loadPages(revisionId: string): Promise<SegmentationInput>;
 
@@ -915,6 +929,12 @@ export function createExtractFieldsHandler(
     let llmProblems = 0;
     /** Даты актов: по самой ранней портал выведет месяц комплекта (S30). */
     const actDates: (string | null)[] = [];
+    /** Реквизиты исполнителя из акта: по ним портал заменит подставленного (S37). */
+    let contractorTriple: {
+      name: string | null;
+      inn: string | null;
+      ogrn: string | null;
+    } | null = null;
     for (const document of targets) {
       const pageIds = pagesOfDocument.get(document.id) ?? [];
       const pages = pageIds
@@ -968,6 +988,23 @@ export function createExtractFieldsHandler(
       if (isAnalysisAnchor(document.docTypeCode)) {
         const actDate = fields.find((value) => value.fieldCode === AOSR_FIELDS.actDate);
         actDates.push(actDate?.valueDate ?? null);
+
+        // Тройка исполнителя берётся с ПЕРВОГО акта, у которого она непуста.
+        // Актов в комплекте бывает несколько, но работу выполняет одна
+        // организация: выбирать из расходящихся троек значило бы гадать, а
+        // расхождение и без того выносит замечанием AOSR.HDR.023.
+        if (contractorTriple === null) {
+          const textOfField = (code: string): string | null =>
+            fields.find((value) => value.fieldCode === code)?.valueText ?? null;
+          const triple = {
+            name: textOfField(AOSR_FIELDS.contractorName),
+            inn: textOfField(AOSR_FIELDS.contractorInn),
+            ogrn: textOfField(AOSR_FIELDS.contractorOgrn),
+          };
+          if (triple.name !== null || triple.inn !== null || triple.ogrn !== null) {
+            contractorTriple = triple;
+          }
+        }
       }
 
       const outcome = await deps.saveFieldValues({
@@ -1018,6 +1055,62 @@ export function createExtractFieldsHandler(
         if (filled) {
           ctx.logger.info({ period }, 'месяц комплекта выведен по дате акта');
           await ctx.emit('work.period_resolved', { period });
+        }
+      } else if (actDates.length > 0) {
+        /**
+         * Разбор прошёл, а даты нет — и это НЕ то же самое, что «ещё не
+         * разбирали» (S37).
+         *
+         * Раньше здесь была тишина, и экран объекта в обоих случаях печатал
+         * «После OCR». Заказчик на это и указал: «комплект распознан, а месяц —
+         * После OCR». Числа в событии различают две причины пустоты: якорей
+         * нет вовсе или якоря есть, но дата ни на одном не прочиталась.
+         */
+        const dated = actDates.filter((value) => value !== null).length;
+        ctx.logger.info(
+          { anchors: actDates.length, dated },
+          'месяц комплекта не выведен: даты акта не распознаны',
+        );
+        await ctx.emit('work.period_unresolved', { anchors: actDates.length, dated });
+      }
+    }
+
+    /**
+     * Исполнитель комплекта выводится здесь же, рядом с месяцем (S37).
+     *
+     * Только при полном прогоне и по тем же основаниям: переизвлечение ОДНОГО
+     * документа не видит остальных актов комплекта.
+     *
+     * Отличие от месяца — в источнике: реквизиты исполнителя объявлены
+     * `extractor: 'llm'` (в шапке РД-11-02 ИНН напечатан у четырёх участников
+     * подряд, и шаблон взял бы первый попавшийся). Значит при выключенной
+     * ступени модели тройка не придёт, и признак «подставлен» останется. Это
+     * записано долгом честно, а не спрятано.
+     */
+    if (documentId === undefined && contractorTriple !== null) {
+      const parties = await deps.listObjectContractors(revisionId);
+      const matched = matchCounterparty(parties, contractorTriple);
+      if (matched === null) {
+        // Организация ПРОЧИТАНА, но за объектом не закреплена. Закрепляет
+        // человек: автозакрепление было бы утверждением о стройке, которого
+        // никто не делал. Портал запоминает прочитанное, чтобы экран сказал,
+        // чего именно не хватает.
+        const raw = contractorTriple.name;
+        if (raw !== null) {
+          const remembered = await deps.rememberContractorRaw(revisionId, raw);
+          if (remembered) {
+            ctx.logger.info(
+              { contractor: raw },
+              'исполнитель из акта не найден среди закреплённых за объектом',
+            );
+            await ctx.emit('work.contractor_unresolved', { reason: 'not_assigned' });
+          }
+        }
+      } else {
+        const replaced = await deps.replaceAssumedContractor(revisionId, matched.id);
+        if (replaced) {
+          ctx.logger.info({ contractorId: matched.id }, 'исполнитель комплекта выведен из акта');
+          await ctx.emit('work.contractor_resolved', { contractorId: matched.id });
         }
       }
     }
