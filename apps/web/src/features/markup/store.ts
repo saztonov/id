@@ -13,6 +13,14 @@
 import { create } from 'zustand';
 import type { BlockType } from '@id/contracts';
 import { EMPTY_FILTER, type BlockFilter } from './blocks.js';
+import {
+  DEFAULT_SIZES,
+  NARROW_WORKSPACE,
+  readColumnSizes,
+  writeColumnSizes,
+  type ColumnSizes,
+} from './workspaceLayout.js';
+import type { ZoomMode } from './zoom.js';
 
 /** Инструмент канвы. Рисование включается явно, иначе перетаскивание рамки и
  * рисование новой различались бы только тем, попал ли курсор в существующий
@@ -26,12 +34,31 @@ interface MarkupState {
   readonly draftType: BlockType;
   readonly selection: ReadonlySet<string>;
   readonly filter: BlockFilter;
+  /**
+   * Правило вычисления масштаба, а не само число.
+   *
+   * «По ширине» обязано пережить и смену страницы (у соседней другие
+   * пропорции), и перетаскивание разделителя. Число, посчитанное однажды,
+   * перестало бы соответствовать своему имени при первом же изменении ширины
+   * колонки — кнопка нажата, а страница по ширине уже не влезает.
+   */
+  readonly zoomMode: ZoomMode;
+  /** Значение РУЧНОГО режима; в двух других не читается. */
   readonly zoom: number;
+  /** Доли четырёх колонок рабочей области; переживают уход на другую вкладку. */
+  readonly columnSizes: ColumnSizes;
+  /** Свёрнута ли колонка распознанного текста. */
+  readonly textCollapsed: boolean;
 
   goToPage: (workingPageIndex: number) => void;
   setTool: (tool: CanvasTool) => void;
   setDraftType: (blockType: BlockType) => void;
-  setZoom: (zoom: number) => void;
+  setZoomMode: (mode: ZoomMode) => void;
+  /** Ручной масштаб: сам переводит режим в `manual`. */
+  setManualZoom: (zoom: number) => void;
+  setColumnSizes: (sizes: ColumnSizes) => void;
+  toggleTextColumn: () => void;
+  resetColumns: () => void;
   setFilter: (patch: Partial<BlockFilter>) => void;
 
   /** Одиночный выбор: заменяет выделение. */
@@ -44,7 +71,24 @@ interface MarkupState {
   retainExisting: (existingIds: readonly string[]) => void;
 }
 
-export const ZOOM_STEPS = [0.5, 0.75, 1, 1.5, 2, 3] as const;
+/**
+ * Стартовое состояние колонки текста.
+ *
+ * На узком экране три живые колонки полезнее четырёх огрызков, поэтому текст
+ * стартует свёрнутым — но ТОЛЬКО пока человек ничего не выбрал сам: как только
+ * он развернёт текст и подвинет разделитель, выбор запомнится, и порог больше
+ * ни на что не влияет.
+ */
+function initialTextCollapsed(hasStoredSizes: boolean): boolean {
+  if (hasStoredSizes) return false;
+  try {
+    return window.innerWidth < NARROW_WORKSPACE;
+  } catch {
+    return false;
+  }
+}
+
+const storedSizes = readColumnSizes();
 
 export const useMarkupStore = create<MarkupState>((set) => ({
   workingPageIndex: 0,
@@ -52,7 +96,10 @@ export const useMarkupStore = create<MarkupState>((set) => ({
   draftType: 'text',
   selection: new Set<string>(),
   filter: EMPTY_FILTER,
+  zoomMode: 'fit-page',
   zoom: 1,
+  columnSizes: storedSizes ?? DEFAULT_SIZES,
+  textCollapsed: initialTextCollapsed(storedSizes !== null),
 
   goToPage: (workingPageIndex) => {
     // Выделение снимается при переходе: применение типа «к выделенным» иначе
@@ -61,7 +108,19 @@ export const useMarkupStore = create<MarkupState>((set) => ({
   },
   setTool: (tool) => set({ tool }),
   setDraftType: (draftType) => set({ draftType }),
-  setZoom: (zoom) => set({ zoom }),
+  setZoomMode: (zoomMode) => set({ zoomMode }),
+  setManualZoom: (zoom) => set({ zoom, zoomMode: 'manual' }),
+  // Запись в хранилище браузера — здесь, а не в компоненте: действие одно, и
+  // второе место, где его повторяют, разошлось бы с первым на первой же правке.
+  setColumnSizes: (columnSizes) => {
+    writeColumnSizes(columnSizes);
+    set({ columnSizes });
+  },
+  toggleTextColumn: () => set((state) => ({ textCollapsed: !state.textCollapsed })),
+  resetColumns: () => {
+    writeColumnSizes(DEFAULT_SIZES);
+    set({ columnSizes: DEFAULT_SIZES, textCollapsed: false });
+  },
   setFilter: (patch) => set((state) => ({ filter: { ...state.filter, ...patch } })),
 
   select: (blockId) => set({ selection: new Set([blockId]) }),

@@ -18,6 +18,15 @@ import { Badge, Tooltip } from 'antd';
 import type { AttentionFlag } from '@id/contracts';
 import type { BundlePage } from '../../api/types.js';
 import { ATTENTION_FLAG_LABELS } from '../../shared/labels.js';
+import { TONE_STYLES } from '../../shared/tags.js';
+
+/** Форма плашки на карточке; цвет приходит из палитры тонов, а не пишется по месту. */
+const PILL = {
+  fontSize: 11,
+  padding: '1px 6px',
+  borderRadius: 10,
+  border: '1px solid',
+} as const;
 
 /**
  * Бейдж типа страницы на карточке.
@@ -100,6 +109,39 @@ export function ThumbnailStrip(props: ThumbnailStripProps): ReactNode {
                 <div style={{ fontSize: 12, color: '#595959', overflowWrap: 'anywhere' }}>
                   {page.fileName}, лист {page.filePageIndex + 1}
                 </div>
+                {page.contentRotation !== 0 && (
+                  /*
+                    Разворот СОДЕРЖИМОГО — вторая величина, и слова у неё свои.
+
+                    Строка выше говорит «поворот 90°» про `/Rotate` из файла: он
+                    уже применён и к размерам, и к вьюпорту, и портал его только
+                    читает. Здесь — про скан, легший на лист боком при нулевом
+                    `/Rotate`: он не применён никем, правится человеком и уезжает
+                    в распознавание. Одинаковая подпись сделала бы их
+                    неразличимыми ровно там, где различать обязательно.
+
+                    Источник подписан словом, а не цветом, — по тому же правилу,
+                    что и ручная метка типа ниже.
+                  */
+                  <div
+                    data-testid={`content-rotation-${page.workingPageIndex}`}
+                    style={{ marginTop: 4, display: 'flex', flexWrap: 'wrap', gap: 4 }}
+                  >
+                    <span style={{ ...PILL, ...TONE_STYLES.accent }}>
+                      содержимое {page.contentRotation}°
+                    </span>
+                    <span
+                      style={{
+                        ...PILL,
+                        ...(page.contentRotationSource === 'user'
+                          ? TONE_STYLES.success
+                          : TONE_STYLES.info),
+                      }}
+                    >
+                      {page.contentRotationSource === 'user' ? 'вручную' : 'зонд'}
+                    </span>
+                  </div>
+                )}
                 {pageType !== undefined && (
                   <div
                     data-testid={`page-type-badge-${page.workingPageIndex}`}

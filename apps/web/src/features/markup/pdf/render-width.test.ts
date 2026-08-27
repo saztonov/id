@@ -10,7 +10,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { renderWidthFor } from './render-width.js';
-import { ZOOM_STEPS } from '../store.js';
+import { ZOOM_STEPS } from '../zoom.js';
 
 describe('renderWidthFor', () => {
   it('никогда не мельче запрошенного показа: канва ужимается, но не растягивается', () => {
@@ -38,7 +38,7 @@ describe('renderWidthFor', () => {
   it('соседние шаги масштаба попадают в одну ступень хотя бы иногда', () => {
     // Иначе развязка масштаба и рендера не даёт ничего: на типичной ширине
     // области лестница ZOOM_STEPS обязана укладываться в несколько ступеней,
-    // а не в шесть разных.
+    // а не в столько же разных, сколько в ней самой шагов.
     const fittedWidth = 700;
     const widths = ZOOM_STEPS.map((zoom) => renderWidthFor(fittedWidth * zoom));
     expect(new Set(widths).size).toBeLessThan(ZOOM_STEPS.length);

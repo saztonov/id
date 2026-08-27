@@ -27,18 +27,25 @@
  * не то, что видел пользователь. Заморозки перед отправкой больше нет (0048):
  * блоки правятся всегда, и отправить их можно повторно.
  */
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
+} from 'react';
 import {
   Alert,
   App as AntApp,
   Button,
-  Col,
   Popconfirm,
-  Row,
   Segmented,
   Select,
   Space,
   Spin,
+  Splitter,
   Tag,
   Typography,
 } from 'antd';
@@ -66,11 +73,34 @@ import { closeDocuments } from './pdf/pdfjs.js';
 import { renderWidthFor } from './pdf/render-width.js';
 import { clearPageCache, prefetchPage, usePdfPage } from './pdf/usePdfPage.js';
 import { useLayoutEditing } from './useLayoutEditing.js';
-import { useMarkupStore, ZOOM_STEPS } from './store.js';
+import { CanvasViewBar } from './CanvasViewBar.js';
+import { usePageOrientation } from './usePageOrientation.js';
+import { applyRotation, normalizeRotation, rotateBy } from './rotation.js';
+import {
+  COLUMN_MIN,
+  mergeSizesWithoutText,
+  pixelsToPercent,
+  sizesWithoutText,
+} from './workspaceLayout.js';
+import { anchoredScroll, effectiveZoom, stepZoom, WHEEL_ZOOM_FACTOR, clampZoom } from './zoom.js';
+import { useShallow } from 'zustand/react/shallow';
+
+import { useMarkupStore } from './store.js';
 
 export interface MarkupScreenProps {
   readonly revisionId: string;
 }
+
+/**
+ * Высота рабочей области — ОДНА величина на весь экран.
+ *
+ * Прежде `72vh` стояло в трёх местах (две боковые колонки и контейнер
+ * прокрутки канвы), а текст держал собственные `32vh`. Четыре копии одного
+ * решения расходятся при первой правке, и расходятся молча: колонки просто
+ * перестают быть одной высоты.
+ */
+const WORKSPACE_HEIGHT = '72vh';
+const WORKSPACE_MIN_HEIGHT = 420;
 
 export function MarkupScreen({ revisionId }: MarkupScreenProps): ReactNode {
   const { can } = useSession();
@@ -197,7 +227,37 @@ function LayoutWorkspace(props: WorkspaceProps): ReactNode {
     enabled: latestRunId !== null,
   });
 
-  const store = useMarkupStore();
+  /**
+   * Подписка НЕ на всё хранилище, а на срез без масштаба.
+   *
+   * `useMarkupStore()` без селектора будит компонент на любое `set`, а масштаб
+   * теперь непрерывный: Ctrl с колесом меняет его десятки раз в секунду. Без
+   * среза каждый щелчок колеса перерисовывал бы ленту из десятков карточек и
+   * список блоков — то есть плавный зум стоил бы тем дороже, чем крупнее
+   * комплект. Масштаб читает только `CanvasArea`, и читает он его селекторами.
+   */
+  const store = useMarkupStore(
+    useShallow((state) => ({
+      workingPageIndex: state.workingPageIndex,
+      tool: state.tool,
+      draftType: state.draftType,
+      selection: state.selection,
+      filter: state.filter,
+      columnSizes: state.columnSizes,
+      textCollapsed: state.textCollapsed,
+      goToPage: state.goToPage,
+      setTool: state.setTool,
+      setDraftType: state.setDraftType,
+      setFilter: state.setFilter,
+      select: state.select,
+      toggle: state.toggle,
+      selectMany: state.selectMany,
+      clearSelection: state.clearSelection,
+      setColumnSizes: state.setColumnSizes,
+      toggleTextColumn: state.toggleTextColumn,
+      resetColumns: state.resetColumns,
+    })),
+  );
   const blocks = blockList.data?.items ?? [];
   const editing = useLayoutEditing({
     layoutId,
@@ -251,6 +311,32 @@ function LayoutWorkspace(props: WorkspaceProps): ReactNode {
     onError: (error) => notify.error(describeError(error)),
   });
 
+  const orientation = usePageOrientation(revisionId, bundleId);
+
+  /**
+   * Ширины колонок и ключ перемонтирования `Splitter`.
+   *
+   * Splitter остаётся НЕуправляемым (`defaultSize`, не `size`), и это не
+   * мелочь: управляемый требует `onResize`, то есть `setState` в этом
+   * компоненте на КАЖДЫЙ кадр перетаскивания разделителя — а значит новые
+   * элементы ленты из десятков карточек и канвы всю дорогу. В неуправляемом
+   * режиме размеры живут внутри antd, дети остаются теми же React-элементами,
+   * и React отбрасывает их поддеревья.
+   *
+   * Плата за это — перемонтирование по `key`, когда набор панелей меняется:
+   * `useSizes` держит размеры позиционным массивом, и убранная панель отдала бы
+   * свою ширину соседке. Перемонтирование стоит один раз на нажатие, а не раз
+   * в кадр, и мигания канвы не даёт — `usePdfPage` берёт готовую канву из кэша
+   * синхронно.
+   */
+  const [resetNonce, setResetNonce] = useState(0);
+  /**
+   * Доли ВИДИМЫХ панелей: при свёрнутом тексте их три, и сумма обязана остаться
+   * сотней, иначе antd растянет остаток по своему усмотрению.
+   */
+  const panelSizes = store.textCollapsed ? sizesWithoutText(store.columnSizes) : store.columnSizes;
+  const splitterKey = `${store.textCollapsed ? 'no-text' : 'with-text'}:${String(resetNonce)}`;
+
   if (detail.isPending || blockList.isPending) return <LoadingState label="Загрузка разметки…" />;
   if (detail.isError) return <ErrorState error={detail.error} />;
   if (blockList.isError) return <ErrorState error={blockList.error} />;
@@ -280,6 +366,24 @@ function LayoutWorkspace(props: WorkspaceProps): ReactNode {
       ? null
       : 'Недостаточно прав: правка разметки требует markup.edit. ' +
         'Разметку ведут подрядчик, генподрядчик, инженер и администратор.';
+
+  const handleResizeEnd = (sizes: number[]): void => {
+    // Пиксели от antd; доли считает чистая функция, она же отвергает мусор.
+    const next = store.textCollapsed
+      ? mergeSizesWithoutText(store.columnSizes, sizes)
+      : pixelsToPercent(sizes);
+    if (next !== null) store.setColumnSizes(next);
+  };
+
+  const resetColumns = (): void => {
+    store.resetColumns();
+    setResetNonce((value) => value + 1);
+  };
+
+  const toggleTextColumn = (): void => {
+    store.toggleTextColumn();
+    setResetNonce((value) => value + 1);
+  };
 
   const pageList = pages.data ?? [];
   const currentIndex = Math.max(
@@ -362,12 +466,10 @@ function LayoutWorkspace(props: WorkspaceProps): ReactNode {
         busy={editing.busy}
         draftType={store.draftType}
         tool={store.tool}
-        zoom={store.zoom}
         selectedCount={selectedOnPage.length}
         manuallyEdited={layoutDetail.manuallyEdited}
         onToolChange={store.setTool}
         onDraftTypeChange={store.setDraftType}
-        onZoomChange={store.setZoom}
         onApplyTypeToSelected={() => {
           void editing.applyTypeTo(
             selectedOnPage.map((block) => block.id),
@@ -392,18 +494,38 @@ function LayoutWorkspace(props: WorkspaceProps): ReactNode {
       />
 
       {/*
-        `wrap={false}` — три колонки рабочей области не переносятся никогда.
+        Четыре колонки на `Splitter`, и петля раскладки разомкнута ПО ПОСТРОЕНИЮ.
 
-        Без него `Row` это `flex-flow: row wrap`, а средняя колонка с `flex="auto"`
-        имеет flex-basis по содержимому: решение о переносе строки считается по
-        flex base size, и `minWidth: 0` на него не влияет — он влияет только на
-        сжатие уже сформированной строки. Поэтому ширину строки раздували то
-        длинная строка распознанного текста, то канва на большом масштабе, и
-        картинка уезжала под ленту миниатюр — на одной странице комплекта рядом,
-        на соседней вниз.
+        История, ради которой это написано: до S32 рабочая область была `Row`,
+        то есть `flex-flow: row wrap`, а средняя колонка имела flex-basis по
+        содержимому. Решение о переносе строки считается по flex base size, и
+        `minWidth: 0` на него не влияет вовсе — он влияет только на сжатие уже
+        сформированной строки. Ширину раздували то длинная строка распознанного
+        текста, то канва на большом масштабе, и картинка уезжала под ленту
+        миниатюр: на одной странице комплекта рядом, на соседней вниз. S32
+        лечил это `wrap={false}` плюс `flex="1 1 0"` — то есть заставлял
+        колонку не зависеть от содержимого руками.
+
+        `Splitter` даёт то же самое сильнее и без уговоров: каждая панель
+        получает `flex-grow: 0` с `flex-basis` в пикселях, а `overflow: auto` на
+        панели разрешает её автоминимум в ноль. Содержимое ширину панели не
+        меняет вообще ничем — ни длинной строкой, ни канвой на 400 %.
+
+        Высота задана ОДИН раз, здесь. Прежде `72vh` стояло в трёх местах
+        (обе боковые колонки и контейнер прокрутки канвы) плюс `32vh` у текста,
+        и величина, разбросанная по четырём файлам, разъезжается при первой же
+        правке.
       */}
-      <Row gutter={12} wrap={false} style={{ marginTop: 12 }}>
-        <Col flex="240px" style={{ maxHeight: '72vh', overflowY: 'auto' }}>
+      <Splitter
+        key={splitterKey}
+        style={{ marginTop: 12, height: WORKSPACE_HEIGHT, minHeight: WORKSPACE_MIN_HEIGHT }}
+        onResizeEnd={handleResizeEnd}
+      >
+        <Splitter.Panel
+          defaultSize={`${String(panelSizes[0] ?? 15)}%`}
+          min={COLUMN_MIN.strip}
+          max="35%"
+        >
           {pages.isPending ? (
             <Spin />
           ) : (
@@ -416,17 +538,22 @@ function LayoutWorkspace(props: WorkspaceProps): ReactNode {
               onSelect={store.goToPage}
             />
           )}
-        </Col>
+        </Splitter.Panel>
 
         {/*
-          `1 1 0`, а не `auto`: ширина средней колонки — остаток строки, и она не
-          зависит от содержимого вовсе. Это размыкает петлю «ResizeObserver мерит
-          holder → `fitInto` → явная ширина канвы → шире колонка → шире канва»,
-          из-за которой раскладка залипала в разъехавшемся состоянии до
-          перезагрузки. Строка отдаётся antd в `style.flex` как есть — её
-          `parseFlex` переписывает только `auto`, число и одиночную длину.
+          Колонка страницы — единственная с `overflow: hidden`.
+
+          У остальных трёх работает штатный `overflow: auto` от antd, и он же
+          заменяет прежние `maxHeight: 72vh` на них. Здесь прокрутка ведётся
+          собственным контейнером внутри `CanvasArea`, потому что там надо
+          мерить доступное место: вторая прокрутка снаружи не добавила бы
+          ничего, кроме второй полосы.
         */}
-        <Col flex="1 1 0" style={{ minWidth: 0 }}>
+        <Splitter.Panel
+          defaultSize={`${String(panelSizes[1] ?? 45)}%`}
+          min={COLUMN_MIN.canvas}
+          style={{ overflow: 'hidden' }}
+        >
           {currentPage === undefined ? (
             <Alert
               type="warning"
@@ -435,7 +562,15 @@ function LayoutWorkspace(props: WorkspaceProps): ReactNode {
               description="Разметка ложится на страницы рабочего документа; без карты страниц показывать нечего."
             />
           ) : (
-            <>
+            <div
+              style={{
+                display: 'flex',
+                flexDirection: 'column',
+                height: '100%',
+                minHeight: 0,
+                minWidth: 0,
+              }}
+            >
               <PageTypePanel
                 revisionId={revisionId}
                 page={currentPage}
@@ -451,8 +586,19 @@ function LayoutWorkspace(props: WorkspaceProps): ReactNode {
                 selection={store.selection}
                 tool={store.tool}
                 draftType={store.draftType}
-                zoom={store.zoom}
                 editable={editable}
+                canRotate={canEdit}
+                rotationPending={orientation.pending}
+                textCollapsed={store.textCollapsed}
+                onToggleText={toggleTextColumn}
+                onResetColumns={resetColumns}
+                onRotate={(quarterTurns) =>
+                  orientation.setRotation(
+                    currentPage.sourcePageId,
+                    rotateBy(normalizeRotation(currentPage.contentRotation), quarterTurns),
+                  )
+                }
+                onResetRotation={() => orientation.clear(currentPage.sourcePageId)}
                 onSelect={(blockId, additive) =>
                   additive ? store.toggle(blockId) : store.select(blockId)
                 }
@@ -468,16 +614,45 @@ function LayoutWorkspace(props: WorkspaceProps): ReactNode {
                   void editing.updateBlock(blockId, { coords });
                 }}
               />
-              <RecognizedText
-                text={currentPageText}
-                loading={runs.isPending || pageTexts.isPending}
-                hasRun={latestRunId !== null}
-              />
-            </>
+            </div>
           )}
-        </Col>
+        </Splitter.Panel>
 
-        <Col flex="300px" style={{ maxHeight: '72vh', overflowY: 'auto' }}>
+        {/*
+          Колонка распознанного текста рисуется только развёрнутой.
+
+          Свёрнутая панель — это НЕ нулевая ширина: `useSizes` держит размеры
+          позиционным массивом, и панель, оставленная в разметке с нулём,
+          отдала бы свою запомненную ширину списку блоков. Условный рендер плюс
+          смена `key` у `Splitter` переинициализируют размеры честно.
+
+          `collapsible` от antd не используется намеренно: его кнопки несут
+          зашитый английский `aria-label` без локали, а экран закрыт гейтом
+          доступности. Своя кнопка с русским именем живёт в панели вида.
+        */}
+        {!store.textCollapsed && (
+          <Splitter.Panel defaultSize={`${String(panelSizes[2] ?? 22)}%`} min={COLUMN_MIN.text}>
+            <RecognizedText
+              text={currentPageText}
+              pageNumber={(currentPage?.workingPageIndex ?? 0) + 1}
+              /*
+                `pageTexts` ВЫКЛЮЧЕН, пока завершённого прогона нет, а
+                выключенный запрос в TanStack Query навсегда остаётся
+                `pending` — то есть `isPending` здесь означал бы «грузится»
+                ровно тогда, когда грузить нечего. В коллапсе под канвой это
+                было незаметно, в собственной колонке — вечный волчок вместо
+                внятного «распознавание ещё не выполнялось».
+              */
+              loading={runs.isPending || (latestRunId !== null && pageTexts.isPending)}
+              hasRun={latestRunId !== null}
+            />
+          </Splitter.Panel>
+        )}
+
+        <Splitter.Panel
+          defaultSize={`${String(panelSizes[store.textCollapsed ? 2 : 3] ?? 20)}%`}
+          min={COLUMN_MIN.blocks}
+        >
           <BlockList
             blocks={pageBlocks}
             visible={visibleBlocks}
@@ -489,8 +664,8 @@ function LayoutWorkspace(props: WorkspaceProps): ReactNode {
             onToggle={store.toggle}
             onSelectMany={store.selectMany}
           />
-        </Col>
-      </Row>
+        </Splitter.Panel>
+      </Splitter>
 
       <SendToRecognition
         blockCount={blocks.length}
@@ -523,11 +698,16 @@ function LayoutWorkspace(props: WorkspaceProps): ReactNode {
 /** Страница рабочего документа в том виде, в каком её знает канва. */
 interface CanvasPage {
   readonly workingPageIndex: number;
+  readonly sourcePageId: string;
   readonly sourceFileId: string;
   readonly filePageIndex: number;
   readonly widthPx: number;
   readonly heightPx: number;
+  /** `/Rotate` из PDF: уже применён и к размерам выше, и к вьюпорту pdf.js. */
   readonly rotation: number;
+  /** Разворот скана: не применён никем, применяем его мы (ADR-0020). */
+  readonly contentRotation: number;
+  readonly contentRotationSource: 'probe' | 'user' | null;
 }
 
 interface CanvasAreaProps {
@@ -539,8 +719,15 @@ interface CanvasAreaProps {
   readonly selection: ReadonlySet<string>;
   readonly tool: 'select' | 'draw';
   readonly draftType: BlockType;
-  readonly zoom: number;
   readonly editable: boolean;
+  /** Право менять разворот. Масштаб доступен и без него — это просмотр. */
+  readonly canRotate: boolean;
+  readonly rotationPending: boolean;
+  readonly onRotate: (quarterTurns: 1 | -1) => void;
+  readonly onResetRotation: () => void;
+  readonly textCollapsed: boolean;
+  readonly onToggleText: () => void;
+  readonly onResetColumns: () => void;
   readonly onSelect: (blockId: string, additive: boolean) => void;
   readonly onClearSelection: () => void;
   readonly onCreate: Parameters<typeof PageCanvas>[0]['onCreate'];
@@ -548,8 +735,14 @@ interface CanvasAreaProps {
 }
 
 function CanvasArea(props: CanvasAreaProps): ReactNode {
-  const { page, zoom, nextPage } = props;
+  const { page, nextPage } = props;
+  const zoomMode = useMarkupStore((state) => state.zoomMode);
+  const manualZoom = useMarkupStore((state) => state.zoom);
+  const setZoomMode = useMarkupStore((state) => state.setZoomMode);
+  const setManualZoom = useMarkupStore((state) => state.setManualZoom);
+
   const holder = useRef<HTMLDivElement | null>(null);
+  const scrollBox = useRef<HTMLDivElement | null>(null);
   /**
    * `null`, пока область не измерена.
    *
@@ -560,6 +753,22 @@ function CanvasArea(props: CanvasAreaProps): ReactNode {
    */
   const [available, setAvailable] = useState<RenderedSize | null>(null);
 
+  const rotation = normalizeRotation(page.contentRotation);
+
+  /**
+   * Наблюдается `holder` с `overflow: hidden`, а НЕ панель `Splitter` и не
+   * контейнер прокрутки — и это не придирка.
+   *
+   * У панели `Splitter` штатный `overflow: auto`. Повесив наблюдателя на неё,
+   * мы получили бы вторую петлю, тоньше прежней: канва выше панели → появилась
+   * вертикальная полоса → `contentRect.width` меньше на её ширину → `fitInto`
+   * даёт меньший размер → полоса исчезает → размер растёт. То же и с самим
+   * контейнером прокрутки. `holder` скрывает переполнение, поэтому его размер
+   * задаётся ТОЛЬКО флексом снаружи и от содержимого не зависит вовсе.
+   *
+   * Высота теперь настоящая, из `contentRect`, а не `window.innerHeight * 0.72`:
+   * доля окна была догадкой о высоте колонки, а колонка стала измеримой.
+   */
   useEffect(() => {
     const element = holder.current;
     if (element === null) return;
@@ -568,43 +777,174 @@ function CanvasArea(props: CanvasAreaProps): ReactNode {
       if (entry === undefined) return;
       setAvailable({
         width: Math.max(200, entry.contentRect.width),
-        height: Math.max(200, window.innerHeight * 0.72),
+        height: Math.max(200, entry.contentRect.height),
       });
     });
     observer.observe(element);
     return () => observer.disconnect();
   }, []);
 
-  const fitted = useMemo(
-    () =>
-      available === null
-        ? null
-        : fitInto({ width: page.widthPx, height: page.heightPx }, available),
-    [page.widthPx, page.heightPx, available],
+  /**
+   * Две системы размеров, и путать их нельзя.
+   *
+   * `content` — размер НЕповёрнутого содержимого: та система, в которой заданы
+   * `coords_norm`, и та, в которой pdf.js рисует канву. `display` — то, что
+   * видно на экране: при развороте на четверть у него переставлены стороны.
+   * Вписывание считается по `display` (иначе повёрнутый лист не влезал бы в
+   * колонку), а ширина рендера pdf.js — по `content`.
+   */
+  const displayFrame = applyRotation({ width: page.widthPx, height: page.heightPx }, rotation);
+  const fittedDisplay = useMemo(
+    () => (available === null ? null : fitInto(displayFrame, available)),
+    [displayFrame.width, displayFrame.height, available],
   );
 
-  /**
-   * Размер показа. Считается из карты страниц, а не из результата рендера:
-   * иначе рамки прыгали бы в момент, когда канва доезжает, — а карта страниц
-   * известна сразу и является той же системой координат, в которой заданы
-   * блоки.
-   */
-  const size: RenderedSize =
-    fitted === null
+  const zoom =
+    fittedDisplay === null || available === null
+      ? 1
+      : effectiveZoom(zoomMode, manualZoom, fittedDisplay, available);
+
+  const display: RenderedSize =
+    fittedDisplay === null
       ? { width: 0, height: 0 }
-      : { width: Math.max(80, fitted.width * zoom), height: Math.max(80, fitted.height * zoom) };
+      : {
+          width: Math.max(80, fittedDisplay.width * zoom),
+          height: Math.max(80, fittedDisplay.height * zoom),
+        };
+  const content = applyRotation(display, rotation);
 
   const contentUrl = filesApi.contentUrl(page.sourceFileId);
   const rendered = usePdfPage(
-    fitted === null
+    fittedDisplay === null
       ? null
       : {
           fileId: page.sourceFileId,
           contentUrl,
           filePageIndex: page.filePageIndex,
-          displayWidth: size.width,
+          displayWidth: content.width,
         },
   );
+
+  /**
+   * Ctrl + колесо — НЕПАССИВНЫМ слушателем, и это обязательное условие.
+   *
+   * React вешает `wheel` на корень контейнера пассивно, поэтому
+   * `preventDefault()` внутри `onWheel` молча не срабатывает: браузер
+   * масштабирует страницу целиком, а канва получает ещё и свой зум. Вышло бы
+   * хуже, чем без функции вовсе, — и «иногда работает» в зависимости от того,
+   * где оказался курсор.
+   */
+  const pendingAnchor = useRef<{
+    readonly before: RenderedSize;
+    readonly pointerX: number;
+    readonly pointerY: number;
+  } | null>(null);
+
+  useEffect(() => {
+    const box = scrollBox.current;
+    if (box === null) return;
+    const onWheel = (event: WheelEvent): void => {
+      if (!event.ctrlKey && !event.metaKey) return;
+      event.preventDefault();
+      const rect = box.getBoundingClientRect();
+      pendingAnchor.current = {
+        before: { width: display.width, height: display.height },
+        pointerX: event.clientX - rect.left,
+        pointerY: event.clientY - rect.top,
+      };
+      const factor = event.deltaY < 0 ? WHEEL_ZOOM_FACTOR : 1 / WHEEL_ZOOM_FACTOR;
+      setManualZoom(clampZoom(zoom * factor));
+    };
+    box.addEventListener('wheel', onWheel, { passive: false });
+    return () => box.removeEventListener('wheel', onWheel);
+  }, [display.width, display.height, zoom, setManualZoom]);
+
+  /**
+   * Точка под курсором остаётся под курсором.
+   *
+   * `useLayoutEffect`, а не `useEffect`: иначе кадр с уже выросшим, но ещё не
+   * прокрученным содержимым успевает отрисоваться, и зум заметно дёргается.
+   */
+  useLayoutEffect(() => {
+    const anchor = pendingAnchor.current;
+    const box = scrollBox.current;
+    pendingAnchor.current = null;
+    if (anchor === null || box === null) return;
+    const next = anchoredScroll({
+      scrollLeft: box.scrollLeft,
+      scrollTop: box.scrollTop,
+      pointerX: anchor.pointerX,
+      pointerY: anchor.pointerY,
+      before: anchor.before,
+      after: { width: display.width, height: display.height },
+    });
+    box.scrollLeft = next.left;
+    box.scrollTop = next.top;
+  }, [display.width, display.height]);
+
+  /**
+   * Панорама — прокруткой контейнера, а не движением сцены Konva.
+   *
+   * Двигать `Stage` нельзя: исчезли бы полосы прокрутки, сломался бы клампинг
+   * указателя по размеру содержимого и появилась бы вторая, невидимая система
+   * координат поверх той, в которой заданы блоки. Прокрутка контейнера
+   * координатам не видна вовсе.
+   */
+  const panFrom = useRef<{
+    readonly x: number;
+    readonly y: number;
+    readonly left: number;
+    readonly top: number;
+  } | null>(null);
+  const [spaceHeld, setSpaceHeld] = useState(false);
+  const [panning, setPanning] = useState(false);
+
+  useEffect(() => {
+    const down = (event: KeyboardEvent): void => {
+      if (event.code === 'Space') setSpaceHeld(true);
+    };
+    const up = (event: KeyboardEvent): void => {
+      if (event.code === 'Space') setSpaceHeld(false);
+    };
+    window.addEventListener('keydown', down);
+    window.addEventListener('keyup', up);
+    return () => {
+      window.removeEventListener('keydown', down);
+      window.removeEventListener('keyup', up);
+    };
+  }, []);
+
+  const beginPan = (event: ReactPointerEvent<HTMLDivElement>): void => {
+    const box = scrollBox.current;
+    // Средняя кнопка либо пробел с левой. Левая без модификатора остаётся за
+    // рисованием и выделением рамок: иначе промах мышью панорамировал бы лист
+    // вместо создания блока.
+    if (box === null || (event.button !== 1 && !(event.button === 0 && spaceHeld))) return;
+    event.preventDefault();
+    panFrom.current = {
+      x: event.clientX,
+      y: event.clientY,
+      left: box.scrollLeft,
+      top: box.scrollTop,
+    };
+    setPanning(true);
+    box.setPointerCapture(event.pointerId);
+  };
+
+  const movePan = (event: ReactPointerEvent<HTMLDivElement>): void => {
+    const from = panFrom.current;
+    const box = scrollBox.current;
+    if (from === null || box === null) return;
+    box.scrollLeft = from.left - (event.clientX - from.x);
+    box.scrollTop = from.top - (event.clientY - from.y);
+  };
+
+  const endPan = (event: ReactPointerEvent<HTMLDivElement>): void => {
+    if (panFrom.current === null) return;
+    panFrom.current = null;
+    setPanning(false);
+    scrollBox.current?.releasePointerCapture(event.pointerId);
+  };
 
   /**
    * Предзагрузка следующей страницы — после того, как текущая показана.
@@ -616,35 +956,86 @@ function CanvasArea(props: CanvasAreaProps): ReactNode {
    */
   useEffect(() => {
     if (nextPage === undefined || rendered.page === null || available === null) return;
-    // Соседняя страница вписывается в область СВОИМИ размерами: у альбомной
-    // A3 после портретной A4 ширина показа другая, и предзагрузка по ширине
-    // текущей страницы легла бы мимо ключа кэша — то есть отрисовала бы
-    // страницу, которую потом никто не возьмёт.
-    const nextFitted = fitInto({ width: nextPage.widthPx, height: nextPage.heightPx }, available);
+    // Соседняя страница вписывается СВОИМИ размерами и СВОИМ разворотом: у
+    // альбомной A3 после портретной A4 ширина показа другая. А ширина РЕНДЕРА
+    // считается от неповёрнутого содержимого — иначе предзагрузка легла бы мимо
+    // ключа кэша, то есть отрисовала бы страницу, которую никто не возьмёт.
+    const nextRotation = normalizeRotation(nextPage.contentRotation);
+    const nextFitted = fitInto(
+      applyRotation({ width: nextPage.widthPx, height: nextPage.heightPx }, nextRotation),
+      available,
+    );
+    const nextContent = applyRotation(
+      {
+        width: Math.max(80, nextFitted.width * zoom),
+        height: Math.max(80, nextFitted.height * zoom),
+      },
+      nextRotation,
+    );
     prefetchPage({
       fileId: nextPage.sourceFileId,
       contentUrl: filesApi.contentUrl(nextPage.sourceFileId),
       filePageIndex: nextPage.filePageIndex,
-      renderWidth: renderWidthFor(Math.max(80, nextFitted.width * zoom)),
+      renderWidth: renderWidthFor(nextContent.width),
     });
   }, [nextPage, rendered.page, available, zoom]);
 
-  // Сверка фреймов, а не поворот координат: расхождение означает, что одна из
-  // сторон применила /Rotate дважды или не применила вовсе, и рамки лягут мимо —
-  // но молча. Поэтому оно показывается.
+  /**
+   * Сверка фреймов, а не поворот координат.
+   *
+   * Сравниваются НЕповёрнутый фрейм карты страниц и НЕповёрнутый вьюпорт
+   * pdf.js. `contentRotation` сюда НЕ входит и входить не должен: он не меняет
+   * ни `widthPx`/`heightPx`, ни вьюпорт — он поправка к тому, что НАРИСОВАНО
+   * внутри этого фрейма. Соблазн «повернуть и здесь тоже, для единообразия»
+   * велик, а результат — падение проверки целостности на каждой странице,
+   * которую инженер развернул, то есть проверка превращается в шум.
+   *
+   * Расхождение же означает, что одна из сторон применила `/Rotate` дважды или
+   * не применила вовсе, и рамки лягут мимо — но молча. Поэтому оно показывается.
+   */
   const mismatch =
     rendered.page !== null &&
     !framesAgree({ width: page.widthPx, height: page.heightPx }, rendered.page.naturalSize);
 
   return (
-    <div ref={holder} style={{ minWidth: 0 }}>
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        flex: '1 1 0',
+        minHeight: 0,
+        minWidth: 0,
+      }}
+    >
+      <CanvasViewBar
+        zoomMode={zoomMode}
+        zoomPercent={Math.round(zoom * 100)}
+        onZoomStep={(direction) => setManualZoom(stepZoom(zoom, direction))}
+        onZoomMode={setZoomMode}
+        rotation={rotation}
+        rotationSource={page.contentRotationSource}
+        canRotate={props.canRotate}
+        rotationPending={props.rotationPending}
+        onRotate={props.onRotate}
+        onResetRotation={props.onResetRotation}
+        textCollapsed={props.textCollapsed}
+        onToggleText={props.onToggleText}
+        onResetColumns={props.onResetColumns}
+      />
+
+      {/*
+        Алерты — СНАРУЖИ измеряемого `holder`.
+
+        Внутри их появление меняло бы измеряемую высоту, то есть доступное
+        канве место зависело бы от того, есть ли сейчас ошибка.
+      */}
       {mismatch && (
         <Alert
           type="error"
           showIcon
           data-testid="frame-mismatch"
           message="Фрейм страницы не совпадает с картой рабочего документа"
-          description={`Карта страниц: ${String(page.widthPx)}×${String(page.heightPx)}, поворот ${String(page.rotation)}°; pdf.js: ${String(Math.round(rendered.page?.naturalSize.width ?? 0))}×${String(Math.round(rendered.page?.naturalSize.height ?? 0))}. Координаты блоков в этом состоянии показывать нельзя.`}
+          description={`Карта страниц: ${String(page.widthPx)}×${String(page.heightPx)}, /Rotate ${String(page.rotation)}°, разворот содержимого ${String(rotation)}°; pdf.js: ${String(Math.round(rendered.page?.naturalSize.width ?? 0))}×${String(Math.round(rendered.page?.naturalSize.height ?? 0))}. Координаты блоков в этом состоянии показывать нельзя.`}
           style={{ marginBottom: 8 }}
         />
       )}
@@ -657,29 +1048,49 @@ function CanvasArea(props: CanvasAreaProps): ReactNode {
           style={{ marginBottom: 8 }}
         />
       )}
-      <div style={{ position: 'relative', overflow: 'auto', maxHeight: '72vh' }}>
-        {rendered.loading && (
-          <div style={{ position: 'absolute', top: 8, left: 8, zIndex: 2 }}>
-            <Spin size="small" />
-          </div>
-        )}
-        {!mismatch && (
-          <PageCanvas
-            size={size}
-            image={rendered.page?.canvas ?? null}
-            blocks={props.blocks}
-            ranks={props.ranks}
-            selection={props.selection}
-            tool={props.tool}
-            draftType={props.draftType}
-            editable={props.editable}
-            workingPageIndex={page.workingPageIndex}
-            onSelect={props.onSelect}
-            onClearSelection={props.onClearSelection}
-            onCreate={props.onCreate}
-            onMove={props.onMove}
-          />
-        )}
+
+      <div ref={holder} style={{ flex: '1 1 0', minWidth: 0, minHeight: 0, overflow: 'hidden' }}>
+        <div
+          ref={scrollBox}
+          onPointerDown={beginPan}
+          onPointerMove={movePan}
+          onPointerUp={endPan}
+          onPointerCancel={endPan}
+          style={{
+            position: 'relative',
+            width: '100%',
+            height: '100%',
+            overflow: 'auto',
+            // Зазор полосы прокрутки постоянен: иначе «по ширине» то показывал
+            // бы полосу, то прятал её, меняя доступную ширину туда-сюда.
+            scrollbarGutter: 'stable',
+            ...(spaceHeld ? { cursor: panning ? 'grabbing' : 'grab' } : {}),
+          }}
+        >
+          {rendered.loading && (
+            <div style={{ position: 'absolute', top: 8, left: 8, zIndex: 2 }}>
+              <Spin size="small" />
+            </div>
+          )}
+          {!mismatch && (
+            <PageCanvas
+              content={content}
+              rotation={rotation}
+              image={rendered.page?.canvas ?? null}
+              blocks={props.blocks}
+              ranks={props.ranks}
+              selection={props.selection}
+              tool={props.tool}
+              draftType={props.draftType}
+              editable={props.editable}
+              workingPageIndex={page.workingPageIndex}
+              onSelect={props.onSelect}
+              onClearSelection={props.onClearSelection}
+              onCreate={props.onCreate}
+              onMove={props.onMove}
+            />
+          )}
+        </div>
       </div>
     </div>
   );
@@ -702,13 +1113,11 @@ interface ToolbarProps {
   readonly busy: boolean;
   readonly draftType: BlockType;
   readonly tool: 'select' | 'draw';
-  readonly zoom: number;
   readonly selectedCount: number;
   readonly manuallyEdited: boolean;
   readonly detecting: boolean;
   readonly onToolChange: (tool: 'select' | 'draw') => void;
   readonly onDraftTypeChange: (blockType: BlockType) => void;
-  readonly onZoomChange: (zoom: number) => void;
   readonly onApplyTypeToSelected: () => void;
   readonly onDeleteSelected: () => void;
   readonly onReplacePage: () => void;
@@ -822,17 +1231,14 @@ function MarkupToolbar(props: ToolbarProps): ReactNode {
         </Popconfirm>
       </Space>
 
-      <Select<number>
-        size="small"
-        value={props.zoom}
-        onChange={props.onZoomChange}
-        style={{ width: 100 }}
-        aria-label="Масштаб"
-        options={ZOOM_STEPS.map((step) => ({
-          value: step,
-          label: `${String(Math.round(step * 100))}%`,
-        }))}
-      />
+      {/*
+        Масштаба здесь больше нет — он переехал в панель вида над канвой.
+
+        Причина в правах: вся эта панель гасится флагом `editable`
+        (`markup.edit`), а масштаб — действие ПРОСМОТРА. Проверяющий без права
+        правки обязан уметь приблизить штамп, иначе он не может выполнить
+        собственную работу. Заодно панель перестала быть трёхстрочной.
+      */}
 
       {props.disabledReason !== null && (
         // `flexBasis: '100%'` — причина занимает свою строку под кнопками:

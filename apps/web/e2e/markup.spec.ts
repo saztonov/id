@@ -41,12 +41,138 @@ test.describe('экран разметки', () => {
     // (`listening={false}`) и верхний с рамками, который принимает указатель.
     // Число закреплено, потому что оно проверяет структуру: третья канва
     // означала бы лишний слой, ноль — что страница не отрисовалась вовсе.
+    //
+    // Разворот содержимого числа канв НЕ меняет: он сделан трансформацией
+    // `Group` ВНУТРИ слоя, а не третьим слоем. Следующий, кто возьмётся
+    // поворачивать лист, должен прочитать здесь именно это, иначе заведёт
+    // третий `Layer` и сломает утверждение, не поняв, о чём оно.
     await expect(page.getByRole('application')).toBeVisible();
     await expect(page.getByTestId('frame-mismatch')).toHaveCount(0);
     await expect(page.locator('canvas')).toHaveCount(2);
 
     // Список блоков — второй, клавиатурный путь к тем же действиям.
     await expect(page.getByTestId(`block-row-${IDS.blockA}`)).toBeVisible();
+  });
+
+  test('рабочая область — четыре колонки с перетаскиваемыми разделителями', async ({ page }) => {
+    // Широкий монитор: на узком колонка текста стартует свёрнутой намеренно
+    // (три живые колонки полезнее четырёх огрызков), и это проверяет отдельный
+    // сценарий ниже. Размер ставится ДО загрузки: стартовое состояние колонки
+    // считается один раз, при инициализации хранилища.
+    await page.setViewportSize({ width: 1920, height: 1080 });
+    await signIn(page, KC.engineer, MARKUP_URL);
+
+    // Три разделителя на четыре колонки: лента, страница, текст, блоки.
+    await expect(page.getByRole('separator')).toHaveCount(3);
+
+    // Текст и картинка видны ОДНОВРЕМЕННО — ради этого колонка и заведена.
+    await expect(page.getByRole('region', { name: 'Распознанный текст страницы' })).toBeVisible();
+    await expect(page.getByRole('application')).toBeVisible();
+
+    // Панель вида отделена от панели инструментов: масштаб — действие
+    // просмотра и не гасится правом на правку.
+    const viewBar = page.getByTestId('canvas-view-bar');
+    await expect(viewBar.getByRole('button', { name: 'Увеличить' })).toBeEnabled();
+    await expect(viewBar.getByRole('button', { name: 'Уменьшить' })).toBeEnabled();
+
+    // Ширина колонки переживает уход на другую вкладку: `Tabs` стоит с
+    // `destroyOnHidden`, то есть экран размонтируется целиком, и без записи в
+    // хранилище браузера раскладка сбрасывалась бы по нескольку раз за сеанс.
+    const strip = page.getByRole('navigation', { name: 'Страницы рабочего документа' });
+    const separator = page.getByRole('separator').first();
+    const box = await separator.boundingBox();
+    if (box === null) throw new Error('разделитель не отрисован');
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width / 2 + 90, box.y + box.height / 2, { steps: 10 });
+    await page.mouse.up();
+
+    const widened = await strip.boundingBox();
+    if (widened === null) throw new Error('лента не отрисована');
+
+    await page.getByRole('tab', { name: 'Файлы' }).click();
+    await page.getByRole('tab', { name: 'Разметка' }).click();
+    await expect(strip.getByRole('button')).toHaveCount(4);
+
+    const restored = await strip.boundingBox();
+    if (restored === null) throw new Error('лента не отрисована после возврата');
+    expect(Math.abs(restored.width - widened.width)).toBeLessThan(12);
+  });
+
+  test('на узком экране колонка текста стартует свёрнутой, а кнопка её возвращает', async ({
+    page,
+  }) => {
+    // Ширина по умолчанию у стенда — 1280, то есть ниже порога. Четыре колонки
+    // по минимумам дают 880 px, и формально они помещаются, — но три живые
+    // колонки полезнее четырёх огрызков, а вертикальной перекладки экран не
+    // делает намеренно: урок S32 в том, что раскладка, меняющая форму от
+    // условий, хуже стабильно тесной.
+    await signIn(page, KC.engineer, MARKUP_URL);
+
+    await expect(page.getByRole('separator')).toHaveCount(2);
+    await expect(page.getByRole('region', { name: 'Распознанный текст страницы' })).toHaveCount(0);
+
+    await page.getByRole('button', { name: 'Показать распознанный текст' }).click();
+    await expect(page.getByRole('separator')).toHaveCount(3);
+    await expect(page.getByRole('region', { name: 'Распознанный текст страницы' })).toBeVisible();
+  });
+
+  test('разворот содержимого меняет форму сцены и доезжает до карты страниц', async ({ page }) => {
+    await page.setViewportSize({ width: 1920, height: 1080 });
+    await signIn(page, KC.engineer, MARKUP_URL);
+
+    const canvas = page.getByRole('application');
+    const before = await canvas.boundingBox();
+    if (before === null) throw new Error('канва не отрисована');
+
+    await page.getByRole('button', { name: 'Повернуть вправо' }).click();
+
+    // Стороны сцены обязаны поменяться местами. Это единственная проверка,
+    // которая ловит рассогласование `Stage` и повёрнутой `Group`: при
+    // расхождении картинка и рамки уехали бы в разные стороны, а размер сцены
+    // остался бы прежним.
+    await expect
+      .poll(async () => {
+        const box = await canvas.boundingBox();
+        return box === null ? 0 : Math.round(box.width);
+      })
+      .toBeGreaterThan(Math.round(before.height) - 40);
+
+    // Последствие в ДАННЫХ, а не надпись на экране: карта страниц отдаёт
+    // разворот тем же запросом, которым отдаёт геометрию.
+    const bundleId = await page.evaluate(async () => {
+      const response = await fetch(
+        '/api/v1/revisions/' + window.location.pathname.split('/')[3] + '/bundles',
+      );
+      const body = (await response.json()) as { items: { id: string }[] };
+      return body.items[body.items.length - 1]?.id ?? '';
+    });
+    const mapResponse = await page.request.get(`/api/v1/bundles/${bundleId}/pages`);
+    expect(mapResponse.status()).toBe(200);
+    const map = (await mapResponse.json()) as {
+      items: {
+        workingPageIndex: number;
+        contentRotation: number;
+        contentRotationSource: string | null;
+      }[];
+    };
+    const first = map.items.find((item) => item.workingPageIndex === 0);
+    expect(first?.contentRotation).toBe(90);
+    expect(first?.contentRotationSource).toBe('user');
+
+    // Плашка в ленте называет и величину, и источник — словом, а не цветом.
+    const badge = page.getByTestId('content-rotation-0');
+    await expect(badge).toContainText('90°');
+    await expect(badge).toContainText('вручную');
+
+    // Сброс возвращает страницу к значению зонда; зонда не было — значит к нулю.
+    // Кнопка ищется В ПОДПИСИ разворота: рядом в той же панели стоит «Сбросить
+    // ширины колонок», и поиск по подстроке нашёл бы обе.
+    await page
+      .getByTestId('canvas-rotation-note')
+      .getByRole('button', { name: 'Сбросить' })
+      .click();
+    await expect(page.getByTestId('content-rotation-0')).toHaveCount(0);
   });
 
   test('повёрнутая страница открывается без расхождения фреймов', async ({ page }) => {

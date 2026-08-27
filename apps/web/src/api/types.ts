@@ -144,7 +144,35 @@ export interface BundlePage {
   filePageIndex: number;
   widthPx: number;
   heightPx: number;
+  /**
+   * `/Rotate` из самого PDF.
+   *
+   * УЖЕ применён: и к `widthPx`/`heightPx` выше, и к вьюпорту pdf.js. Экран его
+   * только показывает.
+   */
   rotation: number;
+  /**
+   * Разворот СОДЕРЖИМОГО: скан лёг на лист боком при нулевом `/Rotate`.
+   *
+   * Не применён никем. Экран разметки поворачивает по нему вид, конвейер —
+   * картинку для детектора и модели. Спутать его с `rotation` — самый вероятный
+   * класс ошибки в этом коде, поэтому имена и подписи у них разные.
+   */
+  contentRotation: 0 | 90 | 180 | 270;
+  /** Кем поставлен; `null` — решения не было, значение нулевое. */
+  contentRotationSource: 'probe' | 'user' | null;
+}
+
+/** Ответ маршрутов разворота страницы. */
+export interface PageOrientation {
+  revisionId: string;
+  sourcePageId: string;
+  contentRotation: 0 | 90 | 180 | 270;
+  /** `null` — решения нет вовсе: строку разворота никто не заводил. */
+  source: 'probe' | 'user' | null;
+  probeRotation: 0 | 90 | 180 | 270 | null;
+  probeConfidence: number | null;
+  probeError: string | null;
 }
 
 export interface BundleBuildResult {

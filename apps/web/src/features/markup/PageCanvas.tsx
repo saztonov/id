@@ -8,10 +8,28 @@
  *
  * ## Координаты
  *
- * Изображение и рамки рисуются от ОДНОГО размера (`size`), полученного из
+ * Изображение и рамки рисуются от ОДНОГО размера (`content`), полученного из
  * вьюпорта pdf.js. Поэтому совпадение рамки с содержимым не зависит ни от зума,
- * ни от поворота страницы: см. `geometry.ts`, где объяснено, почему поворот
+ * ни от `/Rotate` страницы: см. `geometry.ts`, где объяснено, почему поворот
  * координат здесь не выполняется.
+ *
+ * ## Разворот содержимого
+ *
+ * Скан, положенный на лист боком (`/Rotate = 0`, а текст идёт вертикально),
+ * показывается развёрнутым. Разворот сделан ОДНОЙ трансформацией `Group` внутри
+ * каждого слоя, а не отдельными вычислениями для картинки и для рамок: обе
+ * лежат в одной группе, поэтому разъехаться не могут по построению.
+ *
+ * Слоёв при этом по-прежнему ДВА — поворот не добавляет третьего. На этом
+ * держится утверждение сквозного теста о числе элементов `<canvas>`, и заводить
+ * третий `Layer` ради поворота значит сломать его, не поняв, о чём он.
+ *
+ * Внутри группы всё считается в координатах НЕповёрнутого содержимого, поэтому
+ * `coordsToRect`, `rectToCoords` и перетаскивание рамок не знают о развороте
+ * вовсе. Единственное место, где он виден, — положение указателя: оно берётся
+ * `getRelativePointerPosition()` у самой группы, и Konva инвертирует её
+ * трансформацию сам. Почему нельзя было повернуть контейнер средствами CSS —
+ * разобрано в шапке `rotation.ts`.
  *
  * ## Клавиатура и скринридер
  *
@@ -24,7 +42,7 @@
  * из списка, а не только мышью по канве.
  */
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { Image as KonvaImage, Layer, Rect, Stage, Text } from 'react-konva';
+import { Group, Image as KonvaImage, Layer, Rect, Stage, Text } from 'react-konva';
 import type Konva from 'konva';
 import type { BlockType } from '@id/contracts';
 import type { LayoutBlock } from '../../api/types.js';
@@ -37,9 +55,17 @@ import {
   type PixelRect,
   type RenderedSize,
 } from './geometry.js';
+import { contentTransform, type Rotation } from './rotation.js';
 
 export interface PageCanvasProps {
-  readonly size: RenderedSize;
+  /**
+   * Размер НЕповёрнутого содержимого — та система, в которой заданы
+   * `coords_norm`. Не путать с размером сцены: при развороте на четверть у них
+   * переставлены стороны.
+   */
+  readonly content: RenderedSize;
+  /** Разворот содержимого по часовой стрелке; 0 — лист лежит прямо. */
+  readonly rotation: Rotation;
   readonly image: HTMLCanvasElement | null;
   readonly blocks: readonly LayoutBlock[];
   readonly ranks: ReadonlyMap<string, number>;
@@ -58,9 +84,20 @@ export interface PageCanvasProps {
 const HANDLE = 9;
 
 export function PageCanvas(props: PageCanvasProps): ReactNode {
-  const { size, image, blocks, ranks, selection, tool, draftType, editable } = props;
+  const { content, rotation, image, blocks, ranks, selection, tool, draftType, editable } = props;
   const [draft, setDraft] = useState<PixelRect | null>(null);
   const drawStart = useRef<{ x: number; y: number } | null>(null);
+  /**
+   * Группа рамок — та система координат, в которой человек целится.
+   *
+   * Ссылка нужна ради `getRelativePointerPosition()`: положение указателя внутри
+   * повёрнутой группы Konva считает сам, инвертируя её трансформацию. Брать
+   * `stage.getPointerPosition()` нельзя — оно даёт координаты СЦЕНЫ, и на
+   * развёрнутой странице рамка легла бы не туда, куда вели мышь, причём молча.
+   */
+  const contentRef = useRef<Konva.Group | null>(null);
+
+  const { stage, group } = contentTransform(content, rotation);
 
   // Смена страницы обязана снимать незавершённый черновик: иначе отпускание
   // мыши на новой странице создало бы блок по координатам старой.
@@ -69,27 +106,34 @@ export function PageCanvas(props: PageCanvasProps): ReactNode {
     drawStart.current = null;
   }, [props.workingPageIndex]);
 
-  const pointerOf = (stage: Konva.Stage | null): { x: number; y: number } | null => {
-    const position = stage?.getPointerPosition();
+  // Смена разворота — тоже: черновик начат в одной системе координат, а
+  // закончится в другой.
+  useEffect(() => {
+    setDraft(null);
+    drawStart.current = null;
+  }, [rotation]);
+
+  const pointerOf = (): { x: number; y: number } | null => {
+    const position = contentRef.current?.getRelativePointerPosition();
     if (position === undefined || position === null) return null;
     return {
-      x: Math.min(Math.max(position.x, 0), size.width),
-      y: Math.min(Math.max(position.y, 0), size.height),
+      x: Math.min(Math.max(position.x, 0), content.width),
+      y: Math.min(Math.max(position.y, 0), content.height),
     };
   };
 
-  const beginDraw = (event: Konva.KonvaEventObject<PointerEvent>): void => {
+  const beginDraw = (): void => {
     if (!editable || tool !== 'draw') return;
-    const point = pointerOf(event.target.getStage());
+    const point = pointerOf();
     if (point === null) return;
     drawStart.current = point;
     setDraft({ x: point.x, y: point.y, width: 0, height: 0 });
   };
 
-  const extendDraw = (event: Konva.KonvaEventObject<PointerEvent>): void => {
+  const extendDraw = (): void => {
     const start = drawStart.current;
     if (start === null) return;
-    const point = pointerOf(event.target.getStage());
+    const point = pointerOf();
     if (point === null) return;
     setDraft({
       x: Math.min(start.x, point.x),
@@ -104,7 +148,7 @@ export function PageCanvas(props: PageCanvasProps): ReactNode {
     drawStart.current = null;
     setDraft(null);
     if (rect === null) return;
-    const coords = rectToCoords(rect, size);
+    const coords = rectToCoords(rect, content);
     // Случайный щелчок при включённом рисовании даёт вырожденную рамку. Такой
     // блок отвергла бы и схема, и CHECK в БД, поэтому он не отправляется вовсе:
     // 422 в ответ на промах мышью — это отказ по причине, которую пользователь
@@ -113,18 +157,23 @@ export function PageCanvas(props: PageCanvasProps): ReactNode {
     props.onCreate(coords);
   };
 
+  // Разворот дописывается в КОНЕЦ подписи: её начало («Страница N, блоков: M»)
+  // закреплено сквозным тестом доступности как признак того, что канва вообще
+  // назвалась.
+  const rotationNote = rotation === 0 ? '' : ` Лист показан развёрнутым на ${String(rotation)}°.`;
+
   return (
     <div
       role="application"
-      aria-label={`Страница ${String(props.workingPageIndex + 1)}, блоков: ${String(blocks.length)}. Рамки блоков правятся мышью; тот же набор доступен с клавиатуры в списке блоков справа.`}
-      style={{ width: size.width, height: size.height, position: 'relative' }}
+      aria-label={`Страница ${String(props.workingPageIndex + 1)}, блоков: ${String(blocks.length)}. Рамки блоков правятся мышью; тот же набор доступен с клавиатуры в списке блоков справа.${rotationNote}`}
+      style={{ width: stage.width, height: stage.height, position: 'relative' }}
     >
       <Stage
-        width={size.width}
-        height={size.height}
+        width={stage.width}
+        height={stage.height}
         onPointerDown={(event: Konva.KonvaEventObject<PointerEvent>) => {
           if (tool === 'draw') {
-            beginDraw(event);
+            beginDraw();
             return;
           }
           // Щелчок по пустому месту снимает выделение: иначе «применить тип к
@@ -136,36 +185,41 @@ export function PageCanvas(props: PageCanvasProps): ReactNode {
         style={{ cursor: tool === 'draw' && editable ? 'crosshair' : 'default' }}
       >
         <Layer listening={false}>
-          {image !== null && (
-            <KonvaImage image={image} width={size.width} height={size.height} alt="" />
-          )}
+          <Group {...group}>
+            {image !== null && (
+              <KonvaImage image={image} width={content.width} height={content.height} alt="" />
+            )}
+          </Group>
         </Layer>
         <Layer>
-          {blocks.map((block) => (
-            <BlockShape
-              key={block.id}
-              block={block}
-              rank={ranks.get(block.id) ?? 0}
-              size={size}
-              selected={selection.has(block.id)}
-              editable={editable && tool === 'select'}
-              onSelect={props.onSelect}
-              onMove={props.onMove}
-            />
-          ))}
-          {draft !== null && (
-            <Rect
-              x={draft.x}
-              y={draft.y}
-              width={draft.width}
-              height={draft.height}
-              stroke={BLOCK_STYLES[draftType].stroke}
-              fill={BLOCK_STYLES[draftType].fill}
-              dash={[4, 4]}
-              strokeWidth={2}
-              listening={false}
-            />
-          )}
+          <Group {...group} ref={contentRef}>
+            {blocks.map((block) => (
+              <BlockShape
+                key={block.id}
+                block={block}
+                rank={ranks.get(block.id) ?? 0}
+                size={content}
+                rotation={rotation}
+                selected={selection.has(block.id)}
+                editable={editable && tool === 'select'}
+                onSelect={props.onSelect}
+                onMove={props.onMove}
+              />
+            ))}
+            {draft !== null && (
+              <Rect
+                x={draft.x}
+                y={draft.y}
+                width={draft.width}
+                height={draft.height}
+                stroke={BLOCK_STYLES[draftType].stroke}
+                fill={BLOCK_STYLES[draftType].fill}
+                dash={[4, 4]}
+                strokeWidth={2}
+                listening={false}
+              />
+            )}
+          </Group>
         </Layer>
       </Stage>
     </div>
@@ -175,7 +229,10 @@ export function PageCanvas(props: PageCanvasProps): ReactNode {
 interface BlockShapeProps {
   readonly block: LayoutBlock;
   readonly rank: number;
+  /** Размер НЕповёрнутого содержимого: рамка живёт внутри повёрнутой группы. */
   readonly size: RenderedSize;
+  /** Разворот группы — нужен ТОЛЬКО подписи ранга, чтобы она читалась прямо. */
+  readonly rotation: Rotation;
   readonly selected: boolean;
   readonly editable: boolean;
   readonly onSelect: (blockId: string, additive: boolean) => void;
@@ -191,11 +248,33 @@ interface BlockShapeProps {
  * том самом месте, где ошибка означает уехавшую рамку. Вторая: трансформер
  * добавляет вращение, которого у блока нет и быть не может — `layout_blocks`
  * хранит четыре координаты, а не угол.
+ *
+ * ## Почему разворот страницы не потребовал здесь ни строчки арифметики
+ *
+ * Рамка лежит ВНУТРИ повёрнутой группы, то есть `x()`/`y()` ноды — это
+ * координаты в системе родителя, а не экрана. Konva при перетаскивании
+ * присваивает положение через `setAbsolutePosition`, который инвертирует
+ * трансформацию родителя сам, — поэтому `onDragEnd` читает уже те самые
+ * координаты содержимого, в которых заданы `coords_norm`. Единственное, что
+ * пришлось поправить, — подпись ранга: она вращалась вместе с листом.
  */
 function BlockShape(props: BlockShapeProps): ReactNode {
-  const { block, rank, size, selected, editable } = props;
+  const { block, rank, size, rotation, selected, editable } = props;
   const rect = coordsToRect(block.coords, size);
   const style = BLOCK_STYLES[block.blockType];
+  /**
+   * Якорь подписи ранга — тот угол рамки, который после разворота окажется
+   * верхним левым НА ЭКРАНЕ. Без этого контрповёрнутая подпись уезжала бы за
+   * пределы своей рамки на трёх четвертях из четырёх.
+   */
+  const label =
+    rotation === 90
+      ? { x: rect.x + 3, y: rect.y + rect.height - 3 }
+      : rotation === 180
+        ? { x: rect.x + rect.width - 3, y: rect.y + rect.height - 3 }
+        : rotation === 270
+          ? { x: rect.x + rect.width - 3, y: rect.y + 3 }
+          : { x: rect.x + 3, y: rect.y + 3 };
 
   const commit = (next: PixelRect): void => {
     const coords = normalizeCoords(rectToCoords(next, size));
@@ -237,8 +316,12 @@ function BlockShape(props: BlockShapeProps): ReactNode {
         }}
       />
       <Text
-        x={rect.x + 3}
-        y={rect.y + 3}
+        x={label.x}
+        y={label.y}
+        // Контрповорот: абсолютный угол подписи равен нулю при любом развороте
+        // листа. Номер блока — это подпись портала, а не содержимое скана, и
+        // читаться он обязан прямо.
+        rotation={-rotation}
         text={String(rank)}
         fontSize={13}
         fontStyle="bold"

@@ -61,6 +61,7 @@ import type {
   Page,
   PageAccounting,
   PageClassification,
+  PageOrientation,
   PageText,
   PortalUser,
   ProcessingStatus,
@@ -379,6 +380,27 @@ export const layout = {
       body: workingPageIndices === undefined ? {} : { workingPageIndices: [...workingPageIndices] },
     }).then((r) => r.data),
 
+  /**
+   * Разворот содержимого страницы (ADR-0020).
+   *
+   * Адресуется ревизией ПОСТАВКИ и страницей исходного файла, а не разметкой:
+   * разворот — свойство скана и переживает пересборку рабочего документа, как
+   * её переживает ручная метка вида ИД. Право — `markup.edit`: разворот меняет
+   * вход детекции и распознавания, то есть тот же конвейер, что рисует рамки.
+   */
+  setOrientation: (revisionId: string, sourcePageId: string, rotation: 0 | 90 | 180 | 270) =>
+    request<PageOrientation>(
+      'PUT',
+      `${V1}/revisions/${revisionId}/pages/${sourcePageId}/orientation`,
+      { body: { rotation } },
+    ).then((r) => r.data),
+
+  /** Снятие ручного разворота: действующим становится значение зонда. */
+  clearOrientation: (revisionId: string, sourcePageId: string) =>
+    request<PageOrientation>(
+      'DELETE',
+      `${V1}/revisions/${revisionId}/pages/${sourcePageId}/orientation`,
+    ).then((r) => r.data),
 };
 
 export type BlockMutationResponse = ApiResponse<BlockMutationResult>;
