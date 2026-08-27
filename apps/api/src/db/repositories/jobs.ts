@@ -1292,38 +1292,55 @@ export interface StageSummary {
 }
 
 /**
- * Постраничный ход выделения блоков (S30).
+ * Постраничный ход выделения блоков (S30, переписан на прямой счёт в S36).
  *
- * ## Почему считается ОСТАТОК, а не сделанное
+ * ## Считается СДЕЛАННОЕ — так, как написано на экране
  *
- * Постраничной таблицы у детекции нет — в отличие от распознавания, где статус
- * страницы хранит `recognition_run_pages`. Два очевидных числителя не годятся, и
- * оба врут тихо:
+ * До S36 здесь считался остаток (`pagesTotal − pending − failed`), и он врал в
+ * обе стороны, потому что «никто эту страницу не ждёт» верно и когда работа
+ * сделана, и когда её ещё не раздали. На экране это выглядело так: прогон
+ * начинался со «100%, размечено 22 из 22», а дальше счётчик ПЯТИЛСЯ — 21, 17,
+ * — ровно с той скоростью, с какой зонды ориентации порождали задачи детекции.
+ *
+ * Теперь страница считается размеченной, когда выполнены оба условия:
+ *
+ * * её больше не ждёт ни одна задача разметки — ни зонд ориентации, ни детекция;
+ * * хотя бы одна задача ДЕТЕКЦИИ этой страницы завершилась успехом.
+ *
+ * Второе условие обязательно: без него страница, у которой отработал только
+ * зонд, считалась бы сделанной в промежутке между зондом и детекцией.
+ *
+ * ## Что НЕ годится в числители
  *
  * * **страницы, у которых появились блоки.** Страница, на которой детектор не
  *   нашёл ничего, — штатный терминальный исход, и блоков для неё не пишется
  *   вовсе (`local-detection.ts`, «Терминальность пустой страницы»). На комплекте
- *   с пустыми листами счётчик никогда не дошёл бы до конца;
- * * **завершённые задачи детекции.** Черновик разметки у ревизии один, а
- *   `resetPipelineForRevision` намеренно не снимает задачи стадии `layout` — и
- *   `done`-задачи прошлого прогона остаются. Повторное нажатие «1. Выделить
- *   блоки» показывало бы «83 из 83» в первую же секунду.
+ *   с пустыми листами счётчик никогда не дошёл бы до конца. Поэтому считаются
+ *   задачи, а не `layout_blocks`;
+ * * **завершённые задачи детекции сами по себе.** Черновик разметки у ревизии
+ *   один, а `resetPipelineForRevision` намеренно не снимает задачи стадии
+ *   `layout` — `done`-задачи прошлого прогона остаются лежать. Спасает то, что
+ *   новый прогон СРАЗУ ставит на каждую страницу свою ждущую задачу: `pending`
+ *   перекрывает `done`, и счёт честно начинается с нуля.
  *
- * Остаток свободен от обоих дефектов: новый прогон ставит задачи на все
- * страницы заново, счётчик честно начинается с нуля, а старые завершённые
- * задачи на ответ не влияют.
+ * Последнее верно с точностью до одной оговорки: волна раздаётся циклом
+ * `enqueueJob` без общей транзакции (`modules/layout/start.ts`), поэтому опрос,
+ * попавший ВНУТРЬ раздачи повторного прогона, увидит часть страниц ещё по
+ * прошлым `done`-задачам. Окно — десятки миллисекунд против опроса раз в
+ * несколько секунд; заводить ради него транзакцию значило бы расширить тип
+ * исполнителя во всей цепочке `enqueueJob → findVisibleRevision`.
  *
  * ## Почему по страницам, а не по задачам
  *
  * У локальной ветки (RF-DETR) одна задача — одна страница, у ветки RD WEB — до
  * восьми. Считать задачи значило бы получить верный ответ на одном провайдере и
  * заниженный в разы на другом, причём в зависимости от настройки портала.
- * Поэтому массив `pageIndices` разворачивается, и берётся `count(distinct)`.
+ * Поэтому массив `pageIndices` разворачивается, и счёт идёт по страницам.
  */
 export interface LayoutProgress {
   /** Страницы рабочего документа — та же карта, по которой раздавались задачи. */
   readonly pagesTotal: number;
-  /** Ни одна задача больше не ждёт эту страницу. */
+  /** Детекция страницы завершилась, и больше её никто не ждёт. */
   readonly pagesDone: number;
   readonly pagesPending: number;
   /** Страницы задач, исчерпавших попытки: в `pagesDone` они не входят. */
@@ -1346,7 +1363,10 @@ export interface ProcessingStatus {
   readonly finishedAt: string | null;
   readonly stages: readonly StageSummary[];
   readonly jobTypes: readonly JobTypeSummary[];
-  /** `null` — рабочего документа ещё нет, считать страницы не по чему. */
+  /**
+   * `null` — считать нечего: рабочего документа ещё нет либо стадия разметки
+   * прямо сейчас не идёт.
+   */
   readonly layout: LayoutProgress | null;
 }
 
@@ -1435,7 +1455,10 @@ export async function computeProcessingStatus(
     }
   }
 
-  const layout = await computeLayoutProgress(db, revisionId);
+  // Ход разметки считается только при ИДУЩЕЙ стадии, и число ждущих задач уже
+  // посчитано здесь же: второй запрос ради него был бы тем же агрегатом,
+  // выполненным заново.
+  const layout = await computeLayoutProgress(db, revisionId, pendingByStage.get('layout') ?? 0);
 
   /**
    * Ключи ОБЪЕДИНЯЮТСЯ, а не берутся из журнала попыток.
@@ -1513,6 +1536,20 @@ export async function computeProcessingStatus(
 const DETECTION_JOB_TYPES = ['layout.detect_local', 'layout.detect_pages'] as const;
 
 /**
+ * Задачи-РАЗДАТЧИКИ стадии разметки: пока такая ждёт, страницы ещё не розданы.
+ *
+ * `layout.analyze_coverage` и `preview.cache_pages` сюда не входят намеренно,
+ * хотя стадия у них та же: они идут ПОСЛЕ страниц, и обнулять счёт при них
+ * значило бы сбрасывать полосу в ноль на финише прогона.
+ */
+const LAYOUT_HANDOUT_JOB_TYPES = [
+  'layout.start',
+  'rd.create_run_document',
+  'rd.upload_working_pdf',
+  'rd.wait_pages',
+] as const;
+
+/**
  * Постраничный ход выделения блоков — см. докстринг `LayoutProgress`.
  *
  * Отдельным запросом, а не подзапросом в общей сводке: та собирается по
@@ -1520,19 +1557,31 @@ const DETECTION_JOB_TYPES = ['layout.detect_local', 'layout.detect_pages'] as co
  * склеивать два разреза в один оператор значило бы получить строку, где часть
  * колонок про задачи, а часть про страницы.
  *
- * `pending` перекрывает `failed`: страница, которую мёртвая задача прошлого
- * прогона оставила упавшей, а новая задача взяла в работу, — это работающая
- * страница. Не разведи их — сумма превысила бы общее число страниц, и остаток
- * ушёл бы в минус.
+ * `pending` перекрывает и `done`, и `failed`: страница, которую прошлый прогон
+ * оставил сделанной или упавшей, а новый взял в работу, — это работающая
+ * страница. Не разведи их — одна страница попала бы в две корзины сразу, и
+ * сумма превысила бы общее число страниц.
+ *
+ * `layoutPending` — число ждущих задач стадии `layout`, посчитанное вызывающим.
+ * Ноль означает «стадия не идёт», и это не то же самое, что «всё сделано»:
+ * сводная стадия остаётся `layout` и во время пересборки рабочего документа —
+ * `summaryStage` берёт самую дальнюю стадию с активностью, а её оставил прошлый
+ * прогон. Без этой проверки экран показывал бы прошлый комплект («22 из 22»)
+ * ровно в ту минуту, когда собирается новый на 28 страниц.
  */
 async function computeLayoutProgress(
   db: Database,
   revisionId: string,
+  layoutPending: number,
 ): Promise<LayoutProgress | null> {
+  if (layoutPending === 0) return null;
+
   const rows = await db.execute<{
     pages_total: number;
     pages_pending: number;
+    pages_done: number;
     pages_failed: number;
+    handout_pending: number;
   }>(sql`
     with bundle as (
       select b.id
@@ -1541,13 +1590,13 @@ async function computeLayoutProgress(
        order by b.created_at desc
        limit 1
     ),
-    -- Разворот pageIndices обязателен: у локальной ветки одна задача несёт одну
-    -- страницу, у легаси RD WEB — до восьми, и счёт задач дал бы разный ответ
-    -- на разных провайдерах.
-    pages as (
+    -- Страничные задачи разметки: детекция несёт МАССИВ страниц (у локальной
+    -- ветки в нём одна, у легаси RD WEB — до восьми), зонд ориентации — скаляр.
+    -- Разворот обязателен: счёт задач дал бы разный ответ на разных провайдерах.
+    page_jobs as (
       select (idx.value)::int as page_index,
-             bool_or(j.status in ('queued', 'running')) as pending,
-             bool_or(j.status = 'failed') as failed
+             j.status as status,
+             true as detection
         from ${jobs} j
         cross join lateral jsonb_array_elements_text(
           coalesce(j.payload -> 'pageIndices', '[]'::jsonb)
@@ -1557,13 +1606,42 @@ async function computeLayoutProgress(
            DETECTION_JOB_TYPES.map((type) => sql`${type}`),
            sql`, `,
          )})
+      union all
+      select (j.payload ->> 'workingPageIndex')::int as page_index,
+             j.status as status,
+             false as detection
+        from ${jobs} j
+       where j.payload ->> 'revisionId' = ${revisionId}
+         and j.type = 'page.orientation_probe'
+         and j.payload ->> 'workingPageIndex' is not null
+    ),
+    -- Соединение с картой страниц НОВЕЙШЕГО рабочего документа отсекает задачи
+    -- прошлой, более длинной карты: их индексы не существуют в текущей, и без
+    -- отсечения счёт вышел бы за общее число страниц.
+    pages as (
+      select p.working_page_index as page_index,
+             bool_or(page_jobs.status in ('queued', 'running')) as pending,
+             bool_or(page_jobs.status = 'done' and page_jobs.detection) as detected,
+             bool_or(page_jobs.status = 'failed') as failed
+        from processing_bundle_pages p
+        join bundle on bundle.id = p.bundle_id
+        join page_jobs on page_jobs.page_index = p.working_page_index
        group by 1
     )
     select
       (select count(*)::int from processing_bundle_pages p
          join bundle on bundle.id = p.bundle_id) as pages_total,
       (select count(*)::int from pages where pending) as pages_pending,
-      (select count(*)::int from pages where failed and not pending) as pages_failed
+      (select count(*)::int from pages where detected and not pending) as pages_done,
+      (select count(*)::int from pages
+        where failed and not pending and not detected) as pages_failed,
+      (select count(*)::int from ${jobs} j
+        where j.payload ->> 'revisionId' = ${revisionId}
+          and j.status in ('queued', 'running')
+          and j.type in (${sql.join(
+            LAYOUT_HANDOUT_JOB_TYPES.map((type) => sql`${type}`),
+            sql`, `,
+          )})) as handout_pending
   `);
 
   const row = rows.rows[0];
@@ -1571,15 +1649,20 @@ async function computeLayoutProgress(
   // означал бы «комплект пуст», а не «мы пока не знаем».
   if (row === undefined || row.pages_total === 0) return null;
 
-  const pagesPending = row.pages_pending;
-  const pagesFailed = row.pages_failed;
+  /**
+   * Раздатчик ещё в очереди — значит страницы этого прогона не розданы, и всё,
+   * что видно в очереди, принадлежит прошлому. Ноль здесь не осторожность, а
+   * факт: ни одна страница ТЕКУЩЕГО прогона не размечена.
+   */
+  if (row.handout_pending > 0) {
+    return { pagesTotal: row.pages_total, pagesDone: 0, pagesPending: 0, pagesFailed: 0 };
+  }
+
   return {
     pagesTotal: row.pages_total,
-    // Ограничение снизу — не перестраховка: страницы могли быть поставлены по
-    // прежней карте, а рабочий документ пересобран короче.
-    pagesDone: Math.max(0, row.pages_total - pagesPending - pagesFailed),
-    pagesPending,
-    pagesFailed,
+    pagesDone: row.pages_done,
+    pagesPending: row.pages_pending,
+    pagesFailed: row.pages_failed,
   };
 }
 

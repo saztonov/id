@@ -566,8 +566,10 @@ describe('enqueueSystemJob: какие состояния держат dedupe_ke
 
 /**
  * Счётчик, который врёт, хуже отсутствующего: по нему решают, ждать дальше или
- * идти разбираться. Поэтому проверяются ровно те два способа соврать, из-за
- * которых он и считается ОСТАТКОМ, а не числом сделанных страниц.
+ * идти разбираться. Проверяются все способы соврать, из-за которых счёт был
+ * переписан с остатка на прямой (S36): зонд ориентации, принятый за сделанную
+ * страницу, раздатчик, ещё не раздавший работу, и прошлый прогон, выданный за
+ * текущий.
  */
 describe('computeProcessingStatus: разметка постранично', () => {
   const SCOPE: AuthScope = { kind: 'manager', userId: USER };
@@ -623,6 +625,27 @@ describe('computeProcessingStatus: разметка постранично', () 
     await testDb.query(`UPDATE jobs SET status = '${status}' WHERE id = '${jobId}'`);
   }
 
+  /** Зонд ориентации на одну страницу — с него начинается прогон при ADR-0020. */
+  async function probePage(pageIndex: number, status: string, tag: string): Promise<void> {
+    const { jobId } = await enqueueSystemJob(db, {
+      type: 'page.orientation_probe',
+      payload: {
+        revisionId: REVISION,
+        layoutRevisionId: id(220),
+        bundleId: BUNDLE,
+        sourcePageId: id(210 + pageIndex),
+        workingPageIndex: pageIndex,
+      },
+      dedupeKey: `page.orientation_probe:${String(pageIndex)}:${tag}`,
+    });
+    await testDb.query(`UPDATE jobs SET status = '${status}' WHERE id = '${jobId}'`);
+  }
+
+  /** Чистая очередь: сценарии ниже проверяют состояния, а не их наслоение. */
+  async function clearJobs(): Promise<void> {
+    await testDb.query(`DELETE FROM jobs WHERE payload ->> 'revisionId' = '${REVISION}'`);
+  }
+
   const layoutOf = async (): Promise<{
     pagesTotal: number;
     pagesDone: number;
@@ -639,7 +662,7 @@ describe('computeProcessingStatus: разметка постранично', () 
     expect(await layoutOf()).toBeNull();
   });
 
-  it('считает остаток: сделанное — это то, чего никто больше не ждёт', async () => {
+  it('считает сделанное: страница размечена, когда детекция прошла и никто не ждёт', async () => {
     await seedBundle();
     await detectPage(0, 'done', 'a');
     await detectPage(1, 'done', 'a');
@@ -670,8 +693,9 @@ describe('computeProcessingStatus: разметка постранично', () 
 
   it('повторный запуск начинает счёт заново, а не показывает «всё готово»', async () => {
     // `done`-задачи прошлого прогона не удаляются, и черновик разметки у
-    // ревизии один. Счёт по завершённым задачам показал бы «5 из 5» в первую
-    // же секунду нового прогона.
+    // ревизии один. Счёт по одним завершённым задачам показал бы «5 из 5» в
+    // первую же секунду нового прогона; спасает то, что ждущая задача новой
+    // волны перекрывает завершённую задачу прошлой.
     for (let index = 0; index < PAGE_COUNT; index += 1) {
       await detectPage(index, 'queued', 'b');
     }
@@ -685,13 +709,92 @@ describe('computeProcessingStatus: разметка постранично', () 
   });
 
   it('страницу, взятую в работу заново, не считает и упавшей тоже', async () => {
-    // Иначе одна страница попала бы в две корзины сразу, сумма превысила бы
-    // общее число страниц, а остаток ушёл бы в минус.
+    // Иначе одна страница попала бы в две корзины сразу, а сумма превысила бы
+    // общее число страниц.
     const layout = await layoutOf();
     expect(layout?.pagesPending ?? 0).toBe(5);
     expect(layout?.pagesFailed ?? 0).toBe(0);
     expect(
       (layout?.pagesDone ?? 0) + (layout?.pagesPending ?? 0) + (layout?.pagesFailed ?? 0),
     ).toBe(5);
+  });
+
+  it('зонды ориентации — это ещё не размеченные страницы', async () => {
+    // Тот самый дефект, с которого всё началось: зонды не входили в счёт, и
+    // прогон открывался словами «размечено 5 страниц из 5», а дальше счётчик
+    // пятился ровно с той скоростью, с какой зонды порождали детекцию.
+    await clearJobs();
+    for (let index = 0; index < PAGE_COUNT; index += 1) {
+      await probePage(index, 'queued', 'c');
+    }
+
+    expect(await layoutOf()).toEqual({
+      pagesTotal: 5,
+      pagesDone: 0,
+      pagesPending: 5,
+      pagesFailed: 0,
+    });
+  });
+
+  it('отработавший зонд не делает страницу размеченной: ждём детекцию', async () => {
+    await clearJobs();
+    await probePage(0, 'done', 'd');
+    await detectPage(0, 'queued', 'd');
+    // Соседняя страница держит стадию живой: без единой ждущей задачи счётчику
+    // нечего показывать, и он молчит вовсе.
+    await probePage(1, 'queued', 'd');
+
+    expect(await layoutOf()).toEqual({
+      pagesTotal: 5,
+      pagesDone: 0,
+      pagesPending: 2,
+      pagesFailed: 0,
+    });
+
+    await testDb.query(
+      `UPDATE jobs SET status = 'done'
+        WHERE type = 'layout.detect_local' AND dedupe_key = 'layout.detect_local:0:d'`,
+    );
+
+    expect(await layoutOf()).toEqual({
+      pagesTotal: 5,
+      pagesDone: 1,
+      pagesPending: 1,
+      pagesFailed: 0,
+    });
+  });
+
+  it('пока раздатчик в очереди, счёт нулевой, а не «всё готово»', async () => {
+    // `layout.start` ставит страничные задачи сам, и до его отработки в очереди
+    // видны только задачи ПРОШЛОГО прогона. Без этой ветки экран показывал бы
+    // «5 из 5» ровно за секунду до падения счётчика в ноль.
+    await clearJobs();
+    for (let index = 0; index < PAGE_COUNT; index += 1) {
+      await detectPage(index, 'done', 'e');
+    }
+    await enqueueSystemJob(db, {
+      type: 'layout.start',
+      payload: { revisionId: REVISION },
+      dedupeKey: 'layout.start:progress',
+    });
+
+    expect(await layoutOf()).toEqual({
+      pagesTotal: 5,
+      pagesDone: 0,
+      pagesPending: 0,
+      pagesFailed: 0,
+    });
+  });
+
+  it('стадия не идёт — счётчика нет вовсе', async () => {
+    // Сводная стадия остаётся `layout` и во время пересборки рабочего документа:
+    // она берётся как самая дальняя с активностью, а её оставил прошлый прогон.
+    // Полоса при этом обязана исчезнуть, а не показывать прошлый комплект.
+    await testDb.query(
+      `UPDATE jobs SET status = 'done'
+        WHERE payload ->> 'revisionId' = '${REVISION}' AND status IN ('queued', 'running')`,
+    );
+
+    expect(await layoutOf()).toBeNull();
   });
 });

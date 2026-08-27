@@ -187,6 +187,17 @@ export function PipelineBar({ revisionId, editable }: PipelineBarProps): ReactNo
   // считается и виновник остановки.
   const deferred = (data?.jobTypes ?? []).reduce((total, row) => total + row.deferred, 0);
   const busy = isBusy(stage, queued, running);
+  /**
+   * Стадия, которая идёт ПРЯМО СЕЙЧАС, — самая ранняя с задачами в очереди.
+   *
+   * `stage` из сводки отвечает на другой вопрос: это самая ДАЛЬНЯЯ стадия с
+   * активностью, и для фразы «идёт: …» она неверна. Пока пересобирается рабочий
+   * документ, дальней остаётся разметка от прошлого прогона — и экран писал
+   * «идёт: выделение блоков на страницах», хотя шёл приём файлов. Список стадий
+   * приходит отсортированным по порядку конвейера, поэтому первая ждущая в нём
+   * и есть текущая.
+   */
+  const activeStage = (data?.stages ?? []).find((summary) => summary.pending > 0)?.stage ?? null;
   // Постраничный счётчик разметки приезжает в той же сводке: своего запроса и
   // своего опроса у него нет намеренно (см. `LayoutProgress` на сервере).
   const layout = data?.layout ?? null;
@@ -240,6 +251,7 @@ export function PipelineBar({ revisionId, editable }: PipelineBarProps): ReactNo
           <Typography.Text type="secondary">
             {describeState({
               stage,
+              activeStage,
               queued,
               running,
               deferred,
@@ -259,8 +271,11 @@ export function PipelineBar({ revisionId, editable }: PipelineBarProps): ReactNo
           идентификатору. Своего запроса счётчик не заводит — числа приезжают
           в той же сводке, которую экран уже опрашивает и которую поток
           обесценивает на каждое `layout.detected`.
+
+          Стадия берётся ТЕКУЩАЯ, а не сводная: по сводной полоса вылезала во
+          время сборки рабочего документа и показывала прошлый комплект.
         */}
-        {stage === 'layout' && busy && layout !== null && (
+        {activeStage === 'layout' && busy && layout !== null && (
           <Space size={8} data-testid="pipeline-layout-progress">
             <Progress
               type="line"
@@ -373,6 +388,8 @@ function isBusy(stage: string | null, queued: number, running: number): boolean 
 
 interface StateInput {
   readonly stage: string | null;
+  /** Стадия с задачами в очереди; `null` — конвейер не занят. */
+  readonly activeStage: string | null;
   readonly queued: number;
   readonly running: number;
   readonly deferred: number;
@@ -384,7 +401,7 @@ interface StateInput {
 
 /** Одна фраза о том, что происходит прямо сейчас. */
 function describeState(input: StateInput): string {
-  const { stage, queued, running, deferred, dead, busy, dryRun, progress } = input;
+  const { stage, activeStage, queued, running, deferred, dead, busy, dryRun, progress } = input;
 
   if (stage === null) return 'конвейер не запускался';
   if (!busy) {
@@ -403,15 +420,20 @@ function describeState(input: StateInput): string {
   // остановилась» — и человек шёл разбираться с исправным конвейером.
   if (deferred > 0 && dead === 0) return 'идёт: ждём, пока допишутся страницы';
 
+  // Занятый конвейер называет ТЕКУЩУЮ стадию, а не самую дальнюю: иначе во
+  // время пересборки рабочего документа экран обещает выделение блоков, которое
+  // ещё даже не поставлено в очередь.
+  const now = activeStage ?? stage;
+
   // Прогон создан, но страниц ещё нет: между постановкой в очередь и первой
   // страницей проходят десятки секунд, и молчание здесь читается как зависание.
-  if (stage === 'recognition' && running > 0 && (progress === null || progress.pagesTotal === 0)) {
+  if (now === 'recognition' && running > 0 && (progress === null || progress.pagesTotal === 0)) {
     return 'идёт: готовим страницы к распознаванию';
   }
   if (running === 0) {
     return `в очереди: ${String(queued)} ${plural(queued, 'задача', 'задачи', 'задач')}, ждём исполнителя`;
   }
-  return `идёт: ${stageLabel(stage)}`;
+  return `идёт: ${stageLabel(now)}`;
 }
 
 /**
