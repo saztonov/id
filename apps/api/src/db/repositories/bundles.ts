@@ -31,8 +31,9 @@
  * ПОСЛЕ склейки 86 МБ, то есть после самой дорогой части работы.
  */
 import { createHash } from 'node:crypto';
-import { asc, eq, sql } from 'drizzle-orm';
+import { and, asc, eq, sql } from 'drizzle-orm';
 import {
+  pageOrientations,
   processingBundlePages,
   processingBundles,
   sourceFiles,
@@ -40,6 +41,7 @@ import {
   storedBlobs,
   submissionRevisions,
 } from '@id/db';
+import type { ContentRotation, ContentRotationSource } from '@id/contracts';
 import type { AuthScope } from '../../auth/scope.js';
 import { conflict, internal, notFound } from '../../lib/problem.js';
 import { withScope, type ScopeTarget } from '../scoped.js';
@@ -360,9 +362,31 @@ export interface BundlePageView {
   readonly filePageIndex: number;
   readonly widthPx: number;
   readonly heightPx: number;
+  /**
+   * `/Rotate` из самого PDF. УЖЕ применён — и к `widthPx/heightPx` выше, и к
+   * вьюпорту pdf.js, и к растру poppler.
+   */
   readonly rotation: number;
+  /**
+   * Разворот СОДЕРЖИМОГО: поправка к скану, легшему на лист боком (ADR-0020).
+   * Не применён никем; его применяют детекция и кроп, а показывает разметка.
+   *
+   * Спутать эти два поля — самый вероятный класс ошибки в этом коде, поэтому у
+   * них разные имена и разные докстринги, а не одно поле с флагом.
+   */
+  readonly contentRotation: ContentRotation;
+  /** Кем поставлен разворот; `null` — решения не было, значение нулевое. */
+  readonly contentRotationSource: ContentRotationSource | null;
 }
 
+/**
+ * Разворот приезжает ТЕМ ЖЕ запросом, что и карта страниц.
+ *
+ * Левое соединение, а не второй запрос: карту страниц читают все трое, кому
+ * разворот нужен, — локальная детекция, распознавание и экран разметки. Второй
+ * источник означал бы три места, где его забыли прочитать, и три разных ответа
+ * на один вопрос.
+ */
 const PAGE_MAP_SELECTION = {
   workingPageIndex: processingBundlePages.workingPageIndex,
   sourcePageId: processingBundlePages.sourcePageId,
@@ -372,7 +396,53 @@ const PAGE_MAP_SELECTION = {
   widthPx: sourcePages.widthPx,
   heightPx: sourcePages.heightPx,
   rotation: sourcePages.rotation,
+  contentRotation: sql<number>`coalesce(${pageOrientations.contentRotation}, 0)`,
+  contentRotationSource: pageOrientations.source,
 };
+
+/**
+ * Условие соединения с разворотом — по ПАРЕ ключей, а не по `source_page_id`.
+ *
+ * Ревизия входит в первичный ключ `page_orientations`, и соединение по одному
+ * идентификатору страницы опиралось бы на то, что он уникален глобально:
+ * сегодня это так, но схема этого не обещает.
+ */
+const ORIENTATION_JOIN = and(
+  eq(pageOrientations.revisionId, processingBundles.revisionId),
+  eq(pageOrientations.sourcePageId, processingBundlePages.sourcePageId),
+);
+
+/** Строка карты страниц из выборки — с приведением развёрнутых полей к контракту. */
+function toPageView(row: {
+  readonly workingPageIndex: number;
+  readonly sourcePageId: string;
+  readonly sourceFileId: string;
+  readonly fileName: string;
+  readonly filePageIndex: number;
+  readonly widthPx: number;
+  readonly heightPx: number;
+  readonly rotation: number;
+  readonly contentRotation: number;
+  readonly contentRotationSource: string | null;
+}): BundlePageView {
+  return {
+    workingPageIndex: row.workingPageIndex,
+    sourcePageId: row.sourcePageId,
+    sourceFileId: row.sourceFileId,
+    fileName: row.fileName,
+    filePageIndex: row.filePageIndex,
+    widthPx: row.widthPx,
+    heightPx: row.heightPx,
+    rotation: row.rotation,
+    // CHECK базы уже сузил домен до четырёх значений; здесь только приведение
+    // типа, а `?? 0` покрывает страницу без строки разворота.
+    contentRotation: (row.contentRotation ?? 0) as ContentRotation,
+    contentRotationSource:
+      row.contentRotationSource === 'probe' || row.contentRotationSource === 'user'
+        ? row.contentRotationSource
+        : null,
+  };
+}
 
 /** Полная карта: страница рабочего PDF → файл и страница оригинала. */
 export async function listBundlePages(
@@ -380,15 +450,17 @@ export async function listBundlePages(
   scope: AuthScope,
   bundleId: string,
 ): Promise<readonly BundlePageView[]> {
-  return db
+  const rows = await db
     .select(PAGE_MAP_SELECTION)
     .from(processingBundlePages)
     .innerJoin(processingBundles, eq(processingBundlePages.bundleId, processingBundles.id))
     .innerJoin(submissionRevisions, eq(processingBundles.revisionId, submissionRevisions.id))
     .innerJoin(sourcePages, eq(processingBundlePages.sourcePageId, sourcePages.id))
     .innerJoin(sourceFiles, eq(sourcePages.sourceFileId, sourceFiles.id))
+    .leftJoin(pageOrientations, ORIENTATION_JOIN)
     .where(withScope(scope, REVISION_SCOPE, eq(processingBundlePages.bundleId, bundleId)))
     .orderBy(asc(processingBundlePages.workingPageIndex));
+  return rows.map(toPageView);
 }
 
 /**
@@ -411,6 +483,7 @@ export async function findSourceOfWorkingPage(
     .innerJoin(submissionRevisions, eq(processingBundles.revisionId, submissionRevisions.id))
     .innerJoin(sourcePages, eq(processingBundlePages.sourcePageId, sourcePages.id))
     .innerJoin(sourceFiles, eq(sourcePages.sourceFileId, sourceFiles.id))
+    .leftJoin(pageOrientations, ORIENTATION_JOIN)
     .where(
       withScope(
         scope,
@@ -420,7 +493,8 @@ export async function findSourceOfWorkingPage(
       ),
     )
     .limit(1);
-  return rows[0] ?? null;
+  const row = rows[0];
+  return row === undefined ? null : toPageView(row);
 }
 
 // =====================================================================

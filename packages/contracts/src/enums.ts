@@ -157,6 +157,36 @@ export type BlockSource = z.infer<typeof blockSourceSchema>;
 export const detectorProvenanceSchema = z.enum(['rf_detr', 'full_page', 'user', 'unavailable']);
 export type DetectorProvenance = z.infer<typeof detectorProvenanceSchema>;
 
+/**
+ * Разворот СОДЕРЖИМОГО страницы: четверть оборота по часовой стрелке (ADR-0020).
+ *
+ * Не путать с `/Rotate` из PDF (`source_pages.rotation`): тот уже применён и к
+ * размерам карты страниц, и к вьюпорту pdf.js, и к растру poppler. Этот —
+ * поправка к скану, легшему на лист боком при нулевом `/Rotate`, и не применён
+ * никем. Значение отвечает на вопрос «на сколько повернуть растр, чтобы текст
+ * читался нормально».
+ *
+ * Числа, а не строки: величина арифметическая — её складывают, обращают и
+ * передают в `sharp.rotate`.
+ */
+export const contentRotationSchema = z.union([
+  z.literal(0),
+  z.literal(90),
+  z.literal(180),
+  z.literal(270),
+]);
+export type ContentRotation = z.infer<typeof contentRotationSchema>;
+
+/**
+ * Кем поставлен разворот.
+ *
+ * `user` перекрывает `probe` и никогда не перекрывается им обратно — правило
+ * живёт в SQL (`ON CONFLICT … WHERE source <> 'user'`), а не в обработчике,
+ * чтобы гонка «инженер повернул, пока зонд летел» решалась базой.
+ */
+export const contentRotationSourceSchema = z.enum(['probe', 'user']);
+export type ContentRotationSource = z.infer<typeof contentRotationSourceSchema>;
+
 // --- Распознавание и артефакты (§3.5, §5.2) ---
 
 /**
@@ -414,5 +444,15 @@ export const processingFeedbackReasonSchema = z.enum([
   'manual.field_corrected',
   'manual.block_redrawn',
   'manual.type_changed',
+  /**
+   * Зонд ориентации не дал ответа (ADR-0020).
+   *
+   * Не отказ конвейера: страница считается прямой и уходит на детекцию. Но и не
+   * рядовой исход — на боковом листе детектор даёт скудную разметку, и знать,
+   * где портал работал вслепую, обязан человек.
+   */
+  'orientation.probe_failed',
+  /** Зонд предложил разворот, но не уверен: мнение записано, лист не повёрнут. */
+  'orientation.low_confidence',
 ]);
 export type ProcessingFeedbackReason = z.infer<typeof processingFeedbackReasonSchema>;

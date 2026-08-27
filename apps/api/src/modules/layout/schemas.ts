@@ -12,6 +12,8 @@ import {
   attentionFlagSchema,
   blockSourceSchema,
   blockTypeSchema,
+  contentRotationSchema,
+  contentRotationSourceSchema,
   detectorProvenanceSchema,
   layoutRevisionStateSchema,
   normalizedCoordsSchema,
@@ -143,3 +145,47 @@ export const fullPageTextResponseSchema = z.object({
   version: z.int().nonnegative(),
   pages: z.int().nonnegative(),
 });
+
+// =====================================================================
+// Разворот содержимого страницы (ADR-0020)
+// =====================================================================
+
+export const orientationParamSchema = z.object({
+  revisionId: z.uuid(),
+  sourcePageId: z.uuid(),
+});
+
+/**
+ * Тело правки разворота.
+ *
+ * Значение — четверть оборота, и схема сужает его до четырёх чисел ДО записи:
+ * тот же инвариант держит CHECK таблицы, но схема называет виновное поле
+ * человеку, а не отдаёт ему `restrict_violation` из драйвера.
+ */
+export const orientationRequestSchema = z.object({
+  rotation: contentRotationSchema,
+});
+
+export const orientationResponseSchema = z.object({
+  revisionId: z.uuid(),
+  sourcePageId: z.uuid(),
+  contentRotation: contentRotationSchema,
+  /** `null` — решения нет вовсе: строку разворота никто не заводил. */
+  source: contentRotationSourceSchema.nullable(),
+  probeRotation: contentRotationSchema.nullable(),
+  probeConfidence: z.number().min(0).max(1).nullable(),
+  probeError: z.string().nullable(),
+});
+
+/*
+ * Числа блоков на странице в ответе НЕТ намеренно.
+ *
+ * Экран, который поворачивает страницу, ровно эти блоки сейчас и рисует —
+ * посчитать их он может сам, а серверное поле было бы вторым источником одного
+ * и того же числа, расходящимся ровно в тот момент, когда рамку удалили в
+ * соседней вкладке.
+ *
+ * Детекцию маршрут тоже не ставит: инженер жмёт 90, 180, 270, подбирая, и это
+ * были бы три задачи подряд. Перевыделение блоков остаётся отдельным действием
+ * человека — той же кнопкой, что и всегда.
+ */

@@ -25,7 +25,7 @@
  * репозитории на КАЖДОМ пути: подрядчик не видит чужую разметку ни списком, ни
  * по прямому идентификатору.
  */
-import type { FastifyReply } from 'fastify';
+import type { FastifyReply, FastifyRequest } from 'fastify';
 import type { Logger } from 'pino';
 import type { AppInstance } from '../../app.js';
 import { conflict, notFound } from '../../lib/problem.js';
@@ -46,6 +46,13 @@ import {
   updateLayoutBlock,
   type LayoutRevisionView,
 } from '../../db/repositories/layout.js';
+import {
+  clearManualPageOrientation,
+  findPageOrientation,
+  saveManualPageOrientation,
+} from '../../db/repositories/page-orientation.js';
+import { auditEmailHmac } from '../../db/repositories/admin.js';
+import type { AuditActor } from '../../db/repositories/audit.js';
 import { readDetectionSettings, readImmutabilityEnforced } from '../../config/portal-settings.js';
 import { enqueueDetectBatches, enqueueLocalDetectBatches, startMarkupOnBundle } from './start.js';
 import {
@@ -60,6 +67,9 @@ import {
   layoutDetailSchema,
   layoutIdParamSchema,
   layoutListSchema,
+  orientationParamSchema,
+  orientationRequestSchema,
+  orientationResponseSchema,
   pageParamSchema,
   pageQuerySchema,
   revisionIdParamSchema,
@@ -77,6 +87,17 @@ export function registerLayoutRoutes(app: AppInstance): void {
   registerReadRoutes(app);
   registerBlockRoutes(app);
   registerPageRoutes(app);
+  registerOrientationRoutes(app);
+}
+
+/** Данные актора для `audit_log`: то, что знает только слой HTTP. */
+function auditActor(app: AppInstance, request: FastifyRequest): AuditActor {
+  const auth = currentAuth(request);
+  return {
+    emailHmac: auditEmailHmac(app.env.AUDIT_HMAC_KEY, auth.user.email),
+    ip: request.ip,
+    requestId: request.id,
+  };
 }
 
 // =====================================================================
@@ -479,6 +500,117 @@ function registerPageRoutes(app: AppInstance): void {
         batches: jobIds.length,
         jobIds,
       });
+    },
+  );
+}
+
+// =====================================================================
+// Разворот содержимого страницы (ADR-0020)
+// =====================================================================
+
+/**
+ * Почему разворот живёт в модуле разметки, а не документов.
+ *
+ * Ручная метка вида ИД адресуется той же парой `revisionId/sourcePageId` и
+ * лежит в соседнем модуле, поэтому соблазн положить разворот рядом с ней
+ * велик. Но метка отвечает на вопрос «что это за документ» и правится правом
+ * `document.edit`, а разворот отвечает на вопрос «как эту страницу читать» и
+ * является входом ДЕТЕКЦИИ И РАСПОЗНАВАНИЯ — того же конвейера, что рисует
+ * рамки. Право на него то же, что на рамки: `markup.edit`.
+ *
+ * Ревизия ПОСТАВКИ, а не разметки, в адресе — намеренно: разворот привязан к
+ * странице исходного файла и переживает пересборку рабочего документа, как её
+ * переживает ручная метка. Ревизия разметки здесь не при чём вовсе.
+ */
+function registerOrientationRoutes(app: AppInstance): void {
+  app.put(
+    `${PREFIX}/revisions/:revisionId/pages/:sourcePageId/orientation`,
+    {
+      preHandler: editMarkup,
+      schema: {
+        params: orientationParamSchema,
+        body: orientationRequestSchema,
+        response: { 200: orientationResponseSchema },
+      },
+    },
+    async (request, reply) => {
+      const { scope } = currentAuth(request);
+      const { revisionId, sourcePageId } = request.params;
+      updateContext({ revisionId });
+
+      const view = await saveManualPageOrientation(app.db, scope, {
+        revisionId,
+        sourcePageId,
+        rotation: request.body.rotation,
+        actor: auditActor(app, request),
+      });
+
+      request.log.info(
+        {
+          event: 'page_orientation_set',
+          revision_id: revisionId,
+          source_page_id: sourcePageId,
+          content_rotation: view.contentRotation,
+          probe_rotation: view.probeRotation,
+        },
+        'разворот содержимого страницы задан вручную',
+      );
+
+      return reply.code(200).send(view);
+    },
+  );
+
+  app.delete(
+    `${PREFIX}/revisions/:revisionId/pages/:sourcePageId/orientation`,
+    {
+      preHandler: editMarkup,
+      schema: {
+        params: orientationParamSchema,
+        response: { 200: orientationResponseSchema },
+      },
+    },
+    async (request, reply) => {
+      const { scope } = currentAuth(request);
+      const { revisionId, sourcePageId } = request.params;
+      updateContext({ revisionId });
+
+      const view = await clearManualPageOrientation(app.db, scope, {
+        revisionId,
+        sourcePageId,
+        actor: auditActor(app, request),
+      });
+
+      request.log.info(
+        {
+          event: 'page_orientation_cleared',
+          revision_id: revisionId,
+          source_page_id: sourcePageId,
+          content_rotation: view.contentRotation,
+        },
+        'ручной разворот снят: действует значение зонда',
+      );
+
+      return reply.code(200).send(view);
+    },
+  );
+
+  app.get(
+    `${PREFIX}/revisions/:revisionId/pages/:sourcePageId/orientation`,
+    {
+      preHandler: readMarkup,
+      schema: {
+        params: orientationParamSchema,
+        response: { 200: orientationResponseSchema },
+      },
+    },
+    async (request, reply) => {
+      const { scope: _scope } = currentAuth(request);
+      const { revisionId, sourcePageId } = request.params;
+      updateContext({ revisionId });
+
+      const view = await findPageOrientation(app.db, revisionId, sourcePageId);
+      if (view === null) throw notFound('Разворот этой страницы не задавали.');
+      return reply.code(200).send(view);
     },
   );
 }

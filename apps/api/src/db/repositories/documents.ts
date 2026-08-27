@@ -161,8 +161,15 @@ async function requireVisibleRevision(
   return row;
 }
 
-/** То же плюс требование изменяемости: терминальную ревизию правит только БД-отказ. */
-async function requireMutableRevision(
+/**
+ * То же плюс требование изменяемости: терминальную ревизию правит только БД-отказ.
+ *
+ * Экспортируется ради `page-orientation.ts`: разворот содержимого страницы —
+ * такое же производное решение конвейера, как классификация, и правило «в каких
+ * статусах его можно менять» обязано быть ОДНО. Своя копия проверки там
+ * разошлась бы с этой на первой же правке статусов.
+ */
+export async function requireMutableRevision(
   db: Database,
   scope: AuthScope,
   revisionId: string,
@@ -199,7 +206,7 @@ params:
  * свой: SQLSTATE и имени ограничения для диагностики достаточно. Это тот же
  * приём, что в `catalog.ts`, и заведён он там по итогам утечки S3.
  */
-async function guardWrites<TResult>(operation: () => Promise<TResult>): Promise<TResult> {
+export async function guardWrites<TResult>(operation: () => Promise<TResult>): Promise<TResult> {
   try {
     return await operation();
   } catch (error) {

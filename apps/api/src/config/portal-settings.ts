@@ -98,6 +98,33 @@ export function parseModelAllowlist(raw: string | undefined): readonly string[] 
   return entries.length === 0 ? null : entries;
 }
 
+export interface OrientationProbeSettings {
+  readonly enabled: boolean;
+  /** Пустая строка — брать модель распознавания (`recognition.vlm_model`). */
+  readonly model: string;
+}
+
+/**
+ * Настройки зонда ориентации (ADR-0020).
+ *
+ * Порога уверенности здесь НЕТ намеренно: он часть политики разворота, и
+ * настройка дала бы два прогона с одной версией политики и разными поворотами —
+ * дословно тот довод, которым `crop.ts` объясняет, почему потолок кропа
+ * константа, а не настройка.
+ */
+export async function readOrientationProbeSettings(
+  db: Database,
+): Promise<OrientationProbeSettings> {
+  const [enabled, model] = await Promise.all([
+    readEffectiveSetting(db, 'orientation.probe_enabled'),
+    readEffectiveSetting(db, 'orientation.probe_model'),
+  ]);
+  return {
+    enabled: enabled === true,
+    model: typeof model === 'string' ? model.trim() : '',
+  };
+}
+
 export interface DetectionProviderSettings {
   readonly provider: DetectionProviderSetting;
   /** Пустая строка — модель не загружена; локальная детекция честно отказывает. */

@@ -26,7 +26,11 @@ import { listBundlePages } from '../../db/repositories/bundles.js';
 import { enqueueJob } from '../../db/repositories/jobs.js';
 import { ensureDraftLayout } from '../../db/repositories/layout.js';
 import { resetPipelineForRevision } from '../../db/repositories/purge.js';
-import { readDetectionSettings, readImmutabilityEnforced } from '../../config/portal-settings.js';
+import {
+  readDetectionSettings,
+  readImmutabilityEnforced,
+  readOrientationProbeSettings,
+} from '../../config/portal-settings.js';
 import { DETECT_BATCH_LIMIT } from '../../integrations/rdweb/legacy-adapter.js';
 import { dedupeKeyFor } from '../../jobs/types.js';
 import { conflict } from '../../lib/problem.js';
@@ -163,10 +167,45 @@ export async function startMarkupOnBundle(
         'PREVIEW_MODE=cached недоступен при локальной детекции: превью рендерит браузер',
       );
     }
-    const pages = (await listBundlePages(db, scope, input.bundleId)).map(
-      (page) => page.workingPageIndex,
-    );
+    const pageMap = await listBundlePages(db, scope, input.bundleId);
+    const pages = pageMap.map((page) => page.workingPageIndex);
     if (pages.length === 0) throw conflict('У рабочего документа нет карты страниц.');
+
+    /**
+     * Зонд ориентации идёт ПЕРЕД детекцией (ADR-0020).
+     *
+     * RF-DETR обучен на прямых листах: на боковом он даёт скудную разметку, и
+     * табличная зона, оставшаяся без блока, не будет распознана вовсе — её
+     * никто не спросит у модели. Поэтому цепочка «зонд → детекция», а не
+     * «детекция и когда-нибудь зонд».
+     *
+     * Детекцию ставит сам зонд, в любом своём исходе. Ставить её здесь ЗАОДНО
+     * значило бы поставить дважды — и второй раз без разворота, который зонд
+     * ещё не записал.
+     */
+    const orientation = await readOrientationProbeSettings(db);
+    if (orientation.enabled) {
+      const probes = await enqueueOrientationProbes(db, scope, {
+        layoutRevisionId: layout.id,
+        revisionId: input.revisionId,
+        bundleId: input.bundleId,
+        pages: pageMap.map((page) => ({
+          workingPageIndex: page.workingPageIndex,
+          sourcePageId: page.sourcePageId,
+        })),
+        logger: input.logger,
+      });
+      return {
+        layoutRevisionId: layout.id,
+        bundleId: input.bundleId,
+        created,
+        version: layout.version,
+        provider: 'local',
+        jobIds: probes.jobIds,
+        jobsCreated: probes.created,
+        detectionSkipReason: null,
+      };
+    }
 
     const enqueued = await enqueueLocalDetectBatches(db, scope, {
       layoutRevisionId: layout.id,
@@ -322,6 +361,63 @@ export async function enqueueLocalDetectBatches(
       created: anyCreated,
     },
     'локальная детекция поставлена постранично',
+  );
+  return { jobIds, created: anyCreated };
+}
+
+/**
+ * Постановка зондов ориентации ПЕРЕД детекцией (ADR-0020).
+ *
+ * Одна задача на страницу, и каждая по завершении ставит детекцию своей
+ * страницы сама — тем же приёмом, каким `bundle.build` ставит `layout.start`, а
+ * `layout.detect_local` ставит `layout.analyze_coverage`. Сцепление, а не
+ * задержка: `runAfterMs` был бы догадкой о времени вызова модели, а цепочка —
+ * гарантией порядка.
+ *
+ * `dedupeKey` детекции воркер поставит ТОТ ЖЕ, что поставил бы этот модуль,
+ * поэтому повторный проход и путь «зонд выключен» идемпотентны между собой:
+ * дважды детекция одной страницы не встанет.
+ */
+export async function enqueueOrientationProbes(
+  db: Database,
+  scope: AuthScope,
+  input: {
+    readonly layoutRevisionId: string;
+    readonly revisionId: string;
+    readonly bundleId: string;
+    readonly pages: readonly { readonly workingPageIndex: number; readonly sourcePageId: string }[];
+    readonly logger: Logger;
+  },
+): Promise<{ readonly jobIds: string[]; readonly created: boolean }> {
+  const jobIds: string[] = [];
+  let anyCreated = false;
+  for (const page of input.pages) {
+    const { jobId, created } = await enqueueJob(db, scope, {
+      type: 'page.orientation_probe',
+      payload: tracePayload({
+        revisionId: input.revisionId,
+        layoutRevisionId: input.layoutRevisionId,
+        bundleId: input.bundleId,
+        sourcePageId: page.sourcePageId,
+        workingPageIndex: page.workingPageIndex,
+      }),
+      dedupeKey: dedupeKeyFor(
+        'page.orientation_probe',
+        input.layoutRevisionId,
+        String(page.workingPageIndex),
+      ),
+    });
+    jobIds.push(jobId);
+    if (created) anyCreated = true;
+  }
+  input.logger.info(
+    {
+      event: 'job_enqueued',
+      job_type: 'page.orientation_probe',
+      batches: jobIds.length,
+      created: anyCreated,
+    },
+    'зонд ориентации поставлен постранично; детекцию поставит он же',
   );
   return { jobIds, created: anyCreated };
 }

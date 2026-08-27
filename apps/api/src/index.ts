@@ -302,12 +302,28 @@ export {
   parseModelAllowlist,
   readAiDryRunOnly,
   readImmutabilityEnforced,
+  readOrientationProbeSettings,
   readRecognitionSettings,
 } from './config/portal-settings.js';
-export type { RecognitionProviderSettings } from './config/portal-settings.js';
+export type {
+  OrientationProbeSettings,
+  RecognitionProviderSettings,
+} from './config/portal-settings.js';
+
+/** Разворот содержимого страницы (ADR-0020). */
+export {
+  clearManualPageOrientation,
+  findPageOrientation,
+  listPageOrientations,
+  listPagesWithoutOrientation,
+  saveManualPageOrientation,
+  saveProbeOrientation,
+} from './db/repositories/page-orientation.js';
+export type { PageOrientationView } from './db/repositories/page-orientation.js';
 
 /** VLM-распознавание по кропам блоков (ADR-0007, план v3). */
 export {
+  RECOGNITION_ORIENTATION_PROMPT,
   RECOGNITION_PROMPT_CODES,
   RECOGNITION_PROMPT_DEFAULTS,
   recognitionPromptDefaultByCode,
@@ -330,7 +346,8 @@ export {
   ANALYSIS_PROMPT_STAGES,
 } from './prompts/analysis-defaults.js';
 export type { AnalysisPromptDefault, AnalysisPromptStage } from './prompts/analysis-defaults.js';
-export { schemaHash } from './recognition/vlm/schemas.js';
+export { schemaHash, vlmOrientationResponseSchema } from './recognition/vlm/schemas.js';
+export { stripNoise } from './recognition/vlm/postprocess.js';
 export { recognizeBlock } from './recognition/vlm/recognize-block.js';
 export type {
   RecognizeBlockInput,

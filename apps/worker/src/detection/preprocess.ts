@@ -79,10 +79,7 @@ export interface NormalizationOptions {
  * (grayscale-рендер poppler реплицируется в RGB — так же, как PIL
  * `convert("RGB")`). Каналов не три после этого — дефект входа, а не режим.
  */
-export async function readTileRgb(
-  source: string | Buffer,
-  region: TileRegion,
-): Promise<TileRgb> {
+export async function readTileRgb(source: string | Buffer, region: TileRegion): Promise<TileRgb> {
   const { data, info } = await sharp(source)
     .extract({ left: region.x0, top: region.y0, width: region.width, height: region.height })
     .toColourspace('srgb')
@@ -153,4 +150,37 @@ export async function preprocessTile(
     }
   }
   return { data, dims: [1, 3, r, r] };
+}
+
+/**
+ * Разворот растра страницы перед инференсом (ADR-0020).
+ *
+ * ## Почему детекции поворачивается ЛИСТ, а распознаванию — кроп
+ *
+ * Это не непоследовательность, а одно правило для двух потребителей: модель и
+ * детектор обязаны видеть прямую картинку, а в БД координаты обязаны остаться в
+ * системе страницы. Распознавание получает вырезанный прямоугольник — его и
+ * разворачиваем, координаты не трогая. Детектор же потребляет лист целиком:
+ * вырезать нечего, поэтому разворачивается растр, а найденные боксы
+ * возвращаются обратным поворотом (`rotateRectNorm` с `inverseTurn`).
+ *
+ * RF-DETR обучен на прямых листах. На боковом он даёт скудную разметку — а
+ * табличная зона, оставшаяся без блока, не будет распознана вовсе: её никто не
+ * спросит у модели.
+ *
+ * ## Отдельным файлом, а не звеном конвейера тайлинга
+ *
+ * Поворот обязан произойти ДО планирования плиток: их сетка считается от
+ * размеров страницы, и повернуть плитку после нарезки — значит нарезать не то.
+ * Функция пишет новый файл, потому что дальше по коду страница адресуется путём
+ * (`readTileRgb` берёт `string | Buffer`), и держать развёрнутый лист A0 в
+ * памяти всю детекцию незачем.
+ */
+export async function rotatePagePng(
+  sourcePath: string,
+  targetPath: string,
+  turn: 90 | 180 | 270,
+): Promise<{ readonly widthPx: number; readonly heightPx: number }> {
+  const info = await sharp(sourcePath).rotate(turn).png().toFile(targetPath);
+  return { widthPx: info.width, heightPx: info.height };
 }

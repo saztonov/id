@@ -44,7 +44,12 @@ describe('CROP_POLICY_VERSION', () => {
     //
     // v2 — появился отдельный потолок длинной стороны для полностраничных
     // блоков (S27): общий 2048 px сжимал A4@300dpi в 1.7 раза.
-    expect(CROP_POLICY_VERSION).toBe('crop.v2');
+    //
+    // v3 — кроп отдаётся модели РАЗВЁРНУТЫМ по `content_rotation` страницы
+    // (S35, ADR-0020). Подъём делает все прежние прогоны несовместимыми в
+    // `runsProduceSameCrops`: старый результат получен по картинке, которой
+    // модель больше не увидит.
+    expect(CROP_POLICY_VERSION).toBe('crop.v3');
   });
 });
 
@@ -311,5 +316,164 @@ describe('cropBlockPng: валидация входа', () => {
         polygon: null,
       }),
     ).rejects.toThrow(/pagePngPath.*pageBuffer/);
+  });
+});
+
+describe('cropBlockPng: разворот содержимого (ADR-0020)', () => {
+  /**
+   * Двухцветная страница: левая половина одного цвета, правая другого.
+   *
+   * Помеченная область нужна, чтобы отличить поворот по часовой от поворота
+   * против: на однотонной картинке оба выглядят одинаково, и перепутанный знак
+   * прошёл бы тест — а именно перепутанный знак и есть главный риск всей правки.
+   */
+  async function halfPage(width: number, height: number): Promise<Buffer> {
+    const left = await sharp({
+      create: { width: Math.floor(width / 2), height, channels: 3, background: RED },
+    })
+      .png()
+      .toBuffer();
+    return sharp({ create: { width, height, channels: 3, background: BLUE } })
+      .composite([{ input: left, left: 0, top: 0 }])
+      .png()
+      .toBuffer();
+  }
+
+  const RED = { r: 220, g: 20, b: 20 };
+  const BLUE = { r: 20, g: 20, b: 220 };
+
+  it('поворот на 90 меняет стороны кропа местами', async () => {
+    const page = await solidPage(400, 800, RED);
+    const result = await cropBlockPng({
+      pageBuffer: page,
+      pageWidthPx: 400,
+      pageHeightPx: 800,
+      coordsNorm: [0, 0, 1, 1],
+      polygon: null,
+      paddingPx: 0,
+      contentRotation: 90,
+    });
+    if ('degenerate' in result) throw new Error('кроп вырожден');
+    expect(result.widthPx).toBe(800);
+    expect(result.heightPx).toBe(400);
+  });
+
+  it('поворот идёт ПО ЧАСОВОЙ: левая половина уезжает наверх', async () => {
+    // Соглашение записано в четырёх местах портала, и здесь оно проверяется
+    // пикселями: при повороте по часовой стрелке левый край листа становится
+    // верхним. Против часовой он стал бы нижним — и это единственное, что
+    // отличает верную реализацию от зеркальной.
+    const page = await halfPage(400, 800);
+    const result = await cropBlockPng({
+      pageBuffer: page,
+      pageWidthPx: 400,
+      pageHeightPx: 800,
+      coordsNorm: [0, 0, 1, 1],
+      polygon: null,
+      paddingPx: 0,
+      contentRotation: 90,
+    });
+    if ('degenerate' in result) throw new Error('кроп вырожден');
+
+    const raw = await toRaw(result.png);
+    expect(raw.width).toBe(800);
+    expect(raw.height).toBe(400);
+    // Верхняя полоса — бывшая левая (красная), нижняя — бывшая правая (синяя).
+    expect(pixelAt(raw, 400, 10).slice(0, 3)).toEqual([RED.r, RED.g, RED.b]);
+    expect(pixelAt(raw, 400, 390).slice(0, 3)).toEqual([BLUE.r, BLUE.g, BLUE.b]);
+  });
+
+  it('поворот на 270 уводит левую половину вниз — знак не перепутан', async () => {
+    const page = await halfPage(400, 800);
+    const result = await cropBlockPng({
+      pageBuffer: page,
+      pageWidthPx: 400,
+      pageHeightPx: 800,
+      coordsNorm: [0, 0, 1, 1],
+      polygon: null,
+      paddingPx: 0,
+      contentRotation: 270,
+    });
+    if ('degenerate' in result) throw new Error('кроп вырожден');
+
+    const raw = await toRaw(result.png);
+    expect(pixelAt(raw, 400, 390).slice(0, 3)).toEqual([RED.r, RED.g, RED.b]);
+    expect(pixelAt(raw, 400, 10).slice(0, 3)).toEqual([BLUE.r, BLUE.g, BLUE.b]);
+  });
+
+  it('нулевой разворот даёт ПОБАЙТОВО тот же PNG, что и его отсутствие', async () => {
+    // Страховка от лишнего энкода. `sharp.rotate(0)` не бесплатен: он способен
+    // изменить байты вывода, а `cropSha256` уезжает в провенанс каждого блока.
+    // Лишняя операция при нуле переписала бы провенанс всем прямым страницам
+    // комплекта — молча и без единой видимой причины.
+    const page = await halfPage(400, 800);
+    const input = {
+      pageBuffer: page,
+      pageWidthPx: 400,
+      pageHeightPx: 800,
+      coordsNorm: [0.1, 0.1, 0.9, 0.5] as const,
+      polygon: null,
+      paddingPx: 8,
+    };
+    const without = await cropBlockPng(input);
+    const withZero = await cropBlockPng({ ...input, contentRotation: 0 });
+    if ('degenerate' in without || 'degenerate' in withZero) throw new Error('кроп вырожден');
+    expect(Buffer.from(withZero.png).equals(Buffer.from(without.png))).toBe(true);
+  });
+
+  it('маска полигона строится ДО поворота, а не после', async () => {
+    // Точки полигона нормализованы к НЕповёрнутой странице (как в
+    // `layout_block_points`). Построй маску после поворота — и она вырезала бы
+    // не ту часть блока, причём правдоподобно: контур остался бы контуром.
+    const page = await solidPage(200, 200, RED);
+    const result = await cropBlockPng({
+      pageBuffer: page,
+      pageWidthPx: 200,
+      pageHeightPx: 200,
+      coordsNorm: [0, 0, 1, 1],
+      // Треугольник, накрывающий ЛЕВЫЙ ВЕРХНИЙ угол страницы.
+      polygon: [
+        [0, 0],
+        [1, 0],
+        [0, 1],
+      ],
+      paddingPx: 0,
+      contentRotation: 90,
+    });
+    if ('degenerate' in result) throw new Error('кроп вырожден');
+
+    const raw = await toRaw(result.png);
+    // Левый верхний угол страницы после поворота по часовой — правый верхний.
+    expect(pixelAt(raw, 190, 10).slice(0, 3)).toEqual([RED.r, RED.g, RED.b]);
+    // Правый нижний угол страницы (вне треугольника) остаётся белым и после
+    // поворота оказывается в левом нижнем.
+    expect(pixelAt(raw, 10, 190).slice(0, 3)).toEqual([255, 255, 255]);
+  });
+
+  it('потолок длинной стороны и поворот дают тот же размер, что и без поворота', async () => {
+    // Порядок «потолок → поворот» закреплён: четверть оборота меняет стороны
+    // местами, но не длину длинной, поэтому сжатие обязано быть тем же.
+    const page = await solidPage(3000, 1000, RED);
+    const straight = await cropBlockPng({
+      pageBuffer: page,
+      pageWidthPx: 3000,
+      pageHeightPx: 1000,
+      coordsNorm: [0, 0, 1, 1],
+      polygon: null,
+      paddingPx: 0,
+    });
+    const turned = await cropBlockPng({
+      pageBuffer: page,
+      pageWidthPx: 3000,
+      pageHeightPx: 1000,
+      coordsNorm: [0, 0, 1, 1],
+      polygon: null,
+      paddingPx: 0,
+      contentRotation: 90,
+    });
+    if ('degenerate' in straight || 'degenerate' in turned) throw new Error('кроп вырожден');
+    expect(straight.widthPx).toBe(2048);
+    expect(turned.heightPx).toBe(2048);
+    expect(turned.widthPx).toBe(straight.heightPx);
   });
 });

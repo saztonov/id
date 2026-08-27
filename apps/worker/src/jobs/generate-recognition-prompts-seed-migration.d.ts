@@ -12,7 +12,7 @@
  * но декларация не обязана знать, из какой глубины её будут импортировать).
  */
 declare module '*/generate-recognition-prompts-seed-migration.mjs' {
-  /** Абсолютный путь к закоммиченному `migrations/0020_seed_recognition_prompts.sql`. */
+  /** Абсолютный путь к ПОСЛЕДНЕЙ сид-миграции промптов. */
   export const TARGET: string;
 
   export function sqlLiteral(value: string): string;
@@ -24,12 +24,19 @@ declare module '*/generate-recognition-prompts-seed-migration.mjs' {
   export function generateRecognitionPromptsSeedSql(defaults: Record<string, unknown>): string;
 
   /**
-   * Собирает `@id/api` (`tsc`) и возвращает `RECOGNITION_PROMPT_DEFAULTS`
-   * (`apps/api/src/recognition/vlm/prompts.ts`) — по ключам `text`/`image`/`stamp`.
+   * Собирает `@id/api` (`tsc`) и возвращает сеемые промпты.
+   *
+   * Ключи `text`/`image`/`stamp` — это `RECOGNITION_PROMPT_DEFAULTS`
+   * (`apps/api/src/recognition/vlm/prompts.ts`), а `orientation` —
+   * `RECOGNITION_ORIENTATION_PROMPT` оттуда же. Отдельной константой он лежит
+   * не по недосмотру: словарь блоков типизирован тремя типами, и четвёртый
+   * ключ в нём означал бы, что «видов блока четыре», — а зонд смотрит на
+   * страницу целиком и блоков не знает вовсе. Сводит их генератор, на своей
+   * границе, и здесь описан именно его результат.
    */
   export function loadRecognitionPromptDefaults(): Promise<
     Record<
-      'text' | 'image' | 'stamp',
+      'text' | 'image' | 'stamp' | 'orientation',
       {
         readonly code: string;
         readonly systemPrompt: string;
@@ -37,7 +44,11 @@ declare module '*/generate-recognition-prompts-seed-migration.mjs' {
         readonly temperature: number;
         readonly maxTokens: number;
         readonly topK?: number;
-        readonly responseFormat: { readonly name: string; readonly schema: unknown; readonly strict: true };
+        readonly responseFormat: {
+          readonly name: string;
+          readonly schema: unknown;
+          readonly strict: true;
+        };
       }
     >
   >;

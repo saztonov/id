@@ -58,3 +58,74 @@ export function xyxyToCxcywh(rect: Rect): [cx: number, cy: number, w: number, h:
   const [x0, y0, x1, y1] = rect;
   return [(x0 + x1) / 2, (y0 + y1) / 2, x1 - x0, y1 - y0];
 }
+
+// ---------------------------------------------------------------------------
+// Поворот на четверть оборота (ADR-0020)
+// ---------------------------------------------------------------------------
+
+/**
+ * Четверть оборота ПО ЧАСОВОЙ СТРЕЛКЕ.
+ *
+ * Соглашение одно на весь портал и записано дословно в четырёх местах: здесь, в
+ * комментарии колонки `page_orientations.content_rotation`, в тексте промпта
+ * зонда ориентации и в шапке `apps/web/src/features/markup/rotation.ts`. Четыре
+ * разных места читают одно число, и понимать его они обязаны одинаково — иначе
+ * страница уедет вверх ногами, и это не упадёт, а просто будет неверно.
+ */
+export type QuarterTurn = 0 | 90 | 180 | 270;
+
+/** Обратный поворот: 90 ↔ 270, 0 и 180 сами себе обратны. */
+export function inverseTurn(turn: QuarterTurn): QuarterTurn {
+  return ((360 - turn) % 360) as QuarterTurn;
+}
+
+/**
+ * Точка ИЗ системы страницы В систему повёрнутой картинки, координаты 0..1.
+ *
+ * - 90:  `(x, y) → (1 − y, x)`
+ * - 180: `(x, y) → (1 − x, 1 − y)`
+ * - 270: `(x, y) → (y, 1 − x)`
+ *
+ * Формула НЕ содержит ширины и высоты, и это не упрощение, а свойство
+ * нормализованных координат: при 90/270 меняется аспект, но каждая ось
+ * независимо перенормируется в [0,1]. В пикселях те же три случая требовали бы
+ * двух лишних аргументов — то есть двух лишних способов ошибиться.
+ */
+export function rotatePointNorm(
+  point: readonly [number, number],
+  turn: QuarterTurn,
+): [number, number] {
+  const [x, y] = point;
+  switch (turn) {
+    case 90:
+      return [1 - y, x];
+    case 180:
+      return [1 - x, 1 - y];
+    case 270:
+      return [y, 1 - x];
+    default:
+      return [x, y];
+  }
+}
+
+/**
+ * Прямоугольник ИЗ системы страницы В систему повёрнутой картинки.
+ *
+ * Поворачиваются два противоположных угла, после чего границы приводятся к
+ * порядку `x0<=x1, y0<=y1`: axis-aligned прямоугольник при четверти оборота
+ * остаётся axis-aligned, но углы меняются местами.
+ */
+export function rotateRectNorm(rect: Rect, turn: QuarterTurn): Rect {
+  const [ax, ay] = rotatePointNorm([rect[0], rect[1]], turn);
+  const [bx, by] = rotatePointNorm([rect[2], rect[3]], turn);
+  return [Math.min(ax, bx), Math.min(ay, by), Math.max(ax, bx), Math.max(ay, by)];
+}
+
+/** Размер картинки после поворота: стороны меняются местами на 90 и 270. */
+export function rotatedSize(
+  width: number,
+  height: number,
+  turn: QuarterTurn,
+): { width: number; height: number } {
+  return turn === 90 || turn === 270 ? { width: height, height: width } : { width, height };
+}

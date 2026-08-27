@@ -24,8 +24,15 @@
 
 import type { LlmProviderName } from './port.js';
 
-/** Единственная стадия порта; совпадает с CHECK `ai_runs_stage_chk` (0019). */
-export type VlmStage = 'recognize';
+/**
+ * Стадии порта; совпадают с CHECK `ai_runs_stage_chk` (0019, 0052).
+ *
+ * `orientation` — зонд разворота страницы (ADR-0020). Отдельная стадия, а не
+ * `recognize`: у строки зонда нет `recognition_run_id` — он отрабатывает ДО
+ * детекции, когда прогона ещё не существует, — и под `recognize` он врал бы
+ * всякому срезу «цена прогона».
+ */
+export type VlmStage = 'recognize' | 'orientation';
 
 /** Изображение кропа. Всегда PNG: формат фиксирован crop policy (ADR-0007). */
 export interface VlmImage {

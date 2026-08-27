@@ -104,6 +104,9 @@ export const DERIVED_DELETES: readonly PurgeStep[] = [
   },
   { table: 'layout_blocks', where: (id: SQL) => sql`revision_id = ${id}` },
   { table: 'page_classifications', where: (id: SQL) => sql`revision_id = ${id}` },
+  // Разворот содержимого (0052) — производное решение о странице, как и
+  // классификация: ссылается на `source_pages` и обязан уйти ДО них.
+  { table: 'page_orientations', where: (id: SQL) => sql`revision_id = ${id}` },
   { table: 'page_text_versions', where: (id: SQL) => sql`revision_id = ${id}` },
   {
     table: 'artifact_versions',

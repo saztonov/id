@@ -707,7 +707,7 @@ export const aiRuns = pgTable("ai_runs", {
 	check("ai_runs_input_hash_chk", sql`input_hash ~ '^[0-9a-f]{64}$'::text`),
 	check("ai_runs_output_hash_chk", sql`output_hash ~ '^[0-9a-f]{64}$'::text`),
 	check("ai_runs_tokens_chk", sql`((tokens_in IS NULL) OR (tokens_in >= 0)) AND ((tokens_out IS NULL) OR (tokens_out >= 0))`),
-	check("ai_runs_stage_chk", sql`stage = ANY (ARRAY['page_classify'::text, 'doc_split'::text, 'extract'::text, 'check'::text, 'summary'::text, 'recognize'::text])`),
+	check("ai_runs_stage_chk", sql`stage = ANY (ARRAY['page_classify'::text, 'doc_split'::text, 'extract'::text, 'check'::text, 'summary'::text, 'recognize'::text, 'orientation'::text])`),
 ]);
 
 export const pageTextVersions = pgTable("page_text_versions", {
@@ -1150,43 +1150,6 @@ export const appSettings = pgTable("app_settings", {
 		}),
 ]);
 
-export const promptTemplates = pgTable("prompt_templates", {
-	id: uuid().defaultRandom().primaryKey().notNull(),
-	code: text().notNull(),
-	version: integer().notNull(),
-	stage: text().notNull(),
-	docTypeCode: text("doc_type_code"),
-	state: text().default('draft').notNull(),
-	systemPrompt: text("system_prompt").notNull(),
-	userTemplate: text("user_template").notNull(),
-	outputSchema: jsonb("output_schema"),
-	modelOverride: text("model_override"),
-	publishedAt: timestamp("published_at", { withTimezone: true, mode: 'string' }),
-	publishedBy: uuid("published_by"),
-	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-	updatedAt: timestamp("updated_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-}, (table) => [
-	index("ix_prompt_templates_doc_type").using("btree", table.docTypeCode.asc().nullsLast().op("text_ops")),
-	index("ix_prompt_templates_published_by").using("btree", table.publishedBy.asc().nullsLast().op("uuid_ops")),
-	uniqueIndex("ux_prompt_templates_single_published").using("btree", table.code.asc().nullsLast().op("text_ops")).where(sql`(state = 'published'::text)`),
-	foreignKey({
-			columns: [table.docTypeCode],
-			foreignColumns: [docTypes.code],
-			name: "prompt_templates_doc_type_code_fkey"
-		}),
-	foreignKey({
-			columns: [table.publishedBy],
-			foreignColumns: [users.id],
-			name: "prompt_templates_published_by_fkey"
-		}),
-	unique("prompt_templates_code_version_uq").on(table.code, table.version),
-	check("prompt_templates_code_chk", sql`code ~ '^[a-z][a-z0-9_]*$'::text`),
-	check("prompt_templates_version_chk", sql`version > 0`),
-	check("prompt_templates_state_chk", sql`state = ANY (ARRAY['draft'::text, 'test'::text, 'published'::text, 'archived'::text])`),
-	check("prompt_templates_published_chk", sql`(state <> 'published'::text) OR ((published_at IS NOT NULL) AND (published_by IS NOT NULL))`),
-	check("prompt_templates_stage_chk", sql`stage = ANY (ARRAY['page_classify'::text, 'doc_split'::text, 'extract'::text, 'check'::text, 'summary'::text, 'recognize'::text])`),
-]);
-
 export const errorEventsLegacy = pgTable("error_events_legacy", {
 	fingerprint: text().primaryKey().notNull(),
 	errorClass: text("error_class").notNull(),
@@ -1273,6 +1236,43 @@ export const jobRuns = pgTable("job_runs", {
 	check("job_runs_duration_chk", sql`(duration_ms IS NULL) OR (duration_ms >= 0)`),
 	check("job_runs_finished_chk", sql`(outcome IS NOT NULL) OR (finished_at IS NULL)`),
 	check("job_runs_outcome_chk", sql`(outcome IS NULL) OR (outcome = ANY (ARRAY['succeeded'::text, 'failed'::text, 'cancelled'::text, 'lease_expired'::text, 'deferred'::text]))`),
+]);
+
+export const promptTemplates = pgTable("prompt_templates", {
+	id: uuid().defaultRandom().primaryKey().notNull(),
+	code: text().notNull(),
+	version: integer().notNull(),
+	stage: text().notNull(),
+	docTypeCode: text("doc_type_code"),
+	state: text().default('draft').notNull(),
+	systemPrompt: text("system_prompt").notNull(),
+	userTemplate: text("user_template").notNull(),
+	outputSchema: jsonb("output_schema"),
+	modelOverride: text("model_override"),
+	publishedAt: timestamp("published_at", { withTimezone: true, mode: 'string' }),
+	publishedBy: uuid("published_by"),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	updatedAt: timestamp("updated_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+}, (table) => [
+	index("ix_prompt_templates_doc_type").using("btree", table.docTypeCode.asc().nullsLast().op("text_ops")),
+	index("ix_prompt_templates_published_by").using("btree", table.publishedBy.asc().nullsLast().op("uuid_ops")),
+	uniqueIndex("ux_prompt_templates_single_published").using("btree", table.code.asc().nullsLast().op("text_ops")).where(sql`(state = 'published'::text)`),
+	foreignKey({
+			columns: [table.docTypeCode],
+			foreignColumns: [docTypes.code],
+			name: "prompt_templates_doc_type_code_fkey"
+		}),
+	foreignKey({
+			columns: [table.publishedBy],
+			foreignColumns: [users.id],
+			name: "prompt_templates_published_by_fkey"
+		}),
+	unique("prompt_templates_code_version_uq").on(table.code, table.version),
+	check("prompt_templates_code_chk", sql`code ~ '^[a-z][a-z0-9_]*$'::text`),
+	check("prompt_templates_version_chk", sql`version > 0`),
+	check("prompt_templates_state_chk", sql`state = ANY (ARRAY['draft'::text, 'test'::text, 'published'::text, 'archived'::text])`),
+	check("prompt_templates_published_chk", sql`(state <> 'published'::text) OR ((published_at IS NOT NULL) AND (published_by IS NOT NULL))`),
+	check("prompt_templates_stage_chk", sql`stage = ANY (ARRAY['page_classify'::text, 'doc_split'::text, 'extract'::text, 'check'::text, 'summary'::text, 'recognize'::text, 'orientation'::text])`),
 ]);
 
 export const outbox = pgTable("outbox", {
@@ -1588,52 +1588,6 @@ export const errorSignatures = pgTable("error_signatures", {
 	check("error_signatures_source_chk", sql`source = ANY (ARRAY['api'::text, 'worker'::text, 'web'::text, 'unknown'::text])`),
 ]);
 
-export const processingFeedback = pgTable("processing_feedback", {
-	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
-	id: bigint({ mode: "number" }).primaryKey().generatedAlwaysAsIdentity({ name: "processing_feedback_id_seq", startWith: 1, increment: 1, minValue: 1, maxValue: 9223372036854775807, cache: 1 }),
-	at: timestamp({ withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-	feedbackType: text("feedback_type").notNull(),
-	reasonCode: text("reason_code").notNull(),
-	severity: text().default('warn').notNull(),
-	revisionId: uuid("revision_id"),
-	recognitionRunId: uuid("recognition_run_id"),
-	sourcePageId: uuid("source_page_id"),
-	workingPageIndex: integer("working_page_index"),
-	layoutBlockId: uuid("layout_block_id"),
-	fieldCode: text("field_code"),
-	findingId: uuid("finding_id"),
-	jobRunId: uuid("job_run_id"),
-	aiRunId: uuid("ai_run_id"),
-	docTypeCode: text("doc_type_code"),
-	pipelineStage: text("pipeline_stage"),
-	provider: text(),
-	model: text(),
-	promptCode: text("prompt_code"),
-	promptVersion: integer("prompt_version"),
-	detectorModelVersion: text("detector_model_version"),
-	rulesetVersion: text("ruleset_version"),
-	appRelease: text("app_release"),
-	score: doublePrecision(),
-	observed: jsonb(),
-	expected: jsonb(),
-	requestId: text("request_id"),
-}, (table) => [
-	index("ix_processing_feedback_at").using("btree", table.at.desc().nullsFirst().op("timestamptz_ops")),
-	index("ix_processing_feedback_block").using("btree", table.layoutBlockId.asc().nullsLast().op("uuid_ops")).where(sql`(layout_block_id IS NOT NULL)`),
-	index("ix_processing_feedback_doc_type").using("btree", table.docTypeCode.asc().nullsLast().op("text_ops"), table.at.desc().nullsFirst().op("timestamptz_ops")),
-	index("ix_processing_feedback_prompt").using("btree", table.promptCode.asc().nullsLast().op("int4_ops"), table.promptVersion.asc().nullsLast().op("int4_ops"), table.at.desc().nullsFirst().op("timestamptz_ops")),
-	index("ix_processing_feedback_reason").using("btree", table.reasonCode.asc().nullsLast().op("timestamptz_ops"), table.at.desc().nullsFirst().op("text_ops")),
-	index("ix_processing_feedback_revision").using("btree", table.revisionId.asc().nullsLast().op("timestamptz_ops"), table.at.desc().nullsFirst().op("timestamptz_ops")),
-	index("ix_processing_feedback_stage").using("btree", table.pipelineStage.asc().nullsLast().op("text_ops"), table.at.desc().nullsFirst().op("timestamptz_ops")),
-	check("processing_feedback_type_chk", sql`feedback_type = ANY (ARRAY['system_failure'::text, 'recognition_failure'::text, 'wrong_extraction'::text, 'check_error'::text, 'manual_correction'::text])`),
-	check("processing_feedback_reason_chk", sql`reason_code = ANY (ARRAY['vlm.invalid_json'::text, 'vlm.schema_mismatch'::text, 'vlm.refusal'::text, 'vlm.empty_result'::text, 'extract.field_missing'::text, 'classify.low_confidence'::text, 'detect.no_blocks'::text, 'detect.low_score'::text, 'match.ambiguous'::text, 'doc_split.unassigned_pages'::text, 'manual.field_corrected'::text, 'manual.block_redrawn'::text, 'manual.type_changed'::text])`),
-	check("processing_feedback_severity_chk", sql`severity = ANY (ARRAY['info'::text, 'warn'::text, 'error'::text])`),
-	check("processing_feedback_stage_chk", sql`(pipeline_stage IS NULL) OR (pipeline_stage = ANY (ARRAY['uploaded'::text, 'layout'::text, 'recognition'::text, 'analysis'::text, 'checks'::text, 'ready'::text, 'failed'::text, 'detect'::text, 'match'::text]))`),
-	check("processing_feedback_score_chk", sql`(score IS NULL) OR ((score >= (0)::double precision) AND (score <= (1)::double precision))`),
-	check("processing_feedback_page_chk", sql`(working_page_index IS NULL) OR (working_page_index >= 0)`),
-	check("processing_feedback_prompt_version_chk", sql`(prompt_version IS NULL) OR (prompt_version > 0)`),
-]);
-
 export const errorSamples = pgTable("error_samples", {
 	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
 	id: bigint({ mode: "number" }).primaryKey().generatedAlwaysAsIdentity({ name: "error_samples_id_seq", startWith: 1, increment: 1, minValue: 1, maxValue: 9223372036854775807, cache: 1 }),
@@ -1701,6 +1655,52 @@ export const errorIssueActions = pgTable("error_issue_actions", {
 			name: "error_issue_actions_actor_user_id_fkey"
 		}),
 	check("error_issue_actions_action_chk", sql`action = ANY (ARRAY['acknowledge'::text, 'comment'::text, 'resolve'::text, 'reopen'::text, 'assign'::text])`),
+]);
+
+export const processingFeedback = pgTable("processing_feedback", {
+	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
+	id: bigint({ mode: "number" }).primaryKey().generatedAlwaysAsIdentity({ name: "processing_feedback_id_seq", startWith: 1, increment: 1, minValue: 1, maxValue: 9223372036854775807, cache: 1 }),
+	at: timestamp({ withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	feedbackType: text("feedback_type").notNull(),
+	reasonCode: text("reason_code").notNull(),
+	severity: text().default('warn').notNull(),
+	revisionId: uuid("revision_id"),
+	recognitionRunId: uuid("recognition_run_id"),
+	sourcePageId: uuid("source_page_id"),
+	workingPageIndex: integer("working_page_index"),
+	layoutBlockId: uuid("layout_block_id"),
+	fieldCode: text("field_code"),
+	findingId: uuid("finding_id"),
+	jobRunId: uuid("job_run_id"),
+	aiRunId: uuid("ai_run_id"),
+	docTypeCode: text("doc_type_code"),
+	pipelineStage: text("pipeline_stage"),
+	provider: text(),
+	model: text(),
+	promptCode: text("prompt_code"),
+	promptVersion: integer("prompt_version"),
+	detectorModelVersion: text("detector_model_version"),
+	rulesetVersion: text("ruleset_version"),
+	appRelease: text("app_release"),
+	score: doublePrecision(),
+	observed: jsonb(),
+	expected: jsonb(),
+	requestId: text("request_id"),
+}, (table) => [
+	index("ix_processing_feedback_at").using("btree", table.at.desc().nullsFirst().op("timestamptz_ops")),
+	index("ix_processing_feedback_block").using("btree", table.layoutBlockId.asc().nullsLast().op("uuid_ops")).where(sql`(layout_block_id IS NOT NULL)`),
+	index("ix_processing_feedback_doc_type").using("btree", table.docTypeCode.asc().nullsLast().op("text_ops"), table.at.desc().nullsFirst().op("timestamptz_ops")),
+	index("ix_processing_feedback_prompt").using("btree", table.promptCode.asc().nullsLast().op("int4_ops"), table.promptVersion.asc().nullsLast().op("int4_ops"), table.at.desc().nullsFirst().op("timestamptz_ops")),
+	index("ix_processing_feedback_reason").using("btree", table.reasonCode.asc().nullsLast().op("timestamptz_ops"), table.at.desc().nullsFirst().op("text_ops")),
+	index("ix_processing_feedback_revision").using("btree", table.revisionId.asc().nullsLast().op("timestamptz_ops"), table.at.desc().nullsFirst().op("timestamptz_ops")),
+	index("ix_processing_feedback_stage").using("btree", table.pipelineStage.asc().nullsLast().op("text_ops"), table.at.desc().nullsFirst().op("timestamptz_ops")),
+	check("processing_feedback_type_chk", sql`feedback_type = ANY (ARRAY['system_failure'::text, 'recognition_failure'::text, 'wrong_extraction'::text, 'check_error'::text, 'manual_correction'::text])`),
+	check("processing_feedback_severity_chk", sql`severity = ANY (ARRAY['info'::text, 'warn'::text, 'error'::text])`),
+	check("processing_feedback_stage_chk", sql`(pipeline_stage IS NULL) OR (pipeline_stage = ANY (ARRAY['uploaded'::text, 'layout'::text, 'recognition'::text, 'analysis'::text, 'checks'::text, 'ready'::text, 'failed'::text, 'detect'::text, 'match'::text]))`),
+	check("processing_feedback_score_chk", sql`(score IS NULL) OR ((score >= (0)::double precision) AND (score <= (1)::double precision))`),
+	check("processing_feedback_page_chk", sql`(working_page_index IS NULL) OR (working_page_index >= 0)`),
+	check("processing_feedback_prompt_version_chk", sql`(prompt_version IS NULL) OR (prompt_version > 0)`),
+	check("processing_feedback_reason_chk", sql`reason_code = ANY (ARRAY['vlm.invalid_json'::text, 'vlm.schema_mismatch'::text, 'vlm.refusal'::text, 'vlm.empty_result'::text, 'extract.field_missing'::text, 'classify.low_confidence'::text, 'detect.no_blocks'::text, 'detect.low_score'::text, 'match.ambiguous'::text, 'doc_split.unassigned_pages'::text, 'manual.field_corrected'::text, 'manual.block_redrawn'::text, 'manual.type_changed'::text, 'orientation.probe_failed'::text, 'orientation.low_confidence'::text])`),
 ]);
 
 export const counterpartyKinds = pgTable("counterparty_kinds", {
@@ -2416,6 +2416,35 @@ export const registryReconciliationExtraDocs = pgTable("registry_reconciliation_
 			name: "registry_reconciliation_extra_docs_parent_fk"
 		}).onDelete("cascade"),
 	primaryKey({ columns: [table.documentId, table.reconciliationId], name: "registry_reconciliation_extra_docs_pkey"}),
+]);
+
+export const pageOrientations = pgTable("page_orientations", {
+	revisionId: uuid("revision_id").notNull(),
+	sourcePageId: uuid("source_page_id").notNull(),
+	contentRotation: integer("content_rotation").notNull(),
+	source: text().notNull(),
+	probeRotation: integer("probe_rotation"),
+	probeConfidence: doublePrecision("probe_confidence"),
+	probeModel: text("probe_model"),
+	probePromptCode: text("probe_prompt_code"),
+	probePromptVersion: integer("probe_prompt_version"),
+	probeInputHash: text("probe_input_hash"),
+	probedAt: timestamp("probed_at", { withTimezone: true, mode: 'string' }),
+	probeError: text("probe_error"),
+	updatedAt: timestamp("updated_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+}, (table) => [
+	index("ix_page_orientations_rotated").using("btree", table.revisionId.asc().nullsLast().op("uuid_ops")).where(sql`(content_rotation <> 0)`),
+	foreignKey({
+			columns: [table.revisionId, table.sourcePageId],
+			foreignColumns: [sourcePages.id, sourcePages.revisionId],
+			name: "page_orientations_source_page_fk"
+		}).onDelete("cascade"),
+	primaryKey({ columns: [table.revisionId, table.sourcePageId], name: "page_orientations_pkey"}),
+	check("page_orientations_rotation_chk", sql`content_rotation = ANY (ARRAY[0, 90, 180, 270])`),
+	check("page_orientations_probe_rotation_chk", sql`(probe_rotation IS NULL) OR (probe_rotation = ANY (ARRAY[0, 90, 180, 270]))`),
+	check("page_orientations_source_chk", sql`source = ANY (ARRAY['probe'::text, 'user'::text])`),
+	check("page_orientations_confidence_chk", sql`(probe_confidence IS NULL) OR ((probe_confidence >= (0)::double precision) AND (probe_confidence <= (1)::double precision))`),
+	check("page_orientations_probe_evidence_chk", sql`(source <> 'probe'::text) OR (probe_rotation IS NOT NULL) OR (probe_error IS NOT NULL)`),
 ]);
 
 export const registryReconciliationGroups = pgTable("registry_reconciliation_groups", {

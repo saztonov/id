@@ -64,13 +64,17 @@ import {
   describeAppliedOverrides,
   DETECTION_BLOCK_TYPES,
   INFERENCE_MODE_AUTO,
+  inverseTurn,
+  rotateRectNorm,
   type Candidate,
   type DetectPageStats,
   type InferenceMode,
   type InferenceParamOverrides,
+  type Rect,
 } from '@id/detection';
 
 import { detectPage } from '../detection/detector.js';
+import { rotatePagePng } from '../detection/preprocess.js';
 import { DetectionConfigurationError } from '../detection/errors.js';
 import type { ModelStore } from '../detection/model-store.js';
 import { MarkupStateError, type MarkupTarget } from './markup.js';
@@ -426,6 +430,7 @@ export function createLocalDetectionHandler(
 
     const scratchDir = await mkdtemp(join(deps.workDirBase ?? tmpdir(), 'id-detect-local-'));
     let renderedPages = 0;
+    let rotatedPages = 0;
     let renderFailedPages = 0;
     let sizeMismatchPages = 0;
     let emptyPages = 0;
@@ -489,13 +494,38 @@ export function createLocalDetectionHandler(
           continue;
         }
 
+        /**
+         * Разворот содержимого перед инференсом (ADR-0020).
+         *
+         * ПОСЛЕ `checkRenderedSize`: та сверяет СЫРОЙ рендер с картой страниц и
+         * ловит подменённый файл или несогласованный `/Rotate`. Её подсказка
+         * «совпадает при перестановке сторон» стала бы ложью, если бы стороны
+         * переставляли мы сами.
+         *
+         * Ноль — полный no-op: ни одного лишнего декода. Детекция идёт по всему
+         * комплекту, и лишний проход sharp на каждой прямой странице стоил бы
+         * заметно, не давая ничего.
+         */
+        const contentRotation = page.contentRotation;
+        let inferencePath = pngPath;
+        let inferenceSize = { widthPx: rendered.widthPx, heightPx: rendered.heightPx };
+        if (contentRotation !== 0) {
+          const turnedPath = join(
+            scratchDir,
+            `page-${String(pageIndex).padStart(4, '0')}-r${String(contentRotation)}.png`,
+          );
+          inferenceSize = await rotatePagePng(pngPath, turnedPath, contentRotation);
+          inferencePath = turnedPath;
+          rotatedPages += 1;
+        }
+
         // Исключение отсюда НЕ ловится (см. докстринг файла): рассинхрон
         // модели/манифеста — не свойство одной страницы.
         const detected = await detectPage({
           pageIndex,
-          pngPath,
-          widthPx: rendered.widthPx,
-          heightPx: rendered.heightPx,
+          pngPath: inferencePath,
+          widthPx: inferenceSize.widthPx,
+          heightPx: inferenceSize.heightPx,
           session,
           params,
           inferenceMode,
@@ -507,9 +537,32 @@ export function createLocalDetectionHandler(
           );
         }
 
+        /**
+         * Порядок чтения считается в РАЗВЁРНУТОМ фрейме, а координаты
+         * возвращаются в систему страницы.
+         *
+         * Порядок — свойство человеческого чтения: «сверху вниз, слева направо»
+         * на боковом листе идёт по другой оси, и отсортировав до обратного
+         * поворота, мы получили бы порядок, в котором текст страницы собрался бы
+         * задом наперёд. Координаты же обязаны остаться там, где их рисует
+         * экран разметки, — то есть в системе неповёрнутой страницы.
+         */
         const ordered = orderReadingWise(detected.candidates);
         const blocks = ordered.map((candidate, index) =>
-          toBlockInput(pageIndex, candidate, index, settings.modelVersion),
+          toBlockInput(
+            pageIndex,
+            contentRotation === 0
+              ? candidate
+              : {
+                  ...candidate,
+                  coordsNorm: rotateRectNorm(
+                    [...candidate.coordsNorm] as Rect,
+                    inverseTurn(contentRotation),
+                  ),
+                },
+            index,
+            settings.modelVersion,
+          ),
         );
 
         // Постраничная сводка: раньше `DetectPageStats` считалась и
@@ -521,6 +574,7 @@ export function createLocalDetectionHandler(
           {
             event: 'detect_local_page_stats',
             page: pageIndex,
+            content_rotation: contentRotation,
             mode: detected.mode,
             mode_source: detected.modeSource,
             raw_by_type: detected.stats.rawByType,
@@ -574,6 +628,7 @@ export function createLocalDetectionHandler(
         pages_requested: pageIndices.length,
         pages_skipped_existing: skippedExisting.length,
         pages_rendered: renderedPages,
+        pages_rotated: rotatedPages,
         pages_render_failed: renderFailedPages,
         pages_size_mismatch: sizeMismatchPages,
         pages_empty: emptyPages,

@@ -7,7 +7,12 @@
  * одного соответствия пришлось бы восемьдесят три раза.
  */
 import { z } from 'zod';
-import { isoDateTimeSchema, uuidSchema } from '@id/contracts';
+import {
+  contentRotationSchema,
+  contentRotationSourceSchema,
+  isoDateTimeSchema,
+  uuidSchema,
+} from '@id/contracts';
 
 export const revisionIdParamSchema = z.object({ revisionId: uuidSchema });
 export const bundleIdParamSchema = z.object({ bundleId: uuidSchema });
@@ -52,7 +57,17 @@ export const bundlePageSchema = z.object({
   filePageIndex: z.number().int().nonnegative(),
   widthPx: z.number().int().positive(),
   heightPx: z.number().int().positive(),
+  /** `/Rotate` из PDF: уже применён и к размерам выше, и к вьюпорту pdf.js. */
   rotation: z.number().int(),
+  /**
+   * Разворот СОДЕРЖИМОГО — поправка к скану, легшему боком (ADR-0020).
+   *
+   * Едет вместе с картой страниц, а не отдельным запросом: карту читают все
+   * трое, кому разворот нужен (детекция, распознавание, экран разметки), и
+   * второй источник означал бы три места, где его забыли прочитать.
+   */
+  contentRotation: contentRotationSchema,
+  contentRotationSource: contentRotationSourceSchema.nullable(),
 });
 
 export const bundlePageListSchema = z.object({

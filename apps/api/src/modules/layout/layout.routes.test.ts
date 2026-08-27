@@ -210,7 +210,7 @@ afterAll(async () => {
 // Вход и запросы
 // =====================================================================
 
-type Method = 'GET' | 'POST' | 'PATCH' | 'DELETE';
+type Method = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
 
 interface SignedIn {
   readonly cookie: string;
@@ -689,5 +689,213 @@ describe('разметка правится и после отправки на 
       body: {},
     });
     expect(response.statusCode).toBe(202);
+  });
+});
+
+// =====================================================================
+// Разворот содержимого страницы (ADR-0020)
+// =====================================================================
+
+interface OrientationView {
+  readonly revisionId: string;
+  readonly sourcePageId: string;
+  readonly contentRotation: number;
+  readonly source: 'probe' | 'user' | null;
+  readonly probeRotation: number | null;
+  readonly probeConfidence: number | null;
+  readonly probeError: string | null;
+}
+
+interface PageMapItem {
+  readonly workingPageIndex: number;
+  readonly contentRotation: number;
+  readonly contentRotationSource: 'probe' | 'user' | null;
+}
+
+async function pageMap(): Promise<readonly PageMapItem[]> {
+  const response = await as(KC.engineer, 'GET', `/api/v1/bundles/${BUNDLE}/pages`);
+  expect(response.statusCode).toBe(200);
+  return response.json<{ items: PageMapItem[] }>().items;
+}
+
+describe('разворот содержимого страницы', () => {
+  it('до правки развороты нулевые, а источника нет вовсе', async () => {
+    const items = await pageMap();
+    expect(items).not.toHaveLength(0);
+    for (const item of items) {
+      expect(item.contentRotation).toBe(0);
+      // `null`, а не `probe`: «решения никто не принимал» и «зонд сказал ноль» —
+      // разные состояния, и склеивать их в контракте нельзя.
+      expect(item.contentRotationSource).toBeNull();
+    }
+  });
+
+  it('ручной разворот сохраняется и доезжает до карты страниц тем же запросом', async () => {
+    const saved = await as(
+      KC.engineer,
+      'PUT',
+      `/api/v1/revisions/${REVISION}/pages/${PAGE_0}/orientation`,
+      { body: { rotation: 90 } },
+    );
+    expect(saved.statusCode).toBe(200);
+    const view = saved.json<OrientationView>();
+    expect(view.contentRotation).toBe(90);
+    expect(view.source).toBe('user');
+
+    // Карта страниц — единственный источник для детекции, распознавания и
+    // экрана. Если разворот не доехал сюда, он не доехал никуда.
+    const items = await pageMap();
+    const first = items.find((item) => item.workingPageIndex === 0);
+    expect(first?.contentRotation).toBe(90);
+    expect(first?.contentRotationSource).toBe('user');
+
+    // Соседняя страница не задета: разворот — свойство одной страницы.
+    expect(items.find((item) => item.workingPageIndex === 1)?.contentRotation).toBe(0);
+  });
+
+  it('повторная правка перезаписывает значение, а не заводит вторую строку', async () => {
+    const again = await as(
+      KC.engineer,
+      'PUT',
+      `/api/v1/revisions/${REVISION}/pages/${PAGE_0}/orientation`,
+      { body: { rotation: 270 } },
+    );
+    expect(again.statusCode).toBe(200);
+    expect(again.json<OrientationView>().contentRotation).toBe(270);
+
+    const rows = await db.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM page_orientations
+        WHERE revision_id = '${REVISION}' AND source_page_id = '${PAGE_0}'`,
+    );
+    expect(rows[0]?.count).toBe('1');
+  });
+
+  it('значение вне четверти оборота отвергается схемой, а не CHECK базы', async () => {
+    const refused = await as(
+      KC.engineer,
+      'PUT',
+      `/api/v1/revisions/${REVISION}/pages/${PAGE_0}/orientation`,
+      { body: { rotation: 45 } },
+    );
+    expect(refused.statusCode).toBe(422);
+  });
+
+  it('страница чужой ревизии не разворачивается по прямому идентификатору', async () => {
+    const refused = await as(
+      KC.engineer,
+      'PUT',
+      `/api/v1/revisions/${REVISION}/pages/${PAGE_OTHER}/orientation`,
+      { body: { rotation: 90 } },
+    );
+    expect(refused.statusCode).toBe(404);
+  });
+
+  it('сброс без мнения зонда убирает строку целиком', async () => {
+    // Строку заводил человек, зонд её не касался. Оставить её с `source =
+    // probe` нельзя буквально: CHECK требует от строки зонда сказать, что он
+    // видел, либо почему не увидел ничего. Отсутствие строки и есть честное
+    // «решения никто не принимал».
+    const cleared = await as(
+      KC.engineer,
+      'DELETE',
+      `/api/v1/revisions/${REVISION}/pages/${PAGE_0}/orientation`,
+    );
+    expect(cleared.statusCode).toBe(200);
+    const view = cleared.json<OrientationView>();
+    expect(view.contentRotation).toBe(0);
+    expect(view.source).toBeNull();
+
+    const rows = await db.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM page_orientations
+        WHERE revision_id = '${REVISION}' AND source_page_id = '${PAGE_0}'`,
+    );
+    expect(rows[0]?.count).toBe('0');
+  });
+
+  it('сброс поверх мнения зонда возвращает мнение зонда, а не ноль', async () => {
+    await db.query(
+      `INSERT INTO page_orientations
+         (revision_id, source_page_id, content_rotation, source, probe_rotation, probe_confidence)
+       VALUES ('${REVISION}', '${PAGE_1}', 180, 'probe', 180, 0.91)`,
+    );
+    const overridden = await as(
+      KC.engineer,
+      'PUT',
+      `/api/v1/revisions/${REVISION}/pages/${PAGE_1}/orientation`,
+      { body: { rotation: 90 } },
+    );
+    expect(overridden.statusCode).toBe(200);
+    // Мнение зонда пережило перекрытие: без него нельзя ответить на вопрос
+    // «зонд ошибся или инженер?», ради которого зонд и заводился.
+    expect(overridden.json<OrientationView>().probeRotation).toBe(180);
+
+    const cleared = await as(
+      KC.engineer,
+      'DELETE',
+      `/api/v1/revisions/${REVISION}/pages/${PAGE_1}/orientation`,
+    );
+    expect(cleared.statusCode).toBe(200);
+    const view = cleared.json<OrientationView>();
+    expect(view.contentRotation).toBe(180);
+    expect(view.source).toBe('probe');
+  });
+
+  it('второй сброс подряд отвечает 404, а не делает вид, что снял', async () => {
+    const refused = await as(
+      KC.engineer,
+      'DELETE',
+      `/api/v1/revisions/${REVISION}/pages/${PAGE_1}/orientation`,
+    );
+    expect(refused.statusCode).toBe(404);
+  });
+
+  it('зонд не перекрывает ручное значение — правило живёт в SQL', async () => {
+    await as(KC.engineer, 'PUT', `/api/v1/revisions/${REVISION}/pages/${PAGE_2}/orientation`, {
+      body: { rotation: 90 },
+    });
+
+    // Ровно тот запрос, которым пишет задача зонда: `WHERE source <> 'user'`.
+    // Гонка «инженер повернул, пока зонд летел» обязана решаться базой, а не
+    // порядком вызовов в обработчике.
+    await db.query(
+      `INSERT INTO page_orientations
+         (revision_id, source_page_id, content_rotation, source, probe_rotation)
+       VALUES ('${REVISION}', '${PAGE_2}', 0, 'probe', 0)
+       ON CONFLICT (revision_id, source_page_id) DO UPDATE
+         SET content_rotation = EXCLUDED.content_rotation, source = EXCLUDED.source
+       WHERE page_orientations.source <> 'user'`,
+    );
+
+    const items = await pageMap();
+    expect(items.find((item) => item.workingPageIndex === 2)?.contentRotation).toBe(90);
+    expect(items.find((item) => item.workingPageIndex === 2)?.contentRotationSource).toBe('user');
+  });
+
+  it('разметка правится в submitted — значит и разворот тоже', async () => {
+    // Ровно та проверка, ради которой разворот вынесен в отдельную таблицу:
+    // колонка в `source_pages` была бы заперта триггером уже здесь.
+    await db.query(`UPDATE submission_revisions SET status = 'submitted' WHERE id = '${REVISION}'`);
+    const saved = await as(
+      KC.engineer,
+      'PUT',
+      `/api/v1/revisions/${REVISION}/pages/${PAGE_0}/orientation`,
+      { body: { rotation: 180 } },
+    );
+    expect(saved.statusCode).toBe(200);
+    expect(saved.json<OrientationView>().contentRotation).toBe(180);
+  });
+
+  it('согласованная ревизия разворот не принимает', async () => {
+    await db.query(`UPDATE submission_revisions SET status = 'approved' WHERE id = '${REVISION}'`);
+    const refused = await as(
+      KC.engineer,
+      'PUT',
+      `/api/v1/revisions/${REVISION}/pages/${PAGE_0}/orientation`,
+      { body: { rotation: 90 } },
+    );
+    expect(refused.statusCode).toBe(409);
+    // Обратно в `draft` ревизию не возвращаем: переход запрещён триггером
+    // неизменяемости, и это правильно — согласование не отменяется правкой
+    // статуса. Сценарий стоит последним в файле именно поэтому.
   });
 });

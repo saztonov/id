@@ -157,7 +157,12 @@ function runTarget(overrides: Partial<VlmRunTarget> = {}): VlmRunTarget {
 }
 
 const GEOMETRY: readonly VlmPageGeometry[] = [
-  { workingPageIndex: 0, widthPx: 595, heightPx: 842, rotation: 0 },
+  { workingPageIndex: 0, widthPx: 595, heightPx: 842, rotation: 0, contentRotation: 0 },
+];
+
+/** Та же карта, но страница развёрнута: скан лёг на лист боком (ADR-0020). */
+const GEOMETRY_TURNED: readonly VlmPageGeometry[] = [
+  { workingPageIndex: 0, widthPx: 595, heightPx: 842, rotation: 0, contentRotation: 90 },
 ];
 
 function publishedPrompt(code: string, version = 1) {
@@ -433,7 +438,7 @@ describe('createVlmStartHandler', () => {
     ]);
     expect(merged).toHaveLength(1);
     expect(merged[0]).toMatchObject({
-      cropPolicyVersion: 'crop.v2',
+      cropPolicyVersion: 'crop.v3',
       rasterizer: { kind: 'pdftoppm', version: '1.0', dpi: 300 },
     });
     expect((merged[0]?.['promptVersions'] as Record<string, number>)['text']).toBe(1);
@@ -457,7 +462,7 @@ describe('createVlmStartHandler', () => {
       provider: 'openrouter_vlm',
       model: 'vendor/model-1',
       dryRun: false,
-      cropPolicyVersion: 'crop.v2',
+      cropPolicyVersion: 'crop.v3',
       rasterizer: { kind: 'pdftoppm', version: '1.0', dpi: 300 },
     };
     const parentEnvelope = (patch: Record<string, unknown> = {}) => ({
@@ -472,7 +477,7 @@ describe('createVlmStartHandler', () => {
           promptCode: 'recognition_block_text',
           promptVersion: 1,
           model: 'vendor/model-1',
-          cropPolicyVersion: 'crop.v2',
+          cropPolicyVersion: 'crop.v3',
           ...patch,
         },
       },
@@ -518,6 +523,101 @@ describe('createVlmStartHandler', () => {
     });
   });
 
+  it('восстановление: блок развёрнутой с тех пор страницы не переносится', async () => {
+    /**
+     * Ради этой проверки перенос и сделан ПОБЛОЧНЫМ.
+     *
+     * Инженер развернул одну страницу и нажал «Распознать» снова. Её результат
+     * получен по картинке, которой модель больше не увидит, — переносить его
+     * нельзя. А блоки остальных страниц не изменились ничем, и заставлять
+     * платить за них второй раз означало бы вернуть трату, которую убирал S28.
+     *
+     * Без этой строки кнопка поворота выглядела бы работающей и не меняла бы
+     * ничего: прогон молча вернул бы прежний текст.
+     */
+    const PARENT = '00000000-0000-4000-8000-0000000000f5';
+    const turned = frozenBlock({ id: 'b-turned', workingPageIndex: 0, sortOrder: 0 });
+    const straight = frozenBlock({ id: 'b-straight', workingPageIndex: 1, sortOrder: 0 });
+    const hash = computeBlocksHash([turned, straight].map(toHashable));
+
+    const parentProvenance = (contentRotation: number) => ({
+      promptCode: 'recognition_block_text',
+      promptVersion: 1,
+      model: 'vendor/model-1',
+      cropPolicyVersion: 'crop.v3',
+      contentRotation,
+    });
+
+    const inserted: { block: { layoutBlockId: string } }[] = [];
+    const d = deps({
+      loadFrozenBlocks: async () => [turned, straight],
+      // Страница 0 развёрнута СЕЙЧАС, страница 1 — нет.
+      loadPageGeometry: async () => [
+        { workingPageIndex: 0, widthPx: 595, heightPx: 842, rotation: 0, contentRotation: 90 },
+        { workingPageIndex: 1, widthPx: 595, heightPx: 842, rotation: 0, contentRotation: 0 },
+      ],
+      loadRun: async ({ recognitionRunId }) =>
+        recognitionRunId === PARENT
+          ? runTarget({
+              status: 'failed',
+              // Тот же набор блоков, что у потомка: иначе родитель отвергается
+              // целиком, и поблочная сверка разворота не проверялась бы вовсе.
+              localLayoutHash: hash,
+              settingsSnapshot: {
+                version: 2,
+                provider: 'openrouter_vlm',
+                model: 'vendor/model-1',
+                cropPolicyVersion: 'crop.v3',
+                rasterizer: { kind: 'pdftoppm', version: '1.0', dpi: 300 },
+              },
+            })
+          : runTarget({ repairOfRunId: PARENT, localLayoutHash: hash }),
+      listBlockEnvelopes: async () => [
+        {
+          id: 'parent-turned',
+          layoutBlockId: turned.id,
+          modelId: 'vendor/model-1',
+          contentJson: {
+            envelope: 'recognition.block_result.v1',
+            block: okBlock(turned),
+            page: { workingPageIndex: 0, widthPx: 595, heightPx: 842 },
+            // Родитель считал эту страницу прямой.
+            provenance: parentProvenance(0),
+          },
+        },
+        {
+          id: 'parent-straight',
+          layoutBlockId: straight.id,
+          modelId: 'vendor/model-1',
+          contentJson: {
+            envelope: 'recognition.block_result.v1',
+            block: okBlock(straight),
+            page: { workingPageIndex: 1, widthPx: 595, heightPx: 842 },
+            provenance: parentProvenance(0),
+          },
+        },
+      ],
+      insertBlockResult: async (input) => {
+        inserted.push(input as never);
+        return { written: true };
+      },
+      mergeSnapshot: async () => {},
+      seedRunPages: async () => {},
+    });
+
+    const handler = createVlmStartHandler(d);
+    await handler(
+      makeContext(
+        'vlm.start_recognition',
+        { revisionId: REVISION, recognitionRunId: RUN },
+        makeSink(),
+      ),
+    );
+
+    // Перенесён ровно один блок — с той страницы, разворот которой не менялся.
+    expect(inserted.map((item) => item.block.layoutBlockId)).toEqual([straight.id]);
+  });
+
   it('восстановление: результат другой модели не переносится', async () => {
     const PARENT = '00000000-0000-4000-8000-0000000000f2';
     const block = frozenBlock();
@@ -531,7 +631,7 @@ describe('createVlmStartHandler', () => {
                 version: 2,
                 provider: 'openrouter_vlm',
                 model: 'vendor/model-1',
-                cropPolicyVersion: 'crop.v2',
+                cropPolicyVersion: 'crop.v3',
                 rasterizer: { kind: 'pdftoppm', version: '1.0', dpi: 300 },
               },
             })
@@ -551,7 +651,7 @@ describe('createVlmStartHandler', () => {
               // Блок прочитан другой моделью: перенести его значит выдать
               // чужой ответ за результат этого прогона.
               model: 'vendor/model-OLD',
-              cropPolicyVersion: 'crop.v2',
+              cropPolicyVersion: 'crop.v3',
             },
           },
         },
@@ -1181,7 +1281,7 @@ describe('createVlmFinalizeHandler', () => {
           actualModel: 'vendor/model-1',
           finishReason: 'stop',
           attempts: 1,
-          cropPolicyVersion: 'crop.v2',
+          cropPolicyVersion: 'crop.v3',
           cropSha256: 'x'.repeat(64),
         },
       },
@@ -1540,5 +1640,182 @@ describe('createVlmFinalizeHandler', () => {
     expect(publishResults).not.toHaveBeenCalled();
     expect(finishRun).not.toHaveBeenCalled();
     expect(sink.logs.map((entry) => entry.fields['event'])).toContain('vlm_run_obsolete');
+  });
+});
+
+// =====================================================================
+// Разворот содержимого страницы (ADR-0020)
+// =====================================================================
+
+describe('разворот содержимого доезжает до кропа и до провенанса', () => {
+  it('кроп блока получает разворот страницы, а координаты остаются в системе листа', async () => {
+    const cropCalls: Record<string, unknown>[] = [];
+    const inserted: Record<string, unknown>[] = [];
+    const d = deps({
+      loadPageGeometry: async () => GEOMETRY_TURNED,
+      workingPdfToFile: async () => ({ path: '/tmp/work.pdf', cleanup: async () => {} }),
+      rasterizer: {
+        kind: 'pdftoppm',
+        version: '1.0',
+        renderPage: async () => ({ widthPx: 595, heightPx: 842 }),
+      },
+      crop: async (input) => {
+        cropCalls.push(input as unknown as Record<string, unknown>);
+        return { png: new Uint8Array([1, 2, 3]), widthPx: 100, heightPx: 100 };
+      },
+      recognizeBlock: async (): Promise<VlmRecognizeBlockOutcome> => okOutcome(frozenBlock()),
+      insertBlockResult: async (input) => {
+        inserted.push(input as unknown as Record<string, unknown>);
+        return { written: true };
+      },
+      markRunPage: async () => {},
+      recordAiRun: async () => {},
+    });
+
+    const handler = createVlmRecognizePageHandler(d);
+    await handler(
+      makeContext(
+        'vlm.recognize_page',
+        { revisionId: REVISION, recognitionRunId: RUN, pageIndex: 0 },
+        makeSink(),
+      ),
+    );
+
+    expect(cropCalls).toHaveLength(1);
+    expect(cropCalls[0]?.['contentRotation']).toBe(90);
+    // Координаты блока НЕ повёрнуты: прямоугольник вырезается в системе
+    // страницы, а разворачивается уже картинка. Поворот координат здесь
+    // означал бы вторую систему координат в портале.
+    expect(cropCalls[0]?.['coordsNorm']).toEqual(DEFAULT_FROZEN[0]?.coordsNorm);
+
+    // Провенанс называет разворот: без него перенесённый в будущем результат
+    // неотличим от полученного по другой картинке.
+    const envelope = (inserted[0]?.['block'] as { contentJson: Record<string, unknown> })
+      .contentJson;
+    const provenance = envelope['provenance'] as Record<string, unknown>;
+    expect(provenance['contentRotation']).toBe(90);
+    expect(provenance['cropPolicyVersion']).toBe('crop.v3');
+  });
+
+  it('на прямой странице в провенанс пишется явный ноль, а не отсутствие поля', async () => {
+    const inserted: Record<string, unknown>[] = [];
+    const d = deps({
+      workingPdfToFile: async () => ({ path: '/tmp/work.pdf', cleanup: async () => {} }),
+      rasterizer: {
+        kind: 'pdftoppm',
+        version: '1.0',
+        renderPage: async () => ({ widthPx: 595, heightPx: 842 }),
+      },
+      crop: async () => ({ png: new Uint8Array([1, 2, 3]), widthPx: 100, heightPx: 100 }),
+      recognizeBlock: async (): Promise<VlmRecognizeBlockOutcome> => okOutcome(frozenBlock()),
+      insertBlockResult: async (input) => {
+        inserted.push(input as unknown as Record<string, unknown>);
+        return { written: true };
+      },
+      markRunPage: async () => {},
+      recordAiRun: async () => {},
+    });
+
+    const handler = createVlmRecognizePageHandler(d);
+    await handler(
+      makeContext(
+        'vlm.recognize_page',
+        { revisionId: REVISION, recognitionRunId: RUN, pageIndex: 0 },
+        makeSink(),
+      ),
+    );
+
+    const envelope = (inserted[0]?.['block'] as { contentJson: Record<string, unknown> })
+      .contentJson;
+    const provenance = envelope['provenance'] as Record<string, unknown>;
+    expect(Object.hasOwn(provenance, 'contentRotation')).toBe(true);
+    expect(provenance['contentRotation']).toBe(0);
+  });
+
+  /**
+   * Самый ценный тест правки.
+   *
+   * Модель видела РАЗВЁРНУТУЮ картинку и просит участок в её системе координат.
+   * Растр лежит в системе страницы. Без обратного отображения модель получила бы
+   * участок с другой стороны листа — и он выглядел бы правдоподобно, той же
+   * страницей. Дефект не упал бы: он тихо испортил бы результат.
+   */
+  it('дозапрос кропа отображается ОБРАТНО в систему страницы', async () => {
+    const cropCalls: Record<string, unknown>[] = [];
+    const d = deps({
+      loadPageGeometry: async () => GEOMETRY_TURNED,
+      workingPdfToFile: async () => ({ path: '/tmp/work.pdf', cleanup: async () => {} }),
+      rasterizer: {
+        kind: 'pdftoppm',
+        version: '1.0',
+        renderPage: async () => ({ widthPx: 595, heightPx: 842 }),
+      },
+      crop: async (input) => {
+        cropCalls.push(input as unknown as Record<string, unknown>);
+        return { png: new Uint8Array([1, 2, 3]), widthPx: 100, heightPx: 100 };
+      },
+      recognizeBlock: async (input): Promise<VlmRecognizeBlockOutcome> => {
+        // Модель просит ЛЕВУЮ ПОЛОВИНУ того, что видела.
+        await input.requestCrop?.([0, 0, 0.5, 1]);
+        return okOutcome(frozenBlock());
+      },
+      insertBlockResult: async () => ({ written: true }),
+      markRunPage: async () => {},
+      recordAiRun: async () => {},
+    });
+
+    const handler = createVlmRecognizePageHandler(d);
+    await handler(
+      makeContext(
+        'vlm.recognize_page',
+        { revisionId: REVISION, recognitionRunId: RUN, pageIndex: 0 },
+        makeSink(),
+      ),
+    );
+
+    // Первый вызов — основной кроп, второй — дозапрос.
+    expect(cropCalls).toHaveLength(2);
+    // Обратное отображение при 90°: (x, y) → (y, 1 − x). Левая половина
+    // развёрнутой картинки [0,0,0.5,1] — это НИЖНЯЯ половина страницы
+    // [0, 0.5, 1, 1]. Не левая: иначе модель получила бы не то, что просила.
+    const requested = cropCalls[1]?.['coordsNorm'] as readonly number[];
+    expect(requested.map((v) => Number(v.toFixed(6)))).toEqual([0, 0.5, 1, 1]);
+    // И выданный участок разворачивается вперёд тем же углом.
+    expect(cropCalls[1]?.['contentRotation']).toBe(90);
+  });
+
+  it('на прямой странице дозапрос идёт без всякого преобразования', async () => {
+    const cropCalls: Record<string, unknown>[] = [];
+    const d = deps({
+      workingPdfToFile: async () => ({ path: '/tmp/work.pdf', cleanup: async () => {} }),
+      rasterizer: {
+        kind: 'pdftoppm',
+        version: '1.0',
+        renderPage: async () => ({ widthPx: 595, heightPx: 842 }),
+      },
+      crop: async (input) => {
+        cropCalls.push(input as unknown as Record<string, unknown>);
+        return { png: new Uint8Array([1, 2, 3]), widthPx: 100, heightPx: 100 };
+      },
+      recognizeBlock: async (input): Promise<VlmRecognizeBlockOutcome> => {
+        await input.requestCrop?.([0.25, 0.1, 0.75, 0.4]);
+        return okOutcome(frozenBlock());
+      },
+      insertBlockResult: async () => ({ written: true }),
+      markRunPage: async () => {},
+      recordAiRun: async () => {},
+    });
+
+    const handler = createVlmRecognizePageHandler(d);
+    await handler(
+      makeContext(
+        'vlm.recognize_page',
+        { revisionId: REVISION, recognitionRunId: RUN, pageIndex: 0 },
+        makeSink(),
+      ),
+    );
+
+    expect(cropCalls[1]?.['coordsNorm']).toEqual([0.25, 0.1, 0.75, 0.4]);
+    expect(cropCalls[1]?.['contentRotation']).toBe(0);
   });
 });

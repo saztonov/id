@@ -57,11 +57,28 @@ const API_DIR = join(ROOT, 'apps', 'api');
  * то есть всегда на ПОСЛЕДНЮЮ сид-миграцию: «в БД уезжает то, что лежит в коде»
  * — утверждение про неё, а не про историю.
  */
-export const SEED_VERSION = 3;
-export const TARGET = join(ROOT, 'migrations', '0049_reseed_recognition_prompts_v3.sql');
+export const SEED_VERSION = 4;
+export const TARGET = join(ROOT, 'migrations', '0053_reseed_recognition_prompts_v4.sql');
 
-const BLOCK_TYPES = ['text', 'image', 'stamp'];
-const STAGE = 'recognize';
+/**
+ * Что именно сеется — пары «промт + его стадия».
+ *
+ * Прежде здесь стоял список типов блоков и ОДНА стадия на весь файл. Допущение
+ * «сколько промтов, столько типов блоков, и стадия у них общая» перестало быть
+ * верным с зондом ориентации (ADR-0020): он смотрит на страницу целиком,
+ * блоков не знает вовсе и живёт на собственной стадии `orientation` — отдельной
+ * потому, что у его строки `ai_runs` нет прогона распознавания.
+ *
+ * Разрешать это `if`-ом на месте вставки было бы дешевле на одну строку и
+ * дороже на одно молчаливое допущение: следующий промт вне трёх типов блоков
+ * снова потребовал бы правки в двух местах.
+ */
+const SEEDED = [
+  { key: 'text', stage: 'recognize' },
+  { key: 'image', stage: 'recognize' },
+  { key: 'stamp', stage: 'recognize' },
+  { key: 'orientation', stage: 'orientation' },
+];
 const TAG_BASE = 'prompt';
 
 /**
@@ -83,7 +100,11 @@ function jsonbLiteral(value) {
   return `${sqlLiteral(JSON.stringify(value))}::jsonb`;
 }
 
-const HEADER = `-- Seed промптов стадии recognize (ADR-0007, план v3 Ф4/Ф5), версия ${SEED_VERSION}.
+const HEADER = `-- Seed промптов распознавания и зонда ориентации, версия ${SEED_VERSION}.
+--
+-- Стадий здесь ДВЕ: recognize у трёх промтов блоков (ADR-0007) и orientation
+-- у зонда разворота страницы (ADR-0020). Допущение «одна стадия на сид-файл»
+-- перестало быть верным вместе с появлением зонда.
 --
 -- Файл сгенерирован generateRecognitionPromptsSeedSql() из
 -- RECOGNITION_PROMPT_DEFAULTS (apps/api/src/recognition/vlm/prompts.ts).
@@ -107,19 +128,23 @@ const HEADER = `-- Seed промптов стадии recognize (ADR-0007, пл�
 `;
 
 /**
- * Три `INSERT` (не один с тремя `VALUES`) — по одному на код, читаются и
- * диффятся независимо друг от друга.
+ * По одному `INSERT` на код, а не один с несколькими `VALUES`: они читаются и
+ * диффятся независимо друг от друга, а промты — самое длинное, что вообще
+ * попадает в диффы этого репозитория.
  */
 export function generateRecognitionPromptsSeedStatements(defaults) {
-  return BLOCK_TYPES.map((type) => {
-    const spec = defaults[type];
+  return SEEDED.map(({ key, stage }) => {
+    const spec = defaults[key];
+    if (spec === undefined) {
+      throw new Error(`Дефолт промпта «${key}» не найден: сид сгенерировал бы пустую строку`);
+    }
     return `INSERT INTO prompt_templates (
   code, version, stage, doc_type_code, state, system_prompt, user_template, output_schema, model_override
 )
 VALUES (
   ${sqlLiteral(spec.code)},
   ${SEED_VERSION},
-  ${sqlLiteral(STAGE)},
+  ${sqlLiteral(stage)},
   NULL,
   ${sqlLiteral('draft')},
   ${sqlLiteral(spec.systemPrompt)},
@@ -152,15 +177,21 @@ export async function loadRecognitionPromptDefaults() {
   const promptsModuleUrl = pathToFileURL(
     join(API_DIR, 'dist', 'recognition', 'vlm', 'prompts.js'),
   ).href;
-  const { RECOGNITION_PROMPT_DEFAULTS } = await import(promptsModuleUrl);
-  return RECOGNITION_PROMPT_DEFAULTS;
+  const { RECOGNITION_PROMPT_DEFAULTS, RECOGNITION_ORIENTATION_PROMPT } = await import(
+    promptsModuleUrl
+  );
+  // Зонд лежит ОТДЕЛЬНОЙ константой, а не четвёртым ключом словаря блоков: тот
+  // типизирован тремя типами блоков, и четвёртый ключ в нём означал бы, что
+  // «видов блока четыре». Сводятся они здесь, на границе генератора.
+  return { ...RECOGNITION_PROMPT_DEFAULTS, orientation: RECOGNITION_ORIENTATION_PROMPT };
 }
 
 // ---------------------------------------------------------------------------
 // Точка входа: выполняется ТОЛЬКО при прямом запуске файла, не при импорте
 // (сверка на дрейф импортирует функции выше без побочных эффектов сборки).
 // ---------------------------------------------------------------------------
-const isMain = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
+const isMain =
+  process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
 
 if (isMain) {
   const defaults = await loadRecognitionPromptDefaults();

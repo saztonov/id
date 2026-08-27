@@ -59,29 +59,41 @@ describe('sqlLiteral', () => {
 });
 
 describe('seed промптов recognize не отстаёт от RECOGNITION_PROMPT_DEFAULTS', () => {
-  it(
-    'совпадает с текущим выводом generateRecognitionPromptsSeedSql()',
-    async () => {
-      const committed = readFileSync(TARGET, 'utf8').replace(/\r\n/gu, '\n');
-      const defaults = await loadRecognitionPromptDefaults();
-      const generated = generateRecognitionPromptsSeedSql(defaults);
-
-      expect(
-        checksumOf(committed),
-        `${SEED_FILE} разошёлся с RECOGNITION_PROMPT_DEFAULTS. ` +
-          'Перегенерируйте: pnpm prompts:seed:generate',
-      ).toBe(checksumOf(generated));
-    },
-    180_000,
-  );
-
-  it('содержит ровно три кода промптов recognize (text/image/stamp)', async () => {
+  it('совпадает с текущим выводом generateRecognitionPromptsSeedSql()', async () => {
+    const committed = readFileSync(TARGET, 'utf8').replace(/\r\n/gu, '\n');
     const defaults = await loadRecognitionPromptDefaults();
-    expect(Object.keys(defaults).sort()).toEqual(['image', 'stamp', 'text']);
+    const generated = generateRecognitionPromptsSeedSql(defaults);
+
+    expect(
+      checksumOf(committed),
+      `${SEED_FILE} разошёлся с RECOGNITION_PROMPT_DEFAULTS. ` +
+        'Перегенерируйте: pnpm prompts:seed:generate',
+    ).toBe(checksumOf(generated));
+  }, 180_000);
+
+  it('сеются три промта блоков и зонд ориентации — и ни одного лишнего', async () => {
+    // Зонд добавлен четвёртым (ADR-0020), и это НЕ четвёртый тип блока: он
+    // смотрит на страницу целиком, живёт на собственной стадии `orientation` и
+    // лежит отдельной константой. Сводит их генератор, на своей границе.
+    const defaults = await loadRecognitionPromptDefaults();
+    expect(Object.keys(defaults).sort()).toEqual(['image', 'orientation', 'stamp', 'text']);
     expect(defaults.text.code).toBe('recognition_block_text');
     expect(defaults.image.code).toBe('recognition_block_image');
     expect(defaults.stamp.code).toBe('recognition_block_stamp');
+    expect(defaults.orientation.code).toBe('recognition_page_orientation');
   }, 180_000);
+
+  it('зонд сеется со стадией orientation, а блоки — с recognize', async () => {
+    // Стадия у зонда своя, потому что у его строки `ai_runs` нет прогона
+    // распознавания: под `recognize` он врал бы срезу «цена прогона».
+    const committed = readFileSync(TARGET, 'utf8');
+    const orientationInsert = committed
+      .split(/INSERT INTO prompt_templates/u)
+      .find((chunk) => chunk.includes('recognition_page_orientation'));
+    expect(orientationInsert).toBeDefined();
+    expect(orientationInsert).toContain('$prompt$orientation$prompt$');
+    expect(committed.match(/\$prompt\$recognize\$prompt\$/gu)).toHaveLength(3);
+  });
 
   it('виден раннеру миграций и входит в непрерывную нумерацию', () => {
     const committed = readFileSync(TARGET, 'utf8').replace(/\r\n/gu, '\n');
@@ -96,7 +108,10 @@ describe('seed промптов recognize не отстаёт от RECOGNITION_P
     // так что это не про корректность SQL, а про читаемость закоммиченного
     // файла: обычный $prompt$ на каждой границе значения проще диффить.
     const defaults = await loadRecognitionPromptDefaults();
-    for (const spec of Object.values(defaults) as readonly { systemPrompt: string; userTemplate: string }[]) {
+    for (const spec of Object.values(defaults) as readonly {
+      systemPrompt: string;
+      userTemplate: string;
+    }[]) {
       expect(spec.systemPrompt).not.toContain('$prompt$');
       expect(spec.userTemplate).not.toContain('$prompt$');
     }

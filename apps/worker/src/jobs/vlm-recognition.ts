@@ -87,6 +87,9 @@ import {
   type VlmResponse,
 } from '@id/api';
 import type { BlockType, DetectorProvenance } from '@id/contracts';
+// Обратное отображение прямоугольника — та же чистая функция, что разворачивает
+// координаты детекции: соглашение о направлении поворота обязано быть одним.
+import { inverseTurn, rotateRectNorm } from '@id/detection';
 import {
   PAGE_TEXT_RENDER_VERSION,
   recognitionBlockSchema,
@@ -105,6 +108,17 @@ import {
 
 /** Конверт `content_json` результата блока — тег форматa, не версия схемы канона. */
 export const RECOGNITION_BLOCK_RESULT_ENVELOPE = 'recognition.block_result.v1';
+
+/**
+ * Версия соглашения о развороте содержимого (ADR-0020).
+ *
+ * Уезжает в снимок прогона рядом со сводкой. Отдельно от `CROP_POLICY_VERSION`,
+ * потому что отвечает на другой вопрос: та говорит, КАК готовилась картинка,
+ * эта — что вообще означает число градусов. Смена направления отсчёта не
+ * изменила бы ни одного пикселя у прямых страниц, а у развёрнутых поменяла бы
+ * всё — и без своей версии это осталось бы недоказуемым.
+ */
+const CONTENT_ROTATION_VERSION = 'rotation.v1';
 
 /** Допуск сверки геометрии рендера с сохранённой (§ crop policy / Ф4а «framesAgree»). */
 const GEOMETRY_ASPECT_TOLERANCE = 0.02;
@@ -208,7 +222,16 @@ export interface VlmPageGeometry {
   readonly workingPageIndex: number;
   readonly widthPx: number;
   readonly heightPx: number;
+  /** `/Rotate` из PDF: уже применён и к размерам выше, и к растру poppler. */
   readonly rotation: number;
+  /**
+   * Разворот СОДЕРЖИМОГО, градусы по часовой (ADR-0020).
+   *
+   * Поправка к скану, легшему на лист боком при нулевом `/Rotate`. Не применён
+   * никем — применяет его кроп, разворачивая уже вырезанную картинку. Спутать
+   * его с `rotation` выше — самый вероятный класс ошибки в этом коде.
+   */
+  readonly contentRotation: 0 | 90 | 180 | 270;
 }
 
 export type VlmRunPageStatus = 'pending' | 'done' | 'failed';
@@ -1015,6 +1038,20 @@ async function reuseParentResults(
   }
 
   const blockById = new Map(frozen.map((block) => [block.id, block] as const));
+  /**
+   * Разворот каждой страницы СЕЙЧАС — против того, с каким считался родитель.
+   *
+   * Сверка поблочная, а не по прогону: у блока известна страница, значит
+   * инженер, развернувший ОДНУ страницу из восьмидесяти трёх, платит за одну
+   * страницу. Run-level хэш поворотов был бы кувалдой — он забраковал бы
+   * родителя целиком и заново распознал бы все блоки комплекта, ровно ту трату,
+   * которую убирал S28.
+   */
+  const rotationByPage = new Map(
+    (await deps.loadPageGeometry(run.runId)).map(
+      (page) => [page.workingPageIndex, page.contentRotation] as const,
+    ),
+  );
   const envelopes = await deps.listBlockEnvelopes(parentRunId);
   let reused = 0;
 
@@ -1030,6 +1067,13 @@ async function reuseParentResults(
     if (provenance['promptVersion'] !== prompt.version) continue;
     if (provenance['cropPolicyVersion'] !== CROP_POLICY_VERSION) continue;
     if (provenance['model'] !== expected.model) continue;
+    // Страницу развернули после родительского прогона — его картинка больше не
+    // та, которую увидит модель, и результат по ней непереносим.
+    if (
+      (provenance['contentRotation'] ?? 0) !== (rotationByPage.get(block.workingPageIndex) ?? 0)
+    ) {
+      continue;
+    }
 
     const contentJson = {
       ...(envelope.contentJson as Record<string, unknown>),
@@ -1247,10 +1291,23 @@ export function createVlmStartHandler(
     }
 
     const rasterizerSignature = `${rasterizer.kind}/${rasterizer.version}@${String(RASTER_DPI)}`;
+    /**
+     * Развороты уходят в снимок СВОДКОЙ, а не списком.
+     *
+     * Снимок доказывает, ЧЕМ прогон выполнен: провайдер, модель, версии.
+     * Восемьдесят три числа в нём были бы данными, пронесёнными контрабандой в
+     * доказательство, — а на вопрос «этот прогон что-нибудь разворачивал»
+     * отвечает одно число. Поблочный разворот и так лежит в провенансе каждого
+     * результата, где он и нужен.
+     */
+    const pagesRotated = (await deps.loadPageGeometry(run.runId)).filter(
+      (page) => page.contentRotation !== 0,
+    ).length;
     await deps.mergeSnapshot(run.runId, {
       promptVersions,
       rasterizer: { kind: rasterizer.kind, version: rasterizer.version, dpi: RASTER_DPI },
       cropPolicyVersion: CROP_POLICY_VERSION,
+      contentRotation: { version: CONTENT_ROTATION_VERSION, pagesRotated },
     });
 
     // --- Восстановление: перенос совместимых результатов родителя (S28) ---
@@ -1550,6 +1607,17 @@ export function createVlmRecognizePageHandler(
           return;
         }
 
+        /**
+         * Разворот содержимого страницы (ADR-0020).
+         *
+         * Читается из карты страниц ОДИН раз на страницу и дальше уезжает в
+         * каждый кроп, в обратное отображение дозапроса и в провенанс каждого
+         * блока. Сверка фреймов выше его НЕ знает и знать не должна: она
+         * сравнивает сырой рендер с картой страниц, а разворот — поправка к
+         * тому, что нарисовано ВНУТРИ этого фрейма.
+         */
+        const contentRotation = geometry.contentRotation;
+
         let recognizedThisAttempt = 0;
         let invalidCount = 0;
         let refusedCount = 0;
@@ -1573,6 +1641,9 @@ export function createVlmRecognizePageHandler(
             pageHeightPx: rendered.heightPx,
             coordsNorm: block.coordsNorm,
             polygon: block.shapeType === 'polygon' ? block.polygon : null,
+            // Разворот содержимого: координаты остаются в системе страницы, а
+            // модель получает уже развёрнутую картинку (ADR-0020).
+            contentRotation,
             // Блок на весь лист получает свой потолок: общий (2048 px) сжал бы
             // A4@300dpi в 1.7 раза, и мелкий шрифт сертификата стал бы
             // нечитаем — а такие блоки ставит заплатка ровно там, где другого
@@ -1612,6 +1683,11 @@ export function createVlmRecognizePageHandler(
                   finishReason: null,
                   attempts: 0,
                   cropPolicyVersion: CROP_POLICY_VERSION,
+                  // Ноль пишется ЯВНО: «знаем, что разворота не было» и «поле
+                  // не писали» обязаны быть различимы в архиве — то же
+                  // правило, по которому версия промта равна нулю, а не
+                  // отсутствует.
+                  contentRotation,
                   cropSha256: null,
                   degenerate: true,
                 },
@@ -1709,14 +1785,34 @@ export function createVlmRecognizePageHandler(
                * Вырожденный участок отдаётся как `null`: `recognizeBlock`
                * превратит его во внятный отказ инструмента, а не в исключение,
                * — модель обязана узнать, что кропа не будет.
+               *
+               * ## Разворот: самое хрупкое место правки S35
+               *
+               * Модель видела РАЗВЁРНУТУЮ картинку и просит прямоугольник в её
+               * системе координат — «та же страница» для неё повёрнута. Растр
+               * же лежит в системе страницы. Поэтому запрос отображается
+               * ОБРАТНО (`inverseTurn`), вырезается, и полученный участок
+               * разворачивается вперёд тем же `contentRotation`.
+               *
+               * Без обратного отображения модель получила бы участок с другой
+               * стороны листа — и он выглядел бы правдоподобно, той же
+               * страницей. Дефект не упал бы: он тихо испортил бы результат.
                */
               requestCrop: async (rect) => {
+                const pageRect =
+                  contentRotation === 0
+                    ? rect
+                    : rotateRectNorm(
+                        [rect[0], rect[1], rect[2], rect[3]],
+                        inverseTurn(contentRotation),
+                      );
                 const extra = await deps.crop({
                   pagePngPath: outPath,
                   pageWidthPx: rendered.widthPx,
                   pageHeightPx: rendered.heightPx,
-                  coordsNorm: rect,
+                  coordsNorm: pageRect,
                   polygon: null,
+                  contentRotation,
                 });
                 return 'degenerate' in extra ? null : extra.png;
               },
@@ -1798,6 +1894,11 @@ export function createVlmRecognizePageHandler(
                   // непрозрачны наружу по контракту порта.
                   attempts: ctx.attempt,
                   cropPolicyVersion: CROP_POLICY_VERSION,
+                  // Ноль пишется ЯВНО: «знаем, что разворота не было» и «поле
+                  // не писали» обязаны быть различимы в архиве — то же
+                  // правило, по которому версия промта равна нулю, а не
+                  // отсутствует.
+                  contentRotation,
                   cropSha256,
                   // Предупреждения исхода прежде терялись целиком: порт их
                   // возвращал, а записать было некуда. Здесь им и место —

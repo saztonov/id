@@ -10,10 +10,15 @@
 export {
   clamp01,
   cxcywhToXyxy,
+  inverseTurn,
   rectArea,
   rectIntersection,
   rectIou,
+  rotatePointNorm,
+  rotateRectNorm,
+  rotatedSize,
   xyxyToCxcywh,
+  type QuarterTurn,
   type Rect,
 } from './geometry.js';
 export {

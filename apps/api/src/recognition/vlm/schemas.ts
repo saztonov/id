@@ -294,6 +294,34 @@ export const vlmStampResponseSchema = z.strictObject({
 export type VlmStampResponse = z.infer<typeof vlmStampResponseSchema>;
 
 // ---------------------------------------------------------------------------
+// Ориентация страницы (ADR-0020)
+// ---------------------------------------------------------------------------
+
+/**
+ * Ответ зонда ориентации в ДОМЕННОЙ форме.
+ *
+ * Набор из четырёх значений держит zod, а не JSON Schema: числового `enum`
+ * Google не принимает, и попытка ограничить грамматику им кончилась бы 400 до
+ * генерации — тем же способом, каким кончился `anyOf` у text-фрагмента.
+ *
+ * `.nullish()`, а не `.nullable()`, у необязательных: часть бекендов
+ * OpenRouter грамматику по схеме не исполняет и выписывает только значимые
+ * ключи. Требовать от такого ответа полный набор значило бы браковать верный
+ * ответ из-за особенностей бекенда, о которых он не знает.
+ */
+export const vlmOrientationResponseSchema = z.strictObject({
+  rotation: z.union([z.literal(0), z.literal(90), z.literal(180), z.literal(270)]),
+  /**
+   * Уверенность 0..1. Отсутствие — не ноль: «модель не сказала» и «модель
+   * сказала, что не уверена» ведут к разному, и второе обязано быть видно.
+   */
+  confidence: z.number().min(0).max(1).nullish(),
+  /** Короткая фраза «шапка идёт снизу вверх» — для человека, читающего журнал. */
+  evidence: z.string().nullish(),
+});
+export type VlmOrientationResponse = z.infer<typeof vlmOrientationResponseSchema>;
+
+// ---------------------------------------------------------------------------
 // JSON Schema для response_format
 // ---------------------------------------------------------------------------
 
@@ -379,6 +407,24 @@ export const STAMP_BLOCK_RESULT_SCHEMA: JsonSchema = strictObjectSchema({
   },
 });
 
+/**
+ * Ответ зонда ориентации страницы (ADR-0020).
+ *
+ * Три поля и ни одного лишнего: зонд отвечает на один вопрос, и всё, что он мог
+ * бы сказать сверх этого, было бы транскрипцией — то есть работой, за которую
+ * платят потом и другой моделью.
+ *
+ * `rotation` — ЧИСЛО, а не строка, потому что величина арифметическая: её
+ * обращают, складывают и передают в `sharp.rotate`. Числового `enum` в схеме
+ * нет намеренно: Google его для не-строк не принимает (см. шапку файла), и
+ * закрытый набор из четырёх значений держит zod ниже.
+ */
+export const ORIENTATION_RESULT_SCHEMA: JsonSchema = strictObjectSchema({
+  rotation: { type: 'integer' },
+  confidence: { type: ['number', 'null'] },
+  evidence: nullableStringSchema,
+});
+
 /** Имена схем — стабильные идентификаторы `json_schema.name` (паритет RD WEB). */
 export const VLM_TEXT_RESPONSE_FORMAT: VlmJsonSchemaFormat = {
   name: 'text_block_result',
@@ -395,6 +441,12 @@ export const VLM_IMAGE_RESPONSE_FORMAT: VlmJsonSchemaFormat = {
 export const VLM_STAMP_RESPONSE_FORMAT: VlmJsonSchemaFormat = {
   name: 'stamp_block_result',
   schema: STAMP_BLOCK_RESULT_SCHEMA,
+  strict: true,
+};
+
+export const VLM_ORIENTATION_RESPONSE_FORMAT: VlmJsonSchemaFormat = {
+  name: 'page_orientation_result',
+  schema: ORIENTATION_RESULT_SCHEMA,
   strict: true,
 };
 

@@ -123,6 +123,20 @@ const markupPayload = revisionPayload.extend({
   layoutRevisionId: uuid,
 });
 
+/**
+ * Вход зонда ориентации: ОДНА страница.
+ *
+ * `layoutRevisionId` нужен, чтобы по завершении поставить детекцию именно этой
+ * разметки; `sourcePageId` — ключ строки разворота (он переживает пересборку
+ * рабочего документа, в отличие от индекса листа).
+ */
+const orientationProbePayload = revisionPayload.extend({
+  layoutRevisionId: uuid,
+  bundleId: uuid,
+  sourcePageId: uuid,
+  workingPageIndex: z.int().nonnegative(),
+});
+
 const layoutPayload = revisionPayload.extend({
   layoutRevisionId: uuid,
   /**
@@ -294,6 +308,33 @@ export const JOB_DEFINITIONS = {
     stage: 'layout',
     maxAttempts: 3,
     leaseMs: 600_000,
+    priority: DEFAULT_PRIORITY,
+  },
+  /**
+   * Зонд ориентации страницы (ADR-0020): в какую сторону повёрнут скан.
+   *
+   * ОТДЕЛЬНАЯ задача, а не шаг детекции, и не шаг распознавания. По времени она
+   * обязана отработать ДО детекции — значит внутри `vlm.recognize_page` быть не
+   * может. По существу она не должна быть и шагом `layout.detect_local`: у них
+   * разные последствия (тот же довод, что в шапке `signature-probe.ts`). Отказ
+   * детекции — страница без блоков; отказ зонда не имеет права останавливать
+   * конвейер. Смешав их, мы дали бы одному таймауту шлюза сжигать
+   * 600-секундную аренду очереди `cpu` и переигрывать вместе с собой
+   * ONNX-инференс.
+   *
+   * Очередь `io`, а не `llm`: вызов один, короткий и на маленькой картинке —
+   * это сеть, а не поток распознавания, и вставать в очередь к блокам он не
+   * должен. Одна СТРАНИЦА на задачу: цикл по восьмидесяти трём держал бы аренду
+   * на восемьдесят три вызова модели и переигрывал бы сделанное при падении.
+   *
+   * Стадия `layout`: зонд принадлежит разметке — он готовит её вход.
+   */
+  'page.orientation_probe': {
+    queue: 'io',
+    payload: orientationProbePayload,
+    stage: 'layout',
+    maxAttempts: 3,
+    leaseMs: 120_000,
     priority: DEFAULT_PRIORITY,
   },
   'layout.analyze_coverage': {

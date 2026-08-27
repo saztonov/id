@@ -862,3 +862,64 @@ describe('переопределения параметров детекции �
     await setDetectionSetting('detection.score_threshold', null);
   });
 });
+
+describe('разворот содержимого страницы перед инференсом (ADR-0020)', () => {
+  /**
+   * Детектор обучен на прямых листах.
+   *
+   * На боковом он даёт скудную разметку, а табличная зона, оставшаяся без
+   * блока, не будет распознана вовсе: её никто не спросит у модели. Поэтому
+   * лист разворачивается ДО инференса — но координаты обязаны вернуться в
+   * систему страницы, ту самую, в которой их рисует экран разметки.
+   *
+   * Проверяется именно это: фикстура детектора отдаёт ШИРОКИЙ бокс (0.4 × 0.2),
+   * и на развёрнутой на 90° странице он обязан лечь в БД ВЫСОКИМ. Если
+   * обратного поворота нет, бокс останется широким — и рамка на экране уедет
+   * поперёк содержимого.
+   */
+  async function boxOfPage(pageIndex: number): Promise<{
+    readonly width: number;
+    readonly height: number;
+  } | null> {
+    const rows = await testDb.query<{ x0: string; y0: string; x1: string; y1: string }>(
+      `SELECT x0, y0, x1, y1 FROM layout_blocks
+        WHERE layout_revision_id = '${layoutRevisionId}'
+          AND working_page_index = ${String(pageIndex)}
+        LIMIT 1`,
+    );
+    const row = rows[0];
+    if (row === undefined) return null;
+    return { width: Number(row.x1) - Number(row.x0), height: Number(row.y1) - Number(row.y0) };
+  }
+
+  it('на прямой странице широкая детекция остаётся широкой', async () => {
+    const session = new QueueSession([oneTextDetection()]);
+    await runJob(session, { pageIndices: [1], overwriteExisting: true });
+
+    const box = await boxOfPage(1);
+    expect(box).not.toBeNull();
+    expect(box?.width ?? 0).toBeGreaterThan(box?.height ?? 1);
+  });
+
+  it('на развёрнутой странице та же детекция ложится в базу повёрнутой обратно', async () => {
+    await testDb.query(
+      `INSERT INTO page_orientations (revision_id, source_page_id, content_rotation, source)
+       SELECT '${REVISION}', source_page_id, 90, 'user'
+         FROM processing_bundle_pages
+        WHERE bundle_id = '${bundleId}' AND working_page_index = 1
+       ON CONFLICT (revision_id, source_page_id) DO UPDATE
+         SET content_rotation = 90, source = 'user'`,
+    );
+
+    const session = new QueueSession([oneTextDetection()]);
+    await runJob(session, { pageIndices: [1], overwriteExisting: true });
+    expect(session.calls).toBe(1);
+
+    const box = await boxOfPage(1);
+    expect(box).not.toBeNull();
+    // Широкая детекция на развёрнутом листе — это ВЫСОКИЙ блок страницы.
+    expect(box?.height ?? 0).toBeGreaterThan(box?.width ?? 1);
+
+    await testDb.query(`DELETE FROM page_orientations WHERE revision_id = '${REVISION}'`);
+  });
+});

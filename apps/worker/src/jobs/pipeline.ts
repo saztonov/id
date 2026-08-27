@@ -150,6 +150,20 @@ import {
   saveLlmFindings,
   saveRunJournal,
   startValidationRun,
+  // Зонд ориентации (ADR-0020): настройки, репозиторий разворота, промт и
+  // разбор ответа. Классификация отказа берётся у самой ошибки — `LlmError`
+  // несёт `retriable` полем.
+  LlmError,
+  RECOGNITION_ORIENTATION_PROMPT,
+  findPageOrientation,
+  enqueueLocalDetectBatches,
+  readAiDryRunOnly,
+  readOrientationProbeSettings,
+  readRecognitionSettings,
+  saveProbeOrientation,
+  stripNoise,
+  substitutePlaceholders,
+  vlmOrientationResponseSchema,
 } from '@id/api';
 
 import {
@@ -214,6 +228,11 @@ import {
   type WaitPagesOptions,
 } from './markup.js';
 import { createLocalDetectionHandler, type LocalDetectionDeps } from './local-detection.js';
+import {
+  createOrientationProbeHandler,
+  ORIENTATION_PROBE_MAX_LONG_EDGE_PX,
+  type OrientationProbeDeps,
+} from './orientation-probe.js';
 import { createLayoutStartHandler, type LayoutStartDeps } from './layout-start.js';
 import { createChecksLlmReviewHandler, type ChecksLlmReviewDeps } from './checks-llm-review.js';
 import { createModelStore } from '../detection/model-store.js';
@@ -1091,6 +1110,197 @@ function recognitionDeps(options: PipelineJobsOptions): RecognitionDeps {
  * наборе полей: у VLM-прогона нет ни RD-документа, ни удалённых хэшей, зато
  * есть таблица `recognition_run_pages`, растеризатор и порт `VlmPort`.
  */
+/**
+ * Связывание зонда ориентации (ADR-0020).
+ *
+ * Растеризатор и VLM-порт здесь ОПЦИОНАЛЬНЫ, как и у распознавания. Их
+ * отсутствие не отказ задачи, а выключенный зонд: страница считается прямой,
+ * детекция ставится, процесс поднимается. Молчаливая деградация хуже честного
+ * отказа — но остановленный конвейер хуже обоих, а поворот скана это поправка к
+ * качеству, без которой портал работал всё время до S35.
+ */
+function orientationProbeDeps(options: PipelineJobsOptions): OrientationProbeDeps {
+  const { db, storage } = options;
+
+  const scopeOf = async (revisionId: string): Promise<AuthScope> => {
+    const scope = await pinScope(db, revisionId);
+    if (scope === null) {
+      throw new PipelineScopeError(`Ревизия ${revisionId} не найдена: зонд адресован в никуда.`);
+    }
+    return scope;
+  };
+
+  return {
+    ...(options.workDirBase !== undefined ? { workDirBase: options.workDirBase } : {}),
+
+    probeEnabled: async () => {
+      if (options.vlm === undefined || options.vlm === null) return false;
+      if (options.rasterizer === undefined || options.rasterizer === null) return false;
+      return (await readOrientationProbeSettings(db)).enabled;
+    },
+
+    dryRun: () => readAiDryRunOnly(db),
+
+    existingSource: async ({ revisionId, sourcePageId }) => {
+      const view = await findPageOrientation(db, revisionId, sourcePageId);
+      return view === null ? null : view.source;
+    },
+
+    workingPdfToFile: async (bundleId) => {
+      const bundle = await findBundle(db, SYSTEM_SCOPE, bundleId);
+      if (bundle === null) throw new PipelineScopeError(`Рабочий документ ${bundleId} не найден.`);
+      const dir = await mkdtemp(join(options.workDirBase ?? tmpdir(), 'id-orientation-pdf-'));
+      const path = join(dir, 'working.pdf');
+      await fetchOriginal(storage, blobKey(bundle.workingPdfBlobSha256), path);
+      return { path, cleanup: () => rm(dir, { recursive: true, force: true }) };
+    },
+
+    renderPage: async (input) => {
+      const rasterizer = options.rasterizer;
+      if (rasterizer === null || rasterizer === undefined) {
+        throw new Error('Растеризатор недоступен: зонд не может отрендерить страницу');
+      }
+      return rasterizer.renderPage(input);
+    },
+
+    // Миниатюра берётся ТЕМ ЖЕ `cropBlockPng`, что режет блоки: второй путь
+    // ресемплинга означал бы два ответа на вопрос «как уменьшить картинку», а
+    // побочный выигрыш в том, что картинка зонда попадает под ту же версию
+    // crop policy.
+    thumbnail: async ({ pagePngPath, widthPx, heightPx }) => {
+      const cropped = await cropBlockPng({
+        pagePngPath,
+        pageWidthPx: widthPx,
+        pageHeightPx: heightPx,
+        coordsNorm: [0, 0, 1, 1],
+        polygon: null,
+        paddingPx: 0,
+        maxLongEdgePx: ORIENTATION_PROBE_MAX_LONG_EDGE_PX,
+      });
+      return 'degenerate' in cropped ? null : cropped.png;
+    },
+
+    probe: async ({ png, pageNumber }) => {
+      const vlm = options.vlm;
+      if (vlm === null || vlm === undefined) {
+        throw new Error('VLM-порт не настроен: зонд не может спросить модель');
+      }
+
+      const preset = RECOGNITION_ORIENTATION_PROMPT;
+      // Опубликованная версия в приоритете, встроенный текст — запасной, с
+      // версией 0. Та же схема, что у промтов распознавания: «встроенным» —
+      // такой же честный ответ на вопрос «чем выполнено», как «версией 3».
+      const templates = await listPromptTemplates(db, SYSTEM_SCOPE, {
+        code: preset.code,
+        state: 'published',
+        limit: 1,
+      });
+      const published = templates.items[0];
+      const systemPrompt = published?.systemPrompt ?? preset.systemPrompt;
+      const userTemplate = published?.userTemplate ?? preset.userTemplate;
+      const promptVersion = published?.version ?? 0;
+
+      // Модель зонда: своя настройка, иначе модель распознавания. Требовать
+      // настройки ВТОРОЙ модели ради работы зонда значило бы завести гейт того
+      // же рода, который `prompts.ts` уже описал и снял.
+      const [probeSettings, recognitionSettings] = await Promise.all([
+        readOrientationProbeSettings(db),
+        readRecognitionSettings(db),
+      ]);
+      const model = probeSettings.model !== '' ? probeSettings.model : recognitionSettings.vlmModel;
+      if (model === '') {
+        throw new Error('Модель зонда не выбрана: пусты и своя настройка, и модель распознавания');
+      }
+
+      const response = await vlm.complete({
+        stage: 'orientation',
+        promptCode: preset.code,
+        promptVersion,
+        systemPrompt,
+        userPrompt: substitutePlaceholders(userTemplate, {
+          pageNumber,
+          // Зонд смотрит на страницу целиком: блока у него нет, и подставлять
+          // сюда нечего. Пустая строка честнее выдуманного идентификатора.
+          layoutBlockId: '',
+        }),
+        images: [{ png }],
+        responseFormat: preset.responseFormat,
+        schemaVersion: schemaHash(preset.responseFormat.schema),
+        model,
+        temperature: preset.temperature,
+        maxTokens: preset.maxTokens,
+      });
+
+      const parsed = vlmOrientationResponseSchema.safeParse(
+        JSON.parse(stripNoise(response.text)) as unknown,
+      );
+      if (!parsed.success) {
+        throw new Error(`Ответ зонда не прошёл схему: ${parsed.error.issues[0]?.message ?? ''}`);
+      }
+
+      return {
+        promptCode: preset.code,
+        promptVersion,
+        model: response.model,
+        provider: response.provider,
+        inputHash: response.inputHash,
+        outputHash: response.outputHash,
+        answer: {
+          rotation: parsed.data.rotation,
+          confidence: parsed.data.confidence ?? null,
+          evidence: parsed.data.evidence ?? null,
+        },
+        tokensIn: response.tokensIn,
+        tokensOut: response.tokensOut,
+        cost: response.cost,
+        latencyMs: response.latencyMs,
+      };
+    },
+
+    saveOrientation: (input) => saveProbeOrientation(db, input),
+
+    recordAiRun: async (input) => {
+      await recordAiRun(db, await scopeOf(input.revisionId), input);
+    },
+
+    enqueueDetection: async ({ revisionId, layoutRevisionId, workingPageIndex, logger }) => {
+      await enqueueLocalDetectBatches(db, await scopeOf(revisionId), {
+        layoutRevisionId,
+        revisionId,
+        pages: [workingPageIndex],
+        overwriteExisting: false,
+        // Журнал контекста задачи — тот же интерфейс, что ждёт постановка.
+        logger,
+      });
+    },
+
+    reportFeedback: async (input) => {
+      const sink = options.feedback ?? new NoopProcessingFeedbackSink();
+      await sink.record({
+        revisionId: input.revisionId,
+        sourcePageId: input.sourcePageId,
+        workingPageIndex: input.workingPageIndex,
+        feedbackType: 'system_failure',
+        reasonCode: input.reasonCode,
+        severity: 'warn',
+        pipelineStage: 'layout',
+        observed: { detail: input.detail },
+      });
+    },
+
+    /**
+     * Повторяемость отказа спрашивается у самой ошибки.
+     *
+     * `LlmError` несёт `retriable` полем — провайдер уже решил, поможет ли
+     * повтор ЭТОГО вызова (см. шапку `llm/port.ts`). Второй классификатор
+     * рядом означал бы второй словарь ошибок шлюза, расходящийся с первым на
+     * первом же новом коде. Всё, что не `LlmError`, — не сетевой отказ, а
+     * дефект нашего кода: повторять его незачем.
+     */
+    isRetriable: (error) => error instanceof LlmError && error.retriable,
+  };
+}
+
 function vlmRecognitionDeps(options: PipelineJobsOptions): VlmRecognitionDeps {
   const { db, storage } = options;
 
@@ -1979,6 +2189,10 @@ export function registerPipelineJobs(
   registry.register(
     'layout.detect_local',
     createLocalDetectionHandler(localDetectionDeps(options)),
+  );
+  registry.register(
+    'page.orientation_probe',
+    createOrientationProbeHandler(orientationProbeDeps(options)),
   );
 
   // Задачи 10–13 (§12): цикл сверки, запуск OCR, поллинг и однократный забор
