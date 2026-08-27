@@ -4,7 +4,7 @@
  * Разделение простое и держится строго: всё, что живёт на сервере (блоки,
  * версия ревизии разметки, флаги внимания), читается TanStack Query и здесь НЕ
  * дублируется. Здесь только то, чего сервер не знает: какая страница открыта,
- * что выделено, какой инструмент включён, как отфильтрован список.
+ * что выделено, взведена ли обводка, как разложены колонки.
  *
  * Копия серверных данных в этом хранилище была бы вторым источником правды о
  * блоках, и разошлась бы она молча — ровно тем способом, которым на S2
@@ -12,28 +12,32 @@
  */
 import { create } from 'zustand';
 import type { BlockType } from '@id/contracts';
-import { EMPTY_FILTER, type BlockFilter } from './blocks.js';
 import {
   DEFAULT_SIZES,
-  NARROW_WORKSPACE,
   readColumnSizes,
   writeColumnSizes,
   type ColumnSizes,
 } from './workspaceLayout.js';
 import type { ZoomMode } from './zoom.js';
 
-/** Инструмент канвы. Рисование включается явно, иначе перетаскивание рамки и
- * рисование новой различались бы только тем, попал ли курсор в существующий
- * блок, — и промах создавал бы блок вместо переноса. */
-export type CanvasTool = 'select' | 'draw';
-
 interface MarkupState {
   readonly workingPageIndex: number;
-  readonly tool: CanvasTool;
-  /** Тип, которым рисуется новый блок и который применяется к выделенным. */
-  readonly draftType: BlockType;
+  /**
+   * Взведённый тип обводки: `null` — обычный режим, блоки выделяются и правятся.
+   *
+   * Прежде здесь стояла пара `tool: 'select' | 'draw'` плюс `draftType`, то есть
+   * ДВА контрола на одно решение: сначала переключить инструмент, потом выбрать
+   * тип. Теперь решение одно и принимается одной кнопкой типа — она же и есть
+   * переключатель. Взвод одноразовый: после созданного блока он гаснет сам,
+   * иначе промах мышью по листу заводил бы лишние рамки, пока человек не
+   * вспомнит про переключатель.
+   *
+   * Рисование по-прежнему включается ЯВНО, и это существенно: без взвода
+   * перетаскивание рамки и рисование новой различались бы только тем, попал ли
+   * курсор в существующий блок, — и промах создавал бы блок вместо переноса.
+   */
+  readonly armedType: BlockType | null;
   readonly selection: ReadonlySet<string>;
-  readonly filter: BlockFilter;
   /**
    * Правило вычисления масштаба, а не само число.
    *
@@ -45,69 +49,54 @@ interface MarkupState {
   readonly zoomMode: ZoomMode;
   /** Значение РУЧНОГО режима; в двух других не читается. */
   readonly zoom: number;
-  /** Доли четырёх колонок рабочей области; переживают уход на другую вкладку. */
+  /** Доли трёх колонок рабочей области; переживают уход на другую вкладку. */
   readonly columnSizes: ColumnSizes;
   /** Свёрнута ли колонка распознанного текста. */
   readonly textCollapsed: boolean;
 
   goToPage: (workingPageIndex: number) => void;
-  setTool: (tool: CanvasTool) => void;
-  setDraftType: (blockType: BlockType) => void;
+  /** Взвести обводку этим типом; выделение при этом снимается. */
+  armType: (blockType: BlockType) => void;
+  /** Снять взвод: обводка отменена, экран вернулся к выделению. */
+  disarm: () => void;
   setZoomMode: (mode: ZoomMode) => void;
   /** Ручной масштаб: сам переводит режим в `manual`. */
   setManualZoom: (zoom: number) => void;
   setColumnSizes: (sizes: ColumnSizes) => void;
   toggleTextColumn: () => void;
   resetColumns: () => void;
-  setFilter: (patch: Partial<BlockFilter>) => void;
 
   /** Одиночный выбор: заменяет выделение. */
   select: (blockId: string) => void;
   /** Множественный выбор: добавляет или снимает один блок. */
   toggle: (blockId: string) => void;
-  selectMany: (blockIds: readonly string[]) => void;
   clearSelection: () => void;
   /** Снятие с выделения блоков, которых больше нет на сервере. */
   retainExisting: (existingIds: readonly string[]) => void;
 }
 
-/**
- * Стартовое состояние колонки текста.
- *
- * На узком экране три живые колонки полезнее четырёх огрызков, поэтому текст
- * стартует свёрнутым — но ТОЛЬКО пока человек ничего не выбрал сам: как только
- * он развернёт текст и подвинет разделитель, выбор запомнится, и порог больше
- * ни на что не влияет.
- */
-function initialTextCollapsed(hasStoredSizes: boolean): boolean {
-  if (hasStoredSizes) return false;
-  try {
-    return window.innerWidth < NARROW_WORKSPACE;
-  } catch {
-    return false;
-  }
-}
-
-const storedSizes = readColumnSizes();
-
 export const useMarkupStore = create<MarkupState>((set) => ({
   workingPageIndex: 0,
-  tool: 'select',
-  draftType: 'text',
+  armedType: null,
   selection: new Set<string>(),
-  filter: EMPTY_FILTER,
   zoomMode: 'fit-page',
   zoom: 1,
-  columnSizes: storedSizes ?? DEFAULT_SIZES,
-  textCollapsed: initialTextCollapsed(storedSizes !== null),
+  columnSizes: readColumnSizes() ?? DEFAULT_SIZES,
+  textCollapsed: false,
 
   goToPage: (workingPageIndex) => {
-    // Выделение снимается при переходе: применение типа «к выделенным» иначе
-    // затронуло бы блоки страницы, которую пользователь уже не видит.
-    set({ workingPageIndex, selection: new Set<string>() });
+    // Выделение снимается при переходе: смена типа «у выделенного» иначе
+    // затронула бы блоки страницы, которую пользователь уже не видит.
+    //
+    // Взвод снимается по той же причине: обводка, начатая для одной страницы и
+    // доехавшая до другой, — это блок, поставленный не туда, куда целились.
+    set({ workingPageIndex, selection: new Set<string>(), armedType: null });
   },
-  setTool: (tool) => set({ tool }),
-  setDraftType: (draftType) => set({ draftType }),
+  // Взвод и выделение взаимно исключаются: кнопка типа при непустом выделении
+  // МЕНЯЕТ тип, а взводится только на пустом. Оставленное выделение означало бы,
+  // что следующий клик по типу сделает не то, что показывает подсветка кнопки.
+  armType: (armedType) => set({ armedType, selection: new Set<string>() }),
+  disarm: () => set({ armedType: null }),
   setZoomMode: (zoomMode) => set({ zoomMode }),
   setManualZoom: (zoom) => set({ zoom, zoomMode: 'manual' }),
   // Запись в хранилище браузера — здесь, а не в компоненте: действие одно, и
@@ -121,17 +110,18 @@ export const useMarkupStore = create<MarkupState>((set) => ({
     writeColumnSizes(DEFAULT_SIZES);
     set({ columnSizes: DEFAULT_SIZES, textCollapsed: false });
   },
-  setFilter: (patch) => set((state) => ({ filter: { ...state.filter, ...patch } })),
 
-  select: (blockId) => set({ selection: new Set([blockId]) }),
+  // Выделение гасит взвод: человек передумал обводить и взялся за готовый блок,
+  // а взведённая кнопка типа в этот момент показывала бы неправдой то, что
+  // произойдёт по следующему клику.
+  select: (blockId) => set({ selection: new Set([blockId]), armedType: null }),
   toggle: (blockId) =>
     set((state) => {
       const next = new Set(state.selection);
       if (next.has(blockId)) next.delete(blockId);
       else next.add(blockId);
-      return { selection: next };
+      return { selection: next, armedType: null };
     }),
-  selectMany: (blockIds) => set({ selection: new Set(blockIds) }),
   clearSelection: () => set({ selection: new Set<string>() }),
   // Когда снимать нечего, возвращается ТОТ ЖЕ объект состояния, а не пустая
   // заплата: `set({})` собирает новый объект через `Object.assign` и будит

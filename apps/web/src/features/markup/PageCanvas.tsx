@@ -1,10 +1,10 @@
 /**
  * Канва страницы: рамки блоков поверх отрисованной страницы PDF (§7.2).
  *
- * Поддержаны все действия §7.2: нарисовать, перетащить, растянуть, сменить тип,
- * удалить, выделить несколько, применить тип к выделенным, заменить страницу
- * одним блоком. Часть их живёт в панели инструментов и в списке блоков — здесь
- * то, что делается мышью и клавиатурой по самой странице.
+ * Поддержаны действия §7.2 над рамками: нарисовать, перетащить, растянуть,
+ * выделить одну или несколько, сменить тип, удалить. Смена типа и выбор блока
+ * списком живут в панели инструментов — здесь то, что делается мышью и
+ * клавиатурой по самой странице.
  *
  * ## Координаты
  *
@@ -35,13 +35,24 @@
  *
  * Konva рисует в `<canvas>`, а элементы канвы недоступны ни фокусу, ни
  * скринридеру по построению. Поэтому канва — не единственный путь к блоку:
- * рядом лежит список блоков со чекбоксами (`BlockList`), который является
- * полноценной альтернативой для клавиатуры, а сама канва помечена
- * `role="application"` с описанием доступных клавиш и `aria-label`, называющим
- * страницу и число блоков. Удаление и смена типа работают с клавиатуры именно
- * из списка, а не только мышью по канве.
+ * в панели инструментов лежат выбор блока списком, кнопки типов и удаление, и
+ * этот путь полностью клавиатурный. Сама канва помечена `role="application"`,
+ * получает фокус (`tabIndex`) и несёт `aria-label`, называющий страницу и число
+ * блоков.
+ *
+ * Собственные клавиши канвы — `Delete`/`Backspace` (удалить выделенное) и
+ * `Escape` (снять взвод и выделение) — слушаются НА ОБЁРТКЕ, а не на `window`.
+ * Глобальный слушатель срабатывал бы и при наборе текста в полях экрана: рядом
+ * живут селект вида ИД и поиск по нему, и `Backspace` в них означает «стереть
+ * символ», а не «удалить блок».
  */
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import {
+  useEffect,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
+} from 'react';
 import { Group, Image as KonvaImage, Layer, Rect, Stage, Text } from 'react-konva';
 import type Konva from 'konva';
 import type { BlockType } from '@id/contracts';
@@ -70,21 +81,33 @@ export interface PageCanvasProps {
   readonly blocks: readonly LayoutBlock[];
   readonly ranks: ReadonlyMap<string, number>;
   readonly selection: ReadonlySet<string>;
-  readonly tool: 'select' | 'draw';
-  readonly draftType: BlockType;
+  /**
+   * Взведённый тип обводки; `null` — обычный режим, блоки выделяются и правятся.
+   *
+   * Ровно одно значение вместо прежней пары «инструмент + тип черновика»: два
+   * поля на одно решение расходились бы ровно там, где ошибка означает, что
+   * человек рисует не тем, что видит на подсвеченной кнопке.
+   */
+  readonly armedType: BlockType | null;
   readonly editable: boolean;
   readonly workingPageIndex: number;
   readonly onSelect: (blockId: string, additive: boolean) => void;
   readonly onClearSelection: () => void;
   readonly onCreate: (coords: ReturnType<typeof rectToCoords>) => void;
   readonly onMove: (blockId: string, coords: ReturnType<typeof rectToCoords>) => void;
+  /** `Delete`/`Backspace` по канве. Подтверждения нет: рамка восстанавливается обводкой. */
+  readonly onDeleteSelected: () => void;
+  /** `Escape`: снять взвод и выделение разом. */
+  readonly onEscape: () => void;
 }
 
 /** Сторона квадратика-ручки растягивания в пикселях канвы. */
 const HANDLE = 9;
 
 export function PageCanvas(props: PageCanvasProps): ReactNode {
-  const { content, rotation, image, blocks, ranks, selection, tool, draftType, editable } = props;
+  const { content, rotation, image, blocks, ranks, selection, armedType, editable } = props;
+  /** Обводка идёт, только если тип взведён И правка вообще разрешена. */
+  const drawing = editable && armedType !== null;
   const [draft, setDraft] = useState<PixelRect | null>(null);
   const drawStart = useRef<{ x: number; y: number } | null>(null);
   /**
@@ -113,6 +136,15 @@ export function PageCanvas(props: PageCanvasProps): ReactNode {
     drawStart.current = null;
   }, [rotation]);
 
+  // Снятый взвод убирает незаконченный черновик: иначе пунктирная рамка висела
+  // бы поверх листа после `Escape`, а отпускание мыши завело бы блок типом,
+  // который уже не выбран.
+  useEffect(() => {
+    if (armedType !== null) return;
+    setDraft(null);
+    drawStart.current = null;
+  }, [armedType]);
+
   const pointerOf = (): { x: number; y: number } | null => {
     const position = contentRef.current?.getRelativePointerPosition();
     if (position === undefined || position === null) return null;
@@ -123,7 +155,7 @@ export function PageCanvas(props: PageCanvasProps): ReactNode {
   };
 
   const beginDraw = (): void => {
-    if (!editable || tool !== 'draw') return;
+    if (!drawing) return;
     const point = pointerOf();
     if (point === null) return;
     drawStart.current = point;
@@ -162,27 +194,47 @@ export function PageCanvas(props: PageCanvasProps): ReactNode {
   // назвалась.
   const rotationNote = rotation === 0 ? '' : ` Лист показан развёрнутым на ${String(rotation)}°.`;
 
+  const onKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>): void => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      props.onEscape();
+      return;
+    }
+    if (event.key !== 'Delete' && event.key !== 'Backspace') return;
+    if (!editable || selection.size === 0) return;
+    // `Backspace` в браузере без этого уводит на предыдущую страницу истории.
+    event.preventDefault();
+    props.onDeleteSelected();
+  };
+
   return (
     <div
       role="application"
-      aria-label={`Страница ${String(props.workingPageIndex + 1)}, блоков: ${String(blocks.length)}. Рамки блоков правятся мышью; тот же набор доступен с клавиатуры в списке блоков справа.${rotationNote}`}
-      style={{ width: stage.width, height: stage.height, position: 'relative' }}
+      tabIndex={0}
+      onKeyDown={onKeyDown}
+      // Фокус ставится щелчком: без него клавиши канвы работали бы только после
+      // обхода табом, то есть у человека с мышью — никогда.
+      onPointerDown={(event) => {
+        event.currentTarget.focus({ preventScroll: true });
+      }}
+      aria-label={`Страница ${String(props.workingPageIndex + 1)}, блоков: ${String(blocks.length)}. Рамки блоков правятся мышью, Delete удаляет выделенное; тот же набор доступен с клавиатуры в панели над страницей.${rotationNote}`}
+      style={{ width: stage.width, height: stage.height, position: 'relative', outlineOffset: 2 }}
     >
       <Stage
         width={stage.width}
         height={stage.height}
         onPointerDown={(event: Konva.KonvaEventObject<PointerEvent>) => {
-          if (tool === 'draw') {
+          if (drawing) {
             beginDraw();
             return;
           }
-          // Щелчок по пустому месту снимает выделение: иначе «применить тип к
-          // выделенным» однажды сработает по забытому выделению.
+          // Щелчок по пустому месту снимает выделение: иначе кнопка типа однажды
+          // сработает по забытому выделению вместо взвода обводки.
           if (event.target === event.target.getStage()) props.onClearSelection();
         }}
         onPointerMove={extendDraw}
         onPointerUp={finishDraw}
-        style={{ cursor: tool === 'draw' && editable ? 'crosshair' : 'default' }}
+        style={{ cursor: drawing ? 'crosshair' : 'default' }}
       >
         <Layer listening={false}>
           <Group {...group}>
@@ -201,19 +253,20 @@ export function PageCanvas(props: PageCanvasProps): ReactNode {
                 size={content}
                 rotation={rotation}
                 selected={selection.has(block.id)}
-                editable={editable && tool === 'select'}
+                editable={editable && !drawing}
+                drawing={drawing}
                 onSelect={props.onSelect}
                 onMove={props.onMove}
               />
             ))}
-            {draft !== null && (
+            {draft !== null && armedType !== null && (
               <Rect
                 x={draft.x}
                 y={draft.y}
                 width={draft.width}
                 height={draft.height}
-                stroke={BLOCK_STYLES[draftType].stroke}
-                fill={BLOCK_STYLES[draftType].fill}
+                stroke={BLOCK_STYLES[armedType].stroke}
+                fill={BLOCK_STYLES[armedType].fill}
                 dash={[4, 4]}
                 strokeWidth={2}
                 listening={false}
@@ -235,6 +288,8 @@ interface BlockShapeProps {
   readonly rotation: Rotation;
   readonly selected: boolean;
   readonly editable: boolean;
+  /** Взведена ли обводка: тогда рамка не перехватывает указатель вовсе. */
+  readonly drawing: boolean;
   readonly onSelect: (blockId: string, additive: boolean) => void;
   readonly onMove: (blockId: string, coords: ReturnType<typeof rectToCoords>) => void;
 }
@@ -259,7 +314,7 @@ interface BlockShapeProps {
  * пришлось поправить, — подпись ранга: она вращалась вместе с листом.
  */
 function BlockShape(props: BlockShapeProps): ReactNode {
-  const { block, rank, size, rotation, selected, editable } = props;
+  const { block, rank, size, rotation, selected, editable, drawing } = props;
   const rect = coordsToRect(block.coords, size);
   const style = BLOCK_STYLES[block.blockType];
   /**
@@ -301,6 +356,16 @@ function BlockShape(props: BlockShapeProps): ReactNode {
         dash={style.dash}
         fill={style.fill}
         draggable={editable}
+        /*
+          При взведённой обводке рамка не слушает указатель ВОВСЕ.
+
+          Прежде `cancelBubble` стоял безусловно, и это молча запрещало обводить
+          блок поверх существующего: щелчок внутри чужой рамки не доходил до
+          сцены, то есть вместо начала обводки происходило выделение. На плотной
+          странице свободного места под новый блок может не быть вообще, и
+          человек упирался в «рисование не работает» без единого признака причины.
+        */
+        listening={!drawing}
         onPointerDown={(event: Konva.KonvaEventObject<PointerEvent>) => {
           event.cancelBubble = true;
           const additive = event.evt.ctrlKey || event.evt.metaKey || event.evt.shiftKey;

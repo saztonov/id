@@ -40,13 +40,12 @@ import {
   Alert,
   App as AntApp,
   Button,
-  Popconfirm,
-  Segmented,
   Select,
   Space,
   Spin,
   Splitter,
   Tag,
+  Tooltip,
   Typography,
 } from 'antd';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -62,12 +61,17 @@ import { RecognizedText } from './RecognizedText.js';
 import { useQueryParam } from '../../app/router.js';
 import { ErrorState, LoadingState } from '../../shared/ui.js';
 import { LAYOUT_STATE_LABELS } from '../../shared/labels.js';
-import { BlockList } from './BlockList.js';
 import { PageCanvas } from './PageCanvas.js';
 import { PageTypePanel } from './PageTypePanel.js';
 import { ThumbnailStrip, type PageTypeBadge } from './ThumbnailStrip.js';
 import { VersionConflictModal } from './VersionConflictModal.js';
-import { applyFilter, coverageOf, readingRanks, sortedForReading, BLOCK_STYLES } from './blocks.js';
+import {
+  coverageOf,
+  describeBlock,
+  readingRanks,
+  sortedForReading,
+  BLOCK_STYLES,
+} from './blocks.js';
 import { framesAgree, fitInto, type RenderedSize } from './geometry.js';
 import { closeDocuments } from './pdf/pdfjs.js';
 import { renderWidthFor } from './pdf/render-width.js';
@@ -239,19 +243,15 @@ function LayoutWorkspace(props: WorkspaceProps): ReactNode {
   const store = useMarkupStore(
     useShallow((state) => ({
       workingPageIndex: state.workingPageIndex,
-      tool: state.tool,
-      draftType: state.draftType,
+      armedType: state.armedType,
       selection: state.selection,
-      filter: state.filter,
       columnSizes: state.columnSizes,
       textCollapsed: state.textCollapsed,
       goToPage: state.goToPage,
-      setTool: state.setTool,
-      setDraftType: state.setDraftType,
-      setFilter: state.setFilter,
+      armType: state.armType,
+      disarm: state.disarm,
       select: state.select,
       toggle: state.toggle,
-      selectMany: state.selectMany,
       clearSelection: state.clearSelection,
       setColumnSizes: state.setColumnSizes,
       toggleTextColumn: state.toggleTextColumn,
@@ -265,8 +265,8 @@ function LayoutWorkspace(props: WorkspaceProps): ReactNode {
     blocks,
   });
 
-  // Выделение чистится от блоков, которых больше нет: иначе «применить тип к
-  // выделенным» посылала бы PATCH на удалённый блок и получала 404.
+  // Выделение чистится от блоков, которых больше нет: иначе кнопка типа послала
+  // бы PATCH на удалённый блок и получила 404.
   //
   // Зависимости эффекта — СТРОКА идентификаторов и отдельно взятое действие
   // хранилища, а не массив блоков и не объект состояния целиком. Первая
@@ -437,7 +437,6 @@ function LayoutWorkspace(props: WorkspaceProps): ReactNode {
     blocks.filter((block) => block.workingPageIndex === (currentPage?.workingPageIndex ?? 0)),
   );
   const ranks = readingRanks(blocks);
-  const visibleBlocks = applyFilter(pageBlocks, store.filter, store.selection);
   const selectedOnPage = pageBlocks.filter((block) => store.selection.has(block.id));
 
   // Текст прогона ложится на блоки по `layoutBlockId`, а на страницу — по
@@ -452,40 +451,68 @@ function LayoutWorkspace(props: WorkspaceProps): ReactNode {
     textByBlock.set(result.layoutBlockId, result.contentMd);
   }
 
+  /**
+   * Текст ОДНОГО выделенного блока для колонки распознанного текста.
+   *
+   * Прежде текст каждого блока стоял в списке блоков, а списка больше нет.
+   * Возможность от этого не исчезает: проверяют всегда один блок — тот, чью
+   * рамку сейчас правят, — и его текст показывается над текстом страницы.
+   * При выделении из нескольких показывать нечего: «текст выделенного» тогда
+   * означало бы текст произвольного из них.
+   */
+  const soleSelected = selectedOnPage.length === 1 ? selectedOnPage[0] : undefined;
+  const soleSelectedText =
+    soleSelected === undefined ? undefined : textByBlock.get(soleSelected.id);
+  const selectedBlockText =
+    soleSelected === undefined || soleSelectedText === undefined || soleSelectedText.trim() === ''
+      ? null
+      : {
+          title: describeBlock(soleSelected, ranks.get(soleSelected.id) ?? 0),
+          text: soleSelectedText,
+        };
+
+  /**
+   * Кнопка типа делает ОДНО из двух, и выбор зависит только от выделения.
+   *
+   * Выделен блок — тип меняется у него, немедленно. Выделения нет — тип
+   * взводится для обводки, ровно на один блок. Третьего состояния нет
+   * намеренно: прежде их было именно три (инструмент, тип, «Применить»), и
+   * ошибиться можно было в каждом.
+   */
+  const pickType = (blockType: BlockType): void => {
+    if (selectedOnPage.length > 0) {
+      void editing.applyTypeTo(
+        selectedOnPage.map((block) => block.id),
+        blockType,
+      );
+      return;
+    }
+    if (store.armedType === blockType) store.disarm();
+    else store.armType(blockType);
+  };
+
+  const deleteSelected = (): void => {
+    if (selectedOnPage.length === 0) return;
+    void editing.deleteBlocks(selectedOnPage.map((block) => block.id));
+  };
+
   return (
     <>
       <MarkupToolbar
         state={layoutDetail.state}
-        revisionNo={layoutDetail.revisionNo}
         blocksHash={layoutDetail.blocksHash}
         blockCount={blocks.length}
         coverage={coverageOf(pageBlocks)}
-        layoutId={layoutId}
         editable={editable}
         disabledReason={disabledReason}
         busy={editing.busy}
-        draftType={store.draftType}
-        tool={store.tool}
-        selectedCount={selectedOnPage.length}
-        manuallyEdited={layoutDetail.manuallyEdited}
-        onToolChange={store.setTool}
-        onDraftTypeChange={store.setDraftType}
-        onApplyTypeToSelected={() => {
-          void editing.applyTypeTo(
-            selectedOnPage.map((block) => block.id),
-            store.draftType,
-          );
-        }}
-        onDeleteSelected={() => {
-          void editing.deleteBlocks(selectedOnPage.map((block) => block.id));
-        }}
-        onReplacePage={() => {
-          if (currentPage === undefined) return;
-          void editing.replacePageWithText(currentPage.workingPageIndex);
-        }}
-        onFullPageProfile={() => {
-          void editing.applyFullPageProfile();
-        }}
+        armedType={store.armedType}
+        pageBlocks={pageBlocks}
+        ranks={ranks}
+        selection={store.selection}
+        onPickType={pickType}
+        onSelectBlock={store.select}
+        onDeleteSelected={deleteSelected}
         onRedetect={() => {
           if (currentPage === undefined) return;
           detect.mutate([currentPage.workingPageIndex]);
@@ -494,7 +521,7 @@ function LayoutWorkspace(props: WorkspaceProps): ReactNode {
       />
 
       {/*
-        Четыре колонки на `Splitter`, и петля раскладки разомкнута ПО ПОСТРОЕНИЮ.
+        Три колонки на `Splitter`, и петля раскладки разомкнута ПО ПОСТРОЕНИЮ.
 
         История, ради которой это написано: до S32 рабочая область была `Row`,
         то есть `flex-flow: row wrap`, а средняя колонка имела flex-basis по
@@ -515,6 +542,11 @@ function LayoutWorkspace(props: WorkspaceProps): ReactNode {
         (обе боковые колонки и контейнер прокрутки канвы) плюс `32vh` у текста,
         и величина, разбросанная по четырём файлам, разъезжается при первой же
         правке.
+
+        Колонок было четыре: последней стоял список блоков с фильтрами. Он ушёл
+        целиком — выбор блока, смена типа и удаление переехали в панель
+        инструментов, а освободившаяся пятая часть ширины досталась странице и
+        распознанному тексту, то есть тому, что рассматривают и читают.
       */}
       <Splitter
         key={splitterKey}
@@ -550,7 +582,7 @@ function LayoutWorkspace(props: WorkspaceProps): ReactNode {
           ничего, кроме второй полосы.
         */}
         <Splitter.Panel
-          defaultSize={`${String(panelSizes[1] ?? 45)}%`}
+          defaultSize={`${String(panelSizes[1] ?? 50)}%`}
           min={COLUMN_MIN.canvas}
           style={{ overflow: 'hidden' }}
         >
@@ -584,8 +616,7 @@ function LayoutWorkspace(props: WorkspaceProps): ReactNode {
                 blocks={pageBlocks}
                 ranks={ranks}
                 selection={store.selection}
-                tool={store.tool}
-                draftType={store.draftType}
+                armedType={store.armedType}
                 editable={editable}
                 canRotate={canEdit}
                 rotationPending={orientation.pending}
@@ -603,12 +634,26 @@ function LayoutWorkspace(props: WorkspaceProps): ReactNode {
                   additive ? store.toggle(blockId) : store.select(blockId)
                 }
                 onClearSelection={store.clearSelection}
+                onDeleteSelected={deleteSelected}
+                onEscape={() => {
+                  store.disarm();
+                  store.clearSelection();
+                }}
                 onCreate={(coords) => {
+                  if (store.armedType === null) return;
                   void editing.createBlock({
                     workingPageIndex: currentPage.workingPageIndex,
-                    blockType: store.draftType,
+                    blockType: store.armedType,
                     coords,
                   });
+                  /*
+                    Взвод одноразовый: обведя рамку, человек возвращается к
+                    выделению и может тут же поправить её углы. Оставленный
+                    включённым, он превращал бы каждый следующий щелчок по листу
+                    в новый блок — и заметно это становилось только по мусору в
+                    списке, уже после нескольких промахов.
+                  */
+                  store.disarm();
                 }}
                 onMove={(blockId, coords) => {
                   void editing.updateBlock(blockId, { coords });
@@ -631,9 +676,10 @@ function LayoutWorkspace(props: WorkspaceProps): ReactNode {
           доступности. Своя кнопка с русским именем живёт в панели вида.
         */}
         {!store.textCollapsed && (
-          <Splitter.Panel defaultSize={`${String(panelSizes[2] ?? 22)}%`} min={COLUMN_MIN.text}>
+          <Splitter.Panel defaultSize={`${String(panelSizes[2] ?? 35)}%`} min={COLUMN_MIN.text}>
             <RecognizedText
               text={currentPageText}
+              blockText={selectedBlockText}
               pageNumber={(currentPage?.workingPageIndex ?? 0) + 1}
               /*
                 `pageTexts` ВЫКЛЮЧЕН, пока завершённого прогона нет, а
@@ -648,23 +694,6 @@ function LayoutWorkspace(props: WorkspaceProps): ReactNode {
             />
           </Splitter.Panel>
         )}
-
-        <Splitter.Panel
-          defaultSize={`${String(panelSizes[store.textCollapsed ? 2 : 3] ?? 20)}%`}
-          min={COLUMN_MIN.blocks}
-        >
-          <BlockList
-            blocks={pageBlocks}
-            visible={visibleBlocks}
-            ranks={ranks}
-            selection={store.selection}
-            filter={store.filter}
-            textByBlock={textByBlock}
-            onFilterChange={store.setFilter}
-            onToggle={store.toggle}
-            onSelectMany={store.selectMany}
-          />
-        </Splitter.Panel>
       </Splitter>
 
       <SendToRecognition
@@ -717,8 +746,7 @@ interface CanvasAreaProps {
   readonly blocks: readonly LayoutBlock[];
   readonly ranks: ReadonlyMap<string, number>;
   readonly selection: ReadonlySet<string>;
-  readonly tool: 'select' | 'draw';
-  readonly draftType: BlockType;
+  readonly armedType: BlockType | null;
   readonly editable: boolean;
   /** Право менять разворот. Масштаб доступен и без него — это просмотр. */
   readonly canRotate: boolean;
@@ -730,6 +758,8 @@ interface CanvasAreaProps {
   readonly onResetColumns: () => void;
   readonly onSelect: (blockId: string, additive: boolean) => void;
   readonly onClearSelection: () => void;
+  readonly onDeleteSelected: () => void;
+  readonly onEscape: () => void;
   readonly onCreate: Parameters<typeof PageCanvas>[0]['onCreate'];
   readonly onMove: Parameters<typeof PageCanvas>[0]['onMove'];
 }
@@ -1080,12 +1110,13 @@ function CanvasArea(props: CanvasAreaProps): ReactNode {
               blocks={props.blocks}
               ranks={props.ranks}
               selection={props.selection}
-              tool={props.tool}
-              draftType={props.draftType}
+              armedType={props.armedType}
               editable={props.editable}
               workingPageIndex={page.workingPageIndex}
               onSelect={props.onSelect}
               onClearSelection={props.onClearSelection}
+              onDeleteSelected={props.onDeleteSelected}
+              onEscape={props.onEscape}
               onCreate={props.onCreate}
               onMove={props.onMove}
             />
@@ -1100,33 +1131,73 @@ function CanvasArea(props: CanvasAreaProps): ReactNode {
 // Панель инструментов
 // =====================================================================
 
+/**
+ * Панель инструментов: всё управление блоками в одну строку.
+ *
+ * ## Почему тип блока стал КНОПКОЙ, а не значением селекта
+ *
+ * Прежде смена типа одной рамки стоила четырёх движений в трёх местах: выделить
+ * блок на канве, найти селект «Тип блока», выбрать в нём значение, нажать
+ * «Применить тип к выделенным». Три из четырёх шагов не относились к делу — они
+ * обслуживали механизм, а не задачу. Причём тот же селект отвечал ещё и за тип
+ * НОВОГО блока, то есть одно поле означало два разных «типа» в зависимости от
+ * положения соседнего переключателя «Выделять / Рисовать».
+ *
+ * Теперь состояние ровно одно — есть выделение или нет, — и кнопка типа читает
+ * его сама:
+ *
+ * - выделение есть → тип меняется у выделенного, сразу;
+ * - выделения нет → тип взводится для обводки, ровно на один блок.
+ *
+ * Взвод виден подсветкой самой кнопки, поэтому отдельного индикатора режима
+ * не нужно: переключатель инструмента и был таким индикатором, и именно он
+ * расходился с селектом типа.
+ *
+ * ## Почему у удаления нет подтверждения
+ *
+ * `Popconfirm` на каждой поправке рамки — это и есть та тяжесть, ради которой
+ * панель переделывалась. Блок восстанавливается обводкой за секунду или
+ * повтором детекции страницы; цена ошибочного удаления несоизмерима с ценой
+ * лишнего диалога на каждое из десятков движений разметки. Разрушительные
+ * пакетные операции («заменить страницу одним блоком», профиль full-page-text)
+ * из портала убраны совсем — вместе с их подтверждениями.
+ */
 interface ToolbarProps {
   readonly state: 'draft' | 'superseded';
-  readonly revisionNo: number;
   readonly blocksHash: string | null;
   readonly blockCount: number;
   readonly coverage: number;
-  readonly layoutId: string;
   readonly editable: boolean;
   /** Почему панель недоступна; `null` — доступна. Показывается рядом с кнопками. */
   readonly disabledReason: string | null;
   readonly busy: boolean;
-  readonly draftType: BlockType;
-  readonly tool: 'select' | 'draw';
-  readonly selectedCount: number;
-  readonly manuallyEdited: boolean;
+  /** Взведённый тип обводки; `null` — обычный режим. */
+  readonly armedType: BlockType | null;
+  /** Блоки ТЕКУЩЕЙ страницы в порядке чтения — для выбора блока списком. */
+  readonly pageBlocks: readonly LayoutBlock[];
+  readonly ranks: ReadonlyMap<string, number>;
+  readonly selection: ReadonlySet<string>;
   readonly detecting: boolean;
-  readonly onToolChange: (tool: 'select' | 'draw') => void;
-  readonly onDraftTypeChange: (blockType: BlockType) => void;
-  readonly onApplyTypeToSelected: () => void;
+  readonly onPickType: (blockType: BlockType) => void;
+  readonly onSelectBlock: (blockId: string) => void;
   readonly onDeleteSelected: () => void;
-  readonly onReplacePage: () => void;
-  readonly onFullPageProfile: () => void;
   readonly onRedetect: () => void;
 }
 
+const BLOCK_TYPES: readonly BlockType[] = ['text', 'image', 'stamp'];
+
 function MarkupToolbar(props: ToolbarProps): ReactNode {
-  const nothingSelected = props.selectedCount === 0;
+  const selectedOnPage = props.pageBlocks.filter((block) => props.selection.has(block.id));
+  const nothingSelected = selectedOnPage.length === 0;
+  /**
+   * Значение выбора блока: только когда выделен ровно один.
+   *
+   * При выделении из нескольких поле остаётся пустым, а сколько их — сказано
+   * рядом словами. Показывать в нём «первый из трёх» значило бы утверждать, что
+   * кнопка типа сработает по нему одному.
+   */
+  const soleSelected = selectedOnPage.length === 1 ? selectedOnPage[0] : undefined;
+
   return (
     <div
       style={{
@@ -1156,60 +1227,88 @@ function MarkupToolbar(props: ToolbarProps): ReactNode {
         </Typography.Text>
       )}
 
-      <Segmented<'select' | 'draw'>
-        size="small"
-        value={props.tool}
-        onChange={props.onToolChange}
-        disabled={!props.editable}
-        options={[
-          { label: 'Выделять', value: 'select' },
-          { label: 'Рисовать', value: 'draw' },
-        ]}
-        aria-label="Инструмент канвы"
-      />
-      <Select<BlockType>
-        size="small"
-        value={props.draftType}
-        onChange={props.onDraftTypeChange}
-        disabled={!props.editable}
-        style={{ width: 150 }}
-        aria-label="Тип блока"
-        options={(['text', 'image', 'stamp'] as BlockType[]).map((type) => ({
-          value: type,
-          label: BLOCK_STYLES[type].label,
-        }))}
-      />
+      {/*
+        Выбор блока списком — путь к рамке МИМО канвы.
+
+        Элементы Konva живут в `<canvas>` и недостижимы ни фокусу, ни
+        скринридеру по построению. Раньше этот путь давали чекбоксы колонки
+        блоков; колонки больше нет, и обязанность перешла сюда. Подписи те же
+        (`describeBlock`), поэтому «третий блок» на канве и «третий блок» в
+        списке — один и тот же блок, названный одинаково.
+      */}
+      <Space size={6}>
+        <Typography.Text type="secondary">Блок:</Typography.Text>
+        {/*
+          Метка стоит на ОБЁРТКЕ: antd не проносит `data-*` до корня `Select`,
+          и повешенный на сам компонент атрибут просто исчезает из разметки —
+          молча, без предупреждения сборки.
+        */}
+        <span data-testid="selected-block">
+          <Select<string>
+            size="small"
+            style={{ width: 240 }}
+            aria-label="Блок страницы"
+            placeholder={props.pageBlocks.length === 0 ? 'Блоков нет' : 'Выбрать блок'}
+            disabled={props.pageBlocks.length === 0}
+            value={soleSelected?.id ?? null}
+            onChange={props.onSelectBlock}
+            options={props.pageBlocks.map((block) => ({
+              value: block.id,
+              label: describeBlock(block, props.ranks.get(block.id) ?? 0),
+            }))}
+          />
+        </span>
+        {selectedOnPage.length > 1 && (
+          <Typography.Text type="secondary">выделено: {selectedOnPage.length}</Typography.Text>
+        )}
+      </Space>
+
       <Space size={6} wrap>
-        <Button
-          size="small"
-          disabled={!props.editable || nothingSelected || props.busy}
-          onClick={props.onApplyTypeToSelected}
-        >
-          Применить тип к выделенным ({props.selectedCount})
-        </Button>
-        <Popconfirm
-          title={`Удалить выделенные блоки: ${String(props.selectedCount)}?`}
-          okText="Удалить"
-          cancelText="Отмена"
-          onConfirm={props.onDeleteSelected}
-          disabled={!props.editable || nothingSelected}
-        >
-          <Button size="small" danger disabled={!props.editable || nothingSelected || props.busy}>
-            Удалить выделенные
+        {BLOCK_TYPES.map((type) => (
+          <Tooltip
+            key={type}
+            title={
+              nothingSelected
+                ? `Обвести новый блок: ${BLOCK_STYLES[type].label}`
+                : `Сменить тип выделенного на «${BLOCK_STYLES[type].label}»`
+            }
+          >
+            <Button
+              size="small"
+              type={props.armedType === type ? 'primary' : 'default'}
+              disabled={!props.editable || props.busy}
+              onClick={() => props.onPickType(type)}
+            >
+              {/*
+                Цвет — не единственный признак типа: рядом стоит подпись, а на
+                канве у рамки ещё и штриховка. Точка здесь связывает кнопку с
+                цветом её рамки, но ничего не сообщает в одиночку.
+              */}
+              <span
+                aria-hidden="true"
+                style={{
+                  display: 'inline-block',
+                  width: 8,
+                  height: 8,
+                  borderRadius: 4,
+                  marginRight: 6,
+                  background: BLOCK_STYLES[type].stroke,
+                }}
+              />
+              {BLOCK_STYLES[type].label}
+            </Button>
+          </Tooltip>
+        ))}
+        <Tooltip title="Удалить выделенные блоки (Delete)">
+          <Button
+            size="small"
+            danger
+            disabled={!props.editable || nothingSelected || props.busy}
+            onClick={props.onDeleteSelected}
+          >
+            Удалить
           </Button>
-        </Popconfirm>
-        <Popconfirm
-          title="Заменить страницу одним TEXT-блоком?"
-          description="Прежние блоки страницы будут удалены."
-          okText="Заменить"
-          cancelText="Отмена"
-          onConfirm={props.onReplacePage}
-          disabled={!props.editable}
-        >
-          <Button size="small" disabled={!props.editable || props.busy}>
-            Заменить страницу одним блоком
-          </Button>
-        </Popconfirm>
+        </Tooltip>
         <Button
           size="small"
           disabled={!props.editable || props.detecting}
@@ -1217,18 +1316,6 @@ function MarkupToolbar(props: ToolbarProps): ReactNode {
         >
           Повторить детекцию страницы
         </Button>
-        <Popconfirm
-          title="Применить профиль full-page-text ко всему комплекту?"
-          description="Операция удаляет прежние блоки страниц и недоступна после первой ручной правки."
-          okText="Применить"
-          cancelText="Отмена"
-          onConfirm={props.onFullPageProfile}
-          disabled={!props.editable || props.manuallyEdited}
-        >
-          <Button size="small" disabled={!props.editable || props.manuallyEdited || props.busy}>
-            Профиль full-page-text
-          </Button>
-        </Popconfirm>
       </Space>
 
       {/*
@@ -1237,8 +1324,22 @@ function MarkupToolbar(props: ToolbarProps): ReactNode {
         Причина в правах: вся эта панель гасится флагом `editable`
         (`markup.edit`), а масштаб — действие ПРОСМОТРА. Проверяющий без права
         правки обязан уметь приблизить штамп, иначе он не может выполнить
-        собственную работу. Заодно панель перестала быть трёхстрочной.
+        собственную работу.
       */}
+
+      {/*
+        Двойное значение кнопки типа — текстом.
+
+        Оно не угадывается: кнопка выглядит одинаково в обоих случаях, а
+        различает их состояние выделения, которое живёт на канве. Строка стоит
+        под кнопками (`flexBasis: '100%'`), а не в подсказке, потому что
+        подсказку читают уже после того, как нажали не то.
+      */}
+      <Typography.Text type="secondary" style={{ flexBasis: '100%', fontSize: 12 }}>
+        {nothingSelected
+          ? 'Блок не выделен: кнопка типа один раз включает обводку нового блока этим типом. Клик по рамке выделяет её.'
+          : 'Блок выделен: кнопка типа меняет его тип, углы рамки тянутся мышью, Delete удаляет. Esc снимает выделение.'}
+      </Typography.Text>
 
       {props.disabledReason !== null && (
         // `flexBasis: '100%'` — причина занимает свою строку под кнопками:

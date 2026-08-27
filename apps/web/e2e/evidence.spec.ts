@@ -36,11 +36,10 @@ test('замечание ведёт на страницу и выделяет б
   await expect(page.getByRole('application')).toBeVisible();
   await expect(page).toHaveURL(/tab=markup/);
 
-  // Блок замечания выделен: чекбокс списка блоков — второй, клавиатурный путь к
-  // тому же выделению, и именно по нему видно, что адрес доехал.
-  const row = page.getByTestId(`block-row-${IDS.blockB}`);
-  await expect(row).toBeVisible();
-  await expect(page.locator(`input[type="checkbox"]:checked`).first()).toBeVisible();
+  // Блок замечания выделен: выбор блока в панели инструментов — второй,
+  // клавиатурный путь к тому же выделению, и именно по нему видно, что адрес
+  // доехал. Пустое поле означало бы, что страница открылась, а блок нет.
+  await expect(page.getByTestId('selected-block')).toContainText(/% страницы/);
 });
 
 test('цитата доказательства заменяет удалённый раздел «Реквизиты»', async ({ page }) => {

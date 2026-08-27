@@ -50,20 +50,27 @@ test.describe('экран разметки', () => {
     await expect(page.getByTestId('frame-mismatch')).toHaveCount(0);
     await expect(page.locator('canvas')).toHaveCount(2);
 
-    // Список блоков — второй, клавиатурный путь к тем же действиям.
-    await expect(page.getByTestId(`block-row-${IDS.blockA}`)).toBeVisible();
+    // Выбор блока списком — второй, клавиатурный путь к тем же действиям:
+    // элементы Konva недостижимы ни фокусу, ни скринридеру по построению.
+    await expect(page.getByTestId('selected-block')).toBeVisible();
+    await page.getByRole('combobox', { name: 'Блок страницы' }).click();
+    await expect(
+      page
+        .locator('.ant-select-dropdown:visible')
+        .getByText(/% страницы/)
+        .first(),
+    ).toBeVisible();
+    await page.keyboard.press('Escape');
   });
 
-  test('рабочая область — четыре колонки с перетаскиваемыми разделителями', async ({ page }) => {
-    // Широкий монитор: на узком колонка текста стартует свёрнутой намеренно
-    // (три живые колонки полезнее четырёх огрызков), и это проверяет отдельный
-    // сценарий ниже. Размер ставится ДО загрузки: стартовое состояние колонки
-    // считается один раз, при инициализации хранилища.
+  test('рабочая область — три колонки с перетаскиваемыми разделителями', async ({ page }) => {
     await page.setViewportSize({ width: 1920, height: 1080 });
     await signIn(page, KC.engineer, MARKUP_URL);
 
-    // Три разделителя на четыре колонки: лента, страница, текст, блоки.
-    await expect(page.getByRole('separator')).toHaveCount(3);
+    // Два разделителя на три колонки: лента, страница, текст. Четвёртой —
+    // списка блоков — больше нет: выбор блока, смена типа и удаление уехали в
+    // панель инструментов, а её ширина досталась странице и тексту.
+    await expect(page.getByRole('separator')).toHaveCount(2);
 
     // Текст и картинка видны ОДНОВРЕМЕННО — ради этого колонка и заведена.
     await expect(page.getByRole('region', { name: 'Распознанный текст страницы' })).toBeVisible();
@@ -99,21 +106,22 @@ test.describe('экран разметки', () => {
     expect(Math.abs(restored.width - widened.width)).toBeLessThan(12);
   });
 
-  test('на узком экране колонка текста стартует свёрнутой, а кнопка её возвращает', async ({
-    page,
-  }) => {
-    // Ширина по умолчанию у стенда — 1280, то есть ниже порога. Четыре колонки
-    // по минимумам дают 880 px, и формально они помещаются, — но три живые
-    // колонки полезнее четырёх огрызков, а вертикальной перекладки экран не
-    // делает намеренно: урок S32 в том, что раскладка, меняющая форму от
-    // условий, хуже стабильно тесной.
+  test('колонка текста сворачивается и возвращается кнопкой панели вида', async ({ page }) => {
+    // Автосворачивания на узком экране больше нет: оно существовало ради
+    // «три живые колонки полезнее четырёх огрызков», а колонок теперь три и
+    // по минимумам они занимают 660 px — помещаются везде. Решение осталось
+    // за человеком, и проверяется именно оно.
     await signIn(page, KC.engineer, MARKUP_URL);
 
     await expect(page.getByRole('separator')).toHaveCount(2);
+    await expect(page.getByRole('region', { name: 'Распознанный текст страницы' })).toBeVisible();
+
+    await page.getByRole('button', { name: 'Скрыть распознанный текст' }).click();
+    await expect(page.getByRole('separator')).toHaveCount(1);
     await expect(page.getByRole('region', { name: 'Распознанный текст страницы' })).toHaveCount(0);
 
     await page.getByRole('button', { name: 'Показать распознанный текст' }).click();
-    await expect(page.getByRole('separator')).toHaveCount(3);
+    await expect(page.getByRole('separator')).toHaveCount(2);
     await expect(page.getByRole('region', { name: 'Распознанный текст страницы' })).toBeVisible();
   });
 
@@ -187,7 +195,7 @@ test.describe('экран разметки', () => {
     }
   });
 
-  test('смена типа выделенных блоков доходит до базы и поднимает версию', async ({ page }) => {
+  test('смена типа выделенного блока доходит до базы и поднимает версию', async ({ page }) => {
     await signIn(page, KC.engineer, MARKUP_URL);
 
     const before = await page.request.get(`/api/v1/layouts/${IDS.layoutMarkup}/blocks`);
@@ -197,19 +205,18 @@ test.describe('экран разметки', () => {
     };
     const versionBefore = beforeBody.version;
 
-    // Выделение — чекбоксом в списке: тот же путь, что у клавиатурного
-    // пользователя, и он обязан работать наравне с мышью по канве.
-    await page.getByRole('checkbox', { name: /Текст/ }).first().check();
-    await page.getByRole('combobox', { name: 'Тип блока' }).click();
-    // Именно опция ОТКРЫТОГО списка: подпись «Штамп» есть ещё и у фильтра
-    // блоков справа, и поиск по заголовку попадал бы в оба элемента сразу.
-    // Роль `option` здесь не годится — antd держит семантический список
-    // скрытым и виртуализованным (в нём лежат не все варианты), а кликать
-    // приходится по видимому элементу.
-    await page.locator('.ant-select-dropdown:visible').getByTitle('Штамп').click();
-    await page.getByRole('button', { name: /Применить тип к выделенным/ }).click();
+    // Выделение — выбором в списке блоков панели: тот же путь, что у
+    // клавиатурного пользователя, и он обязан работать наравне с мышью по канве.
+    //
+    // Роль `option` здесь не годится — antd держит семантический список скрытым
+    // и виртуализованным (в нём лежат не все варианты), а кликать приходится по
+    // видимому элементу выпадающего списка.
+    await page.getByRole('combobox', { name: 'Блок страницы' }).click();
+    await page.locator('.ant-select-dropdown:visible').getByText(/Текст/).first().click();
 
-    await expect(page.getByText('Штамп', { exact: false }).first()).toBeVisible();
+    // Одна кнопка вместо прежних «выбрать тип в селекте» + «Применить»: при
+    // непустом выделении кнопка типа МЕНЯЕТ тип, и это всё действие целиком.
+    await page.getByRole('button', { name: 'Штамп' }).click();
 
     // Проверяется РЕЗУЛЬТАТ, а не сообщение: тип в базе и поднятая версия.
     await expect
@@ -230,7 +237,7 @@ test.describe('экран разметки', () => {
 
   test('конфликт версий показывает сравнение, а не молча перезаписывает', async ({ page }) => {
     await signIn(page, KC.engineer, MARKUP_URL);
-    await expect(page.getByTestId(`block-row-${IDS.blockA}`)).toBeVisible();
+    await expect(page.getByTestId('selected-block')).toBeVisible();
 
     const snapshot = await page.request.get(`/api/v1/layouts/${IDS.layoutMarkup}/blocks`);
     const version = ((await snapshot.json()) as { version: number }).version;
@@ -251,11 +258,13 @@ test.describe('экран разметки', () => {
     expect(created.status).toBe(201);
 
     // Правка с устаревшей версией: сервер отвечает 412.
+    await page.getByRole('combobox', { name: 'Блок страницы' }).click();
     await page
-      .getByRole('checkbox', { name: /Штамп|Текст/ })
+      .locator('.ant-select-dropdown:visible')
+      .getByText(/% страницы/)
       .first()
-      .check();
-    await page.getByRole('button', { name: /Применить тип к выделенным/ }).click();
+      .click();
+    await page.getByRole('button', { name: 'Изображение' }).click();
 
     // Пользователь видит СРАВНЕНИЕ версий: диалог с таблицей расхождений.
     // Окно ищется по ДОСТУПНОМУ ИМЕНИ, а не по тексту внутри: заголовок и

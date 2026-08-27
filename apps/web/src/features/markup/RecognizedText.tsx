@@ -61,9 +61,33 @@ const COLUMN: CSSProperties = {
   gap: 6,
 };
 
+/**
+ * Секция текста выделенного блока: доля колонки, а не доля окна.
+ *
+ * Потолок нужен — иначе длинный блок вытеснил бы текст страницы, ради которого
+ * колонка и заведена. Считается он в процентах от КОЛОНКИ (у `COLUMN` задана
+ * `height: 100%`), а не в `vh`: доля окна была бы догадкой о высоте колонки,
+ * ровно той, от которой этот файл уже однажды избавился.
+ */
+const BLOCK_SECTION: CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  minHeight: 0,
+  maxHeight: '40%',
+};
+
 export interface RecognizedTextProps {
   /** Текст страницы последнего завершённого прогона; `null` — прогона нет. */
   readonly text: PageText | null;
+  /**
+   * Текст ЕДИНСТВЕННОГО выделенного блока; `null` — выделен не один или текста нет.
+   *
+   * Прежде текст каждого блока стоял в списке блоков справа. Списка больше нет —
+   * выбор блока, смена типа и удаление уехали в панель инструментов, — но
+   * возможность сверить прочитанное с ОДНОЙ рамкой осталась здесь: проверяют
+   * всегда тот блок, чью рамку сейчас правят.
+   */
+  readonly blockText: { readonly title: string; readonly text: string } | null;
   /** Номер страницы для человека: в отдельной колонке заголовок без него безадресен. */
   readonly pageNumber: number;
   readonly loading: boolean;
@@ -74,6 +98,27 @@ export interface RecognizedTextProps {
 export function RecognizedText(props: RecognizedTextProps): ReactNode {
   return (
     <section style={COLUMN} aria-label="Распознанный текст страницы">
+      {props.blockText !== null && (
+        // Текст блока стоит НАД текстом страницы: это ответ на вопрос «что
+        // прочитано в рамке, которую я держу», и он теряет смысл, если за ним
+        // надо прокручивать страницу целиком.
+        <section
+          aria-label="Распознанный текст выделенного блока"
+          data-testid="selected-block-text"
+          style={BLOCK_SECTION}
+        >
+          {/*
+            Подпись блока — жирный текст, а не заголовок: она стоит НАД `h2`
+            колонки, и заголовок третьего уровня перед вторым сломал бы порядок
+            заголовков, который проверяет гейт доступности. Имя у секции есть —
+            оно в `aria-label`.
+          */}
+          <Typography.Text strong style={{ fontSize: 13 }}>
+            {props.blockText.title}
+          </Typography.Text>
+          <pre style={MONO}>{props.blockText.text}</pre>
+        </section>
+      )}
       <Typography.Title level={2} style={{ fontSize: 14, margin: 0 }}>
         Распознанный текст страницы {props.pageNumber}
       </Typography.Title>

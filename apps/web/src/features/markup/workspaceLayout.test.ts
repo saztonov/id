@@ -17,22 +17,32 @@ import {
 } from './workspaceLayout.js';
 
 describe('normalizeColumnSizes', () => {
-  it('принимает четвёрку и нормирует сумму к 100', () => {
-    expect(normalizeColumnSizes([1, 1, 1, 1])).toEqual([25, 25, 25, 25]);
-    const scaled = normalizeColumnSizes([150, 450, 220, 180]);
+  it('принимает тройку и нормирует сумму к 100', () => {
+    expect(normalizeColumnSizes([1, 1, 1])).toEqual([100 / 3, 100 / 3, 100 / 3]);
+    const scaled = normalizeColumnSizes([150, 500, 350]);
     expect(scaled?.reduce((sum, value) => sum + value, 0)).toBeCloseTo(100, 6);
   });
 
-  it('отвергает всё, из чего нельзя собрать четыре доли', () => {
-    expect(normalizeColumnSizes([25, 25, 50])).toBeNull();
-    expect(normalizeColumnSizes([20, 20, 20, 20, 20])).toBeNull();
-    expect(normalizeColumnSizes([Number.NaN, 1, 1, 1])).toBeNull();
-    expect(normalizeColumnSizes([Number.POSITIVE_INFINITY, 1, 1, 1])).toBeNull();
-    expect(normalizeColumnSizes([-1, 1, 1, 1])).toBeNull();
-    expect(normalizeColumnSizes([0, 0, 0, 0])).toBeNull();
-    expect(normalizeColumnSizes('15,45,22,18')).toBeNull();
+  it('отвергает всё, из чего нельзя собрать три доли', () => {
+    expect(normalizeColumnSizes([50, 50])).toBeNull();
+    expect(normalizeColumnSizes([25, 25, 25, 25])).toBeNull();
+    expect(normalizeColumnSizes([Number.NaN, 1, 1])).toBeNull();
+    expect(normalizeColumnSizes([Number.POSITIVE_INFINITY, 1, 1])).toBeNull();
+    expect(normalizeColumnSizes([-1, 1, 1])).toBeNull();
+    expect(normalizeColumnSizes([0, 0, 0])).toBeNull();
+    expect(normalizeColumnSizes('15,50,35')).toBeNull();
     expect(normalizeColumnSizes(null)).toBeNull();
-    expect(normalizeColumnSizes({ 0: 25, 1: 25, 2: 25, 3: 25 })).toBeNull();
+    expect(normalizeColumnSizes({ 0: 33, 1: 33, 2: 34 })).toBeNull();
+  });
+
+  /*
+    Колонок стало три, и запись прежней раскладки обязана отвергаться, а не
+    молча съезжать. Ключ `localStorage` при этом версионирован, то есть до
+    разбора четвёрка вообще не доходит, — но проверка длины остаётся последним
+    рубежом на случай, если ключ забудут поднять в следующий раз.
+  */
+  it('сохранённая четвёрка от прежней раскладки не принимается', () => {
+    expect(normalizeColumnSizes([15, 45, 22, 18])).toBeNull();
   });
 
   it('умолчание само проходит проверку — иначе оно было бы ловушкой', () => {
@@ -42,7 +52,7 @@ describe('normalizeColumnSizes', () => {
 
 describe('pixelsToPercent', () => {
   it('пиксели любой ширины дают сумму 100', () => {
-    const sizes = pixelsToPercent([240, 720, 352, 288]);
+    const sizes = pixelsToPercent([240, 800, 560]);
     expect(sizes?.reduce((sum, value) => sum + value, 0)).toBeCloseTo(100, 6);
     expect(sizes?.[0]).toBeCloseTo(15, 6);
   });
@@ -53,28 +63,28 @@ describe('pixelsToPercent', () => {
 });
 
 describe('свёртывание колонки текста', () => {
-  it('три доли без текста дают сумму 100', () => {
-    const three = sizesWithoutText(DEFAULT_SIZES);
-    expect(three.reduce((sum, value) => sum + value, 0)).toBeCloseTo(100, 6);
+  it('две доли без текста дают сумму 100', () => {
+    const two = sizesWithoutText(DEFAULT_SIZES);
+    expect(two.reduce((sum, value) => sum + value, 0)).toBeCloseTo(100, 6);
   });
 
   it('круговой прогон сохраняет долю текста', () => {
-    const three = sizesWithoutText(DEFAULT_SIZES);
-    const back = mergeSizesWithoutText(DEFAULT_SIZES, three);
+    const two = sizesWithoutText(DEFAULT_SIZES);
+    const back = mergeSizesWithoutText(DEFAULT_SIZES, two);
     expect(back?.[2]).toBeCloseTo(DEFAULT_SIZES[2], 6);
     expect(back?.[0]).toBeCloseTo(DEFAULT_SIZES[0], 6);
-    expect(back?.[3]).toBeCloseTo(DEFAULT_SIZES[3], 6);
+    expect(back?.[1]).toBeCloseTo(DEFAULT_SIZES[1], 6);
   });
 
   it('изменённые в свёрнутом виде доли переносятся пропорционально', () => {
-    const back = mergeSizesWithoutText(DEFAULT_SIZES, [10, 70, 20]);
+    const back = mergeSizesWithoutText(DEFAULT_SIZES, [20, 80]);
     expect(back?.[2]).toBeCloseTo(DEFAULT_SIZES[2], 6);
     expect(back?.reduce((sum, value) => sum + value, 0)).toBeCloseTo(100, 6);
     expect(back?.[1]).toBeGreaterThan(back?.[0] ?? 0);
   });
 
-  it('мусор в трёх долях не превращается в раскладку', () => {
-    expect(mergeSizesWithoutText(DEFAULT_SIZES, [0, 0, 0])).toBeNull();
-    expect(mergeSizesWithoutText(DEFAULT_SIZES, [Number.NaN, 1, 1])).toBeNull();
+  it('мусор в двух долях не превращается в раскладку', () => {
+    expect(mergeSizesWithoutText(DEFAULT_SIZES, [0, 0])).toBeNull();
+    expect(mergeSizesWithoutText(DEFAULT_SIZES, [Number.NaN, 1])).toBeNull();
   });
 });

@@ -5,9 +5,9 @@
  *
  * Каждая мутация возвращает новую версию ревизии разметки в теле и в `ETag`.
  * Клиент запоминает именно её. Соблазн писать `version + 1` велик и неверен:
- * пакетная операция (замена страницы одним блоком, профиль `full-page-text`)
- * поднимает версию не на единицу, и предсказанное значение разошлось бы с
- * фактическим — а расплата за расхождение это 412 на следующей же правке.
+ * серверная операция над набором блоков поднимает версию не на единицу, и
+ * предсказанное значение разошлось бы с фактическим — а расплата за расхождение
+ * это 412 на следующей же правке.
  *
  * ## Конфликт не приводит к повтору сам
  *
@@ -19,7 +19,7 @@
  *
  * ## Пакетная операция останавливается на первом конфликте
  *
- * «Применить тип к выделенным» — это N запросов PATCH, каждый со своей версией.
+ * Смена типа у выделенного — это N запросов PATCH, каждый со своей версией.
  * Если третий получил 412, четвёртый посылать нельзя: он либо тоже получит 412,
  * либо (что хуже) пройдёт по случайно совпавшей версии, и часть выделения
  * окажется применённой, а часть нет — без следа для пользователя. Поэтому обход
@@ -50,11 +50,8 @@ export interface LayoutEditing {
   readonly dismissConflict: () => void;
   readonly createBlock: (input: BlockCreateInput) => Promise<void>;
   readonly updateBlock: (blockId: string, patch: BlockUpdateInput) => Promise<void>;
-  readonly deleteBlock: (blockId: string) => Promise<void>;
   readonly deleteBlocks: (blockIds: readonly string[]) => Promise<void>;
   readonly applyTypeTo: (blockIds: readonly string[], blockType: BlockType) => Promise<void>;
-  readonly replacePageWithText: (workingPageIndex: number) => Promise<void>;
-  readonly applyFullPageProfile: () => Promise<void>;
 }
 
 export function useLayoutEditing(options: {
@@ -169,9 +166,6 @@ export function useLayoutEditing(options: {
     updateBlock: (blockId, patch) =>
       single(async (v) => (await layout.updateBlock(layoutId, blockId, v, patch)).data),
 
-    deleteBlock: (blockId) =>
-      single(async (v) => (await layout.deleteBlock(layoutId, blockId, v)).data),
-
     deleteBlocks: (blockIds) =>
       batch(blockIds, async (id, v) => (await layout.deleteBlock(layoutId, id, v)).data),
 
@@ -180,10 +174,5 @@ export function useLayoutEditing(options: {
         blockIds,
         async (id, v) => (await layout.updateBlock(layoutId, id, v, { blockType })).data,
       ),
-
-    replacePageWithText: (workingPageIndex) =>
-      single(async (v) => (await layout.replacePageWithText(layoutId, workingPageIndex, v)).data),
-
-    applyFullPageProfile: () => single(async (v) => (await layout.fullPageText(layoutId, v)).data),
   };
 }

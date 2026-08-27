@@ -223,16 +223,27 @@ test('редактор блоков управляется с клавиатур
   const canvasArea = page.getByRole('application');
   await expect(canvasArea).toHaveAttribute('aria-label', /Страница 1, блоков: \d+/);
 
-  // Второй путь к блокам: чекбоксы списка достижимы и подписаны осмысленно.
-  const checkbox = page.getByRole('checkbox', { name: /% страницы/ }).first();
-  await expect(checkbox).toBeVisible();
-  await checkbox.focus();
-  await page.keyboard.press('Space');
-  await expect(checkbox).toBeChecked();
+  // Второй путь к блокам: выбор блока списком в панели инструментов. Элементы
+  // Konva живут в `<canvas>` и недостижимы ни фокусу, ни скринридеру, поэтому
+  // весь набор — выбрать, сменить тип, удалить — обязан существовать в DOM.
+  const blockSelect = page.getByRole('combobox', { name: 'Блок страницы' });
+  await expect(blockSelect).toBeVisible();
+  await blockSelect.focus();
+  await page.keyboard.press('Enter');
+  await page
+    .locator('.ant-select-dropdown:visible')
+    .getByText(/% страницы/)
+    .first()
+    .click();
 
   // Действия над выделенным — настоящие кнопки, а не обработчики на канве.
-  await expect(page.getByRole('button', { name: /Применить тип к выделенным/ })).toBeEnabled();
-  await expect(page.getByRole('button', { name: /Заменить страницу одним блоком/ })).toBeEnabled();
+  // Кнопка типа при непустом выделении меняет тип, кнопка удаления — удаляет.
+  await expect(page.getByRole('button', { name: 'Штамп' })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Удалить' })).toBeEnabled();
+
+  // Сама канва тоже попадает в обход табом: без этого её клавиши (Delete, Esc)
+  // достались бы только тем, кто уже кликнул по ней мышью.
+  await expect(canvasArea).toHaveAttribute('tabindex', '0');
 
   // Страницы ленты — кнопки в списке, с пометкой активной.
   const strip = page.getByRole('navigation', { name: 'Страницы рабочего документа' });

@@ -4,8 +4,8 @@
  * Цвет — не единственный признак типа. Рамка получает ещё и штриховку, а номер
  * подписывается текстом: различение исключительно цветом недоступно примерно
  * восьми процентам мужчин, и требование accessibility (§17) это прямо
- * закрывает. По той же причине у каждого блока есть текстовое имя в списке
- * справа и в `aria-label` на канве.
+ * закрывает. По той же причине у каждого блока есть текстовое имя в выборе
+ * блока на панели инструментов и в `aria-label` на канве.
  */
 import type { BlockType } from '@id/contracts';
 import type { LayoutBlock } from '../../api/types.js';
@@ -94,32 +94,7 @@ export function coverageOf(blocks: readonly LayoutBlock[]): number {
   return blocks.reduce((sum, block) => sum + areaOf(block.coords), 0);
 }
 
-export interface BlockFilter {
-  readonly types: readonly BlockType[];
-  readonly onlyManual: boolean;
-  readonly onlySelected: boolean;
-}
-
-export const EMPTY_FILTER: BlockFilter = {
-  types: ['text', 'image', 'stamp'],
-  onlyManual: false,
-  onlySelected: false,
-};
-
-export function applyFilter(
-  blocks: readonly LayoutBlock[],
-  filter: BlockFilter,
-  selection: ReadonlySet<string>,
-): LayoutBlock[] {
-  return blocks.filter((block) => {
-    if (!filter.types.includes(block.blockType)) return false;
-    if (filter.onlyManual && block.source !== 'user') return false;
-    if (filter.onlySelected && !selection.has(block.id)) return false;
-    return true;
-  });
-}
-
-/** Короткое имя блока для списка и для `aria-label`. */
+/** Короткое имя блока для выбора в панели и для `aria-label`. */
 export function describeBlock(block: LayoutBlock, rank: number): string {
   const style = BLOCK_STYLES[block.blockType];
   const percent = Math.round(areaOf(block.coords) * 100);

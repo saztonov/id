@@ -359,21 +359,14 @@ export const layout = {
       ifMatch: version,
     }),
 
-  /** Замена страницы одним TEXT-блоком: явное действие пользователя (§5.3). */
-  replacePageWithText: (layoutId: string, workingPageIndex: number, version: number) =>
-    request<BlockMutationResult>(
-      'POST',
-      `${V1}/layouts/${layoutId}/pages/${workingPageIndex}/replace-with-text`,
-      { ifMatch: version },
-    ),
-
-  /** Профиль `full-page-text` на весь комплект; после ручной правки отвергается. */
-  fullPageText: (layoutId: string, version: number) =>
-    request<{ layoutRevisionId: string; version: number; pages: number }>(
-      'POST',
-      `${V1}/layouts/${layoutId}/full-page-text`,
-      { ifMatch: version },
-    ),
+  /*
+    Замены страницы одним TEXT-блоком и профиля `full-page-text` здесь больше
+    нет. Маршруты `POST …/replace-with-text` и `POST …/full-page-text` в API
+    остались и работают — убран вход в них из портала: обе операции разом
+    сносили блоки, обе жили под подтверждением в панели инструментов и обе
+    делались считаные разы за жизнь комплекта. Панель, где половина кнопок
+    опасна и почти не нужна, читается хуже, чем панель без них.
+  */
 
   detect: (layoutId: string, workingPageIndices?: readonly number[]) =>
     request<DetectResult>('POST', `${V1}/layouts/${layoutId}/detect`, {
