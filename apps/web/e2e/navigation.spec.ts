@@ -87,7 +87,13 @@ test('дерево навигации проходится настоящими 
   expect(calls.some((call) => call.startsWith('/api/v1/works?'))).toBe(true);
   expect(calls.some((call) => call.includes(`objectId=${IDS.object}`))).toBe(true);
   expect(calls.some((call) => call.includes(`sectionCode=${IDS.sectionCode}`))).toBe(true);
-  expect(calls.some((call) => call.includes(`/objects/${IDS.object}/works`))).toBe(false);
+  // Проверяется отсутствие вложенного СПИСКА комплектов — того самого пути,
+  // которого в API нет и который экран когда-то угадал. `/works/pipeline` под
+  // тем же префиксом существует и законен: это сводка конвейера по уже
+  // отрисованным строкам (S37), а не второй способ получить комплекты.
+  expect(
+    calls.some((call) => new RegExp(`/objects/${IDS.object}/works(?:[?]|$)`, 'u').test(call)),
+  ).toBe(false);
 
   // Реестры объекта читаются той же плоской коллекцией.
   expect(calls.some((call) => call.startsWith('/api/v1/registries?'))).toBe(true);
@@ -358,10 +364,16 @@ test('сверка описи: карточка папки — только ве
   expect(summary.status()).toBe(403);
 });
 
-test('роли подрядчика и инженера вместе: отказ подтверждён сервером', async ({ page }) => {
+test('роли подрядчика и инженера вместе: организация берётся не из второй роли', async ({
+  page,
+}) => {
+  // Область строится по СТАРШЕЙ роли, то есть инженерской, и организации не
+  // содержит. До S37 портал на этом отказывал; теперь он выводит исполнителя из
+  // карточки объекта — но по-прежнему НЕ берёт организацию подрядчика, которым
+  // тот же человек числится второй ролью. Это и проверяется.
   await signIn(page, KC.mixed, `/ids/objects/${IDS.object}`);
 
-  const refused = await apiPost(page, '/api/v1/works', {
+  const created = await apiPost(page, '/api/v1/works', {
     data: {
       objectId: IDS.object,
       sectionCode: IDS.sectionCode,
@@ -369,10 +381,15 @@ test('роли подрядчика и инженера вместе: отказ
       title: 'Комплект от совмещающего роли',
     },
   });
-  expect(refused.status).toBe(403);
-  const problem = refused.body as { type?: string; detail?: string };
-  expect(problem.type).toBe('urn:id-portal:problem:forbidden');
-  expect(problem.detail).toContain('организации');
+  expect(created.status).toBe(201);
+
+  const { work } = created.body as {
+    work: { contractorId: string; contractorAssumed: boolean };
+  };
+  expect(work.contractorId).toBe(IDS.orgGeneral);
+  expect(work.contractorId).not.toBe(IDS.orgContractor);
+  // Признак поднят: назвал не человек, и на экране будет надпись, а не имя.
+  expect(work.contractorAssumed).toBe(true);
 });
 
 test('несуществующий реестр неотличим от чужого и не выглядит пустой таблицей', async ({
