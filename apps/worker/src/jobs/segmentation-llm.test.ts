@@ -84,7 +84,7 @@ function harness(behaviour: (index: number) => Promise<LlmCallResult>, pageCount
     fillWorkPeriod: () => Promise.resolve(false),
     replaceAssumedContractor: () => Promise.resolve(false),
     rememberContractorRaw: () => Promise.resolve(false),
-    listObjectContractors: () => Promise.resolve([]),
+    listMatchableContractors: () => Promise.resolve([]),
     applySegmentation: () =>
       Promise.reject(new Error('задача 15 в этом наборе не участвует')) as never,
     listDocuments: () => Promise.resolve([]),

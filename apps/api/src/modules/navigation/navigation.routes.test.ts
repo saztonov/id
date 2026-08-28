@@ -689,33 +689,54 @@ describe('POST /works', () => {
     for (const row of rows) expect(row).toEqual({ contractor: ORG_GC, assumed: true });
   });
 
-  it('неоднозначный объект даёт 422 с названным действием, а не догадку', async () => {
-    // На объекте 2 генподрядчик не назван; добавим второго подрядчика — и
-    // выводить станет не из чего. Портал обязан сказать, что сделать, а не
-    // выбрать одного из двух.
-    await db.query(
-      `INSERT INTO object_contractors (object_id, contractor_id)
-       VALUES ('${OBJECT_2}', '${ORG_A}') ON CONFLICT DO NOTHING`,
-    );
-
+  it('на объекте без генподрядчика исполнитель берётся из справочника (S39)', async () => {
+    // Объект 2 генподрядчика в карточке не имеет, и закреплений там ровно одно.
+    // До S39 портал отказывал, если закреплений не одно; теперь закрепления не
+    // читаются вовсе, а решает справочник: генподрядная организация в нём одна.
     const response = await as(KC.engineer, 'POST', '/api/v1/works', {
       objectId: OBJECT_2,
       sectionCode: SECTION,
       period: PERIOD,
-      title: 'Комплект на неоднозначном объекте',
+      title: 'Комплект на объекте без генподрядчика',
     });
-    expect(response.statusCode).toBe(422);
-    expect(response.body).toContain('contractor_undetermined');
+    expect(response.statusCode).toBe(201);
 
-    const rows = await db.query<{ n: string }>(
-      `SELECT count(*)::text AS n FROM works WHERE title = 'Комплект на неоднозначном объекте'`,
+    const rows = await db.query<{ contractor: string; assumed: boolean }>(
+      `SELECT contractor_id AS contractor, contractor_assumed AS assumed
+         FROM works WHERE title = 'Комплект на объекте без генподрядчика'`,
     );
-    expect(rows[0]?.n).toBe('0');
+    expect(rows[0]).toEqual({ contractor: ORG_GC, assumed: true });
+  });
 
+  it('две генподрядные организации — отказ с названным действием, а не догадка', async () => {
+    // Допущение «в портале одна генподрядная организация» обязано быть
+    // проверяемым: как только их две, портал спрашивает человека вместо того,
+    // чтобы выбрать наугад. Второй ГП заводится здесь же и убирается следом —
+    // соседние наборы читают ту же фикстуру.
+    const second = id(990);
     await db.query(
-      `DELETE FROM object_contractors
-        WHERE object_id = '${OBJECT_2}' AND contractor_id = '${ORG_A}'`,
+      `INSERT INTO counterparties (id, name, kind)
+       VALUES ('${second}', 'ООО «Второй генподрядчик»', 'general_contractor')`,
     );
+    try {
+      const response = await as(KC.engineer, 'POST', '/api/v1/works', {
+        objectId: OBJECT_2,
+        sectionCode: SECTION,
+        period: PERIOD,
+        title: 'Комплект при двух генподрядчиках',
+      });
+      expect(response.statusCode).toBe(422);
+      expect(response.body).toContain('contractor_undetermined');
+      // Действие названо в `detail` — это то, что видит человек на экране.
+      expect(response.json<{ detail: string }>().detail).toMatch(/карточке объекта/u);
+
+      const rows = await db.query<{ n: string }>(
+        `SELECT count(*)::text AS n FROM works WHERE title = 'Комплект при двух генподрядчиках'`,
+      );
+      expect(rows[0]?.n).toBe('0');
+    } finally {
+      await db.query(`DELETE FROM counterparties WHERE id = '${second}'`);
+    }
   });
 
   it('инженер заводит комплект за подрядчика, и это помечено в аудите', async () => {
@@ -869,7 +890,12 @@ describe('POST /works', () => {
     expect(foreignRevision.statusCode).toBe(403);
   });
 
-  it('незакреплённый подрядчик — 422 с указанием поля, а не 500 по внешнему ключу', async () => {
+  it('незакреплённый за объектом исполнитель принимается (S39)', async () => {
+    // До S39 это был 422: составной ключ `works_contractor_fk` требовал
+    // закрепления. Заказчик требование снял — «инженеру генподрядчика не должно
+    // быть препятствий в виде назначенных на объект подрядчиков», — и ключ снят
+    // миграцией 0055. Организация при этом обязана существовать: обычный
+    // `works_contractor_id_fkey` не тронут, и его проверяет соседний набор.
     const response = await as(KC.gc, 'POST', '/api/v1/works', {
       objectId: OBJECT_1,
       sectionCode: SECTION,
@@ -877,11 +903,33 @@ describe('POST /works', () => {
       title: 'Комплект незакреплённого',
       contractorId: ORG_CUSTOMER,
     });
-    expect(response.statusCode).toBe(422);
-    const pointers = response
-      .json<{ errors?: { pointer: string | null }[] }>()
-      .errors?.map((issue) => issue.pointer);
-    expect(pointers).toContain('/contractorId');
+    expect(response.statusCode).toBe(201);
+
+    const rows = await db.query<{ contractor: string; assumed: boolean }>(
+      `SELECT contractor_id AS contractor, contractor_assumed AS assumed
+         FROM works WHERE title = 'Комплект незакреплённого'`,
+    );
+    // Названный человеком исполнитель признаком не метится, даже если он не
+    // закреплён: человек сказал, а не портал догадался.
+    expect(rows[0]).toEqual({ contractor: ORG_CUSTOMER, assumed: false });
+  });
+
+  it('несуществующая организация исполнителем не принимается', async () => {
+    // Положительный контроль к предыдущему: снят ключ ЗАКРЕПЛЕНИЯ, а не ключ
+    // существования. Без него «любой uuid» стал бы законным исполнителем.
+    const response = await as(KC.gc, 'POST', '/api/v1/works', {
+      objectId: OBJECT_1,
+      sectionCode: SECTION,
+      period: PERIOD,
+      title: 'Комплект несуществующего',
+      contractorId: id(991),
+    });
+    expect(response.statusCode).toBeGreaterThanOrEqual(400);
+
+    const rows = await db.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM works WHERE title = 'Комплект несуществующего'`,
+    );
+    expect(rows[0]?.n).toBe('0');
   });
 
   it('комплект заводится БЕЗ месяца, и месяц приходит пустым', async () => {

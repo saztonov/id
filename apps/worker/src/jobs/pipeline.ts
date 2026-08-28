@@ -112,7 +112,7 @@ import {
   listRegistryComplectRevisions,
   saveReconciliation,
   fillWorkPeriodIfEmpty,
-  listObjectContractorParties,
+  listMatchableContractors,
   listFieldValues,
   listLogicalDocuments,
   listPageAssignments,
@@ -1952,11 +1952,9 @@ function segmentationDeps(options: PipelineJobsOptions): SegmentationDeps {
 
     rememberContractorRaw: async (revisionId, raw) => rememberContractorRaw(db, revisionId, raw),
 
-    listObjectContractors: async (revisionId) => {
-      const scope = await scopeOf(revisionId);
-      const revision = await findRevisionForFiles(db, scope, revisionId);
-      return revision === null ? [] : listObjectContractorParties(db, revision.objectId);
-    },
+    // Весь справочник, а не закрепления объекта: сужение оставляло бы
+    // исполнителя неопознанным на объектах без закреплений (S39).
+    listMatchableContractors: async () => listMatchableContractors(db),
 
     saveFieldValues: async (input) => saveFieldValues(db, await scopeOf(input.revisionId), input),
 

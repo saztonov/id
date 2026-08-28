@@ -167,7 +167,6 @@ export function ObjectScreen({ objectId }: { objectId: string }): ReactNode {
   });
 
   const enabled = (sections.data ?? []).filter((row) => row.isActive);
-  const assigned = (contractors.data ?? []).filter((row) => row.isActive);
 
   const countOf = (sectionCode: string): number | null => {
     const result = counts.data;
@@ -228,7 +227,6 @@ export function ObjectScreen({ objectId }: { objectId: string }): ReactNode {
                   <SectionPanel
                     objectId={objectId}
                     section={section}
-                    contractors={assigned}
                     filter={filter}
                     canUpload={can('submission.upload')}
                     canDelete={can('settings.manage')}
@@ -540,17 +538,15 @@ function DeleteWorkAction({ work }: { work: Work }): ReactNode {
 function SectionPanel({
   objectId,
   section,
-  contractors,
   filter,
   canUpload,
   canDelete,
 }: {
   objectId: string;
   section: ObjectSection;
-  contractors: readonly ObjectContractor[];
   filter: WorkFilter;
   canUpload: boolean;
-  /** `settings.manage`: удалять комплекты вправе только администратор. */
+  /** Право `submission.delete`: удаляют комплекты все роли (S37). */
   canDelete: boolean;
 }): ReactNode {
   const scoped: WorkFilter = { ...filter, objectId, sectionCode: section.sectionCode };
@@ -636,12 +632,12 @@ function SectionPanel({
                 key: 'contractorId',
                 render: (_value: unknown, row) =>
                   contractorLabel({
-                    // Полный список закреплений, а не только активные: у
-                    // комплекта с откреплённым позже подрядчиком имя иначе
-                    // превращалось в прочерк, будто исполнителя нет вовсе.
-                    name:
-                      contractors.find((party) => party.contractorId === row.contractorId)?.name ??
-                      null,
+                    // Имя приходит со строкой комплекта, а не ищется среди
+                    // закреплённых за объектом: закрепление больше не условие
+                    // заведения (S39), и у незакреплённого исполнителя поиск
+                    // давал бы прочерк — то есть утверждал бы, что исполнителя
+                    // нет, хотя он назван.
+                    name: row.contractorName,
                     assumed: row.contractorAssumed,
                     raw: row.contractorRaw,
                     pipeline: pipelineOf(row.id),

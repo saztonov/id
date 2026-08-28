@@ -189,10 +189,10 @@ export interface SegmentationDeps {
   readonly replaceAssumedContractor: (revisionId: string, contractorId: string) => Promise<boolean>;
   /** Запомнить наименование из акта, которого нет в справочнике объекта. */
   readonly rememberContractorRaw: (revisionId: string, raw: string) => Promise<boolean>;
-  /** Организации, закреплённые за объектом ревизии: с ними и сопоставляется акт. */
-  readonly listObjectContractors: (
-    revisionId: string,
-  ) => Promise<readonly { id: string; name: string; inn: string | null; ogrn: string | null }[]>;
+  /** Организации справочника, с которыми сопоставляется исполнитель из акта. */
+  readonly listMatchableContractors: () => Promise<
+    readonly { id: string; name: string; inn: string | null; ogrn: string | null }[]
+  >;
   /** Вход сегментации: страницы ревизии, текст последнего успешного прогона. */
   loadPages(revisionId: string): Promise<SegmentationInput>;
 
@@ -1088,22 +1088,22 @@ export function createExtractFieldsHandler(
      * записано долгом честно, а не спрятано.
      */
     if (documentId === undefined && contractorTriple !== null) {
-      const parties = await deps.listObjectContractors(revisionId);
+      const parties = await deps.listMatchableContractors();
       const matched = matchCounterparty(parties, contractorTriple);
       if (matched === null) {
-        // Организация ПРОЧИТАНА, но за объектом не закреплена. Закрепляет
-        // человек: автозакрепление было бы утверждением о стройке, которого
-        // никто не делал. Портал запоминает прочитанное, чтобы экран сказал,
-        // чего именно не хватает.
+        // Организация ПРОЧИТАНА, но в справочнике её нет. Заводит человек:
+        // создавать контрагента по строке из скана значило бы наполнять
+        // справочник результатом распознавания. Портал запоминает прочитанное,
+        // чтобы экран сказал, чего именно не хватает.
         const raw = contractorTriple.name;
         if (raw !== null) {
           const remembered = await deps.rememberContractorRaw(revisionId, raw);
           if (remembered) {
             ctx.logger.info(
               { contractor: raw },
-              'исполнитель из акта не найден среди закреплённых за объектом',
+              'исполнитель из акта не найден в справочнике контрагентов',
             );
-            await ctx.emit('work.contractor_unresolved', { reason: 'not_assigned' });
+            await ctx.emit('work.contractor_unresolved', { reason: 'not_in_directory' });
           }
         }
       } else {

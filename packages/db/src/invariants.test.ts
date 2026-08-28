@@ -1093,7 +1093,16 @@ describe('реестр передачи: снимок состава и неиз
     ).rejects.toThrow();
   });
 
-  it('комплект нельзя завести подрядчику, не закреплённому за объектом', async () => {
+  /**
+   * Закрепление за объектом больше НЕ требуется (S39, миграция 0055).
+   *
+   * Утверждение перевёрнуто, а не удалено: оно сторожит снятие ключа
+   * `works_contractor_fk`. Заказчик снял требование прямо — «инженеру
+   * генподрядчика не должно быть препятствий в виде назначенных на объект
+   * подрядчиков», — и молчаливый возврат ключа снова остановил бы загрузку
+   * документации на объектах, где закрепления не ведут.
+   */
+  it('комплект заводится подрядчику, не закреплённому за объектом', async () => {
     const stranger = id(69);
     await db.query(
       `INSERT INTO counterparties (id, name, kind)
@@ -1105,6 +1114,20 @@ describe('реестр передачи: снимок состава и неиз
            (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
          VALUES ('${id(70)}', '${ID.object}', '${stranger}', '${stranger}',
                  'roofing', DATE '2026-01-01', 'Комплект незакреплённого', '${ID.user}')`,
+      ),
+    ).resolves.toBeDefined();
+  });
+
+  it('исполнителем не может быть несуществующая организация', async () => {
+    // Положительный контроль к предыдущему: снят ключ ЗАКРЕПЛЕНИЯ, а не ключ
+    // существования. `works_contractor_id_fkey` на месте, и без него
+    // исполнителем стал бы любой uuid.
+    await expect(
+      db.query(
+        `INSERT INTO works
+           (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
+         VALUES ('${id(71)}', '${ID.object}', '${id(991)}', '${ID.contractor}',
+                 'roofing', DATE '2026-01-01', 'Комплект несуществующего', '${ID.user}')`,
       ),
     ).rejects.toThrow();
   });

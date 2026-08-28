@@ -1580,23 +1580,30 @@ export async function listObjectContractors(
 }
 
 /**
- * Организации, закреплённые за объектом, — с реквизитами для сопоставления.
+ * Организации справочника с реквизитами для сопоставления с актом.
  *
- * Отдельно от `listObjectContractors`, и по двум причинам сразу. Во-первых,
- * здесь нужен ОГРН: сопоставление организации из акта идёт тройкой
+ * Отдельно от `listCounterparties`, и по двум причинам сразу. Во-первых, здесь
+ * нужен ОГРН: сопоставление организации из акта идёт тройкой
  * ИНН → ОГРН → наименование (`matchCounterparty`), и без третьего признака
  * половина актов корпуса не сходится. Во-вторых, здесь нет области видимости:
- * зовёт конвейер, у которого пользователя нет, и проверять его правами
- * человека было бы подлогом — исполнитель не решение пользователя, а
- * прочитанный факт (то же основание, что у `fillWorkPeriodIfEmpty`).
+ * зовёт конвейер, у которого пользователя нет, и проверять его правами человека
+ * было бы подлогом — исполнитель не решение пользователя, а прочитанный факт
+ * (то же основание, что у `fillWorkPeriodIfEmpty`).
  *
- * Отбираются только АКТИВНЫЕ закрепления: неактивное не пройдёт составной ключ
- * `works_contractor_fk`, и подставить его значило бы получить отказ базы вместо
- * записи.
+ * ## Почему весь справочник, а не закрепления объекта (S39)
+ *
+ * До S39 отбирались организации, ЗАКРЕПЛЁННЫЕ за объектом: подставить
+ * незакреплённую значило бы получить отказ составного ключа
+ * `works_contractor_fk`. Ключ снят (0055), и вместе с ним ушло основание сужать
+ * отбор. Сужение при этом было вредным: на объекте без закреплений — а такие в
+ * бою есть — конвейер не нашёл бы организацию из акта НИКОГДА, то есть признак
+ * «исполнитель подставлен порталом» не снимался бы вовсе.
+ *
+ * Неактивные организации не отбираются: подставить исполнителем выведенного из
+ * работы контрагента значит записать заведомо устаревший факт.
  */
-export async function listObjectContractorParties(
+export async function listMatchableContractors(
   db: Database,
-  objectId: string,
 ): Promise<readonly { id: string; name: string; inn: string | null; ogrn: string | null }[]> {
   return db
     .select({
@@ -1605,9 +1612,8 @@ export async function listObjectContractorParties(
       inn: counterparties.inn,
       ogrn: counterparties.ogrn,
     })
-    .from(objectContractors)
-    .innerJoin(counterparties, eq(counterparties.id, objectContractors.contractorId))
-    .where(and(eq(objectContractors.objectId, objectId), eq(objectContractors.isActive, true)))
+    .from(counterparties)
+    .where(eq(counterparties.isActive, true))
     .orderBy(asc(counterparties.name));
 }
 
