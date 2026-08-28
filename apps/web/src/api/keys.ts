@@ -45,8 +45,33 @@ export const documentKeys = {
 };
 
 export const catalogKeys = {
+  /**
+   * Справочник объектов ОДНОЙ страницей (`useQuery`).
+   *
+   * Ключ отличается от `objectsPaged` не из аккуратности: под одним ключом не
+   * могут жить `useQuery` и `useInfiniteQuery`. Формы данных у них разные —
+   * `{ items, nextCursor }` против `{ pages, pageParams }`, — и кто сходил
+   * первым, тот и задал форму в кэше. Второй экран получает готовые данные, у
+   * которых нет его полей: `data.items` оказывается `undefined`, таблица
+   * пустеет, и НИ ошибки, ни загрузки при этом нет.
+   *
+   * Так и было до S39: галерея раздела ИД наполняла кэш инфинити-структурой, а
+   * «Справочники → Объекты» после неё показывали «В справочнике нет ни одного
+   * объекта» при двух заведённых объектах. Экран выглядел рабочим и молчал.
+   */
   objects: (search: string) => ['catalog', 'objects', search] as const,
-  object: (objectId: string) => ['catalog', 'objects', objectId] as const,
+  /** Тот же справочник с докруткой (`useInfiniteQuery`) — галерея раздела ИД. */
+  objectsPaged: (search: string) => ['catalog', 'objects', 'paged', search] as const,
+  /**
+   * Один объект.
+   *
+   * Сегмент `one` обязателен: без него ключ карточки неотличим по ФОРМЕ от
+   * ключа списка (`['catalog','objects', <строка>]`), и совпасть им мешает лишь
+   * то, что поиск редко бывает похож на UUID. Это та же ловушка, что развела
+   * `objects` и `objectsPaged`, только менее вероятная — а разводится она
+   * одним словом.
+   */
+  object: (objectId: string) => ['catalog', 'objects', 'one', objectId] as const,
   counterparties: (search: string, kind: string) =>
     ['catalog', 'counterparties', search, kind] as const,
   sections: (objectId: string) => ['catalog', 'sections', objectId] as const,

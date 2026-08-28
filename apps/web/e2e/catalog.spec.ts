@@ -145,6 +145,30 @@ test('объект заводится формой и появляется в р
   await expect(page.getByRole('link', { name: /Объект из формы/u })).toBeVisible();
 });
 
+/**
+ * Справочник объектов ПОСЛЕ галереи раздела ИД (S39).
+ *
+ * Порядок здесь и есть проверка. Оба экрана читают один и тот же маршрут, но
+ * разными хуками: галерея — `useInfiniteQuery`, справочник — `useQuery`. Пока
+ * ключ кэша был общим, первый заполнял его структурой `{ pages, pageParams }`,
+ * а второй читал из неё `items` — получал `undefined` и показывал «В
+ * справочнике нет ни одного объекта» при двух заведённых объектах. Ни ошибки,
+ * ни загрузки: экран выглядел рабочим и молчал.
+ *
+ * Переход СТРОГО ссылкой, а не `page.goto`: перезагрузка страницы очищает кэш и
+ * прячет дефект — тест стал бы зелёным, ничего не проверяя.
+ */
+test('объекты видны в справочнике после захода в раздел ИД', async ({ page }) => {
+  await signIn(page, KC.admin, '/ids');
+  await expect(page.getByRole('link', { name: /Объект сквозного прогона/u })).toBeVisible();
+
+  await page.getByRole('link', { name: 'Справочники' }).click();
+  await expect(page).toHaveURL(/\/catalog/u);
+
+  await expect(page.getByRole('cell', { name: 'E2E01', exact: true })).toBeVisible();
+  await expect(page.getByText('В справочнике нет ни одного объекта')).toHaveCount(0);
+});
+
 test('удаление объекта со связями отклоняется с названной причиной', async ({ page }) => {
   await signIn(page, KC.admin, '/catalog?tab=objects');
 

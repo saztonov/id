@@ -52,7 +52,10 @@ export function IdsScreen(): ReactNode {
   const [search, setSearch] = useState('');
 
   const objects = useInfiniteQuery({
-    queryKey: catalogKeys.objects(search),
+    // Ключ ОТДЕЛЬНЫЙ от справочника: там `useQuery`, здесь `useInfiniteQuery`, и
+    // общий ключ означал бы, что второй экран читает чужую форму данных (разбор
+    // — в `keys.ts`). Из-за него «Справочники → Объекты» показывали пустоту.
+    queryKey: catalogKeys.objectsPaged(search),
     queryFn: ({ pageParam }) =>
       catalog.objects({ ...(search === '' ? {} : { search }), cursor: pageParam }),
     initialPageParam: null as string | null,
