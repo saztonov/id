@@ -1411,3 +1411,99 @@ export async function listBlockResults(
     isCurrent: row.currentId === row.id,
   }));
 }
+
+// =====================================================================
+// Выбор страниц для повторного распознавания (S40)
+// =====================================================================
+
+/**
+ * Страницы, которые «Распознать только ошибки» обязана перечитать.
+ *
+ * ## Почему двух источников, а не одного
+ *
+ * «Ошибка» на этой кнопке означает две разные вещи, и обе — работа для модели:
+ *
+ * 1. **отказ распознавания**: блок не вернулся, вернулся неразбираемым либо был
+ *    отклонён по бюджету. Такую страницу перечитать очевидно;
+ * 2. **замечание проверки**: распознавание формально прошло, а разбор дал
+ *    ошибку либо «не проверено». На комплекте `№01_Бл_П` отказов было НОЛЬ при
+ *    четырёх ошибках и восемнадцати «не проверено»: перечитывать по одному
+ *    первому источнику там было бы нечего, и пункт молчал бы на том самом
+ *    комплекте, ради которого заведён.
+ *
+ * Второй источник берёт страницы ДОКУМЕНТА, а не одну страницу замечания:
+ * реквизит, из-за которого правило не сошлось, может быть напечатан на любом
+ * листе документа, и перечитывать лист с замечанием, оставив соседний, значит
+ * оплатить вызов модели и ничего не изменить.
+ *
+ * Замечания без документа (о материале, о партии, о непривязанной странице)
+ * добавляют свою страницу, если она названа: у таких замечаний документа нет по
+ * построению (ADR-0016), но лист бывает известен.
+ *
+ * ## Что сюда НЕ входит
+ *
+ * Замечания состояния `waived` и `resolved`: человек уже решил по ним вопрос, и
+ * перечитывать лист заново означало бы отменить его решение молча. Внешние
+ * реестры (`origin: 'external_unavailable'`) тоже: их «не проверено» лечится
+ * подключением источника, а не вторым проходом модели по той же картинке.
+ */
+export async function listPagesToRerecognize(
+  db: Database,
+  scope: AuthScope,
+  input: {
+    readonly revisionId: string;
+    readonly layoutRevisionId: string;
+    /** Прогон, чьи отказы считаются; `null` — прогонов ещё не было. */
+    readonly parentRunId: string | null;
+  },
+): Promise<readonly number[]> {
+  const pages = new Set<number>();
+
+  if (input.parentRunId !== null) {
+    const failed = await db
+      .select({ workingPageIndex: recognitionRunPages.workingPageIndex })
+      .from(recognitionRunPages)
+      .where(
+        and(
+          eq(recognitionRunPages.recognitionRunId, input.parentRunId),
+          sql`(${recognitionRunPages.status} = 'failed'
+               or ${recognitionRunPages.blocksInvalid} > 0
+               or ${recognitionRunPages.blocksRefused} > 0)`,
+        ),
+      );
+    for (const row of failed) pages.add(row.workingPageIndex);
+  }
+
+  const troubled = await db
+    .select({ workingPageIndex: layoutBlocks.workingPageIndex })
+    .from(layoutBlocks)
+    .innerJoin(submissionRevisions, eq(layoutBlocks.revisionId, submissionRevisions.id))
+    .where(
+      withScope(
+        scope,
+        REVISION_SCOPE,
+        eq(layoutBlocks.layoutRevisionId, input.layoutRevisionId),
+        sql`${layoutBlocks.sourcePageId} in (
+            select pa.source_page_id
+              from page_assignments pa
+              join findings f
+                on f.target_id = pa.document_id and f.target_type = 'document'
+             where f.revision_id = ${input.revisionId}
+               and f.origin <> 'external_unavailable'
+               and f.state in ('open', 'undetermined')
+               and (f.severity = 'error' or f.state = 'undetermined')
+            union
+            select f.source_page_id
+              from findings f
+             where f.revision_id = ${input.revisionId}
+               and f.source_page_id is not null
+               and f.origin <> 'external_unavailable'
+               and f.state in ('open', 'undetermined')
+               and (f.severity = 'error' or f.state = 'undetermined')
+          )`,
+      ),
+    );
+  for (const row of troubled) pages.add(row.workingPageIndex);
+
+  return [...pages].sort((left, right) => left - right);
+}

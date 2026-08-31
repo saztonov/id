@@ -234,6 +234,15 @@ export interface StartMarkupPipelineResult {
   readonly detectionSkipReason: string | null;
 }
 
+/**
+ * Что делать с уже распознанным комплектом (S40).
+ *
+ * `auto` — прежнее поведение: продолжить с той стадии, где ревизия встала.
+ * `errors` — перечитать листы с отказами и замечаниями, остальное перенести.
+ * `full` — снести прежний результат и распознать заново целиком.
+ */
+export type RecheckMode = 'auto' | 'errors' | 'full';
+
 export interface CheckPipelineResult {
   readonly stage: 'recognition' | 'analysis' | 'checks';
   readonly recognitionRunId: string | null;
@@ -241,6 +250,8 @@ export interface CheckPipelineResult {
   readonly jobCreated: boolean;
   /** Прогон, который запущенный восстанавливает; `null` — распознавание с нуля. */
   readonly repairOfRunId?: string | null;
+  /** Сколько листов ушло на повторное распознавание (S40). */
+  readonly retriedPages?: number;
 }
 
 export interface RecognitionProgress {
@@ -277,9 +288,10 @@ export const pipeline = {
     }).then((r) => r.data),
 
   /** Заморозка, распознавание, анализ и проверки одним нажатием. */
-  check: (revisionId: string) =>
+  check: (revisionId: string, mode: RecheckMode = 'auto') =>
     request<CheckPipelineResult>('POST', `${V1}/revisions/${revisionId}/check`, {
       idempotencyKey: newIdempotencyKey('pipeline-check'),
+      body: { mode },
     }).then((r) => r.data),
 
   /** Постраничный прогресс распознавания: «идёт» без числа страниц бесполезно. */

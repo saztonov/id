@@ -120,22 +120,46 @@ describe('formatDate', () => {
 describe('datesLabel', () => {
   it('интервал печатается интервалом', () => {
     const text = datesLabel(
-      row({ id: 'a', dates: { issuedAt: null, validFrom: '2023-03-12', validTo: '2026-03-11' } }),
+      row({
+        id: 'a',
+        dates: { issuedAt: null, validFrom: '2023-03-12', validTo: '2026-03-11', composedAt: null },
+      }),
     );
     expect(text).toBe('действует 12.03.2023 — 11.03.2026');
   });
 
   it('дата выдачи и срок годности читаются вместе', () => {
     const text = datesLabel(
-      row({ id: 'a', dates: { issuedAt: '2023-03-12', validFrom: null, validTo: '2024-03-12' } }),
+      row({
+        id: 'a',
+        dates: { issuedAt: '2023-03-12', validFrom: null, validTo: '2024-03-12', composedAt: null },
+      }),
     );
     expect(text).toBe('выдан 12.03.2023, до 12.03.2024');
+  });
+
+  it('акт датируется составлением, а не выдачей', () => {
+    // S40. Акт никто не выдаёт: его составляет комиссия. До S40 колонка
+    // печатала «выдан 10.04.2023, до 01.08.2026» — обе даты были взяты у
+    // документов, названных внутри самого акта.
+    const text = datesLabel(
+      row({
+        id: 'a',
+        dates: { issuedAt: null, validFrom: null, validTo: null, composedAt: '2024-11-21' },
+      }),
+    );
+    expect(text).toBe('акт от 21.11.2024');
   });
 
   it('дат нет — ячейка пустая, а не с прочерком', () => {
     expect(datesLabel(row({ id: 'a', dates: null }))).toBeNull();
     expect(
-      datesLabel(row({ id: 'a', dates: { issuedAt: null, validFrom: null, validTo: null } })),
+      datesLabel(
+        row({
+          id: 'a',
+          dates: { issuedAt: null, validFrom: null, validTo: null, composedAt: null },
+        }),
+      ),
     ).toBeNull();
   });
 });

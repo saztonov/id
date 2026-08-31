@@ -72,6 +72,7 @@ import {
   finishRecognitionRun,
   findRecognitionRun,
   hasPublishedRecognition,
+  listPagesToRerecognize,
   listRecognitionRuns,
   listRunPages,
 } from '../../db/repositories/recognition.js';
@@ -84,6 +85,7 @@ import {
 import { readDetectionSettings, readImmutabilityEnforced } from '../../config/portal-settings.js';
 import { assertRecognitionStageReady, startRecognition } from '../recognition/start.js';
 import {
+  checkRequestSchema,
   checkResponseSchema,
   recognitionProgressSchema,
   revisionIdParamSchema,
@@ -204,12 +206,24 @@ function registerCheckRoute(app: AppInstance): void {
     `${PREFIX}/revisions/:revisionId/check`,
     {
       preHandler: runPipeline,
-      schema: { params: revisionIdParamSchema, response: { 202: checkResponseSchema } },
+      schema: {
+        params: revisionIdParamSchema,
+        body: checkRequestSchema,
+        response: { 202: checkResponseSchema },
+      },
     },
     async (request, reply) => {
       const { scope } = currentAuth(request);
       const { revisionId } = request.params;
       const idempotencyKey = requireIdempotencyKey(request);
+      /**
+       * Режим повторного нажатия (S40).
+       *
+       * Тело необязательно: прежние вызывающие его не шлют, и `auto` оставляет
+       * им ровно прежнее поведение. Новое — только там, где человек ВЫБРАЛ, что
+       * перечитать.
+       */
+      const mode = request.body?.mode ?? 'auto';
 
       // Ревизия разрешается ПЕРВОЙ, до любого суждения о её состоянии. Иначе
       // чужая ревизия получала бы 409 «разметки нет» — то есть ответ о
@@ -271,7 +285,37 @@ function registerCheckRoute(app: AppInstance): void {
        * и цепочка обрывалась на «завершённого прогона распознавания нет» уже
        * внутри задачи, то есть в консоли, а не на экране.
        */
+      /**
+       * Терминальный прогон этой разметки: и родитель восстановления, и ответ
+       * на вопрос «есть ли что перечитывать».
+       *
+       * `integrity_error` донором не бывает — у такого прогона разошлись
+       * доказательства, и переносить из него значит тащить дальше расхождение,
+       * ради обнаружения которого он и упал.
+       */
+      const parentRun = runOfLayout.find((run) => run.status === 'failed' || run.status === 'done');
+
+      /**
+       * Явный выбор человека перебивает «продолжить с того места, где встали».
+       *
+       * Без этой ветки оба пункта поповера были бы бесполезны ровно там, где
+       * они нужны: на разобранном комплекте `done === true`, и нажатие уходило
+       * на прогон правил, ни разу не позвав модель. Пункт «только ошибки» при
+       * пустом списке листов сюда и возвращается — но осознанно и с числом в
+       * ответе, а не молча.
+       */
+      const retryPages =
+        mode === 'errors'
+          ? await listPagesToRerecognize(app.db, scope, {
+              revisionId,
+              layoutRevisionId: layout.id,
+              parentRunId: parentRun?.id ?? null,
+            })
+          : [];
+      const rerecognize = mode === 'full' || (mode === 'errors' && retryPages.length > 0);
+
       const done =
+        !rerecognize &&
         enforceGates &&
         (await hasPublishedRecognition(app.db, scope, {
           revisionId,
@@ -362,16 +406,21 @@ function registerCheckRoute(app: AppInstance): void {
          * модели. Совместимость он же и решает: разошлись модель, промпт,
          * растеризатор или рабочий документ — блок распознаётся заново.
          *
-         * Берётся ПОСЛЕДНИЙ терминальный прогон: список отсортирован по
-         * времени старта. `integrity_error` донором не бывает — у такого
-         * прогона разошлись доказательства, и переносить из него значит
-         * тащить дальше расхождение, ради обнаружения которого он и упал.
+         * Берётся ПОСЛЕДНИЙ терминальный прогон (`parentRun` выше): список
+         * отсортирован по времени старта.
+         *
+         * Пункт «Распознать полностью» (S40) переносом не пользуется: он и
+         * означает «прежний результат больше не описывает то, что получится
+         * сейчас». Поэтому родителя у него нет, а прежнее производное сносится
+         * — иначе документы и замечания указывали бы на блоки с другими
+         * идентификаторами, то есть выглядели бы целыми и врали.
          */
-        const parentRun = runOfLayout.find(
-          (run) => run.status === 'failed' || run.status === 'done',
-        );
+        const repairOf = mode === 'full' ? null : (parentRun?.id ?? null);
 
-        if (!enforceGates && runOfLayout.length > 0 && parentRun === undefined) {
+        if (
+          mode === 'full' ||
+          (!enforceGates && runOfLayout.length > 0 && parentRun === undefined)
+        ) {
           // Прежние результаты по этой разметке больше не описывают то, что
           // получится сейчас: сносим их до старта, а не «поверх». На пути
           // восстановления сброса нет — он снёс бы ровно то, что переносится.
@@ -382,14 +431,16 @@ function registerCheckRoute(app: AppInstance): void {
           layoutId: layout.id,
           idempotencyKey,
           autoContinue: true,
-          repairOfRunId: parentRun?.id ?? null,
+          repairOfRunId: repairOf,
+          ...(mode === 'errors' ? { retryPages } : {}),
         });
         return reply.code(202).send({
           stage: 'recognition',
           recognitionRunId: started.recognitionRunId,
           jobId: started.jobId,
+          retriedPages: mode === 'errors' ? retryPages.length : 0,
           jobCreated: started.jobCreated,
-          repairOfRunId: parentRun?.id ?? null,
+          repairOfRunId: repairOf,
         });
       }
 
@@ -406,6 +457,7 @@ function registerCheckRoute(app: AppInstance): void {
           recognitionRunId: null,
           jobId,
           jobCreated: created,
+          retriedPages: 0,
         });
       }
 
@@ -421,6 +473,10 @@ function registerCheckRoute(app: AppInstance): void {
         recognitionRunId: null,
         jobId,
         jobCreated: created,
+        // «Только ошибки» на комплекте без ошибок доходит сюда: перечитывать
+        // нечего, и прогон продолжается правилами. Ноль в ответе отличает это
+        // от бездействия кнопки.
+        retriedPages: 0,
       });
     },
   );

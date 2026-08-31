@@ -96,6 +96,18 @@ export interface ReportDates {
   readonly issuedAt: string | null;
   readonly validFrom: string | null;
   readonly validTo: string | null;
+  /**
+   * Дата составления акта (S40).
+   *
+   * Отдельным полем, а не под видом `issuedAt`: акт никто не выдаёт, его
+   * составляет комиссия, и «выдан 21.11.2024» о нём — неверная фраза. До S40
+   * колонка дат у акта показывала «выдан 10.04.2023, до 01.08.2026»: первая
+   * дата была взята из договора строительного контроля в шапке, вторая — из
+   * сертификата, названного в п. 3. Извлечение этих реквизитов у акта
+   * прекращено, и, чтобы колонка не осталась пустой у главного документа
+   * комплекта, сюда приходит его настоящая дата.
+   */
+  readonly composedAt: string | null;
 }
 
 export interface ReportItem {
@@ -522,12 +534,11 @@ class ReportFacts {
             ? 'номер подошёл нескольким документам — какой именно, неизвестно'
             : row.matchState === 'candidate'
               ? // Кандидат ничего не утверждает: номер не совпал, а похожий
-                // документ в комплекте есть. Решает человек.
-                `номер не совпал; ${
-                  row.candidateDocumentIds.length === 1
-                    ? 'похожий документ в комплекте есть'
-                    : `похожих документов в комплекте ${String(row.candidateDocumentIds.length)}`
-                } — сверьте вручную`
+                // документ в комплекте есть. Решает человек — и решать ему
+                // нечем, пока строка не называет, ЧТО именно похоже: «похожих
+                // документов 2» отправляет проверяющего листать комплект
+                // руками, хотя страницы известны серверу.
+                `номер не совпал; сверьте вручную${this.candidatePages(row.candidateDocumentIds)}`
               : 'документ комплекта не назван ни одной строкой реестра';
 
     return {
@@ -540,7 +551,13 @@ class ReportFacts {
           .join(' · ') || null,
       page,
       pages: null,
-      dates: { issuedAt: row.issuedAt, validFrom: row.validFrom, validTo: row.validTo },
+      dates: {
+        issuedAt: row.issuedAt,
+        validFrom: row.validFrom,
+        validTo: row.validTo,
+        // У строки реестра даты составления нет: составляют акт, а не строку.
+        composedAt: null,
+      },
       status,
       statusText,
       statusHint: null,
@@ -677,6 +694,22 @@ class ReportFacts {
   // Мелочи печати
   // ===================================================================
 
+  /**
+   * Страницы похожих документов строки: «: похоже на стр. 19, 20».
+   *
+   * Пустая строка, когда сказать нечего: страницы кандидатов неизвестны либо
+   * кандидатов нет вовсе. Число кандидатов отдельно не печатается — оно видно
+   * по перечню, а «похожих документов 2» без перечня не помогает никому.
+   */
+  private candidatePages(documentIds: readonly string[]): string {
+    const pages = documentIds
+      .map((id) => this.pageOf(this.context.documents.get(id)?.firstPageId ?? null)?.number)
+      .filter((number): number is number => number !== undefined)
+      .sort((left, right) => left - right);
+
+    return pages.length === 0 ? '' : `: похоже на стр. ${pages.join(', ')}`;
+  }
+
   private titleOf(code: string): string {
     // Название правила берётся из БД: администратор правит их в портале, и
     // каталог в коде разошёлся бы с ним при первой же правке.
@@ -709,8 +742,12 @@ class ReportFacts {
       issuedAt: own.get('issued_at')?.valueDate ?? null,
       validFrom: own.get('valid_from')?.valueDate ?? null,
       validTo: own.get('valid_to')?.valueDate ?? null,
+      composedAt: own.get('act_date')?.valueDate ?? null,
     };
-    return dates.issuedAt === null && dates.validFrom === null && dates.validTo === null
+    return dates.issuedAt === null &&
+      dates.validFrom === null &&
+      dates.validTo === null &&
+      dates.composedAt === null
       ? null
       : dates;
   }

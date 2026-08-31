@@ -1154,6 +1154,8 @@ describe('GET /revisions/:id/check-report', () => {
       issuedAt: '2023-03-12',
       validFrom: null,
       validTo: '2024-03-12',
+      // Даты составления у сертификата нет: составляют акт, а не сертификат.
+      composedAt: null,
     });
     expect(cert?.status).toBe('warning');
     expect(cert?.statusText).toContain('истёк');

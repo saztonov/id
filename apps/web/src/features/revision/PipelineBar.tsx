@@ -53,10 +53,16 @@
  * секунд отвечает на «оно живое?» дешевле любой анимации.
  */
 import { useEffect, useState, type ReactNode } from 'react';
-import { App as AntApp, Alert, Button, Progress, Space, Tooltip, Typography } from 'antd';
+import { App as AntApp, Alert, Button, Dropdown, Progress, Space, Tooltip, Typography } from 'antd';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 
-import { pipeline, recognition, revisionEvents } from '../../api/endpoints.js';
+import {
+  pipeline,
+  recognition,
+  revisionEvents,
+  type CheckPipelineResult,
+  type RecheckMode,
+} from '../../api/endpoints.js';
 import { pipelineKeys, revisionKeys } from '../../api/keys.js';
 import { describeError } from '../../api/problem.js';
 import { useSession } from '../../app/session.js';
@@ -118,6 +124,13 @@ export function PipelineBar({ revisionId, editable }: PipelineBarProps): ReactNo
   // ревизии разметки в портале ровно один (доменный инвариант §6.2).
   const runningRun = runningRecognitionRun(runs.data);
   const lastRun = newestRecognitionRun(runs.data);
+  /**
+   * Законченный прогон этой ревизии: по нему и решается, есть ли выбор (S40).
+   *
+   * Именно ЗАКОНЧЕННЫЙ, а не «какой-нибудь»: пока прогон идёт, перечитывать
+   * нечего, и меню предлагало бы отменить работу, которая ещё делается.
+   */
+  const finishedRun = runningRun === null && lastRun !== null ? lastRun : null;
   // `lastRunId` — прогон, запущенный В ЭТОЙ вкладке; он старше списка ровно на
   // время до первого его обновления. Новейший прогон стоит третьим: он и есть
   // ответ после перезагрузки страницы и при запуске из соседней вкладки.
@@ -168,10 +181,10 @@ export function PipelineBar({ revisionId, editable }: PipelineBarProps): ReactNo
   });
 
   const check = useMutation({
-    mutationFn: () => pipeline.check(revisionId),
+    mutationFn: (mode: RecheckMode = 'auto') => pipeline.check(revisionId, mode),
     onSuccess: async (result) => {
       setLastRunId(result.recognitionRunId);
-      message.success(STAGE_STARTED_LABEL[result.stage] ?? 'Обработка запущена');
+      message.success(startedLabel(result));
       await refresh();
     },
     onError: (error) => message.error(describeError(error)),
@@ -230,17 +243,60 @@ export function PipelineBar({ revisionId, editable }: PipelineBarProps): ReactNo
             1. Выделить блоки
           </Button>
         </Tooltip>
-        <Tooltip title="Распознает блоки, разберёт документы и прогонит проверки. Если распознавание уже сделано — просто перепроверит.">
-          <Button
-            type="primary"
-            onClick={() => check.mutate()}
-            loading={check.isPending}
-            disabled={!canRun}
-            data-testid="pipeline-check"
+        {/*
+          Первое нажатие выбора не имеет: распознавать нечего, кроме всего
+          комплекта. Как только у ревизии есть законченный прогон, вопрос «что
+          именно перечитать» становится настоящим и стоит денег — один пункт
+          зовёт модель по нескольким листам, другой по всем, — поэтому его
+          задаёт человек, а не портал за него.
+        */}
+        {finishedRun === null ? (
+          <Tooltip title="Распознает блоки, разберёт документы и прогонит проверки. Если распознавание уже сделано — просто перепроверит.">
+            <Button
+              type="primary"
+              onClick={() => check.mutate('auto')}
+              loading={check.isPending}
+              disabled={!canRun}
+              data-testid="pipeline-check"
+            >
+              2. Распознать
+            </Button>
+          </Tooltip>
+        ) : (
+          <Dropdown
+            trigger={['click']}
+            disabled={!canRun || check.isPending}
+            menu={{
+              items: [
+                {
+                  key: 'errors',
+                  label: 'Распознать только ошибки',
+                  onClick: () => check.mutate('errors'),
+                },
+                {
+                  key: 'full',
+                  label: 'Распознать полностью весь документ',
+                  danger: true,
+                  onClick: () => check.mutate('full'),
+                },
+              ],
+            }}
           >
-            2. Распознать
-          </Button>
-        </Tooltip>
+            <Button
+              type="primary"
+              loading={check.isPending}
+              disabled={!canRun}
+              data-testid="pipeline-check"
+            >
+              {/*
+                Стрелка набрана символом, а не иконкой: `@ant-design/icons` во
+                фронте нет, и тянуть пакет ради одного знака дороже, чем
+                написать знак.
+              */}
+              2. Распознать ▾
+            </Button>
+          </Dropdown>
+        )}
 
         {/*
           Живое состояние. `aria-live="polite"` обязателен: пользователь нажал
@@ -370,6 +426,24 @@ export function PipelineBar({ revisionId, editable }: PipelineBarProps): ReactNo
       )}
     </div>
   );
+}
+
+/**
+ * Что сказать после нажатия — с числом перечитываемых листов (S40).
+ *
+ * Число обязательно там, где оно ноль: «Распознать только ошибки» на комплекте
+ * без ошибок ничего не перечитывает и уходит на прогон правил. Без этой фразы
+ * нажатие выглядело бы как бездействие кнопки, и человек нажал бы ещё раз.
+ */
+function startedLabel(result: CheckPipelineResult): string {
+  if (result.stage === 'recognition' && (result.retriedPages ?? 0) > 0) {
+    const pages = result.retriedPages ?? 0;
+    return `Перечитываем ${String(pages)} ${plural(pages, 'лист', 'листа', 'листов')}: остальное перенесётся из прошлого прогона`;
+  }
+  if (result.stage !== 'recognition' && result.retriedPages === 0) {
+    return 'Перечитывать нечего: запущен прогон правил по уже распознанному комплекту';
+  }
+  return STAGE_STARTED_LABEL[result.stage] ?? 'Обработка запущена';
 }
 
 /**

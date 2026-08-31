@@ -393,13 +393,14 @@ async function as(
   kcSub: string,
   method: Method,
   url: string,
-  options: { readonly idempotencyKey?: string } = {},
+  options: { readonly idempotencyKey?: string; readonly body?: Record<string, unknown> } = {},
 ): Promise<LightMyRequestResponse> {
   let session = signedIn.get(kcSub);
   if (session === undefined) {
     session = await signIn(kcSub);
     signedIn.set(kcSub, session);
   }
+  const payload = options.body;
   return app.inject({
     method,
     url,
@@ -410,6 +411,10 @@ async function as(
         ? {}
         : { 'idempotency-key': options.idempotencyKey }),
     },
+    // Тело подставляется только когда оно есть: `payload: undefined` заставил бы
+    // inject выставить content-type, и запрос перестал бы быть «нажатием без
+    // тела», которое проверяет отрицательный контроль.
+    ...(payload === undefined ? {} : { payload }),
   });
 }
 
@@ -780,6 +785,65 @@ describe('POST /revisions/{id}/check в shadow-режиме', () => {
     expect(response.statusCode).toBe(202);
     // Стадия распознавания пройдена — маршрут идёт к разбору документов.
     expect(response.json<{ stage: string }>().stage).toBe('analysis');
+  });
+});
+
+// =====================================================================
+// Выбор режима повторного распознавания (S40)
+// =====================================================================
+
+/**
+ * Комплект `REVISION_DRY` дошёл сюда с ОПУБЛИКОВАННЫМ распознаванием: набор
+ * выше довёл его до состояния «стадия пройдена, следующее нажатие идёт к
+ * анализу». Это ровно то состояние, в котором и появляется выбор, — и ровно
+ * то, в котором до S40 повторное нажатие модель не звало ни при каких
+ * обстоятельствах.
+ *
+ * Набор идёт ДО режима тестирования: `full` обязан работать и в строгом режиме,
+ * иначе пункт бесполезен там, где он нужен, — на боевом портале.
+ */
+describe('POST /revisions/{id}/check с выбором режима', () => {
+  it('нажатие без тела остаётся прежним нажатием', async () => {
+    // Отрицательный контроль: `mode` необязателен, и вызывающие, которые о нём
+    // не знают, обязаны получать ровно прежнее поведение.
+    const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_DRY}/check`, {
+      idempotencyKey: 'check-mode-absent',
+    });
+
+    expect(response.statusCode).toBe(202);
+  });
+
+  it('«только ошибки» на комплекте без замечаний доходит до правил и говорит об этом', async () => {
+    const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_DRY}/check`, {
+      idempotencyKey: 'check-mode-errors',
+      body: { mode: 'errors' },
+    });
+
+    expect(response.statusCode).toBe(202);
+    const body = response.json<{ stage: string; retriedPages?: number }>();
+    // Перечитывать нечего — прогон продолжается разбором, а не молча ничем.
+    expect(body.stage).not.toBe('recognition');
+    expect(body.retriedPages).toBe(0);
+  });
+
+  it('«полностью» зовёт распознавание заново и родителя себе не берёт', async () => {
+    const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_DRY}/check`, {
+      idempotencyKey: 'check-mode-full',
+      body: { mode: 'full' },
+    });
+
+    expect(response.statusCode).toBe(202);
+    const body = response.json<{ stage: string; repairOfRunId: string | null }>();
+    expect(body.stage).toBe('recognition');
+    // Перенос результатов — это ровно то, чего «полностью» не делает.
+    expect(body.repairOfRunId).toBeNull();
+  });
+
+  it('«полностью» сносит прежние прогоны, а не кладёт новый поверх', async () => {
+    const runs = await db.query<{ count: string | number }>(
+      `SELECT count(*) AS count FROM recognition_runs WHERE revision_id = '${REVISION_DRY}'`,
+    );
+    expect(Number(runs[0]?.count ?? 0)).toBe(1);
   });
 });
 

@@ -184,6 +184,8 @@ const reportRowSchema = z.object({
       issuedAt: z.string().nullable(),
       validFrom: z.string().nullable(),
       validTo: z.string().nullable(),
+      /** Дата составления акта: его никто не выдаёт (S40). */
+      composedAt: z.string().nullable(),
     })
     .nullable(),
   /** `unchecked` — прогона не было: портал НЕ ЗНАЕТ, верны ли данные. */

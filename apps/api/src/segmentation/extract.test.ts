@@ -707,3 +707,179 @@ describe('дата составления акта читается со все�
     expect(actDateOf(text)).toBeUndefined();
   });
 });
+
+// =====================================================================
+// S40. Чья это дата
+// =====================================================================
+
+/**
+ * Все шесть наборов ниже собраны по комплекту `№01_Бл_П`: до S40 портал
+ * извлекал из них чужую дату и показывал её на экране как дату документа.
+ * Тексты сокращены до строк, участвующих в решении, но записаны дословно —
+ * иначе тест проверял бы не то, на чём дефект держался.
+ */
+describe('дата выдачи не берётся у чужого документа', () => {
+  it('дата договора из шапки акта не становится датой акта', () => {
+    const fields = extractFields(
+      input(
+        'АКТ\nосвидетельствования скрытых работ\n№ 01-Бл/П\n" 21 " ноября 2024 г.\n' +
+          '(дата составления акта)\n\n' +
+          'на основании договора №ДПТУ-01/23-СР от 10.04.2023 г. с ООО "Октябрь Апарм"',
+        { docTypeCode: 'aosr', typeConfident: true },
+      ),
+    );
+
+    // У акта даты выдачи нет вовсе: его дата — `act_date`.
+    expect(valueOf(fields, 'issued_at')).toBeUndefined();
+    expect(valueOf(fields, 'act_date')).toMatchObject({ valueDate: '2024-11-21' });
+  });
+
+  it('срок действия сертификата из п. 3 не становится сроком действия акта', () => {
+    const fields = extractFields(
+      input(
+        'АКТ\nосвидетельствования скрытых работ\n№ 01-Бл/П\n' +
+          '3. При выполнении работ применены:\n' +
+          'Сертификат соответствия №RU.MCC.234.435.37815 (с 01.08.2023г. по 01.08.2026г.).',
+        { docTypeCode: 'aosr', typeConfident: true },
+      ),
+    );
+
+    expect(valueOf(fields, 'valid_to')).toBeUndefined();
+    expect(valueOf(fields, 'valid_from')).toBeUndefined();
+  });
+
+  it('дата сертификата, названного в паспорте качества, не становится датой паспорта', () => {
+    const fields = extractFields(
+      input(
+        'Паспорт качества №0297\nна песок для строительных работ\n\n' +
+          '«26» сентября 2024 г.\n\n' +
+          'Соответствует требованиям ГОСТ 8736-2014, ' +
+          'Сертификат соответствия №RU.MCC.234.435.37815 от 01.08.2023',
+        { docTypeCode: 'quality_passport', typeConfident: true },
+      ),
+    );
+
+    expect(valueOf(fields, 'issued_at')).toMatchObject({ valueDate: '2024-09-26' });
+  });
+
+  it('дата отраслевого соглашения не становится датой сертификата', () => {
+    const fields = extractFields(
+      input(
+        'СЕРТИФИКАТ СООТВЕТСТВИЯ\n№ RU.MCC.234.435.37815\n\n' +
+          'Уполномочена Межотраслевой комиссией в рамках отраслевого трехстороннего ' +
+          'Соглашения г. Москвы от 28.12.2021 № 62 в качестве базовой организации\n\n' +
+          'Срок действия с 01 августа 2023 г. по 01 августа 2026 г.',
+        { docTypeCode: 'cert_conformity', typeConfident: true },
+      ),
+    );
+
+    expect(valueOf(fields, 'issued_at')).toMatchObject({ valueDate: '2023-08-01' });
+    expect(valueOf(fields, 'valid_to')).toMatchObject({ valueDate: '2026-08-01' });
+  });
+
+  it('дата поверки прибора из примечания схемы не становится датой схемы', () => {
+    const fields = extractFields(
+      input(
+        'ПРИМЕЧАНИЕ:\n5. Съемка выполнена тахеометром Leica TS06 №1383653.\n' +
+          'Свидетельство о поверке\n№С-ДЭМ/16-11-2023/294950039 от 16.11.2023.',
+        { docTypeCode: 'exec_scheme', typeConfident: false },
+      ),
+    );
+
+    expect(valueOf(fields, 'issued_at')).toBeUndefined();
+  });
+
+  it('собственная дата документа при его заголовке остаётся', () => {
+    // Отрицательный контроль: предохранитель обязан снимать чужую дату, а не
+    // всякую дату при слове «протокол».
+    const fields = extractFields(
+      input(
+        'Протокол от 04.10.2024\nопределения коэффициента уплотнения обратной засыпки\n№ 2410-04/10',
+        { docTypeCode: 'lab_protocol_generic', typeConfident: true },
+      ),
+    );
+
+    expect(valueOf(fields, 'issued_at')).toMatchObject({ valueDate: '2024-10-04' });
+  });
+});
+
+describe('дата выдачи не берётся у другого реквизита того же документа', () => {
+  const VERIFICATION =
+    'ООО "ПРОММАШ ТЕСТ МЕТРОЛОГИЯ"\n\nСВИДЕТЕЛЬСТВО О ПОВЕРКЕ\n' +
+    '№ С-ДЮП/17-04-2024/333174456\n\nДействительно до\n16.04.2025 г.\n\n' +
+    'Средство измерений: Весы электронные лабораторные DX-300-WP\n\n' +
+    'Дата поверки 17.04.2024 г.';
+
+  it('свидетельство о поверке датируется поверкой, а не окончанием срока', () => {
+    const fields = extractFields(
+      input(VERIFICATION, { docTypeCode: 'metrology_verification', typeConfident: true }),
+    );
+
+    expect(valueOf(fields, 'issued_at')).toMatchObject({ valueDate: '2024-04-17' });
+    expect(valueOf(fields, 'valid_to')).toMatchObject({ valueDate: '2025-04-16' });
+  });
+
+  it('без подписи «дата поверки» срок окончания не выдаётся за дату выдачи', () => {
+    // Слабая находка, совпавшая спаном с `valid_to`, снимается: один и тот же
+    // участок текста не может быть двумя реквизитами сразу.
+    const fields = extractFields(
+      input(
+        'СВИДЕТЕЛЬСТВО О ПОВЕРКЕ\n№ С-ДЮП/17-04-2024/333174456\n\nДействительно до\n16.04.2025 г.',
+        {
+          docTypeCode: 'metrology_verification',
+          typeConfident: true,
+        },
+      ),
+    );
+
+    expect(valueOf(fields, 'issued_at')).toBeUndefined();
+    expect(valueOf(fields, 'valid_to')).toMatchObject({ valueDate: '2025-04-16' });
+  });
+
+  it('дата изготовления не выдаётся за дату выдачи сертификата', () => {
+    const fields = extractFields(
+      input(
+        'ОАО "Могилевхимволокно"\n\n8 августа 2023 г.\n\nСЕРТИФИКАТ № 275\n\n' +
+          'Дата изготовления 07.09.2023',
+        { docTypeCode: 'unknown_document', typeConfident: false },
+      ),
+    );
+
+    expect(valueOf(fields, 'issued_at')).toMatchObject({ valueDate: '2023-08-08' });
+    expect(valueOf(fields, 'manufactured_at')).toMatchObject({ valueDate: '2023-09-07' });
+  });
+
+  it('лист, отданный графикой, называет себя в пересказе Summary', () => {
+    const fields = extractFields(
+      input(
+        '**[IMAGE]** | Type: Таблица\n\n' +
+          '**Summary:** Сертификат № 275 от 8 августа 2023 г. на полотно полиэфирное ' +
+          'геотекстильное ЛавсанГео-250 с таблицей норм и фактических показателей.',
+        { docTypeCode: 'unknown_document', typeConfident: false },
+      ),
+    );
+
+    expect(valueOf(fields, 'number')).toMatchObject({ valueText: '275' });
+    expect(valueOf(fields, 'issued_at')).toMatchObject({ valueDate: '2023-08-08' });
+  });
+});
+
+describe('ярлык собственного номера переживает разметку', () => {
+  it('«**Номер сертификата №240545**» даёт номер документа, а не первый «№» листа', () => {
+    // S40. Сертификат калибровки комплекта `№01_Бл_П` печатает в шапке бланка
+    // свидетельство о регистрации ЛАБОРАТОРИИ, и его номер стоит на листе
+    // первым. Пока ярлык требовал перед собой только пробелов, ступень на
+    // выделенном полужирным поле не срабатывала, номер доставался чужой, и
+    // строка реестра «Сертификат калибровки … № 240545» документа не находила.
+    const fields = extractFields(
+      input(
+        'ООО «ИМЦ АЛЬФА МЕТРОЛОГИЧЕСКАЯ ЛАБОРАТОРИЯ»\nСвидетельство о регистрации\n' +
+          '№ СНИЛЛ/КЛ-0001-21\n\n## СЕРТИФИКАТ КАЛИБРОВКИ\n\n' +
+          '**Номер сертификата №240545**\n\nДата калибровки: 15.04.2024 г.',
+        { docTypeCode: 'metrology_calibration', typeConfident: true },
+      ),
+    );
+
+    expect(valueOf(fields, 'number')).toMatchObject({ valueText: '240545' });
+  });
+});

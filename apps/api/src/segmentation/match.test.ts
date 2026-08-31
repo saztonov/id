@@ -7,7 +7,12 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { documentNumbersOf, matchRegistryRows, type MatchableDocument } from './match.js';
+import {
+  documentNumbersOf,
+  documentsNamedInActItem3,
+  matchRegistryRows,
+  type MatchableDocument,
+} from './match.js';
 import type { ParsedRegistryRow } from './types.js';
 import { normalizeDocNo } from '@id/contracts';
 
@@ -466,5 +471,153 @@ describe('претенденты неоднозначной строки', () =>
     const result = matchRegistryRows([row(1, '№ 16005')], [doc('d1', '16005')]);
 
     expect(result.rows[0]).toMatchObject({ matchState: 'matched', candidates: [] });
+  });
+});
+
+/**
+ * S40: числовое ядро номера.
+ *
+ * Номера взяты с комплекта `№01_Бл_П` дословно: реестр называет свидетельства о
+ * поверке `С-ДЮОП/…`, сами листы — `С-ДЮП/…` и `С-ДКП/…`. Расхождение внесло
+ * распознавание, и до этой ступени портал заявлял «нет в комплекте» про лист,
+ * лежащий в комплекте.
+ */
+describe('ступень числового ядра', () => {
+  const SCALES = 'С-ДЮП/17-04-2024/333174456';
+  const PRESS = 'С-ДКП/17-04-2024/333174457';
+
+  it('лишняя буква в приставке не мешает найти документ по цифровой серии', () => {
+    const result = matchRegistryRows(
+      [row(1, '№С-ДЮОП/17-04-2024/333174456', 'Свидетельство о поверке Весы')],
+      [doc('d1', SCALES), doc('d2', PRESS)],
+    );
+
+    expect(result.rows[0]).toMatchObject({
+      matchState: 'matched',
+      matchedDocumentId: 'd1',
+      matchScore: 0.7,
+    });
+  });
+
+  it('соседний номер той же серии достаётся своей строке, а не первой', () => {
+    // Обе строки реестра расходятся с листами одинаково, и различает их только
+    // последняя цифра девятизначного хвоста.
+    const result = matchRegistryRows(
+      [
+        row(1, '№С-ДЮОП/17-04-2024/333174456', 'Свидетельство о поверке Весы'),
+        row(2, '№ С-ДЮОП/17-04-2024/333174457', 'Свидетельство о поверке Машины'),
+      ],
+      [doc('d1', SCALES), doc('d2', PRESS)],
+    );
+
+    expect(result.rows.map((decision) => decision.matchedDocumentId)).toEqual(['d1', 'd2']);
+  });
+
+  it('счёт ниже фолдинга: совпал не номер, а его ядро', () => {
+    const core = matchRegistryRows([row(1, '№С-ДЮОП/17-04-2024/333174456')], [doc('d1', SCALES)])
+      .rows[0]?.matchScore;
+
+    expect(core).toBeLessThan(0.85);
+  });
+
+  it('короткая серия ядром не считается', () => {
+    // «2024» — год, а не различающая серия: совпадение по нему означало бы «у
+    // обоих документов есть цифры».
+    const result = matchRegistryRows([row(1, '№ АБВ/2024')], [doc('d1', 'ГДЕ/2024')]);
+
+    expect(result.rows[0]?.matchState).toBe('missing');
+  });
+
+  it('одно ядро у двух документов даёт ambiguous, а не выбор наугад', () => {
+    const result = matchRegistryRows(
+      [row(1, '№ А/333174456')],
+      [doc('d1', 'Б/333174456'), doc('d2', 'В/333174456')],
+    );
+
+    expect(result.rows[0]?.matchState).toBe('ambiguous');
+  });
+});
+
+/**
+ * S40: кандидат одной строки не занимает документ у следующей.
+ *
+ * Строки 8 и 9 реестра комплекта `№01_Бл_П` описывают две исполнительные схемы
+ * и отличаются одной цифрой в номере, которого нет ни на одном из листов.
+ * Строка 8 забирала в кандидаты обе схемы, строке 9 не оставалось ничего — и
+ * она получала ошибку «нет в комплекте».
+ */
+describe('кандидаты двух одинаковых строк', () => {
+  const scheme = (id: string): MatchableDocument =>
+    doc(id, '02-200223-ГПЗ.1', 'Исполнительная схема', { docTypeCode: 'exec_scheme' });
+
+  it('обе строки получают кандидатов, а не первая — всех', () => {
+    const result = matchRegistryRows(
+      [
+        row(1, 'ИС №001', 'Исполнительная схема обратной засыпки'),
+        row(2, 'ИС №002', 'Исполнительная схема обратной засыпки'),
+      ],
+      [scheme('d1'), scheme('d2')],
+    );
+
+    expect(result.rows.map((decision) => decision.matchState)).toEqual(['candidate', 'candidate']);
+    expect(result.rows[1]?.candidates).toHaveLength(2);
+  });
+
+  it('ни одна схема не объявляется лишним документом', () => {
+    const result = matchRegistryRows(
+      [
+        row(1, 'ИС №001', 'Исполнительная схема обратной засыпки'),
+        row(2, 'ИС №002', 'Исполнительная схема обратной засыпки'),
+      ],
+      [scheme('d1'), scheme('d2')],
+    );
+
+    expect(result.extraDocumentIds).toEqual([]);
+  });
+});
+
+/**
+ * S40: документы, названные в п. 3 акта.
+ *
+ * Текст пункта взят с акта комплекта `№01_Бл_П` дословно — вместе с тем, как
+ * распознавание записало номер сертификата на геотекстиль.
+ */
+describe('documentsNamedInActItem3', () => {
+  const ITEM3 =
+    '1.Песок для строительных работ (Паспорт №0297 от 26.09.2024г., Сертификат ' +
+    'соответствия №RU.MCC.234.435.37815 (с 01.08.2023г. по 01.08.2026г.). ' +
+    '2.Полотно полиэфирное геотекстильное (Сертификат №275 от 08.08.2024г., ' +
+    'Сертификат соответствия № РОСС RU BY.HE06.H22245 (с 22.04.2024г. по 21.04.2027г.).';
+
+  it('находит паспорт, сертификат качества и сертификат соответствия', () => {
+    const named = documentsNamedInActItem3(ITEM3, [
+      doc('passport', '0297', 'Паспорт качества'),
+      doc('cert-sand', 'RU.MCC.234.435.37815', 'СЕРТИФИКАТ СООТВЕТСТВИЯ'),
+      doc('cert-275', '275', 'СЕРТИФИКАТ'),
+    ]);
+
+    expect([...named].sort()).toEqual(['cert-275', 'cert-sand', 'passport']);
+  });
+
+  it('документ, не названный пунктом, ребра не получает', () => {
+    const named = documentsNamedInActItem3(ITEM3, [doc('other', 'С-ЕВЧ/17-04-2024/333067628')]);
+
+    expect(named).toEqual([]);
+  });
+
+  it('ссылка, подошедшая двум документам, не называет ни одного', () => {
+    const named = documentsNamedInActItem3(ITEM3, [doc('a', '0297'), doc('b', '0297')]);
+
+    expect(named).toEqual([]);
+  });
+
+  it('номер короче трёх знаков ссылкой не считается', () => {
+    // «№ 62» из «Соглашения г. Москвы от 28.12.2021 № 62» — не номер документа
+    // комплекта, и сопоставление по нему нашло бы случайный лист.
+    const named = documentsNamedInActItem3('Соглашение г. Москвы от 28.12.2021 № 62', [
+      doc('d1', '62'),
+    ]);
+
+    expect(named).toEqual([]);
   });
 });

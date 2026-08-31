@@ -8,6 +8,7 @@
  * расхождении харнес измеряет не прод. Ссылки на строки оригинала — в
  * комментариях по месту.
  */
+import { documentNumbersOf, documentsNamedInActItem3, type MatchableDocument } from '@id/api';
 import type { DocumentNode, RegistryRowNode, RelationNode } from '@id/rules';
 
 /** Зеркало констант graph.build (segmentation.ts:1034-1037). */
@@ -15,7 +16,9 @@ const PROTOCOL_TYPES = /^lab_protocol_|^sampling_act$|^protocol_/u;
 const QUALITY_TYPES =
   /^cert_conformity$|^declaration$|^quality_passport$|^technical_passport$|^mill_certificate$|^mix_quality_doc$|^fire_certificate$|^refusal_letter$|^equipment_passport$|^ttn$|^other_quality_docs$/u;
 const PRIMARY_TYPES = /^aosr/u;
+const DRAWING_TYPES = /^exec_|^other_exec_schemes$/u;
 const REGISTRY_TYPE = 'annex_registry';
+const ACT_ITEM3_FIELD = 'p3_materials';
 
 export function deriveOfflineRelations(
   documents: readonly DocumentNode[],
@@ -64,9 +67,54 @@ export function deriveOfflineRelations(
     add(parent, child.id, relation);
   }
 
-  // Дубли: одинаковый вид и номер (segmentation.ts:1120-1138).
+  // Акт → документ, названный в п. 3 самого акта (segmentation.ts, ветка
+  // `documentsNamedInActItem3`).
+  //
+  // Офлайн эта ветка почти всегда молчит, и это не дефект зеркала: `p3_materials`
+  // объявлен в каталоге `extractor: 'llm'`, а LLM-фазы в харнесе нет по
+  // построению. Ветка воспроизведена целиком, чтобы расхождение с продом не
+  // возникло в день, когда реквизит начнёт приходить и сюда.
+  for (const act of ordered) {
+    const code = act.docTypeCode;
+    if (code === null || !PRIMARY_TYPES.test(code)) continue;
+
+    const item3 = act.fields.find((field) => field.fieldCode === ACT_ITEM3_FIELD);
+    const text = Array.isArray(item3?.valueJson)
+      ? item3.valueJson.filter((item): item is string => typeof item === 'string').join('\n')
+      : (item3?.valueText ?? '');
+    if (text === '') continue;
+
+    const matchable: readonly MatchableDocument[] = ordered
+      .filter((candidate) => candidate.id !== act.id && candidate.docTypeCode !== REGISTRY_TYPE)
+      .map((candidate) => ({
+        documentId: candidate.id,
+        docTypeCode: candidate.docTypeCode,
+        numbers: documentNumbersOf(candidate.fields),
+        issuedAt: null,
+        title: candidate.title,
+      }));
+
+    for (const documentId of documentsNamedInActItem3(text, matchable)) {
+      const child = byId.get(documentId);
+      if (child === undefined) continue;
+      const childCode = child.docTypeCode ?? '';
+      add(
+        act.id,
+        child.id,
+        PROTOCOL_TYPES.test(childCode)
+          ? 'protocol'
+          : QUALITY_TYPES.test(childCode)
+            ? 'quality_doc'
+            : 'annex',
+      );
+    }
+  }
+
+  // Дубли: одинаковый вид и номер, чертежи исключены (segmentation.ts, ветка
+  // `DRAWING_TYPES`).
   const numbers = new Map<string, string[]>();
   for (const document of ordered) {
+    if (DRAWING_TYPES.test(document.docTypeCode ?? '-')) continue;
     const number = document.fields.find((field) => field.fieldCode === 'number')?.valueText ?? null;
     if (number === null || number.trim() === '') continue;
     const key = `${document.docTypeCode ?? '-'}|${number.trim().toUpperCase()}`;

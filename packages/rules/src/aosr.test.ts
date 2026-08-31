@@ -868,6 +868,59 @@ describe('REG.100 / REG.101 / REG.102 — сверка с реестром пр�
     expect(verdictOf('REG.101', graph)).toBe('pass');
   });
 
+  it('REG.101: документ, названный в п. 3 акта, лишним не объявляется', () => {
+    // S40. Бланк пишет «Приложения: в соответствии с п. 3, 4»: приложениями
+    // объявлены и перечень документов о качестве из п. 3, и реестр из п. 4.
+    // Пока «названным» считался только реестр, комплект `№01_Бл_П` получал
+    // четыре обвинения подряд — сертификат № 275, паспорт качества и два
+    // сертификата соответствия перечислены в п. 3 и не продублированы в
+    // реестре. Ребро графа строит `graph.build` по номеру, прочитанному в
+    // самом акте, — свидетельство того же уровня, что и строка реестра.
+    const act = makeDocument({ docTypeCode: 'aosr', title: 'АКТ' });
+    const passport = makeDocument({ docTypeCode: 'quality_passport', title: 'Паспорт качества' });
+    const graph = makeGraph({
+      documents: [act, registry, quality, passport],
+      relations: [
+        { parentDocumentId: act.id, childDocumentId: passport.id, relation: 'quality_doc' },
+      ],
+      registryRows: [
+        makeRegistryRow({
+          registryDocumentId: registry.id,
+          rowNo: 3,
+          docNameRaw: 'Документ о качестве',
+          docNoRaw: '16005',
+          matchState: 'matched',
+          matchedDocumentId: quality.id,
+        }),
+      ],
+    });
+
+    expect(verdictOf('REG.101', graph)).toBe('pass');
+  });
+
+  it('REG.101: документ без ребра к акту по-прежнему объявляется лишним', () => {
+    // Отрицательный контроль: молчать обязано ровно наличие ребра, а не
+    // присутствие акта в комплекте.
+    const act = makeDocument({ docTypeCode: 'aosr', title: 'АКТ' });
+    const orphan = makeDocument({ docTypeCode: 'declaration', title: 'Декларация о соответствии' });
+    const graph = makeGraph({
+      documents: [act, registry, quality, orphan],
+      registryRows: [
+        makeRegistryRow({
+          registryDocumentId: registry.id,
+          rowNo: 3,
+          docNameRaw: 'Документ о качестве',
+          docNoRaw: '16005',
+          matchState: 'matched',
+          matchedDocumentId: quality.id,
+        }),
+      ],
+    });
+
+    expect(verdictOf('REG.101', graph)).toBe('fail');
+    expect(messagesOf('REG.101', graph)[0]).toContain('Декларация о соответствии');
+  });
+
   it('REG.101: претендент неоднозначной строки лишним не объявляется', () => {
     // Два паспорта под одним номером: сверка не может выбрать, но реестром
     // упомянуты оба. Обвинять их «не назван ни одной строкой» значит

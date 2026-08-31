@@ -509,6 +509,7 @@ export type {
 export {
   DOCUMENT_NUMBER_FIELD_CODES,
   documentNumbersOf,
+  documentsNamedInActItem3,
   matchRegistryRows,
 } from './segmentation/match.js';
 export type {

@@ -120,6 +120,9 @@ export function datesLabel(row: ReportRow): string | null {
   if (dates === null) return null;
 
   const parts: string[] = [];
+  // Акт не выдают — его составляют, и фраза о нём своя. До S40 колонка печатала
+  // «выдан …» и «до …» по датам, взятым у документов, названных внутри акта.
+  if (dates.composedAt !== null) parts.push(`акт от ${formatDate(dates.composedAt)}`);
   if (dates.issuedAt !== null) parts.push(`выдан ${formatDate(dates.issuedAt)}`);
   if (dates.validFrom !== null && dates.validTo !== null) {
     parts.push(`действует ${formatDate(dates.validFrom)} — ${formatDate(dates.validTo)}`);

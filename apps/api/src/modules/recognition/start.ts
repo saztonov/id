@@ -149,6 +149,17 @@ export async function startRecognition(
      * оплачивается только то, что осталось непокрытым.
      */
     readonly repairOfRunId?: string | null | undefined;
+    /**
+     * Листы, которые прогон обязан перечитать заново (S40).
+     *
+     * Пустой массив и `undefined` — разные заказы, и различие видно в снимке:
+     * пустой массив означает «перечитывать нечего», отсутствие — «ограничения
+     * не ставилось». Значение идёт в `settings_snapshot`, а не в payload задачи,
+     * потому что оно описывает СОДЕРЖАНИЕ прогона: по снимку прогон потом
+     * доказывает, что именно он делал, и повтор задачи обязан прочитать тот же
+     * заказ, а не собрать его заново по изменившимся с тех пор замечаниям.
+     */
+    readonly retryPages?: readonly number[] | undefined;
   },
 ): Promise<StartRecognitionResult> {
   /**
@@ -174,6 +185,7 @@ export async function startRecognition(
       // Промпты, растеризатор и crop policy дополняет vlm.start_recognition:
       // они известны воркеру, а не роуту.
       dryRun,
+      ...(input.retryPages === undefined ? {} : { recheck: { pages: [...input.retryPages] } }),
     };
     firstJobType = 'vlm.start_recognition';
   } else {

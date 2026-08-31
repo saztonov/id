@@ -56,6 +56,7 @@ import {
   matchCounterparty,
   matrixFor,
   normalizeOrgName,
+  parentsOf,
   standardWithoutYear,
   standardYear,
   textOf,
@@ -1398,6 +1399,22 @@ function evaluateRegistryExtra(graph: CheckGraph): RuleResult {
   const findings: RuleFinding[] = [];
   for (const document of graph.documents) {
     if (named.has(document.id) || registryDocuments.has(document.id)) continue;
+    // Реестр приложений — не единственный законный способ назвать приложение.
+    // Бланк РД-11-02 пишет «Приложения: в соответствии с п. 3, 4»: приложениями
+    // объявлены И перечень документов о качестве из п. 3, И реестр из п. 4.
+    // Документ, связанный с актом ребром графа, реестром может быть и не
+    // назван — граф строит такое ребро только по номеру, прочитанному в самом
+    // акте (`graph.build`), то есть по свидетельству того же уровня, что и
+    // строка реестра. На комплекте `№01_Бл_П` без этой ветки правило обвиняло
+    // комплект четырежды: сертификат № 275, паспорт качества и два сертификата
+    // соответствия перечислены в п. 3 акта и не продублированы в реестре.
+    if (
+      parentsOf(graph, document.id).some(
+        (parent) => parent.docTypeCode !== null && ACT_TYPES.test(parent.docTypeCode),
+      )
+    ) {
+      continue;
+    }
     const code = document.docTypeCode;
     // Сам акт и реестр в реестре не перечисляются.
     if (code !== null && (ACT_TYPES.test(code) || code === REGISTRY_TYPE)) continue;

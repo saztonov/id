@@ -601,7 +601,13 @@ export interface ReportRow {
   page: { number: number; workingPageIndex: number | null } | null;
   /** Диапазон страниц документа для печати: «1–3» либо «8». */
   pages: string | null;
-  dates: { issuedAt: string | null; validFrom: string | null; validTo: string | null } | null;
+  dates: {
+    issuedAt: string | null;
+    validFrom: string | null;
+    validTo: string | null;
+    /** Дата составления акта: его никто не выдаёт (S40). */
+    composedAt: string | null;
+  } | null;
   status: ReportRowStatus;
   statusText: string;
   /** Способ устранения рядом со строкой, а не в раскрытии (ADR-0016). */

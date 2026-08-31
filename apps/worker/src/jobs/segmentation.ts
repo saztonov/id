@@ -54,6 +54,7 @@ import {
   classifyPageWithLlm,
   decodeSegmentation,
   documentNumbersOf,
+  documentsNamedInActItem3,
   extractFields,
   extractFieldsWithLlm,
   llmFieldsFor,
@@ -1481,6 +1482,35 @@ const QUALITY_TYPES =
 const PRIMARY_TYPES = /^aosr/u;
 
 /**
+ * Чертежи: исполнительные схемы, генплан, схемы сетей и свай.
+ *
+ * Выделены ради одного вопроса — «свой ли это номер»: у чертежа собственного
+ * номера на листе нет, и извлечённый берётся из штампа, где стоит шифр рабочей
+ * документации, общий на весь файл.
+ */
+const DRAWING_TYPES = /^exec_|^other_exec_schemes$/u;
+
+/** Реквизит акта, в котором перечислены применённые материалы и их документы. */
+const ACT_ITEM3_FIELD = 'p3_materials';
+
+/**
+ * Текст п. 3 акта одной строкой.
+ *
+ * Реквизит объявлен списком: LLM-стадия отдаёт позиции перечня массивом в
+ * `valueJson`, а `valueText` хранит их же склейкой. Читаются оба, потому что
+ * форма зависит от того, чем реквизит заполнен, а вопрос к нему один — какие
+ * номера документов в нём названы.
+ */
+function actItem3Text(field: FieldValueView | undefined): string {
+  if (field === undefined) return '';
+  const json = field.valueJson;
+  if (Array.isArray(json)) {
+    return json.filter((item): item is string => typeof item === 'string').join('\n');
+  }
+  return field.valueText ?? '';
+}
+
+/**
  * Граф проверки: кто чьё приложение (§9.1).
  *
  * Связи выводятся из ФАКТОВ, установленных предыдущими задачами, и ниоткуда
@@ -1561,15 +1591,73 @@ export function createGraphBuildHandler(deps: SegmentationDeps): JobHandler<'gra
       add(parent, child.id, relation);
     }
 
+    const fieldsByDocument = new Map<string, readonly FieldValueView[]>();
+    for (const document of documents) {
+      fieldsByDocument.set(document.id, await deps.listFieldValues(document.id));
+    }
+
+    // Акт → документ, названный в п. 3 самого акта.
+    //
+    // Второй законный способ назвать приложение: бланк пишет «Приложения: в
+    // соответствии с п. 3, 4», то есть приложениями объявлены и перечень
+    // документов о качестве из п. 3, и реестр из п. 4. Ребро строится по тому же
+    // номеру и той же лестницей (`documentsNamedInActItem3`), что и по реестру, —
+    // разница только в том, где напечатана ссылка.
+    for (const act of documents) {
+      const code = act.docTypeCode;
+      if (code === null || !PRIMARY_TYPES.test(code)) continue;
+
+      const item3 = (fieldsByDocument.get(act.id) ?? []).find(
+        (field) => field.fieldCode === ACT_ITEM3_FIELD,
+      );
+      const text = actItem3Text(item3);
+      if (text === '') continue;
+
+      const matchable: readonly MatchableDocument[] = documents
+        .filter((candidate) => candidate.id !== act.id && candidate.docTypeCode !== REGISTRY_TYPE)
+        .map((candidate) => ({
+          documentId: candidate.id,
+          docTypeCode: candidate.docTypeCode,
+          numbers: documentNumbersOf(fieldsByDocument.get(candidate.id) ?? []),
+          issuedAt: null,
+          title: candidate.title,
+        }));
+
+      for (const documentId of documentsNamedInActItem3(text, matchable)) {
+        const child = byId.get(documentId);
+        if (child === undefined) continue;
+        const childCode = child.docTypeCode ?? '';
+        add(
+          act.id,
+          child.id,
+          PROTOCOL_TYPES.test(childCode)
+            ? 'protocol'
+            : QUALITY_TYPES.test(childCode)
+              ? 'quality_doc'
+              : 'annex',
+        );
+      }
+    }
+
     // Дубли: одинаковый вид и одинаковый номер. Правило по контексту, а не
     // ограничение БД (§9.3, `XS`) — один и тот же лист законно встречается в
     // разных поставках, но не дважды в одной.
+    //
+    // Чертёж в сравнение не входит: собственного номера у него на листе нет, и
+    // тот, что извлечён, взят из штампа — а в штамп печатается шифр рабочей
+    // документации, один на весь файл. Две исполнительные схемы комплекта
+    // `№01_Бл_П` получили из штампа один и тот же «02-200223-ГПЗ.1» и были
+    // объявлены дублем друг друга, хотя сняты с разных осей и разных отметок.
+    // Совпадение шифра здесь означает «оба листа из одного комплекта РД», а не
+    // «это один и тот же лист дважды».
     const numbers = new Map<string, string[]>();
     for (const document of documents) {
-      const fields = await deps.listFieldValues(document.id);
+      const code = document.docTypeCode ?? '-';
+      if (DRAWING_TYPES.test(code)) continue;
+      const fields = fieldsByDocument.get(document.id) ?? [];
       const number = fields.find((field) => field.fieldCode === 'number')?.valueText ?? null;
       if (number === null || number.trim() === '') continue;
-      const key = `${document.docTypeCode ?? '-'}|${number.trim().toUpperCase()}`;
+      const key = `${code}|${number.trim().toUpperCase()}`;
       const list = numbers.get(key) ?? [];
       list.push(document.id);
       numbers.set(key, list);

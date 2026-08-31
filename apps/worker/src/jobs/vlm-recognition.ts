@@ -977,6 +977,22 @@ interface RepairConditions {
   readonly rasterizer: string;
 }
 
+/**
+ * Листы из заказа `settings_snapshot.recheck.pages`; пустое множество — заказа нет.
+ *
+ * Форма читается защитно: снимок объявлен как `unknown`, версий у него две, и
+ * прогон, начатый прежним кодом, поля не содержит вовсе. Отсутствие означает
+ * «ограничения не ставилось», а не «перечитать нечего», — и это разные исходы:
+ * первый переносит всё совместимое, второй не переносит ничего.
+ */
+function recheckPagesOf(snapshot: Record<string, unknown>): ReadonlySet<number> {
+  const recheck = snapshot['recheck'];
+  if (typeof recheck !== 'object' || recheck === null) return new Set();
+  const pages = (recheck as Record<string, unknown>)['pages'];
+  if (!Array.isArray(pages)) return new Set();
+  return new Set(pages.filter((page): page is number => typeof page === 'number'));
+}
+
 /** `kind/version@dpi` из снимка; пустая строка — снимок про растеризатор молчит. */
 function rasterizerSignatureOf(snapshot: Record<string, unknown>): string {
   const value = snapshot['rasterizer'];
@@ -1052,12 +1068,25 @@ async function reuseParentResults(
       (page) => [page.workingPageIndex, page.contentRotation] as const,
     ),
   );
+  /**
+   * Листы, которые заказано перечитать заново (S40, «Распознать только ошибки»).
+   *
+   * Заказ лежит в снимке ЭТОГО прогона, а не в payload задачи: снимок — то, чем
+   * прогон доказывает, что он делал, и повтор задачи обязан прочитать тот же
+   * заказ, а не собрать его заново по замечаниям, изменившимся с тех пор.
+   *
+   * Пустое множество — обычное восстановление: переносится всё совместимое.
+   */
+  const retryPages = recheckPagesOf(snapshotOf(run));
   const envelopes = await deps.listBlockEnvelopes(parentRunId);
   let reused = 0;
 
   for (const envelope of envelopes) {
     const block = blockById.get(envelope.layoutBlockId);
     if (block === undefined) continue;
+    // Лист заказан к перечитыванию: результат родителя по нему и есть то, что
+    // человек попросил заменить.
+    if (retryPages.has(block.workingPageIndex)) continue;
     const parsed = parseBlockEnvelope(envelope.contentJson);
     if (parsed === null) continue;
 
