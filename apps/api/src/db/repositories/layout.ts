@@ -43,9 +43,12 @@ import {
 } from '@id/db';
 import {
   attentionFlagSchema,
+  LEGACY_MARKUP_POLICY,
+  parseMarkupPolicy,
   type AttentionFlag,
   type BlockType,
   type DetectorProvenance,
+  type MarkupPolicy,
   type ShapeType,
 } from '@id/contracts';
 import type { AuthScope } from '../../auth/scope.js';
@@ -383,6 +386,15 @@ export interface LayoutRevisionView {
   readonly createdAt: string;
   /** Статус ревизии поставки: от него зависит, можно ли вообще править. */
   readonly submissionStatus: string;
+  /**
+   * Правило разметки, ЗАПИНЕННОЕ при создании черновика (S42).
+   *
+   * Читать настройку вместо этого поля нельзя нигде, кроме самого пина:
+   * детекция, анализ покрытия, заплатка и экран разметки спрашивают правило в
+   * разные моменты времени, и настройка, сменившаяся между ними, дала бы одну
+   * ревизию, размеченную двумя правилами.
+   */
+  readonly markupPolicy: MarkupPolicy;
 }
 
 const LAYOUT_SELECTION = {
@@ -412,7 +424,21 @@ const LAYOUT_SELECTION = {
       'created_at_iso',
     ),
   submissionStatus: submissionRevisions.status,
+  markupPolicy: layoutRevisions.markupPolicy,
 };
+
+type LayoutRow = { readonly markupPolicy: unknown } & Omit<LayoutRevisionView, 'markupPolicy'>;
+
+/**
+ * Строка в вид: разбор политики — единственное, что здесь происходит.
+ *
+ * `parseMarkupPolicy` возвращает прежнее поведение на непригодном значении, а
+ * не бросает: колонку пишут миграция и портал, но экран разметки не должен
+ * отвечать пятисоткой на строку, которую поправили руками в консоли БД.
+ */
+function toLayoutView(row: LayoutRow): LayoutRevisionView {
+  return { ...row, markupPolicy: parseMarkupPolicy(row.markupPolicy) };
+}
 
 export async function findLayoutRevision(
   db: Database,
@@ -425,7 +451,8 @@ export async function findLayoutRevision(
     .innerJoin(submissionRevisions, eq(layoutRevisions.revisionId, submissionRevisions.id))
     .where(withScope(scope, REVISION_SCOPE, eq(layoutRevisions.id, layoutRevisionId)))
     .limit(1);
-  return rows[0] ?? null;
+  const row = rows[0];
+  return row === undefined ? null : toLayoutView(row);
 }
 
 export async function listLayoutRevisions(
@@ -433,12 +460,13 @@ export async function listLayoutRevisions(
   scope: AuthScope,
   revisionId: string,
 ): Promise<readonly LayoutRevisionView[]> {
-  return db
+  const rows = await db
     .select(LAYOUT_SELECTION)
     .from(layoutRevisions)
     .innerJoin(submissionRevisions, eq(layoutRevisions.revisionId, submissionRevisions.id))
     .where(withScope(scope, REVISION_SCOPE, eq(layoutRevisions.revisionId, revisionId)))
     .orderBy(asc(layoutRevisions.revisionNo));
+  return rows.map(toLayoutView);
 }
 
 /** Единственный черновик разметки поставки (частичный UNIQUE, 0004). */
@@ -460,7 +488,8 @@ export async function findDraftLayout(
       ),
     )
     .limit(1);
-  return rows[0] ?? null;
+  const row = rows[0];
+  return row === undefined ? null : toLayoutView(row);
 }
 
 /**
@@ -524,6 +553,15 @@ export interface EnsureDraftLayoutInput {
   readonly bundleId: string;
   /** §5.3: `full_page` допустим только на однородных текстовых комплектах. */
   readonly detectorProfile?: 'rf_detr' | 'full_page';
+  /**
+   * Правило разметки, пиннящееся на НОВОМ черновике (S42).
+   *
+   * Необязательно: вызывающие, которым разметку надо просто найти, правило не
+   * читают, и черновик тогда получает прежнее поведение. Перепинить правило на
+   * уже существующем черновике этот вызов НЕ может — это делает `pinMarkupPolicy`
+   * по явному нажатию кнопки стадии.
+   */
+  readonly markupPolicy?: MarkupPolicy;
   /**
    * Строгий режим (`core.enforce_immutability`, ADR-0015). `false` — повторное
    * выделение блоков ПЕРЕЗАПИСЫВАЕТ единственную разметку вместо того, чтобы
@@ -627,6 +665,7 @@ export async function ensureDraftLayout(
         revisionNo: (maxRows[0]?.maxNo ?? 0) + 1,
         state: 'draft',
         detectorProfile: input.detectorProfile ?? 'rf_detr',
+        ...(input.markupPolicy === undefined ? {} : { markupPolicy: input.markupPolicy }),
         ...(profile !== null ? { layoutProfileId: profile.id } : {}),
       })
       .returning({ id: layoutRevisions.id });
@@ -643,6 +682,7 @@ export async function ensureDraftLayout(
         layoutRevisionId: row.id,
         bundleId: bundle.bundleId,
         layoutProfileVersion: profile?.version ?? null,
+        markupPolicy: input.markupPolicy ?? LEGACY_MARKUP_POLICY,
       },
     });
 
@@ -654,6 +694,58 @@ export async function ensureDraftLayout(
     throw internal({ logDetail: 'ревизия разметки не читается сразу после записи' });
   }
   return { layout, created: true };
+}
+
+/**
+ * Перепин правила разметки на существующем черновике (S42).
+ *
+ * Вызывается ТОЛЬКО из обработчика кнопки стадии («Выделить блоки»): нажатие —
+ * это решение человека разметить комплект заново, и вместе с ним правило
+ * законно берётся текущее. Всё остальное — постраничные задачи детекции, анализ
+ * покрытия, заплатка, экран — читает пин и переключения не видит, иначе смена
+ * настройки посреди веера дала бы одну ревизию, размеченную двумя правилами.
+ *
+ * `version` не бампится: ETag ревизии сторожит НАБОР БЛОКОВ, а правило блоков
+ * не меняет. Бамп здесь означал бы 412 у всех, кто держит экран разметки
+ * открытым, — без единой правки в том, что на экране нарисовано.
+ *
+ * Событие пишется только при фактической смене: запись «правило прежнее» на
+ * каждое нажатие кнопки утопила бы ленту ревизии в шуме.
+ */
+export async function pinMarkupPolicy(
+  db: Database,
+  scope: AuthScope,
+  input: {
+    readonly layoutRevisionId: string;
+    readonly policy: MarkupPolicy;
+  },
+): Promise<{ readonly changed: boolean }> {
+  const layout = await findLayoutRevision(db, scope, input.layoutRevisionId);
+  if (layout === null) throw notFound('Ревизия разметки не найдена.');
+
+  const before = layout.markupPolicy;
+  const same =
+    before.version === input.policy.version &&
+    before.sheetStrategy === input.policy.sheetStrategy &&
+    before.numberZone === input.policy.numberZone &&
+    before.numberZonePad.x === input.policy.numberZonePad.x &&
+    before.numberZonePad.y === input.policy.numberZonePad.y;
+  if (same) return { changed: false };
+
+  await db.transaction(async (tx) => {
+    await tx
+      .update(layoutRevisions)
+      .set({ markupPolicy: input.policy, updatedAt: sql`now()` })
+      .where(eq(layoutRevisions.id, layout.id));
+
+    await appendRevisionEvent(tx, {
+      revisionId: layout.revisionId,
+      eventType: 'layout.policy_pinned',
+      payload: { layoutRevisionId: layout.id, from: before, to: input.policy },
+    });
+  });
+
+  return { changed: true };
 }
 
 // =====================================================================
@@ -804,6 +896,7 @@ export async function findLayoutBlock(
       detectorProfile: row.detectorProfile,
       layoutProfileId: row.layoutProfileId,
       firstManualEditAt: row.firstManualEditAt,
+      markupPolicy: parseMarkupPolicy(row.markupPolicy),
       frozenAt: row.frozenAt,
       frozenBy: row.frozenBy,
       createdAt: row.createdAt,

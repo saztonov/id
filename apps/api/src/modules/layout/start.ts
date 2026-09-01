@@ -24,7 +24,7 @@ import type { AuthScope } from '../../auth/scope.js';
 import type { Database } from '../../db/repositories/users.js';
 import { listBundlePages } from '../../db/repositories/bundles.js';
 import { enqueueJob, reviveFailedJobs } from '../../db/repositories/jobs.js';
-import { ensureDraftLayout } from '../../db/repositories/layout.js';
+import { ensureDraftLayout, pinMarkupPolicy } from '../../db/repositories/layout.js';
 import { resetPipelineForRevision } from '../../db/repositories/purge.js';
 import {
   readDetectionSettings,
@@ -158,6 +158,17 @@ export async function startMarkupOnBundle(
   const enforceGates = await readImmutabilityEnforced(db);
 
   /**
+   * Настройки детекции читаются ДО создания черновика: правило разметки
+   * пиннится на ревизии, а пин — часть её создания (S42).
+   *
+   * Ветвление провайдера (ADR-0008) читается тем же вызовом и по прежней
+   * причине: локальный RF-DETR не создаёт RD-документ и не ходит в RD WEB
+   * вовсе. Идущие задачи смену настройки не видят — у них цель уже в payload,
+   * а правило — в пине ревизии.
+   */
+  const detection = await readDetectionSettings(db);
+
+  /**
    * Повторное нажатие поверх распознанного: сначала сброс.
    *
    * `block_results.layout_block_id` объявлен `ON DELETE RESTRICT`, поэтому
@@ -174,7 +185,37 @@ export async function startMarkupOnBundle(
     revisionId: input.revisionId,
     bundleId: input.bundleId,
     enforceGates,
+    markupPolicy: detection.markupPolicy,
   });
+
+  /**
+   * Правило разметки берётся текущее — но только здесь (S42).
+   *
+   * Нажатие кнопки стадии и есть решение человека разметить комплект заново, и
+   * вместе с этим решением ревизия законно получает сегодняшнее правило. Всё
+   * остальное — постраничные задачи детекции, анализ покрытия, заплатка
+   * покрытия и экран разметки — читает пин, а не настройку: иначе переключение
+   * посреди веера из двухсот задач дало бы ОДНУ ревизию, размеченную двумя
+   * правилами, и в базе не осталось бы ничего, чем это объяснить.
+   *
+   * `ensureDraftLayout` пиннит правило только на НОВОМ черновике; существующий
+   * (повторное нажатие, разморозка `superseded`) догоняется здесь.
+   */
+  const pinned = await pinMarkupPolicy(db, scope, {
+    layoutRevisionId: layout.id,
+    policy: detection.markupPolicy,
+  });
+  if (pinned.changed) {
+    input.logger.info(
+      {
+        event: 'layout_policy_pinned',
+        layout_revision_id: layout.id,
+        sheet_strategy: detection.markupPolicy.sheetStrategy,
+        number_zone: detection.markupPolicy.numberZone,
+      },
+      'правило разметки ревизии обновлено по нажатию кнопки стадии',
+    );
+  }
 
   /**
    * Мёртвые задачи этой разметки оживают ДО постановки (S41).
@@ -201,11 +242,6 @@ export async function startMarkupOnBundle(
       'мёртвые задачи разметки возвращены в очередь по нажатию кнопки стадии',
     );
   }
-
-  // Ветвление детекции (ADR-0008): локальный RF-DETR не создаёт RD-документ и
-  // не ходит в RD WEB вовсе. Настройка читается на постановке; идущие задачи её
-  // смену не видят — у них цель уже в payload.
-  const detection = await readDetectionSettings(db);
 
   if (detection.provider === 'local') {
     // Постановка пачек без выложенной модели давала бы страницу задач,

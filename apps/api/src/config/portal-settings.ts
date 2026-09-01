@@ -23,10 +23,14 @@
  * заметит экран настроек (он показывает сырое значение).
  */
 import type { InferenceParamOverrides } from '@id/detection';
+import { markupPolicyFromSettings } from '@id/contracts';
 import type {
   DetectionInferenceModeSetting,
   DetectionProviderSetting,
+  DetectionSheetStrategy,
   JsonValue,
+  LargeSheetNumberZone,
+  MarkupPolicy,
   RecognitionProviderSetting,
 } from '@id/contracts';
 import { readSettingValue } from '../db/repositories/admin.js';
@@ -136,6 +140,19 @@ export interface DetectionProviderSettings {
    * манифеста» — см. `applyParamOverrides` в `@id/detection`.
    */
   readonly overrides: InferenceParamOverrides;
+  /**
+   * Правило разметки по формату листа — то, что будет ЗАПИНЕНО на новой ревизии
+   * (S42).
+   *
+   * Отдаётся уже собранной политикой, а не двумя настройками по отдельности:
+   * собирать её у каждого вызывающего значило бы повторять и нормализацию по
+   * провайдеру (легаси-путь RD WEB правила форматов не знает), и пороги. Читать
+   * это поле имеет право только тот, кто СОЗДАЁТ разметку; все остальные —
+   * детекция, анализ покрытия, заплатка, экран — читают пин ревизии, иначе
+   * смена настройки посреди веера постраничных задач разъехалась бы по одной
+   * ревизии двумя правилами.
+   */
+  readonly markupPolicy: MarkupPolicy;
 }
 
 /** Число либо `null`: непригодное хранимое значение — то же, что «не задано». */
@@ -167,6 +184,8 @@ export async function readDetectionSettings(db: Database): Promise<DetectionProv
     nmsIou,
     mergeSplitText,
     maxDetections,
+    sheetStrategy,
+    numberZone,
   ] = await Promise.all([
     readEffectiveSetting(db, 'detection.provider'),
     readEffectiveSetting(db, 'detection.model_version'),
@@ -176,6 +195,8 @@ export async function readDetectionSettings(db: Database): Promise<DetectionProv
     readEffectiveSetting(db, 'detection.nms_iou'),
     readEffectiveSetting(db, 'detection.merge_split_text'),
     readEffectiveSetting(db, 'detection.max_detections'),
+    readEffectiveSetting(db, 'detection.sheet_strategy'),
+    readEffectiveSetting(db, 'detection.large_sheet_number_zone'),
   ]);
   return {
     provider: provider as DetectionProviderSetting,
@@ -188,5 +209,10 @@ export async function readDetectionSettings(db: Database): Promise<DetectionProv
       mergeSplitText: typeof mergeSplitText === 'boolean' ? mergeSplitText : null,
       maxDetections: numberOrNull(maxDetections),
     },
+    markupPolicy: markupPolicyFromSettings({
+      provider: provider as DetectionProviderSetting,
+      sheetStrategy: sheetStrategy as DetectionSheetStrategy,
+      numberZone: numberZone as LargeSheetNumberZone,
+    }),
   };
 }
