@@ -13,8 +13,11 @@
 import type {
   AttentionFlag,
   BlockType,
+  DetectionSheetStrategy,
   DetectorProvenance,
+  LargeSheetNumberZone,
   LayoutRevisionState,
+  PageMarkupMode,
   ProcessingStage,
   RecognitionStatus,
   RegistryStatus,
@@ -79,6 +82,30 @@ export const BLOCK_TYPE_LABELS: Record<BlockType, string> = {
   text: 'Текст',
   image: 'Изображение',
   stamp: 'Штамп',
+};
+
+/**
+ * Что портал искал на странице (S42) — короткая таблетка в ленте миниатюр.
+ *
+ * `full_detection` подписи не имеет намеренно: это прежнее поведение, и лишняя
+ * таблетка на каждой странице комплекта была бы шумом. Подписываются только те
+ * два режима, которые объясняют неожиданное — один блок на весь лист и
+ * единственный штамп на чертеже.
+ */
+export const PAGE_MARKUP_MODE_LABELS: Record<PageMarkupMode, string | null> = {
+  full_page: 'вся страница',
+  stamp_only: 'только штамп',
+  full_detection: null,
+};
+
+export const DETECTION_SHEET_STRATEGY_LABELS: Record<DetectionSheetStrategy, string> = {
+  sheet_aware: 'A4 — целиком, крупнее — только штамп',
+  detect_all: 'детектор на каждой странице',
+};
+
+export const LARGE_SHEET_NUMBER_ZONE_LABELS: Record<LargeSheetNumberZone, string> = {
+  near_stamp: 'искать номер листа рядом со штампом',
+  off: 'только штамп',
 };
 
 export const PROVENANCE_LABELS: Record<DetectorProvenance, string> = {

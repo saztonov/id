@@ -18,6 +18,7 @@ import type {
   BlockType,
   DetectorProvenance,
   LayoutRevisionState,
+  MarkupPolicy,
   MatchState,
   ProcessingStage,
   RecognitionStatus,
@@ -202,6 +203,13 @@ export interface LayoutRevision {
   version: number;
   detectorProfile: 'rf_detr' | 'full_page';
   manuallyEdited: boolean;
+  /**
+   * Правило разметки, запиненное на ревизии (S42): по нему экран объясняет,
+   * почему на A4 один блок, а на чертеже только штамп. Именно пин, а не текущая
+   * настройка портала — иначе вчерашняя разметка была бы подписана сегодняшним
+   * правилом.
+   */
+  markupPolicy: MarkupPolicy;
   createdAt: string;
 }
 

@@ -115,6 +115,7 @@ function toView(layout: LayoutRevisionView) {
     version: layout.version,
     detectorProfile: layout.detectorProfile as 'rf_detr' | 'full_page',
     manuallyEdited: layout.firstManualEditAt !== null,
+    markupPolicy: layout.markupPolicy,
     createdAt: layout.createdAt,
   };
 }

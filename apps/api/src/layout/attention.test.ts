@@ -7,6 +7,8 @@
  * здесь не спрятать.
  */
 import { describe, expect, it } from 'vitest';
+
+import type { PageMarkupMode } from '@id/contracts';
 import { analyzePages, unionArea, type AnalyzedPage } from './attention.js';
 import {
   computeBlocksHash,
@@ -73,7 +75,7 @@ describe('режим разметки страницы', () => {
     y1: 0.95,
   });
 
-  function withMode(base: AnalyzedPage, markupMode: AnalyzedPage['markupMode']): AnalyzedPage {
+  function withMode(base: AnalyzedPage, markupMode: PageMarkupMode): AnalyzedPage {
     return { ...base, markupMode };
   }
 

@@ -15,9 +15,15 @@
  */
 import { type ReactNode } from 'react';
 import { Badge, Tooltip } from 'antd';
-import type { AttentionFlag } from '@id/contracts';
+import {
+  classifySheet,
+  pageMarkupMode,
+  sheetFormatLabel,
+  type AttentionFlag,
+  type MarkupPolicy,
+} from '@id/contracts';
 import type { BundlePage } from '../../api/types.js';
-import { ATTENTION_FLAG_LABELS } from '../../shared/labels.js';
+import { ATTENTION_FLAG_LABELS, PAGE_MARKUP_MODE_LABELS } from '../../shared/labels.js';
 import { TONE_STYLES } from '../../shared/tags.js';
 
 /** Форма плашки на карточке; цвет приходит из палитры тонов, а не пишется по месту. */
@@ -44,6 +50,13 @@ export interface PageTypeBadge {
 
 export interface ThumbnailStripProps {
   readonly pages: readonly BundlePage[];
+  /**
+   * Правило разметки, запиненное на ревизии (S42).
+   *
+   * Из него и размеров страницы считается формат листа и режим — то, чем экран
+   * объясняет человеку, почему на A4 один блок, а на чертеже только штамп.
+   */
+  readonly markupPolicy: MarkupPolicy;
   readonly flagsByPage: ReadonlyMap<number, readonly AttentionFlag[]>;
   readonly blockCountByPage: ReadonlyMap<number, number>;
   /** Тип страницы из классификаций; страницы без строки в карте нет. */
@@ -53,7 +66,7 @@ export interface ThumbnailStripProps {
 }
 
 export function ThumbnailStrip(props: ThumbnailStripProps): ReactNode {
-  const { pages, flagsByPage, blockCountByPage, typeByPage, current } = props;
+  const { pages, flagsByPage, blockCountByPage, typeByPage, current, markupPolicy } = props;
 
   return (
     <nav aria-label="Страницы рабочего документа">
@@ -105,6 +118,33 @@ export function ThumbnailStrip(props: ThumbnailStripProps): ReactNode {
                 <div style={{ fontSize: 12, color: '#595959' }}>
                   {page.widthPx}×{page.heightPx}
                   {page.rotation !== 0 && `, поворот ${page.rotation}°`}
+                </div>
+                {/*
+                  Формат листа и режим его разметки (S42).
+
+                  Формат считается тем же `classifySheet`, что и на сервере, —
+                  из контрактов, а не второй реализацией в браузере: иначе
+                  страница выглядела бы как A4, а размечалась как A3, и
+                  расхождение было бы молчаливым.
+
+                  Режим `full_detection` не подписывается: это прежнее
+                  поведение, и таблетка на каждой странице комплекта была бы
+                  шумом. Подписываются только те два, что объясняют неожиданное.
+                */}
+                <div
+                  data-testid={`sheet-format-${page.workingPageIndex}`}
+                  style={{ marginTop: 4, display: 'flex', flexWrap: 'wrap', gap: 4 }}
+                >
+                  <span style={{ ...PILL, ...TONE_STYLES.neutral }}>
+                    {sheetFormatLabel(classifySheet(page.widthPx, page.heightPx))}
+                  </span>
+                  {(() => {
+                    const mode = pageMarkupMode(page.widthPx, page.heightPx, markupPolicy);
+                    const label = PAGE_MARKUP_MODE_LABELS[mode];
+                    return label === null ? null : (
+                      <span style={{ ...PILL, ...TONE_STYLES.info }}>{label}</span>
+                    );
+                  })()}
                 </div>
                 <div style={{ fontSize: 12, color: '#595959', overflowWrap: 'anywhere' }}>
                   {page.fileName}, лист {page.filePageIndex + 1}

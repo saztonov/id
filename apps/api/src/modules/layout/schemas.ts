@@ -16,6 +16,7 @@ import {
   contentRotationSourceSchema,
   detectorProvenanceSchema,
   layoutRevisionStateSchema,
+  markupPolicySchema,
   normalizedCoordsSchema,
   shapeTypeSchema,
 } from '@id/contracts';
@@ -49,6 +50,14 @@ export const layoutRevisionViewSchema = z.object({
    * `full-page-text`: он удаляет прежние блоки страницы (§5.3).
    */
   manuallyEdited: z.boolean(),
+  /**
+   * Правило разметки, ЗАПИНЕННОЕ на этой ревизии (S42).
+   *
+   * Отдаётся наружу, чтобы экран объяснял человеку, почему на A4 один блок, а
+   * на чертеже только штамп. Именно пин, а не текущая настройка портала: иначе
+   * ревизия, размеченная вчера другим правилом, была бы подписана сегодняшним.
+   */
+  markupPolicy: markupPolicySchema,
   createdAt: z.string(),
 });
 

@@ -40,9 +40,13 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   detectionInferenceModeSettingSchema,
   detectionProviderSettingSchema,
+  detectionSheetStrategySchema,
+  largeSheetNumberZoneSchema,
   recognitionProviderSettingSchema,
   type DetectionInferenceModeSetting,
   type DetectionProviderSetting,
+  type DetectionSheetStrategy,
+  type LargeSheetNumberZone,
   type RecognitionProviderSetting,
 } from '@id/contracts';
 import { admin } from '../../api/endpoints.js';
@@ -56,6 +60,10 @@ import type {
 } from '../../api/types.js';
 import { useSession } from '../../app/session.js';
 import { mapFieldErrors } from '../../shared/formErrors.js';
+import {
+  DETECTION_SHEET_STRATEGY_LABELS,
+  LARGE_SHEET_NUMBER_ZONE_LABELS,
+} from '../../shared/labels.js';
 import { ErrorState, LoadingState } from '../../shared/ui.js';
 
 export function SettingsPanel(): ReactNode {
@@ -261,6 +269,15 @@ function RecognitionSettingsCard({ view }: { view: SettingsView }): ReactNode {
   );
   const detectionProvider: DetectionProviderSetting = detection.success ? detection.data : 'rdweb';
 
+  const strategy = detectionSheetStrategySchema.safeParse(
+    settingString(view, 'detection.sheet_strategy'),
+  );
+  const sheetStrategy: DetectionSheetStrategy = strategy.success ? strategy.data : 'detect_all';
+  const zone = largeSheetNumberZoneSchema.safeParse(
+    settingString(view, 'detection.large_sheet_number_zone'),
+  );
+  const numberZone: LargeSheetNumberZone = zone.success ? zone.data : 'near_stamp';
+
   const [modelDraft, setModelDraft] = useState(() => settingString(view, 'recognition.vlm_model'));
   const [versionDraft, setVersionDraft] = useState(() =>
     settingString(view, 'detection.model_version'),
@@ -421,6 +438,59 @@ function RecognitionSettingsCard({ view }: { view: SettingsView }): ReactNode {
               data-testid="detection-provider-select"
             />
           </div>
+
+          {detectionProvider === 'local' && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <span>Правило разметки по формату листа</span>
+              <Select<DetectionSheetStrategy>
+                style={{ width: 320 }}
+                value={sheetStrategy}
+                options={detectionSheetStrategySchema.options.map((value) => ({
+                  value,
+                  label: DETECTION_SHEET_STRATEGY_LABELS[value],
+                }))}
+                disabled={!canManage || save.isPending}
+                onChange={(value) => save.mutate({ key: 'detection.sheet_strategy', value })}
+                aria-label="Правило разметки по формату листа"
+                data-testid="detection-sheet-strategy-select"
+              />
+              {/*
+                Правило запинывается на ревизии при создании черновика, и
+                эксплуатации это надо сказать прямо: без явной передетекции уже
+                размеченный комплект переключение не увидит, и настройка будет
+                выглядеть неработающей.
+              */}
+              <span style={{ fontSize: 12, color: '#8c8c8c', maxWidth: 320 }}>
+                Действует на новые разметки. Чтобы применить к уже размеченному комплекту, нужна
+                повторная детекция.
+              </span>
+            </div>
+          )}
+
+          {detectionProvider === 'local' && sheetStrategy === 'sheet_aware' && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <span>Номер листа на крупном формате</span>
+              <Select<LargeSheetNumberZone>
+                style={{ width: 320 }}
+                value={numberZone}
+                options={largeSheetNumberZoneSchema.options.map((value) => ({
+                  value,
+                  label: LARGE_SHEET_NUMBER_ZONE_LABELS[value],
+                }))}
+                disabled={!canManage || save.isPending}
+                onChange={(value) =>
+                  save.mutate({ key: 'detection.large_sheet_number_zone', value })
+                }
+                aria-label="Номер листа на крупном формате"
+                data-testid="detection-number-zone-select"
+              />
+              <span style={{ fontSize: 12, color: '#8c8c8c', maxWidth: 320 }}>
+                В штампе чертежа стоит обозначение проекта, общее у всех листов раздела. Собственный
+                номер листа напечатан отдельной ячейкой рядом — без него схема не находит свою
+                строку в реестре приложений.
+              </span>
+            </div>
+          )}
 
           {detectionProvider === 'local' && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxWidth: 460 }}>

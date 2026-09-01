@@ -49,7 +49,14 @@ import {
   Typography,
 } from 'antd';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import type { AttentionFlag, BlockType } from '@id/contracts';
+import {
+  classifySheet,
+  pageMarkupMode,
+  sheetFormatLabel,
+  type AttentionFlag,
+  type BlockType,
+  type MarkupPolicy,
+} from '@id/contracts';
 
 import { bundles, catalog, documents, layout, recognition } from '../../api/endpoints.js';
 import { catalogKeys, layoutKeys, recognitionKeys, revisionKeys } from '../../api/keys.js';
@@ -563,6 +570,7 @@ function LayoutWorkspace(props: WorkspaceProps): ReactNode {
           ) : (
             <ThumbnailStrip
               pages={pageList}
+              markupPolicy={layoutDetail.markupPolicy}
               flagsByPage={flagsByPage}
               blockCountByPage={blockCountByPage}
               typeByPage={typeByPage}
@@ -612,6 +620,7 @@ function LayoutWorkspace(props: WorkspaceProps): ReactNode {
               />
               <CanvasArea
                 page={currentPage}
+                markupPolicy={layoutDetail.markupPolicy}
                 nextPage={nextPage}
                 blocks={pageBlocks}
                 ranks={ranks}
@@ -741,6 +750,8 @@ interface CanvasPage {
 
 interface CanvasAreaProps {
   readonly page: CanvasPage;
+  /** Правило разметки ревизии (S42): чем экран объясняет состав блоков листа. */
+  readonly markupPolicy: MarkupPolicy;
   /** Следующая страница ленты — только для предзагрузки; `undefined` на последней. */
   readonly nextPage: CanvasPage | undefined;
   readonly blocks: readonly LayoutBlock[];
@@ -1052,6 +1063,29 @@ function CanvasArea(props: CanvasAreaProps): ReactNode {
         onToggleText={props.onToggleText}
         onResetColumns={props.onResetColumns}
       />
+
+      {/*
+        Пояснение состава блоков листа (S42).
+
+        Строка, а не `Alert`: состояние штатное, а `Alert` ест высоту канвы и
+        читается как проблема. Режим `full_detection` не поясняется — это
+        прежнее поведение, и объяснять в нём нечего.
+      */}
+      {(() => {
+        const mode = pageMarkupMode(page.widthPx, page.heightPx, props.markupPolicy);
+        if (mode === 'full_detection') return null;
+        const format = sheetFormatLabel(classifySheet(page.widthPx, page.heightPx));
+        return (
+          <div
+            data-testid="markup-mode-note"
+            style={{ marginBottom: 8, fontSize: 12, color: '#595959' }}
+          >
+            {mode === 'full_page'
+              ? `Лист ${format}: страница размечена целиком одним текстовым блоком.`
+              : `Лист ${format} крупнее A4: портал ищет на нём штамп и номер листа. Текст и изображения чертежа не выделяются — при необходимости обведите их вручную.`}
+          </div>
+        );
+      })()}
 
       {/*
         Алерты — СНАРУЖИ измеряемого `holder`.
