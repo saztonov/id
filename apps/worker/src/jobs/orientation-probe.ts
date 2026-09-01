@@ -63,6 +63,21 @@ export const ORIENTATION_PROBE_DPI = 72;
 /** Потолок длинной стороны миниатюры, px. */
 export const ORIENTATION_PROBE_MAX_LONG_EDGE_PX = 1024;
 
+/**
+ * Потолок ожидания ответа модели для ЗОНДА, мс (S41).
+ *
+ * Общий `LLM_TIMEOUT_MS` рассчитан на распознавание крупного блока и в проде
+ * равен 450 секундам — вчетверо больше, чем аренда самой задачи зонда (120 с).
+ * Аренда же работает и потолком попытки, поэтому медленный вызов гарантированно
+ * оканчивался `JobTimeout`, три попытки подряд убивали зонд, а мёртвый зонд не
+ * ставит детекцию своей страницы: лист оставался неразмеченным без внятной
+ * причины на экране.
+ *
+ * Минута — с запасом: зонд смотрит на миниатюру 1024 px и отвечает одним
+ * коротким JSON. Вызов, не уложившийся в неё, не станет полезнее на второй.
+ */
+export const PROBE_CALL_TIMEOUT_MS = 60_000;
+
 export const ORIENTATION_PROBE_JOB_TYPE = 'page.orientation_probe';
 
 export interface OrientationProbeAnswer {
@@ -93,14 +108,20 @@ export interface OrientationProbeDeps {
   /**
    * Уже решённый разворот этой страницы.
    *
-   * `null` — строки нет. Строка `source='user'` означает, что человек уже
-   * повернул страницу руками, и зонду здесь делать нечего: его вызов был бы
-   * оплачен ради значения, которое ON CONFLICT всё равно не запишет.
+   * `null` — строки нет. `source='user'` означает, что человек уже повернул
+   * страницу руками, и зонду здесь делать нечего: его вызов был бы оплачен ради
+   * значения, которое ON CONFLICT всё равно не запишет.
+   *
+   * `answered` (S41) — отвечал ли зонд по существу. Строка от зонда бывает и
+   * записью об отказе (`probe_error`), и такую страницу спросить заново нужно,
+   * а вот уже полученное мнение обязано переиспользоваться: повторный запуск
+   * разметки на 220 страниц иначе платит за 220 одинаковых вызовов, и
+   * пользователь эти минуты видит как «разметка стоит на нуле».
    */
   readonly existingSource: (input: {
     readonly revisionId: string;
     readonly sourcePageId: string;
-  }) => Promise<'probe' | 'user' | null>;
+  }) => Promise<{ readonly source: 'probe' | 'user'; readonly answered: boolean } | null>;
   /** Рабочий PDF во временный файл; `cleanup` зовётся в `finally`. */
   readonly workingPdfToFile: (
     bundleId: string,
@@ -125,6 +146,8 @@ export interface OrientationProbeDeps {
     readonly pageNumber: number;
     /** Отмена попытки: брошенный вызов не держит соединение до ответа (S41). */
     readonly signal?: AbortSignal | undefined;
+    /** Потолок ОДНОГО вызова: он обязан быть меньше аренды задачи (S41). */
+    readonly timeoutMs?: number | undefined;
   }) => Promise<OrientationProbeCall>;
   readonly saveOrientation: (input: {
     readonly revisionId: string;
@@ -219,10 +242,28 @@ export function createOrientationProbeHandler(
     // построению, и платить за вызов, результат которого ON CONFLICT не
     // запишет, незачем.
     const existing = await deps.existingSource({ revisionId, sourcePageId });
-    if (existing === 'user') {
+    if (existing?.source === 'user') {
       ctx.logger.info(
         { event: 'orientation_probe_skipped_manual', working_page_index: workingPageIndex },
         'разворот страницы задан вручную: зонд не вызывается',
+      );
+      await continueWithDetection();
+      return;
+    }
+
+    /**
+     * Мнение зонда уже есть — второй раз за него не платим (S41).
+     *
+     * Разворот — свойство скана, а не результата конвейера: страница, снятая
+     * боком, останется такой при любом повторном запуске разметки. Прежде
+     * повтор стоил 220 вызовов модели на комплект и столько же минут ожидания.
+     * Записанный ОТКАЗ зонда сюда не подходит: там мнения нет, и спросить
+     * заново — единственный способ его получить.
+     */
+    if (existing?.source === 'probe' && existing.answered) {
+      ctx.logger.info(
+        { event: 'orientation_probe_reused', working_page_index: workingPageIndex },
+        'разворот страницы уже определён зондом: вызов не повторяется',
       );
       await continueWithDetection();
       return;
@@ -269,7 +310,12 @@ export function createOrientationProbeHandler(
       if (png === null) {
         failure = 'миниатюра страницы вырождена';
       } else {
-        call = await deps.probe({ png, pageNumber: workingPageIndex + 1, signal: ctx.signal });
+        call = await deps.probe({
+          png,
+          pageNumber: workingPageIndex + 1,
+          signal: ctx.signal,
+          timeoutMs: PROBE_CALL_TIMEOUT_MS,
+        });
       }
     } catch (error) {
       /**

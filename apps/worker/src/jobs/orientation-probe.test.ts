@@ -13,6 +13,7 @@ import { LlmError, type JobContext } from '@id/api';
 import {
   createOrientationProbeHandler,
   ORIENTATION_MIN_CONFIDENCE,
+  PROBE_CALL_TIMEOUT_MS,
   type OrientationProbeCall,
   type OrientationProbeDeps,
 } from './orientation-probe.js';
@@ -209,7 +210,7 @@ describe('createOrientationProbeHandler', () => {
   it('ручной разворот уже задан — зонд не вызывается вовсе', async () => {
     const probe = vi.fn();
     const { deps: d, recorded } = deps({
-      existingSource: async () => 'user',
+      existingSource: async () => ({ source: 'user' as const, answered: true }),
       probe: probe as unknown as OrientationProbeDeps['probe'],
     });
     await run(d);
@@ -220,8 +221,49 @@ describe('createOrientationProbeHandler', () => {
     expect(recorded.detections).toHaveLength(1);
   });
 
-  it('мнение зонда поверх прежнего машинного значения перезапрашивается', async () => {
-    const { deps: d, recorded } = deps({ existingSource: async () => 'probe' });
+  it('вызов зонда получает свой потолок ожидания, а не общий для распознавания', async () => {
+    // Аренда задачи зонда — 120 секунд, и она же потолок попытки. Общий
+    // LLM_TIMEOUT_MS в проде 450 секунд: без своего потолка медленный вызов
+    // гарантированно оканчивался JobTimeout, три попытки убивали зонд, а
+    // мёртвый зонд не ставит детекцию своей страницы.
+    const seen: (number | undefined)[] = [];
+    const { deps: d } = deps({
+      probe: (async (input: { readonly timeoutMs?: number }) => {
+        seen.push(input.timeoutMs);
+        return call();
+      }) as unknown as OrientationProbeDeps['probe'],
+    });
+    await run(d);
+
+    expect(seen[0]).toBe(PROBE_CALL_TIMEOUT_MS);
+    expect(PROBE_CALL_TIMEOUT_MS).toBeLessThan(120_000);
+  });
+
+  it('уже полученное мнение зонда не перезапрашивается', async () => {
+    // Разворот — свойство скана: страница, снятая боком, останется такой при
+    // любом повторном запуске разметки. До S41 повтор комплекта на 220 страниц
+    // заново платил за 220 одинаковых вызовов, и пользователь эти минуты видел
+    // как «разметка стоит на нуле».
+    const probe = vi.fn();
+    const { deps: d, recorded } = deps({
+      existingSource: async () => ({ source: 'probe' as const, answered: true }),
+      probe: probe as unknown as OrientationProbeDeps['probe'],
+    });
+    await run(d);
+
+    expect(probe).not.toHaveBeenCalled();
+    expect(recorded.saved).toHaveLength(0);
+    // Детекция ставится всё равно: она и есть смысл этой задачи в конвейере.
+    expect(recorded.detections).toHaveLength(1);
+  });
+
+  it('записанный отказ зонда перезапрашивается: мнения там нет', async () => {
+    // Строка от зонда бывает и записью об отказе. Считать её ответом значило бы
+    // навсегда оставить страницу без мнения о развороте — спросить заново
+    // единственный способ его получить.
+    const { deps: d, recorded } = deps({
+      existingSource: async () => ({ source: 'probe' as const, answered: false }),
+    });
     await run(d);
     expect(recorded.saved).toHaveLength(1);
   });

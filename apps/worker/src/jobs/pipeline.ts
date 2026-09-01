@@ -1146,7 +1146,11 @@ function orientationProbeDeps(options: PipelineJobsOptions): OrientationProbeDep
 
     existingSource: async ({ revisionId, sourcePageId }) => {
       const view = await findPageOrientation(db, revisionId, sourcePageId);
-      return view === null ? null : view.source;
+      if (view === null || view.source === null) return null;
+      // «Ответил» — это мнение о развороте, а не строка о том, что зонд
+      // отказал: во втором случае спросить заново единственный способ узнать
+      // ответ, в первом — повторный вызов оплачивал бы уже известное (S41).
+      return { source: view.source, answered: view.probeRotation !== null };
     },
 
     workingPdfToFile: async (bundleId) => {
@@ -1183,7 +1187,7 @@ function orientationProbeDeps(options: PipelineJobsOptions): OrientationProbeDep
       return 'degenerate' in cropped ? null : cropped.png;
     },
 
-    probe: async ({ png, pageNumber, signal }) => {
+    probe: async ({ png, pageNumber, signal, timeoutMs }) => {
       const vlm = options.vlm;
       if (vlm === null || vlm === undefined) {
         throw new Error('VLM-порт не настроен: зонд не может спросить модель');
@@ -1235,6 +1239,9 @@ function orientationProbeDeps(options: PipelineJobsOptions): OrientationProbeDep
         // Отмена попытки задачи доезжает до самого вызова (S41): брошенный
         // зонд иначе держал бы соединение до ответа модели.
         ...(signal !== undefined ? { signal } : {}),
+        // Свой потолок ожидания: общий LLM_TIMEOUT_MS вчетверо больше аренды
+        // задачи зонда, и медленный вызов оканчивался бы JobTimeout (S41).
+        ...(timeoutMs !== undefined ? { timeoutMs } : {}),
       });
 
       const parsed = vlmOrientationResponseSchema.safeParse(

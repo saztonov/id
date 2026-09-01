@@ -268,12 +268,16 @@ it('сброс конвейера сохраняет порядок DERIVED_DELE
   expect(reset).toEqual(derived.filter((table) => reset.includes(table)));
 
   // Разметка и рабочий документ переживают сброс — иначе «распознать заново
-  // поверх той же разметки» означало бы «поверх никакой».
+  // поверх той же разметки» означало бы «поверх никакой». Развороты страниц
+  // добавлены в S41: разворот — свойство скана, а не результат конвейера, и
+  // пока строки сносились, повтор разметки заново платил за вызов модели на
+  // каждой странице комплекта.
   const kept = derived.filter((table) => !reset.includes(table)).sort();
   expect(kept).toEqual([
     'layout_block_points',
     'layout_blocks',
     'layout_revisions',
+    'page_orientations',
     'processing_bundle_pages',
     'processing_bundles',
   ]);
