@@ -40,14 +40,14 @@ import type { ContentRotation, ContentRotationSource } from '@id/contracts';
 import type { AuthScope } from '../../auth/scope.js';
 import { notFound } from '../../lib/problem.js';
 import { appendAudit, type AuditActor } from './audit.js';
-// `guardWrites` и `requireMutableRevision` берутся из `documents.ts`, а не
+// `guardWrites` и `requireVisibleFolder` берутся из `documents.ts`, а не
 // пишутся здесь заново: правило «в каких статусах производное решение можно
 // менять» и перевод отказа БД в осмысленный ответ обязаны быть одними на всех.
-import { guardWrites, requireMutableRevision } from './documents.js';
+import { guardWrites, requireVisibleFolder } from './documents.js';
 import type { Database } from './users.js';
 
 export interface PageOrientationView {
-  readonly revisionId: string;
+  readonly folderId: string;
   readonly sourcePageId: string;
   readonly contentRotation: ContentRotation;
   /**
@@ -69,7 +69,7 @@ function toRotation(value: number | null): ContentRotation | null {
 }
 
 function toView(row: {
-  readonly revisionId: string;
+  readonly folderId: string;
   readonly sourcePageId: string;
   readonly contentRotation: number;
   readonly source: string;
@@ -78,7 +78,7 @@ function toView(row: {
   readonly probeError: string | null;
 }): PageOrientationView {
   return {
-    revisionId: row.revisionId,
+    folderId: row.folderId,
     sourcePageId: row.sourcePageId,
     contentRotation: toRotation(row.contentRotation) ?? 0,
     source: row.source === 'user' ? 'user' : 'probe',
@@ -89,7 +89,7 @@ function toView(row: {
 }
 
 const SELECTION = {
-  revisionId: pageOrientations.revisionId,
+  folderId: pageOrientations.folderId,
   sourcePageId: pageOrientations.sourcePageId,
   contentRotation: pageOrientations.contentRotation,
   source: pageOrientations.source,
@@ -103,33 +103,30 @@ const SELECTION = {
  *
  * Область видимости здесь не проверяется намеренно: единственные вызывающие —
  * задачи воркера, у которых ревизия уже разрешена, и маршрут, который до вызова
- * прошёл `requireMutableRevision`. Свой `withScope` означал бы второе правило
+ * прошёл `requireVisibleFolder`. Свой `withScope` означал бы второе правило
  * доступа к тем же строкам.
  */
 export async function listPageOrientations(
   db: Database,
-  revisionId: string,
+  folderId: string,
 ): Promise<readonly PageOrientationView[]> {
   const rows = await db
     .select(SELECTION)
     .from(pageOrientations)
-    .where(eq(pageOrientations.revisionId, revisionId));
+    .where(eq(pageOrientations.folderId, folderId));
   return rows.map(toView);
 }
 
 export async function findPageOrientation(
   db: Database,
-  revisionId: string,
+  folderId: string,
   sourcePageId: string,
 ): Promise<PageOrientationView | null> {
   const rows = await db
     .select(SELECTION)
     .from(pageOrientations)
     .where(
-      and(
-        eq(pageOrientations.revisionId, revisionId),
-        eq(pageOrientations.sourcePageId, sourcePageId),
-      ),
+      and(eq(pageOrientations.folderId, folderId), eq(pageOrientations.sourcePageId, sourcePageId)),
     )
     .limit(1);
   const row = rows[0];
@@ -139,7 +136,7 @@ export async function findPageOrientation(
 /** Страницы ревизии, у которых строки разворота ещё нет: вход пачки зонда. */
 export async function listPagesWithoutOrientation(
   db: Database,
-  revisionId: string,
+  folderId: string,
   sourcePageIds: readonly string[],
 ): Promise<readonly string[]> {
   if (sourcePageIds.length === 0) return [];
@@ -148,7 +145,7 @@ export async function listPagesWithoutOrientation(
     .from(pageOrientations)
     .where(
       and(
-        eq(pageOrientations.revisionId, revisionId),
+        eq(pageOrientations.folderId, folderId),
         inArray(pageOrientations.sourcePageId, [...sourcePageIds]),
       ),
     );
@@ -157,7 +154,7 @@ export async function listPagesWithoutOrientation(
 }
 
 export interface SaveManualOrientationInput {
-  readonly revisionId: string;
+  readonly folderId: string;
   readonly sourcePageId: string;
   readonly rotation: ContentRotation;
   readonly actor: AuditActor;
@@ -175,14 +172,12 @@ export async function saveManualPageOrientation(
   scope: AuthScope,
   input: SaveManualOrientationInput,
 ): Promise<PageOrientationView> {
-  const revision = await requireMutableRevision(db, scope, input.revisionId);
+  const folder = await requireVisibleFolder(db, scope, input.folderId);
 
   const pageRows = await db
     .select({ id: sourcePages.id })
     .from(sourcePages)
-    .where(
-      and(eq(sourcePages.id, input.sourcePageId), eq(sourcePages.revisionId, input.revisionId)),
-    )
+    .where(and(eq(sourcePages.id, input.sourcePageId), eq(sourcePages.folderId, input.folderId)))
     .limit(1);
   if (pageRows[0] === undefined) throw notFound('Страница не принадлежит этой ревизии.');
 
@@ -191,13 +186,13 @@ export async function saveManualPageOrientation(
       await tx
         .insert(pageOrientations)
         .values({
-          revisionId: input.revisionId,
+          folderId: input.folderId,
           sourcePageId: input.sourcePageId,
           contentRotation: input.rotation,
           source: 'user',
         })
         .onConflictDoUpdate({
-          target: [pageOrientations.revisionId, pageOrientations.sourcePageId],
+          target: [pageOrientations.folderId, pageOrientations.sourcePageId],
           set: {
             contentRotation: input.rotation,
             source: 'user',
@@ -209,13 +204,13 @@ export async function saveManualPageOrientation(
         action: 'page.orientation_set',
         entityType: 'source_page',
         entityId: input.sourcePageId,
-        objectId: revision.objectId,
+        objectId: folder.objectId,
         payload: { contentRotation: input.rotation },
       });
     }),
   );
 
-  const saved = await findPageOrientation(db, input.revisionId, input.sourcePageId);
+  const saved = await findPageOrientation(db, input.folderId, input.sourcePageId);
   if (saved === null) throw notFound('Разворот страницы не сохранился.');
   return saved;
 }
@@ -231,17 +226,17 @@ export async function clearManualPageOrientation(
   db: Database,
   scope: AuthScope,
   input: {
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly sourcePageId: string;
     readonly actor: AuditActor;
   },
 ): Promise<PageOrientationView> {
-  const revision = await requireMutableRevision(db, scope, input.revisionId);
+  const folder = await requireVisibleFolder(db, scope, input.folderId);
 
   await guardWrites(() =>
     db.transaction(async (tx) => {
       const manual = and(
-        eq(pageOrientations.revisionId, input.revisionId),
+        eq(pageOrientations.folderId, input.folderId),
         eq(pageOrientations.sourcePageId, input.sourcePageId),
         eq(pageOrientations.source, 'user'),
       );
@@ -279,17 +274,17 @@ export async function clearManualPageOrientation(
         action: 'page.orientation_cleared',
         entityType: 'source_page',
         entityId: input.sourcePageId,
-        objectId: revision.objectId,
+        objectId: folder.objectId,
         payload: {},
       });
     }),
   );
 
-  const remaining = await findPageOrientation(db, input.revisionId, input.sourcePageId);
+  const remaining = await findPageOrientation(db, input.folderId, input.sourcePageId);
   // Строки не осталось — это и есть ответ «решения никто не принимал».
   return (
     remaining ?? {
-      revisionId: input.revisionId,
+      folderId: input.folderId,
       sourcePageId: input.sourcePageId,
       contentRotation: 0,
       source: null,
@@ -301,7 +296,7 @@ export async function clearManualPageOrientation(
 }
 
 export interface ProbeOrientationInput {
-  readonly revisionId: string;
+  readonly folderId: string;
   readonly sourcePageId: string;
   /** Что увидел зонд; `null` — не увидел ничего (тогда обязателен `error`). */
   readonly rotation: ContentRotation | null;
@@ -331,7 +326,7 @@ export async function saveProbeOrientation(
   input: ProbeOrientationInput,
 ): Promise<boolean> {
   const values = {
-    revisionId: input.revisionId,
+    folderId: input.folderId,
     sourcePageId: input.sourcePageId,
     contentRotation: input.effective,
     source: 'probe' as const,
@@ -350,7 +345,7 @@ export async function saveProbeOrientation(
       .insert(pageOrientations)
       .values(values)
       .onConflictDoUpdate({
-        target: [pageOrientations.revisionId, pageOrientations.sourcePageId],
+        target: [pageOrientations.folderId, pageOrientations.sourcePageId],
         set: { ...values, updatedAt: sql`now()` },
         setWhere: sql`${pageOrientations.source} <> 'user'`,
       })

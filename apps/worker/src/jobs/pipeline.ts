@@ -12,13 +12,13 @@
  * ## Область видимости фоновой задачи
  *
  * У воркера нет пользователя, но это не повод работать без области. Задача
- * получает `revisionId` из payload, и порядок такой: ревизия разрешается ОДНИМ
+ * получает `folderId` из payload, и порядок такой: ревизия разрешается ОДНИМ
  * системным чтением (`SYSTEM_SCOPE`, единственное место в файле, где область не
  * ограничена), после чего строится область, закреплённая за подрядчиком этой
  * ревизии, и всё остальное — файл, страницы, состав, запись bundle — читается и
  * пишется уже ею. Payload, назвавший файл чужой поставки, не находит его
  * вовсе; файл соседней ревизии того же подрядчика отсекается сверкой
- * `revisionId` в самом обработчике.
+ * `folderId` в самом обработчике.
  *
  * Системное чтение вынесено в одну функцию намеренно: «где здесь запрос без
  * ограничения» должно отвечаться поиском по одному имени, а не вычиткой файла.
@@ -54,17 +54,12 @@ import {
 } from '@id/api';
 
 import {
-  archiveKey,
   artifactKey,
   blobKey,
   closeRunDocument,
   documentPdfKey,
-  findArchive,
-  findReusableBundle,
-  loadArchivePlan,
   loadMaterializationPlan,
-  recordArchive,
-  requireVisibleRevisionOfDocument,
+  requireVisibleFolderOfDocument,
   saveDerivedPdf,
   createBundle,
   createMaintenanceRegistry,
@@ -77,7 +72,7 @@ import {
   findFileContent,
   findLayoutRevision,
   findRecognitionRun,
-  findRevisionForFiles,
+  findFolderForFiles,
   findRunDocument,
   finishRecognitionRun,
   importDetectedBlocks,
@@ -103,15 +98,7 @@ import {
   applySegmentation,
   createAiSpendReader,
   createLlmProvider,
-  appendRevisionEvent,
-  findCounterparty,
-  findRegistry,
-  findRegistryFile,
-  listDocumentsOfRevisions,
-  listFieldValuesOfRevisions,
-  listRegistryComplectRevisions,
-  saveReconciliation,
-  fillWorkPeriodIfEmpty,
+  fillFolderPeriodIfEmpty,
   listMatchableContractors,
   listFieldValues,
   listLiveRecognizePageJobs,
@@ -162,6 +149,7 @@ import {
   findPageOrientation,
   enqueueLocalDetectBatches,
   readAiDryRunOnly,
+  readAnalysisModel,
   readOrientationProbeSettings,
   readRecognitionSettings,
   saveProbeOrientation,
@@ -187,12 +175,7 @@ import {
   type FileVerifyDeps,
 } from './file-verify.js';
 import { createSignatureProbeHandler, type SignatureProbeDeps } from './signature-probe.js';
-import {
-  createBuildArchiveHandler,
-  createMaterializePdfHandler,
-  type ArchiveDeps,
-  type MaterializeDeps,
-} from './delivery.js';
+import { createMaterializePdfHandler, type MaterializeDeps } from './delivery.js';
 import { createInternalRegistryProviders } from '@id/rules';
 import { createChecksRunHandler, createChecksSummarizeHandler, type ChecksDeps } from './checks.js';
 import {
@@ -215,10 +198,6 @@ import {
   type PublishedPrompt,
   type SegmentationDeps,
 } from './segmentation.js';
-import {
-  createRegistryReconcileHandler,
-  type RegistryReconcileDeps,
-} from './registry-reconcile.js';
 import {
   createAnalyzeCoverageHandler,
   createDetectPagesHandler,
@@ -278,7 +257,6 @@ const WORKER_ACTOR_ID = '00000000-0000-0000-0000-000000000000';
 export const SYSTEM_SCOPE: AuthScope = { kind: 'admin', userId: WORKER_ACTOR_ID };
 
 const PDF_CONTENT_TYPE = 'application/pdf';
-const ZIP_CONTENT_TYPE = 'application/zip';
 
 export interface PipelineLimits {
   /** Потолок размера одного исходного файла (`MAX_UPLOAD_BYTES`). */
@@ -384,10 +362,10 @@ export class PipelineScopeError extends Error {
  * бывает по построению: системная область видит все, и отсутствие строки
  * означает именно отсутствие ревизии.
  */
-async function pinScope(db: Database, revisionId: string): Promise<AuthScope | null> {
-  const revision = await findRevisionForFiles(db, SYSTEM_SCOPE, revisionId);
-  if (revision === null) return null;
-  return { kind: 'contractor', userId: WORKER_ACTOR_ID, contractorId: revision.contractorId };
+async function pinScope(db: Database, folderId: string): Promise<AuthScope | null> {
+  const folder = await findFolderForFiles(db, SYSTEM_SCOPE, folderId);
+  if (folder === null) return null;
+  return { kind: 'contractor', userId: WORKER_ACTOR_ID, contractorId: folder.contractorId };
 }
 
 // =====================================================================
@@ -477,14 +455,14 @@ function loadFilePort(
   db: Database,
 ): (target: FileJobTarget) => Promise<FileForVerification | null> {
   return async (target: FileJobTarget): Promise<FileForVerification | null> => {
-    const scope = await pinScope(db, target.revisionId);
+    const scope = await pinScope(db, target.folderId);
     if (scope === null) return null;
 
     const file = await findFileContent(db, scope, target.sourceFileId);
     if (file === null) return null;
     return {
       fileId: file.fileId,
-      revisionId: file.revisionId,
+      folderId: file.folderId,
       fileName: file.fileName,
       verifyState: file.verifyState,
       storageKey: file.storageKey,
@@ -515,14 +493,14 @@ function fileVerifyDeps(options: PipelineJobsOptions): FileVerifyDeps {
     // Приведение вердикта к колонкам — общей функцией с синхронным путём
     // загрузки (`storableVerdict`). Вторая реализация означала бы, что
     // состояние файла зависит от того, кто его записал.
-    saveVerdict: async ({ fileId, revisionId, verdict }) => {
-      const scope = await pinScope(options.db, revisionId);
+    saveVerdict: async ({ fileId, folderId, verdict }) => {
+      const scope = await pinScope(options.db, folderId);
       if (scope === null) return { written: false, reason: 'ревизия исчезла' };
 
       const storable = storableVerdict(verdict, new Date().toISOString());
       const outcome = await saveFileVerdict(options.db, scope, {
         fileId,
-        revisionId,
+        folderId,
         verifyState: storable.verifyState,
         verifyError: storable.verifyError,
         signatureProbe: storable.signatureProbe,
@@ -543,13 +521,13 @@ function signatureProbeDeps(options: PipelineJobsOptions): SignatureProbeDeps {
       readStorageObject(options.storage, storageKey, options.limits.maxBytes),
     probe: (bytes) => ({ signature: probePdf(bytes).signature }),
 
-    saveProbe: async ({ fileId, revisionId, probe }) => {
-      const scope = await pinScope(options.db, revisionId);
+    saveProbe: async ({ fileId, folderId, probe }) => {
+      const scope = await pinScope(options.db, folderId);
       if (scope === null) return { written: false, reason: 'ревизия исчезла' };
 
       const outcome = await saveSignatureProbe(options.db, scope, {
         fileId,
-        revisionId,
+        folderId,
         probe: { ...probe, subFilters: [...probe.subFilters] },
       });
       return outcome.kind === 'written'
@@ -563,34 +541,18 @@ function bundleBuildDeps(options: PipelineJobsOptions): BundleBuildDeps {
   const { db, storage } = options;
 
   return {
-    loadPlan: async (revisionId: string): Promise<BundlePlan | null> => {
-      const scope = await pinScope(db, revisionId);
+    loadPlan: async (folderId: string): Promise<BundlePlan | null> => {
+      const scope = await pinScope(db, folderId);
       if (scope === null) return null;
-      return loadBundlePlan(db, scope, revisionId);
+      return loadBundlePlan(db, scope, folderId);
     },
 
     findExistingBundle: async (target) => {
-      const scope = await pinScope(db, target.revisionId);
+      const scope = await pinScope(db, target.folderId);
       if (scope === null) return null;
       const bundle = await findBundleByManifest(db, scope, target);
       return bundle === null ? null : { id: bundle.id, pageCount: bundle.pageCount };
     },
-
-    findReusableWorkingPdf: async (target) => {
-      const scope = await pinScope(db, target.revisionId);
-      if (scope === null) return null;
-      const reusable = await findReusableBundle(db, scope, target);
-      if (reusable === null) return null;
-      return {
-        revisionId: reusable.revisionId,
-        workingPdfBlobSha256: reusable.workingPdfBlobSha256,
-        sizeBytes: reusable.sizeBytes,
-        s3Key: blobKey(reusable.workingPdfBlobSha256),
-        pageCount: reusable.pageCount,
-      };
-    },
-
-    workingPdfExists: async (storageKey) => (await storage.headObject(storageKey)) !== null,
 
     fetchOriginal: (storageKey, destinationPath) =>
       fetchOriginal(storage, storageKey, destinationPath),
@@ -598,10 +560,10 @@ function bundleBuildDeps(options: PipelineJobsOptions): BundleBuildDeps {
     storeWorkingPdf: (localPath) => storeWorkingPdf(storage, localPath),
 
     createBundle: async (input) => {
-      const scope = await pinScope(db, input.revisionId);
+      const scope = await pinScope(db, input.folderId);
       if (scope === null) {
         throw new PipelineScopeError(
-          `Ревизия ${input.revisionId} исчезла между планом и записью рабочего документа.`,
+          `Папка ${input.folderId} исчезла между планом и записью рабочего документа.`,
         );
       }
       const result = await createBundle(db, scope, input);
@@ -644,7 +606,7 @@ async function buildMarkupTarget(
 
   return {
     layoutRevisionId: layout.id,
-    revisionId: layout.revisionId,
+    folderId: layout.folderId,
     bundleId: layout.bundleId,
     objectId: layout.objectId,
     state: layout.state,
@@ -669,11 +631,11 @@ function markupDeps(options: PipelineJobsOptions): MarkupDeps {
     rdProjectId: options.rdProjectId ?? null,
     previewCached: options.previewCached ?? false,
 
-    loadTargetByLayout: async ({ revisionId, layoutRevisionId }) => {
-      const scope = await pinScope(db, revisionId);
+    loadTargetByLayout: async ({ folderId, layoutRevisionId }) => {
+      const scope = await pinScope(db, folderId);
       if (scope === null) return null;
       const layout = await findLayoutRevision(db, scope, layoutRevisionId);
-      if (layout === null || layout.revisionId !== revisionId) return null;
+      if (layout === null || layout.folderId !== folderId) return null;
       return buildMarkupTarget(options, scope, layout);
     },
 
@@ -682,7 +644,7 @@ function markupDeps(options: PipelineJobsOptions): MarkupDeps {
       // денормализованных колонок области нет.
       const layout = await findLayoutRevisionSystemwide(db, layoutRevisionId);
       if (layout === null) return null;
-      const scope = await pinScope(db, layout.revisionId);
+      const scope = await pinScope(db, layout.folderId);
       if (scope === null) return null;
       const found = await findRunDocument(db, scope, layoutRevisionId);
       return found === null
@@ -695,7 +657,7 @@ function markupDeps(options: PipelineJobsOptions): MarkupDeps {
     },
 
     saveRunDocument: async (input) => {
-      const scope = await pinScope(db, input.revisionId);
+      const scope = await pinScope(db, input.folderId);
       if (scope === null) throw new PipelineScopeError('Ревизия исчезла до записи RD-документа.');
       await createRunDocument(db, scope, {
         layoutRevisionId: input.layoutRevisionId,
@@ -705,7 +667,7 @@ function markupDeps(options: PipelineJobsOptions): MarkupDeps {
     },
 
     replaceRunDocument: async (input) => {
-      const scope = await pinScope(db, input.revisionId);
+      const scope = await pinScope(db, input.folderId);
       if (scope === null) throw new PipelineScopeError('Ревизия исчезла до замены RD-документа.');
       await replaceRunDocument(db, scope, {
         layoutRevisionId: input.layoutRevisionId,
@@ -720,7 +682,7 @@ function markupDeps(options: PipelineJobsOptions): MarkupDeps {
     },
 
     importBlocks: async (input) => {
-      const scope = await pinScope(db, input.revisionId);
+      const scope = await pinScope(db, input.folderId);
       if (scope === null) throw new PipelineScopeError('Ревизия исчезла до импорта разметки.');
       const result = await importDetectedBlocks(db, scope, {
         layoutRevisionId: input.layoutRevisionId,
@@ -734,7 +696,7 @@ function markupDeps(options: PipelineJobsOptions): MarkupDeps {
     },
 
     loadPageBlocks: async (input) => {
-      const scope = await pinScope(db, input.revisionId);
+      const scope = await pinScope(db, input.folderId);
       if (scope === null) return [];
       const layout = await findLayoutRevision(db, scope, input.layoutRevisionId);
       if (layout === null) return [];
@@ -771,10 +733,10 @@ function markupDeps(options: PipelineJobsOptions): MarkupDeps {
     },
 
     saveFlags: async (input) => {
-      const scope = await pinScope(db, input.revisionId);
+      const scope = await pinScope(db, input.folderId);
       if (scope === null) return { written: false, reason: 'ревизия исчезла' };
       const outcome = await savePageAttentionFlags(db, scope, {
-        revisionId: input.revisionId,
+        folderId: input.folderId,
         flags: input.flags,
       });
       return outcome.kind === 'written'
@@ -824,19 +786,19 @@ function layoutStartDeps(options: PipelineJobsOptions): LayoutStartDeps {
   const { db } = options;
 
   return {
-    start: async ({ revisionId, logger }) => {
-      const scope = await pinScope(db, revisionId);
+    start: async ({ folderId, logger }) => {
+      const scope = await pinScope(db, folderId);
       if (scope === null) return null;
 
       // Последний рабочий документ, а не «тот, что собрала породившая задача»:
       // между сборкой и этой задачей состав мог смениться, и размечать надо то,
       // что в ревизии сейчас. Пустой список означает, что bundle успели убрать.
-      const bundles = await listBundles(db, scope, revisionId);
+      const bundles = await listBundles(db, scope, folderId);
       const bundle = bundles[bundles.length - 1];
       if (bundle === undefined) return null;
 
       const started = await startMarkupOnBundle(db, scope, {
-        revisionId,
+        folderId,
         bundleId: bundle.id,
         previewCached: options.previewCached ?? false,
         logger,
@@ -923,11 +885,11 @@ function localDetectionDeps(options: PipelineJobsOptions): LocalDetectionDeps {
     // качестве обработки (поток C, ADR-0010), а не отказ задачи.
     feedback: options.feedback ?? new NoopProcessingFeedbackSink(),
 
-    loadTargetByLayout: async ({ revisionId, layoutRevisionId }) => {
-      const scope = await pinScope(db, revisionId);
+    loadTargetByLayout: async ({ folderId, layoutRevisionId }) => {
+      const scope = await pinScope(db, folderId);
       if (scope === null) return null;
       const layout = await findLayoutRevision(db, scope, layoutRevisionId);
-      if (layout === null || layout.revisionId !== revisionId) return null;
+      if (layout === null || layout.folderId !== folderId) return null;
       return buildMarkupTarget(options, scope, layout);
     },
 
@@ -943,8 +905,8 @@ function localDetectionDeps(options: PipelineJobsOptions): LocalDetectionDeps {
       };
     },
 
-    pageGeometry: async ({ revisionId, bundleId }) => {
-      const scope = await pinScope(db, revisionId);
+    pageGeometry: async ({ folderId, bundleId }) => {
+      const scope = await pinScope(db, folderId);
       if (scope === null) return [];
       return listBundlePages(db, scope, bundleId);
     },
@@ -953,8 +915,8 @@ function localDetectionDeps(options: PipelineJobsOptions): LocalDetectionDeps {
     // размечали»: skip без overwriteExisting экономит рендер+инференс на
     // странице, которую всё равно не тронет `importBlocks` (авто) или которую
     // он безусловно защищает (ручной, `pagesWithManualBlocks`).
-    existingBlockPages: async ({ revisionId, layoutRevisionId }) => {
-      const scope = await pinScope(db, revisionId);
+    existingBlockPages: async ({ folderId, layoutRevisionId }) => {
+      const scope = await pinScope(db, folderId);
       if (scope === null) return new Set();
       const blocks = await listLayoutBlocks(db, scope, layoutRevisionId);
       return new Set(blocks.map((block) => block.workingPageIndex));
@@ -963,7 +925,7 @@ function localDetectionDeps(options: PipelineJobsOptions): LocalDetectionDeps {
     workingPdf: (key) => leaseWorkingPdf(options, pdfCache, key, 'id-detect-pdf-'),
 
     importBlocks: async (input) => {
-      const scope = await pinScope(db, input.revisionId);
+      const scope = await pinScope(db, input.folderId);
       if (scope === null) {
         throw new PipelineScopeError('Ревизия исчезла до импорта локальной детекции.');
       }
@@ -994,7 +956,7 @@ function localDetectionDeps(options: PipelineJobsOptions): LocalDetectionDeps {
 /**
  * Область прогона распознавания.
  *
- * Та же дисциплина, что у задач разметки: `revisionId` из payload разрешается
+ * Та же дисциплина, что у задач разметки: `folderId` из payload разрешается
  * системным чтением ровно ради подрядчика, а сам прогон, его блоки, артефакты и
  * результаты читаются и пишутся уже закреплённой областью. Payload, назвавший
  * чужой прогон, не находит его вовсе — `findRecognitionRun` фильтрует областью.
@@ -1003,10 +965,10 @@ function recognitionDeps(options: PipelineJobsOptions): RecognitionDeps {
   const { db, storage } = options;
 
   /** Область прогона: одна функция на все методы, чтобы её нельзя было забыть. */
-  const scopeOf = async (revisionId: string): Promise<AuthScope> => {
-    const scope = await pinScope(db, revisionId);
+  const scopeOf = async (folderId: string): Promise<AuthScope> => {
+    const scope = await pinScope(db, folderId);
     if (scope === null) {
-      throw new PipelineScopeError(`Ревизия ${revisionId} не найдена: прогон адресован в никуда.`);
+      throw new PipelineScopeError(`Ревизия ${folderId} не найдена: прогон адресован в никуда.`);
     }
     return scope;
   };
@@ -1017,10 +979,10 @@ function recognitionDeps(options: PipelineJobsOptions): RecognitionDeps {
    * Прогон адресуется своим uuid, а ревизия у него денормализована, поэтому
    * одного системного чтения не избежать — оно ровно одно и здесь.
    */
-  const scopeOfRun = async (runId: string): Promise<{ scope: AuthScope; revisionId: string }> => {
+  const scopeOfRun = async (runId: string): Promise<{ scope: AuthScope; folderId: string }> => {
     const run = await findRecognitionRun(db, SYSTEM_SCOPE, runId);
     if (run === null) throw new PipelineScopeError(`Прогон ${runId} не найден.`);
-    return { scope: await scopeOf(run.revisionId), revisionId: run.revisionId };
+    return { scope: await scopeOf(run.folderId), folderId: run.folderId };
   };
 
   return {
@@ -1029,14 +991,14 @@ function recognitionDeps(options: PipelineJobsOptions): RecognitionDeps {
     documentMode: options.recognitionDocumentMode ?? false,
     sha256: (bytes) => sha256Hex(bytes),
 
-    loadRun: async ({ revisionId, recognitionRunId }) => {
-      const scope = await pinScope(db, revisionId);
+    loadRun: async ({ folderId, recognitionRunId }) => {
+      const scope = await pinScope(db, folderId);
       if (scope === null) return null;
       const run = await findRecognitionRun(db, scope, recognitionRunId);
       // Сверка ревизии в payload с ревизией прогона: задача, поставленная с
       // чужим прогоном, не находит его через область, а задача с прогоном
       // соседней ревизии того же подрядчика отсекается здесь.
-      if (run === null || run.revisionId !== revisionId) return null;
+      if (run === null || run.folderId !== folderId) return null;
       // Легаси-задачи rd.* без RD-документа не работают по построению; прогон
       // ветки VLM (rd_run_document_id NULL, ADR-0007) сюда попасть не должен —
       // его ставит vlm.start_recognition, а не layout.reconcile. Если попал,
@@ -1045,7 +1007,7 @@ function recognitionDeps(options: PipelineJobsOptions): RecognitionDeps {
       if (run.rdDocumentId === null) return null;
       return {
         runId: run.id,
-        revisionId: run.revisionId,
+        folderId: run.folderId,
         layoutRevisionId: run.layoutRevisionId,
         status: run.status,
         rdDocumentId: run.rdDocumentId,
@@ -1153,7 +1115,7 @@ function recognitionDeps(options: PipelineJobsOptions): RecognitionDeps {
       if (layout === null) {
         throw new PipelineScopeError(`Ревизия разметки ${layoutRevisionId} не найдена.`);
       }
-      const scope = await scopeOf(layout.revisionId);
+      const scope = await scopeOf(layout.folderId);
       const result = await closeRunDocument(db, scope, layoutRevisionId);
       return { changed: result.changed };
     },
@@ -1168,7 +1130,7 @@ function recognitionDeps(options: PipelineJobsOptions): RecognitionDeps {
  * Связывание трёх задач `vlm.*` (`vlm-recognition.ts`) с базой, хранилищем,
  * порядка правами и VLM-портом.
  *
- * Та же дисциплина, что у `recognitionDeps`: `revisionId`/`runId` из payload
+ * Та же дисциплина, что у `recognitionDeps`: `folderId`/`runId` из payload
  * разрешаются закреплённой областью, а не системной, — payload с чужим
  * прогоном не находит его вовсе. Отличие от `recognitionDeps` только в
  * наборе полей: у VLM-прогона нет ни RD-документа, ни удалённых хэшей, зато
@@ -1187,10 +1149,10 @@ function orientationProbeDeps(options: PipelineJobsOptions): OrientationProbeDep
   const { db } = options;
   const pdfCache = createPdfCache(options);
 
-  const scopeOf = async (revisionId: string): Promise<AuthScope> => {
-    const scope = await pinScope(db, revisionId);
+  const scopeOf = async (folderId: string): Promise<AuthScope> => {
+    const scope = await pinScope(db, folderId);
     if (scope === null) {
-      throw new PipelineScopeError(`Ревизия ${revisionId} не найдена: зонд адресован в никуда.`);
+      throw new PipelineScopeError(`Ревизия ${folderId} не найдена: зонд адресован в никуда.`);
     }
     return scope;
   };
@@ -1206,8 +1168,8 @@ function orientationProbeDeps(options: PipelineJobsOptions): OrientationProbeDep
 
     dryRun: () => readAiDryRunOnly(db),
 
-    existingSource: async ({ revisionId, sourcePageId }) => {
-      const view = await findPageOrientation(db, revisionId, sourcePageId);
+    existingSource: async ({ folderId, sourcePageId }) => {
+      const view = await findPageOrientation(db, folderId, sourcePageId);
       if (view === null || view.source === null) return null;
       // «Ответил» — это мнение о развороте, а не строка о том, что зонд
       // отказал: во втором случае спросить заново единственный способ узнать
@@ -1338,13 +1300,13 @@ function orientationProbeDeps(options: PipelineJobsOptions): OrientationProbeDep
     saveOrientation: (input) => saveProbeOrientation(db, input),
 
     recordAiRun: async (input) => {
-      await recordAiRun(db, await scopeOf(input.revisionId), input);
+      await recordAiRun(db, await scopeOf(input.folderId), input);
     },
 
-    enqueueDetection: async ({ revisionId, layoutRevisionId, workingPageIndex, logger }) => {
-      await enqueueLocalDetectBatches(db, await scopeOf(revisionId), {
+    enqueueDetection: async ({ folderId, layoutRevisionId, workingPageIndex, logger }) => {
+      await enqueueLocalDetectBatches(db, await scopeOf(folderId), {
         layoutRevisionId,
-        revisionId,
+        folderId,
         pages: [workingPageIndex],
         overwriteExisting: false,
         // Журнал контекста задачи — тот же интерфейс, что ждёт постановка.
@@ -1355,7 +1317,7 @@ function orientationProbeDeps(options: PipelineJobsOptions): OrientationProbeDep
     reportFeedback: async (input) => {
       const sink = options.feedback ?? new NoopProcessingFeedbackSink();
       await sink.record({
-        revisionId: input.revisionId,
+        folderId: input.folderId,
         sourcePageId: input.sourcePageId,
         workingPageIndex: input.workingPageIndex,
         feedbackType: 'system_failure',
@@ -1383,18 +1345,18 @@ function vlmRecognitionDeps(options: PipelineJobsOptions): VlmRecognitionDeps {
   const { db, storage } = options;
   const pdfCache = createPdfCache(options);
 
-  const scopeOf = async (revisionId: string): Promise<AuthScope> => {
-    const scope = await pinScope(db, revisionId);
+  const scopeOf = async (folderId: string): Promise<AuthScope> => {
+    const scope = await pinScope(db, folderId);
     if (scope === null) {
-      throw new PipelineScopeError(`Ревизия ${revisionId} не найдена: прогон адресован в никуда.`);
+      throw new PipelineScopeError(`Ревизия ${folderId} не найдена: прогон адресован в никуда.`);
     }
     return scope;
   };
 
-  const scopeOfRun = async (runId: string): Promise<{ scope: AuthScope; revisionId: string }> => {
+  const scopeOfRun = async (runId: string): Promise<{ scope: AuthScope; folderId: string }> => {
     const run = await findRecognitionRun(db, SYSTEM_SCOPE, runId);
     if (run === null) throw new PipelineScopeError(`Прогон ${runId} не найден.`);
-    return { scope: await scopeOf(run.revisionId), revisionId: run.revisionId };
+    return { scope: await scopeOf(run.folderId), folderId: run.folderId };
   };
 
   /**
@@ -1419,14 +1381,14 @@ function vlmRecognitionDeps(options: PipelineJobsOptions): VlmRecognitionDeps {
     rasterizer: options.rasterizer ?? null,
     sha256: (bytes) => sha256Hex(bytes),
 
-    loadRun: async ({ revisionId, recognitionRunId }) => {
-      const scope = await pinScope(db, revisionId);
+    loadRun: async ({ folderId, recognitionRunId }) => {
+      const scope = await pinScope(db, folderId);
       if (scope === null) return null;
       const run = await findRecognitionRun(db, scope, recognitionRunId);
-      if (run === null || run.revisionId !== revisionId) return null;
+      if (run === null || run.folderId !== folderId) return null;
       return {
         runId: run.id,
-        revisionId: run.revisionId,
+        folderId: run.folderId,
         layoutRevisionId: run.layoutRevisionId,
         status: run.status,
         localLayoutHash: run.localLayoutHash,
@@ -1651,7 +1613,7 @@ function vlmRecognitionDeps(options: PipelineJobsOptions): VlmRecognitionDeps {
     assemble: (input) => assembleRecognitionResult(input),
 
     recordAiRun: async (input) => {
-      await recordAiRun(db, await scopeOf(input.revisionId), input);
+      await recordAiRun(db, await scopeOf(input.folderId), input);
     },
 
     // Дефекты качества: непригодный ответ модели и отказ. По умолчанию
@@ -1690,19 +1652,19 @@ function vlmRecognitionDeps(options: PipelineJobsOptions): VlmRecognitionDeps {
 function checksDeps(options: PipelineJobsOptions): ChecksDeps {
   const db = options.db;
 
-  const scopeOf = async (revisionId: string): Promise<AuthScope> => {
-    const scope = await pinScope(db, revisionId);
+  const scopeOf = async (folderId: string): Promise<AuthScope> => {
+    const scope = await pinScope(db, folderId);
     if (scope === null) {
-      throw new PipelineScopeError(`Ревизия ${revisionId} не найдена: задача адресована в никуда.`);
+      throw new PipelineScopeError(`Ревизия ${folderId} не найдена: задача адресована в никуда.`);
     }
     return scope;
   };
 
   return {
-    loadGraph: async (input) => loadCheckGraph(db, await scopeOf(input.revisionId), input),
+    loadGraph: async (input) => loadCheckGraph(db, await scopeOf(input.folderId), input),
 
     saveDerivedMaterials: async (input) =>
-      saveDerivedMaterials(db, await scopeOf(input.revisionId), input),
+      saveDerivedMaterials(db, await scopeOf(input.folderId), input),
 
     // Набор правил и реестр правил — конфигурация портала, а не данные
     // подрядчика: читаются системной областью, как и бюджет модели на S8.
@@ -1710,22 +1672,22 @@ function checksDeps(options: PipelineJobsOptions): ChecksDeps {
     listRuleDefinitionCodes: async () => listRuleDefinitionCodes(db),
 
     startValidationRun: async (input) =>
-      startValidationRun(db, await scopeOf(input.revisionId), input),
+      startValidationRun(db, await scopeOf(input.folderId), input),
 
-    saveFindings: async (input) => saveFindings(db, await scopeOf(input.revisionId), input),
+    saveFindings: async (input) => saveFindings(db, await scopeOf(input.folderId), input),
 
-    saveRunJournal: async (input) => saveRunJournal(db, await scopeOf(input.revisionId), input),
+    saveRunJournal: async (input) => saveRunJournal(db, await scopeOf(input.folderId), input),
 
-    loadRunJournal: async (input) => loadRunJournal(db, await scopeOf(input.revisionId), input),
+    loadRunJournal: async (input) => loadRunJournal(db, await scopeOf(input.folderId), input),
 
     listFindings: async (input) =>
-      listFindings(db, await scopeOf(input.revisionId), {
-        revisionId: input.revisionId,
+      listFindings(db, await scopeOf(input.folderId), {
+        folderId: input.folderId,
         validationRunId: input.validationRunId,
       }),
 
     finishValidationRun: async (input) =>
-      finishValidationRun(db, await scopeOf(input.revisionId), input),
+      finishValidationRun(db, await scopeOf(input.folderId), input),
 
     registries: createInternalRegistryProviders(),
   };
@@ -1736,26 +1698,26 @@ function checksDeps(options: PipelineJobsOptions): ChecksDeps {
  *
  * Порты связываются здесь, как и у остальных стадий. Отдельно стоит отметить
  * ключи хранилища: нарезка адресуется документом (`documents/{id}.pdf`), архив
- * — ревизией (`archive/{revisionId}/rev{N}-approved.zip`), и оба
+ * — ревизией (`archive/{folderId}/rev{N}-approved.zip`), и оба
  * детерминированы. Это и есть второй рубеж однократности: повтор задачи
  * перезаписывает свой объект, а не плодит сироты (урок S5).
  */
 function materializeDeps(options: PipelineJobsOptions): MaterializeDeps {
   const { db, storage } = options;
 
-  const scopeOf = async (revisionId: string): Promise<AuthScope> => {
-    const scope = await pinScope(db, revisionId);
+  const scopeOf = async (folderId: string): Promise<AuthScope> => {
+    const scope = await pinScope(db, folderId);
     if (scope === null) {
-      throw new PipelineScopeError(`Ревизия ${revisionId} не найдена: задача адресована в никуда.`);
+      throw new PipelineScopeError(`Ревизия ${folderId} не найдена: задача адресована в никуда.`);
     }
     return scope;
   };
 
   return {
-    loadPlan: async (revisionId) => {
-      const scope = await pinScope(db, revisionId);
+    loadPlan: async (folderId) => {
+      const scope = await pinScope(db, folderId);
       if (scope === null) return null;
-      return loadMaterializationPlan(db, scope, revisionId);
+      return loadMaterializationPlan(db, scope, folderId);
     },
 
     fetchWorkingPdf: (storageKey, destinationPath) =>
@@ -1790,180 +1752,36 @@ function materializeDeps(options: PipelineJobsOptions): MaterializeDeps {
     },
 
     saveDerivedPdf: async (input) => {
-      const document = await findDocumentRevision(db, input.documentId);
+      const document = await findDocumentFolder(db, input.documentId);
       if (document === null) {
         return { kind: 'rejected', reason: 'документ исчез между нарезкой и записью' };
       }
-      return saveDerivedPdf(db, await scopeOf(document.revisionId), input);
+      return saveDerivedPdf(db, await scopeOf(document.folderId), input);
     },
-
-    ...(options.workDirBase === undefined ? {} : { workDirBase: options.workDirBase }),
-  };
-}
-
-function archiveDeps(options: PipelineJobsOptions): ArchiveDeps {
-  const { db, storage } = options;
-
-  const scopeOf = async (revisionId: string): Promise<AuthScope> => {
-    const scope = await pinScope(db, revisionId);
-    if (scope === null) {
-      throw new PipelineScopeError(`Ревизия ${revisionId} не найдена: задача адресована в никуда.`);
-    }
-    return scope;
-  };
-
-  return {
-    loadPlan: async (revisionId) => {
-      const scope = await pinScope(db, revisionId);
-      if (scope === null) return null;
-      return loadArchivePlan(db, scope, revisionId);
-    },
-
-    findArchive: async (revisionId) => findArchive(db, await scopeOf(revisionId), revisionId),
-
-    openDocumentPdf: (documentId) => streamStorageObject(storage, documentPdfKey(documentId)),
-
-    storeArchive: async (revisionId, revisionNo, localPath) => {
-      const sha256 = await hashFile(localPath);
-      const { size: sizeBytes } = await stat(localPath);
-      const key = archiveKey(revisionId, revisionNo);
-      await storage.putObject({
-        key,
-        body: createReadStream(localPath),
-        contentType: ZIP_CONTENT_TYPE,
-        contentLength: sizeBytes,
-      });
-      return { sha256, byteSize: sizeBytes, s3Key: key };
-    },
-
-    // Область здесь не применяется намеренно: запись идёт по ревизии, которая
-    // уже разрешена чтением плана этой же задачей, а сам INSERT дополнительно
-    // проверяется триггером `submission_archives_approved_only`.
-    recordArchive: (input) => recordArchive(db, input),
 
     ...(options.workDirBase === undefined ? {} : { workDirBase: options.workDirBase }),
   };
 }
 
 /** Ревизия документа системным чтением: нужна, чтобы построить область записи. */
-async function findDocumentRevision(
+async function findDocumentFolder(
   db: Database,
   documentId: string,
-): Promise<{ readonly revisionId: string } | null> {
+): Promise<{ readonly folderId: string } | null> {
   try {
-    return await requireVisibleRevisionOfDocument(db, SYSTEM_SCOPE, documentId);
+    return await requireVisibleFolderOfDocument(db, SYSTEM_SCOPE, documentId);
   } catch {
     return null;
   }
 }
 
-/** Поток объекта хранилища как асинхронная последовательность байтов. */
-async function* streamStorageObject(
-  storage: StorageProvider,
-  key: string,
-): AsyncGenerator<Uint8Array> {
-  const object = await storage.getObjectStream(key);
-  for await (const chunk of object.stream) {
-    yield chunk as Uint8Array;
-  }
-}
-
-/**
- * Область сверки описи — НЕ область подрядчика ревизии.
- *
- * `pinScope` здесь не годится и это не мелочь: она даёт область подрядчика,
- * подавшего скан описи, а комплекты папки принадлежат ДРУГИМ субподрядчикам.
- * Под ней сверка увидела бы один комплект из семи и доложила бы «сошлась» —
- * то есть соврала бы ровно в том вопросе, ради которого её запускают.
- *
- * До S37 сужение шло по объекту: `{ kind: 'engineer', objectIds: [objectId] }`.
- * Областей по объектам не осталось, и сужать больше нечем — целостность здесь
- * и раньше держал `works_registry_fk` (0028), гарантирующий, что все комплекты
- * реестра лежат на объекте реестра. Функция сохранена ИМЕНЕМ этого решения:
- * подставить сюда `pinScope` по невнимательности нельзя, пока у места есть своё
- * название и этот разбор рядом.
- */
-function objectScope(_objectId: string): AuthScope {
-  return { kind: 'engineer', userId: WORKER_ACTOR_ID };
-}
-
-function registryReconcileDeps(options: PipelineJobsOptions): RegistryReconcileDeps {
-  const db = options.db;
-
-  return {
-    findScan: async (registryId) => {
-      // Файл описи ищется по ключу папки, а не по области: рубеж создал
-      // маршрут (`findRegistry`), а областью здесь пришлось бы гадать, чья она,
-      // ещё не зная объекта. Системное чтение — ровно одна строка `works`.
-      const scan = await findRegistryFile(db, SYSTEM_SCOPE, registryId);
-      if (scan === null) return null;
-
-      return {
-        workId: scan.id,
-        objectId: scan.objectId,
-        kind: scan.kind,
-        registryId: scan.registryId,
-        currentRevisionId: scan.currentRevisionId,
-      };
-    },
-
-    findRegistry: async (objectId, registryId) => {
-      const registry = await findRegistry(db, objectScope(objectId), registryId);
-      if (registry === null) return null;
-      return {
-        id: registry.id,
-        objectId: registry.objectId,
-        number: registry.number,
-        folderNo: registry.folderNo,
-      };
-    },
-
-    loadPages: async (revisionId) => {
-      const scope = await pinScope(db, revisionId);
-      if (scope === null) {
-        throw new PipelineScopeError(
-          `Ревизия ${revisionId} не найдена: задача адресована в никуда.`,
-        );
-      }
-      return loadSegmentationPages(db, scope, revisionId);
-    },
-
-    // Область здесь не нужна и вредна: множество закрыто ключом реестра, а
-    // фильтрация областью дала бы сверку по видимой части папки (см. докстринг
-    // `listRegistryComplectRevisions`).
-    listComplectRevisions: async (registryId) => listRegistryComplectRevisions(db, registryId),
-
-    listContractorNames: async (ids) => {
-      const unique = [...new Set(ids)];
-      const names = new Map<string, string>();
-      for (const id of unique) {
-        const counterparty = await findCounterparty(db, SYSTEM_SCOPE, id);
-        if (counterparty !== null) names.set(id, counterparty.name);
-      }
-      return names;
-    },
-
-    listDocuments: async (objectId, revisionIds) =>
-      listDocumentsOfRevisions(db, objectScope(objectId), revisionIds),
-
-    listFieldValues: async (objectId, revisionIds, fieldCodes) =>
-      listFieldValuesOfRevisions(db, objectScope(objectId), revisionIds, fieldCodes),
-
-    save: async (input) => saveReconciliation(db, input),
-
-    emit: async (revisionId, eventType, payload) => {
-      await appendRevisionEvent(db, { revisionId, eventType, payload });
-    },
-  };
-}
-
 function segmentationDeps(options: PipelineJobsOptions): SegmentationDeps {
   const db = options.db;
 
-  const scopeOf = async (revisionId: string): Promise<AuthScope> => {
-    const scope = await pinScope(db, revisionId);
+  const scopeOf = async (folderId: string): Promise<AuthScope> => {
+    const scope = await pinScope(db, folderId);
     if (scope === null) {
-      throw new PipelineScopeError(`Ревизия ${revisionId} не найдена: задача адресована в никуда.`);
+      throw new PipelineScopeError(`Ревизия ${folderId} не найдена: задача адресована в никуда.`);
     }
     return scope;
   };
@@ -1994,63 +1812,60 @@ function segmentationDeps(options: PipelineJobsOptions): SegmentationDeps {
         : null;
 
   return {
-    loadPages: async (revisionId) =>
-      loadSegmentationPages(db, await scopeOf(revisionId), revisionId),
+    loadPages: async (folderId) => loadSegmentationPages(db, await scopeOf(folderId), folderId),
 
     savePageClassifications: async (input) =>
-      savePageClassifications(db, await scopeOf(input.revisionId), input),
+      savePageClassifications(db, await scopeOf(input.folderId), input),
 
-    listPageClassifications: async (revisionId) =>
-      listPageClassifications(db, await scopeOf(revisionId), revisionId),
+    listPageClassifications: async (folderId) =>
+      listPageClassifications(db, await scopeOf(folderId), folderId),
 
     applySegmentation: async (input) =>
-      applySegmentation(db, await scopeOf(input.revisionId), {
-        revisionId: input.revisionId,
+      applySegmentation(db, await scopeOf(input.folderId), {
+        folderId: input.folderId,
         documents: input.segmentation.documents,
         unassigned: input.segmentation.unassigned,
         extractorVersion: SEGMENTATION_VERSION,
       }),
 
-    listDocuments: async (revisionId) =>
-      listLogicalDocuments(db, await scopeOf(revisionId), revisionId),
+    listDocuments: async (folderId) => listLogicalDocuments(db, await scopeOf(folderId), folderId),
 
-    listPageAssignments: async (revisionId) =>
-      listPageAssignments(db, await scopeOf(revisionId), revisionId),
+    listPageAssignments: async (folderId) =>
+      listPageAssignments(db, await scopeOf(folderId), folderId),
 
     listFieldValues: async (documentId) => listFieldValues(db, SYSTEM_SCOPE, documentId),
 
     // Без области: месяц выводит конвейер, а не человек, и проверять его
     // правами пользователя было бы подлогом. Запись идемпотентна и не трогает
     // уже определённый месяц — условие живёт в самом операторе.
-    fillWorkPeriod: async (revisionId, period) => fillWorkPeriodIfEmpty(db, revisionId, period),
+    fillFolderPeriod: async (folderId, period) => fillFolderPeriodIfEmpty(db, folderId, period),
 
     // Исполнитель — по тем же основаниям без области: он прочитан из акта, а
     // не назван человеком. Условия «заменяется только подставленное» и «пока
     // комплект не подан и не в папке» живут в самих операторах.
-    replaceAssumedContractor: async (revisionId, contractorId) =>
-      replaceAssumedContractor(db, revisionId, contractorId),
+    replaceAssumedContractor: async (folderId, contractorId) =>
+      replaceAssumedContractor(db, folderId, contractorId),
 
-    rememberContractorRaw: async (revisionId, raw) => rememberContractorRaw(db, revisionId, raw),
+    rememberContractorRaw: async (folderId, raw) => rememberContractorRaw(db, folderId, raw),
 
     // Весь справочник, а не закрепления объекта: сужение оставляло бы
     // исполнителя неопознанным на объектах без закреплений (S39).
     listMatchableContractors: async () => listMatchableContractors(db),
 
-    saveFieldValues: async (input) => saveFieldValues(db, await scopeOf(input.revisionId), input),
+    saveFieldValues: async (input) => saveFieldValues(db, await scopeOf(input.folderId), input),
 
-    saveRegistryRows: async (input) => saveRegistryRows(db, await scopeOf(input.revisionId), input),
+    saveRegistryRows: async (input) => saveRegistryRows(db, await scopeOf(input.folderId), input),
 
-    listRegistryRows: async (revisionId) =>
-      listRegistryRows(db, await scopeOf(revisionId), revisionId),
+    listRegistryRows: async (folderId) => listRegistryRows(db, await scopeOf(folderId), folderId),
 
     saveRegistryMatches: async (input) =>
-      saveRegistryMatches(db, await scopeOf(input.revisionId), input),
+      saveRegistryMatches(db, await scopeOf(input.folderId), input),
 
     saveDocumentRelations: async (input) =>
-      saveDocumentRelations(db, await scopeOf(input.revisionId), input),
+      saveDocumentRelations(db, await scopeOf(input.folderId), input),
 
     observeCandidate: async (input) => {
-      const outcome = await observeDocTypeCandidate(db, await scopeOf(input.revisionId), input);
+      const outcome = await observeDocTypeCandidate(db, await scopeOf(input.folderId), input);
       return { created: outcome.created, occurrences: outcome.occurrences };
     },
 
@@ -2075,6 +1890,21 @@ function segmentationDeps(options: PipelineJobsOptions): SegmentationDeps {
      * текста нет вовсе. Тогда пропуск с названной причиной — законный исход.
      */
     stagePrompt: async (stage): Promise<PublishedPrompt | null> => {
+      /**
+       * Модель стадий анализа читается ЗДЕСЬ, вместе с промтом.
+       *
+       * Не в момент вызова шлюза и не один раз на процесс: промт и модель —
+       * одна пара, и в `ai_runs` они уезжают вместе. Настройка, прочитанная
+       * отдельно от промта, разошлась бы с ним при смене посреди прогона.
+       *
+       * Порядок предпочтения: `model_override` конкретного промта → настройка
+       * `analysis.model` → модель распознавания (её подставит сам провайдер,
+       * получив `undefined`). Первый уровень существует ради опыта с одной
+       * стадией, второй — ради всей ветки анализа.
+       */
+      const analysisModel = await readAnalysisModel(db);
+      const fallbackModel = analysisModel === '' ? null : analysisModel;
+
       const page = await listPromptTemplates(db, SYSTEM_SCOPE, {
         stage,
         state: 'published',
@@ -2093,7 +1923,7 @@ function segmentationDeps(options: PipelineJobsOptions): SegmentationDeps {
           version: row.version,
           systemPrompt: row.systemPrompt,
           userTemplate: row.userTemplate,
-          modelOverride: row.modelOverride,
+          modelOverride: row.modelOverride ?? fallbackModel,
         };
       }
 
@@ -2107,7 +1937,7 @@ function segmentationDeps(options: PipelineJobsOptions): SegmentationDeps {
         version: 0,
         systemPrompt: preset.text.system,
         userTemplate: preset.text.user,
-        modelOverride: null,
+        modelOverride: fallbackModel,
       };
     },
 
@@ -2140,7 +1970,7 @@ function segmentationDeps(options: PipelineJobsOptions): SegmentationDeps {
           },
 
     recordAiRun: async (input) => {
-      await recordAiRun(db, await scopeOf(input.revisionId), input);
+      await recordAiRun(db, await scopeOf(input.folderId), input);
     },
   };
 }
@@ -2161,21 +1991,21 @@ function checksLlmReviewDeps(options: PipelineJobsOptions): ChecksLlmReviewDeps 
   const db = options.db;
   const segmentation = segmentationDeps(options);
 
-  const scopeOf = async (revisionId: string): Promise<AuthScope> => {
-    const scope = await pinScope(db, revisionId);
+  const scopeOf = async (folderId: string): Promise<AuthScope> => {
+    const scope = await pinScope(db, folderId);
     if (scope === null) {
-      throw new PipelineScopeError(`Ревизия ${revisionId} не найдена: задача адресована в никуда.`);
+      throw new PipelineScopeError(`Ревизия ${folderId} не найдена: задача адресована в никуда.`);
     }
     return scope;
   };
 
   return {
-    loadReviewDocuments: async (revisionId) => {
-      const scope = await scopeOf(revisionId);
+    loadReviewDocuments: async (folderId) => {
+      const scope = await scopeOf(folderId);
       const [documents, assignments, pages] = await Promise.all([
-        listLogicalDocuments(db, scope, revisionId),
-        listPageAssignments(db, scope, revisionId),
-        loadSegmentationPages(db, scope, revisionId),
+        listLogicalDocuments(db, scope, folderId),
+        listPageAssignments(db, scope, folderId),
+        loadSegmentationPages(db, scope, folderId),
       ]);
 
       const textOf = new Map(pages.pages.map((page) => [page.sourcePageId, page]));
@@ -2213,7 +2043,7 @@ function checksLlmReviewDeps(options: PipelineJobsOptions): ChecksLlmReviewDeps 
       return result;
     },
 
-    saveLlmFindings: async (input) => saveLlmFindings(db, await scopeOf(input.revisionId), input),
+    saveLlmFindings: async (input) => saveLlmFindings(db, await scopeOf(input.folderId), input),
 
     stagePrompt: segmentation.stagePrompt,
     callLlm: segmentation.callLlm,
@@ -2328,10 +2158,6 @@ export function registerPipelineJobs(
 
   // Сверка описи передачи с комплектами папки (S20). Терминальная задача: она
   // ничего не ставит дальше и ничего не блокирует — её выход читает человек.
-  registry.register(
-    'registry.reconcile',
-    createRegistryReconcileHandler(registryReconcileDeps(options)),
-  );
 
   // Задачи 20–21 (§12): прогон правил и сводка. Регистрируются здесь и
   // безусловно — по той же причине, что и остальные стадии: обработчик без
@@ -2351,7 +2177,6 @@ export function registerPipelineJobs(
   // границ и архив согласованной ревизии. Регистрируются здесь и безусловно —
   // по той же причине, что и остальные стадии.
   registry.register('doc.materialize_pdf', createMaterializePdfHandler(materializeDeps(options)));
-  registry.register('submission.build_archive', createBuildArchiveHandler(archiveDeps(options)));
 
   // Задачи 26–27 (0027): разбор загруженного справочника и уборка брошенных
   // импортов. К ревизии отношения не имеют и стадией конвейера не являются, но

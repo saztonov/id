@@ -50,10 +50,10 @@ import {
 } from './report.js';
 
 export function ReportTable({
-  revisionId,
+  folderId,
   report,
 }: {
-  revisionId: string;
+  folderId: string;
   report: CheckReport;
 }): ReactNode {
   if (report.sections.length === 0) {
@@ -67,17 +67,17 @@ export function ReportTable({
   return (
     <div data-testid="checks-report">
       {report.sections.map((section) => (
-        <SectionBlock key={section.kind} revisionId={revisionId} section={section} />
+        <SectionBlock key={section.kind} folderId={folderId} section={section} />
       ))}
     </div>
   );
 }
 
 function SectionBlock({
-  revisionId,
+  folderId,
   section,
 }: {
-  revisionId: string;
+  folderId: string;
   section: ReportSection;
 }): ReactNode {
   const tally = sectionTally(section);
@@ -128,7 +128,7 @@ function SectionBlock({
             // раскрытием и таблица без него разъезжаются по всем колонкам.
             columnWidth: 48,
           }}
-          columns={reportColumns(revisionId)}
+          columns={reportColumns(folderId)}
         />
       )}
     </div>
@@ -143,13 +143,13 @@ function SectionBlock({
  * при раскладке `auto`. Ширины — в процентах, чтобы таблица дышала вместе с
  * окном; «Стр.» в пикселях, потому что номер страницы шире не становится.
  */
-function reportColumns(revisionId: string): ColumnsType<ReportRow> {
+function reportColumns(folderId: string): ColumnsType<ReportRow> {
   return [
     {
       title: 'Стр.',
       key: 'pages',
       width: 72,
-      render: (_value, row) => <PagesCell revisionId={revisionId} row={row} />,
+      render: (_value, row) => <PagesCell folderId={folderId} row={row} />,
     },
     {
       title: 'Позиция комплекта',
@@ -248,10 +248,10 @@ function ItemList({ row }: { row: ReportRow }): ReactNode {
  * Когда рабочий документ не собран, ссылки нет вовсе: неработающая ссылка хуже
  * её отсутствия, потому что по ней нажмут.
  */
-function PagesCell({ revisionId, row }: { revisionId: string; row: ReportRow }): ReactNode {
+function PagesCell({ folderId, row }: { folderId: string; row: ReportRow }): ReactNode {
   const label = pagesLabel(row);
   if (label === null) return null;
-  const href = rowHref(revisionId, row);
+  const href = rowHref(folderId, row);
   if (href === null) return <Typography.Text>{label}</Typography.Text>;
 
   const link = <Link to={href}>{label}</Link>;

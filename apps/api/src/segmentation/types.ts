@@ -64,7 +64,7 @@ export interface ManualLabel {
 export interface PageInput {
   readonly sourcePageId: string;
   /** Сквозной порядок страницы в ревизии поставки. */
-  readonly revisionOrdinal: number;
+  readonly folderOrdinal: number;
   /** Смена файла — СЛАБЫЙ приор границы (§8.2): документ продолжается в другом файле. */
   readonly sourceFileId: string;
   readonly filePageIndex: number;

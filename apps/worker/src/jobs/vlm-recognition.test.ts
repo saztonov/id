@@ -32,7 +32,7 @@ import {
   type VlmRunTarget,
 } from './vlm-recognition.js';
 
-const REVISION = '00000000-0000-4000-8000-000000000011';
+const FOLDER = '00000000-0000-4000-8000-000000000011';
 const LAYOUT = '00000000-0000-4000-8000-000000000013';
 const RUN = '00000000-0000-4000-8000-000000000014';
 
@@ -88,7 +88,7 @@ function makeContext<K extends 'vlm.start_recognition' | 'vlm.recognize_page' | 
     type,
     attempt: options.attempt ?? 1,
     maxAttempts: options.maxAttempts ?? 5,
-    revisionId: (payload['revisionId'] as string) ?? null,
+    folderId: (payload['folderId'] as string) ?? null,
     payload,
     db: undefined,
     logger: recordingLogger(sink.logs),
@@ -144,7 +144,7 @@ const MATCHING_HASH = computeBlocksHash(DEFAULT_FROZEN.map(toHashable));
 function runTarget(overrides: Partial<VlmRunTarget> = {}): VlmRunTarget {
   return {
     runId: RUN,
-    revisionId: REVISION,
+    folderId: FOLDER,
     layoutRevisionId: LAYOUT,
     status: 'running',
     localLayoutHash: MATCHING_HASH,
@@ -346,7 +346,7 @@ describe('createVlmStartHandler', () => {
     const handler = createVlmStartHandler(d);
     const ctx = makeContext(
       'vlm.start_recognition',
-      { revisionId: REVISION, recognitionRunId: RUN },
+      { folderId: FOLDER, recognitionRunId: RUN },
       sink,
     );
 
@@ -374,7 +374,7 @@ describe('createVlmStartHandler', () => {
     const handler = createVlmStartHandler(d);
     const ctx = makeContext(
       'vlm.start_recognition',
-      { revisionId: REVISION, recognitionRunId: RUN },
+      { folderId: FOLDER, recognitionRunId: RUN },
       sink,
     );
 
@@ -401,7 +401,7 @@ describe('createVlmStartHandler', () => {
     const handler = createVlmStartHandler(d);
     const ctx = makeContext(
       'vlm.start_recognition',
-      { revisionId: REVISION, recognitionRunId: RUN },
+      { folderId: FOLDER, recognitionRunId: RUN },
       sink,
     );
 
@@ -432,7 +432,7 @@ describe('createVlmStartHandler', () => {
     const handler = createVlmStartHandler(d);
     const ctx = makeContext(
       'vlm.start_recognition',
-      { revisionId: REVISION, recognitionRunId: RUN },
+      { folderId: FOLDER, recognitionRunId: RUN },
       sink,
     );
 
@@ -514,7 +514,7 @@ describe('createVlmStartHandler', () => {
     const handler = createVlmStartHandler(d);
     const ctx = makeContext(
       'vlm.start_recognition',
-      { revisionId: REVISION, recognitionRunId: RUN },
+      { folderId: FOLDER, recognitionRunId: RUN },
       sink,
     );
 
@@ -617,11 +617,7 @@ describe('createVlmStartHandler', () => {
 
     const handler = createVlmStartHandler(d);
     await handler(
-      makeContext(
-        'vlm.start_recognition',
-        { revisionId: REVISION, recognitionRunId: RUN },
-        makeSink(),
-      ),
+      makeContext('vlm.start_recognition', { folderId: FOLDER, recognitionRunId: RUN }, makeSink()),
     );
 
     // Перенесён ровно один блок — с той страницы, разворот которой не менялся.
@@ -677,7 +673,7 @@ describe('createVlmStartHandler', () => {
     const handler = createVlmStartHandler(d);
     const ctx = makeContext(
       'vlm.start_recognition',
-      { revisionId: REVISION, recognitionRunId: RUN },
+      { folderId: FOLDER, recognitionRunId: RUN },
       sink,
     );
 
@@ -695,7 +691,7 @@ describe('createVlmStartHandler', () => {
     const handler = createVlmStartHandler(d);
     const ctx = makeContext(
       'vlm.start_recognition',
-      { revisionId: REVISION, recognitionRunId: RUN },
+      { folderId: FOLDER, recognitionRunId: RUN },
       sink,
     );
 
@@ -708,7 +704,7 @@ describe('createVlmStartHandler', () => {
     const handler = createVlmStartHandler(d);
     const ctx = makeContext(
       'vlm.start_recognition',
-      { revisionId: REVISION, recognitionRunId: RUN },
+      { folderId: FOLDER, recognitionRunId: RUN },
       sink,
     );
 
@@ -735,7 +731,7 @@ describe('createVlmRecognizePageHandler', () => {
     const handler = createVlmRecognizePageHandler(d);
     const ctx = makeContext(
       'vlm.recognize_page',
-      { revisionId: REVISION, recognitionRunId: RUN, pageIndex: 0 },
+      { folderId: FOLDER, recognitionRunId: RUN, pageIndex: 0 },
       sink,
     );
 
@@ -789,7 +785,7 @@ describe('createVlmRecognizePageHandler', () => {
     const handler = createVlmRecognizePageHandler(d);
     const ctx = makeContext(
       'vlm.recognize_page',
-      { revisionId: REVISION, recognitionRunId: RUN, pageIndex: 0 },
+      { folderId: FOLDER, recognitionRunId: RUN, pageIndex: 0 },
       sink,
     );
 
@@ -835,7 +831,7 @@ describe('createVlmRecognizePageHandler', () => {
     const handler = createVlmRecognizePageHandler(d);
     const ctx = makeContext(
       'vlm.recognize_page',
-      { revisionId: REVISION, recognitionRunId: RUN, pageIndex: 0 },
+      { folderId: FOLDER, recognitionRunId: RUN, pageIndex: 0 },
       sink,
     );
 
@@ -885,7 +881,7 @@ describe('createVlmRecognizePageHandler', () => {
     const handler = createVlmRecognizePageHandler(d);
     const ctx = makeContext(
       'vlm.recognize_page',
-      { revisionId: REVISION, recognitionRunId: RUN, pageIndex: 0 },
+      { folderId: FOLDER, recognitionRunId: RUN, pageIndex: 0 },
       sink,
     );
 
@@ -928,7 +924,7 @@ describe('createVlmRecognizePageHandler', () => {
     const handler = createVlmRecognizePageHandler(d);
     const ctx = makeContext(
       'vlm.recognize_page',
-      { revisionId: REVISION, recognitionRunId: RUN, pageIndex: 0 },
+      { folderId: FOLDER, recognitionRunId: RUN, pageIndex: 0 },
       sink,
     );
 
@@ -979,7 +975,7 @@ describe('createVlmRecognizePageHandler', () => {
     const handler = createVlmRecognizePageHandler(d);
     const ctx = makeContext(
       'vlm.recognize_page',
-      { revisionId: REVISION, recognitionRunId: RUN, pageIndex: 0 },
+      { folderId: FOLDER, recognitionRunId: RUN, pageIndex: 0 },
       sink,
     );
 
@@ -1016,7 +1012,7 @@ describe('createVlmRecognizePageHandler', () => {
     const handler = createVlmRecognizePageHandler(d);
     const ctx = makeContext(
       'vlm.recognize_page',
-      { revisionId: REVISION, recognitionRunId: RUN, pageIndex: 0 },
+      { folderId: FOLDER, recognitionRunId: RUN, pageIndex: 0 },
       sink,
     );
 
@@ -1067,7 +1063,7 @@ describe('createVlmRecognizePageHandler', () => {
     const handler = createVlmRecognizePageHandler(d);
     const ctx = makeContext(
       'vlm.recognize_page',
-      { revisionId: REVISION, recognitionRunId: RUN, pageIndex: 0 },
+      { folderId: FOLDER, recognitionRunId: RUN, pageIndex: 0 },
       sink,
       { signal: controller.signal },
     );
@@ -1104,7 +1100,7 @@ describe('createVlmRecognizePageHandler', () => {
     const handler = createVlmRecognizePageHandler(d);
     const ctx = makeContext(
       'vlm.recognize_page',
-      { revisionId: REVISION, recognitionRunId: RUN, pageIndex: 0 },
+      { folderId: FOLDER, recognitionRunId: RUN, pageIndex: 0 },
       sink,
     );
 
@@ -1156,7 +1152,7 @@ describe('createVlmRecognizePageHandler', () => {
     const handler = createVlmRecognizePageHandler(d);
     const ctx = makeContext(
       'vlm.recognize_page',
-      { revisionId: REVISION, recognitionRunId: RUN, pageIndex: 0 },
+      { folderId: FOLDER, recognitionRunId: RUN, pageIndex: 0 },
       sink,
       { attempt: 1, maxAttempts: 5 },
     );
@@ -1216,7 +1212,7 @@ describe('createVlmRecognizePageHandler', () => {
     const handler = createVlmRecognizePageHandler(d);
     const ctx = makeContext(
       'vlm.recognize_page',
-      { revisionId: REVISION, recognitionRunId: RUN, pageIndex: 0 },
+      { folderId: FOLDER, recognitionRunId: RUN, pageIndex: 0 },
       sink,
       { attempt: 1, maxAttempts: 5 },
     );
@@ -1266,7 +1262,7 @@ describe('createVlmRecognizePageHandler', () => {
     const handler = createVlmRecognizePageHandler(d);
     const ctx = makeContext(
       'vlm.recognize_page',
-      { revisionId: REVISION, recognitionRunId: RUN, pageIndex: 0 },
+      { folderId: FOLDER, recognitionRunId: RUN, pageIndex: 0 },
       sink,
       { attempt: 1, maxAttempts: 5 },
     );
@@ -1294,7 +1290,7 @@ describe('createVlmRecognizePageHandler', () => {
     const handler = createVlmRecognizePageHandler(d);
     const ctx = makeContext(
       'vlm.recognize_page',
-      { revisionId: REVISION, recognitionRunId: RUN, pageIndex: 0 },
+      { folderId: FOLDER, recognitionRunId: RUN, pageIndex: 0 },
       sink,
     );
 
@@ -1390,15 +1386,10 @@ describe('createVlmFinalizeHandler', () => {
     });
     const sink = makeSink();
     const handler = createVlmFinalizeHandler(d);
-    const ctx = makeContext(
-      'vlm.finalize_run',
-      { revisionId: REVISION, recognitionRunId: RUN },
-      sink,
-      {
-        attempt: 1,
-        maxAttempts: 60,
-      },
-    );
+    const ctx = makeContext('vlm.finalize_run', { folderId: FOLDER, recognitionRunId: RUN }, sink, {
+      attempt: 1,
+      maxAttempts: 60,
+    });
 
     await expect(handler(ctx)).rejects.toThrow(VlmRecognitionPendingError);
     expect(finishCalls).toHaveLength(0);
@@ -1436,12 +1427,10 @@ describe('createVlmFinalizeHandler', () => {
     });
     const sink = makeSink();
     const handler = createVlmFinalizeHandler(d);
-    const ctx = makeContext(
-      'vlm.finalize_run',
-      { revisionId: REVISION, recognitionRunId: RUN },
-      sink,
-      { attempt: 1, maxAttempts: 60 },
-    );
+    const ctx = makeContext('vlm.finalize_run', { folderId: FOLDER, recognitionRunId: RUN }, sink, {
+      attempt: 1,
+      maxAttempts: 60,
+    });
 
     /**
      * Ожидание закончилось, и прогон пошёл своим обычным путём.
@@ -1478,12 +1467,10 @@ describe('createVlmFinalizeHandler', () => {
     });
     const sink = makeSink();
     const handler = createVlmFinalizeHandler(d);
-    const ctx = makeContext(
-      'vlm.finalize_run',
-      { revisionId: REVISION, recognitionRunId: RUN },
-      sink,
-      { attempt: 1, maxAttempts: 60 },
-    );
+    const ctx = makeContext('vlm.finalize_run', { folderId: FOLDER, recognitionRunId: RUN }, sink, {
+      attempt: 1,
+      maxAttempts: 60,
+    });
 
     await expect(handler(ctx)).rejects.toThrow(VlmRecognitionPendingError);
     expect(marked).toHaveLength(0);
@@ -1498,11 +1485,7 @@ describe('createVlmFinalizeHandler', () => {
     });
     const sink = makeSink();
     const handler = createVlmFinalizeHandler(d);
-    const ctx = makeContext(
-      'vlm.finalize_run',
-      { revisionId: REVISION, recognitionRunId: RUN },
-      sink,
-    );
+    const ctx = makeContext('vlm.finalize_run', { folderId: FOLDER, recognitionRunId: RUN }, sink);
 
     await expect(handler(ctx)).rejects.toThrow(VlmRecognitionCoverageError);
     expect(finishCalls).toHaveLength(1);
@@ -1528,11 +1511,7 @@ describe('createVlmFinalizeHandler', () => {
     });
     const sink = makeSink();
     const handler = createVlmFinalizeHandler(d);
-    const ctx = makeContext(
-      'vlm.finalize_run',
-      { revisionId: REVISION, recognitionRunId: RUN },
-      sink,
-    );
+    const ctx = makeContext('vlm.finalize_run', { folderId: FOLDER, recognitionRunId: RUN }, sink);
 
     // Отсрочка, а не отказ: страницы вернулись в работу, и прогон закрывать
     // нечем — именно здесь прежде терялись 84 распознанных блока из 85.
@@ -1558,11 +1537,7 @@ describe('createVlmFinalizeHandler', () => {
     });
     const sink = makeSink();
     const handler = createVlmFinalizeHandler(d);
-    const ctx = makeContext(
-      'vlm.finalize_run',
-      { revisionId: REVISION, recognitionRunId: RUN },
-      sink,
-    );
+    const ctx = makeContext('vlm.finalize_run', { folderId: FOLDER, recognitionRunId: RUN }, sink);
 
     await expect(handler(ctx)).rejects.toThrow(VlmRecognitionCoverageError);
     expect(finishCalls[0]?.['status']).toBe('failed');
@@ -1586,11 +1561,7 @@ describe('createVlmFinalizeHandler', () => {
     });
     const sink = makeSink();
     const handler = createVlmFinalizeHandler(d);
-    const ctx = makeContext(
-      'vlm.finalize_run',
-      { revisionId: REVISION, recognitionRunId: RUN },
-      sink,
-    );
+    const ctx = makeContext('vlm.finalize_run', { folderId: FOLDER, recognitionRunId: RUN }, sink);
 
     await expect(handler(ctx)).rejects.toThrow(VlmRecognitionCoverageError);
     expect(finishCalls[0]?.['status']).toBe('failed');
@@ -1613,11 +1584,7 @@ describe('createVlmFinalizeHandler', () => {
     });
     const sink = makeSink();
     const handler = createVlmFinalizeHandler(d);
-    const ctx = makeContext(
-      'vlm.finalize_run',
-      { revisionId: REVISION, recognitionRunId: RUN },
-      sink,
-    );
+    const ctx = makeContext('vlm.finalize_run', { folderId: FOLDER, recognitionRunId: RUN }, sink);
 
     await expect(handler(ctx)).rejects.toThrow(VlmRecognitionPendingError);
     expect(finishCalls).toHaveLength(0);
@@ -1635,11 +1602,7 @@ describe('createVlmFinalizeHandler', () => {
     });
     const sink = makeSink();
     const handler = createVlmFinalizeHandler(d);
-    const ctx = makeContext(
-      'vlm.finalize_run',
-      { revisionId: REVISION, recognitionRunId: RUN },
-      sink,
-    );
+    const ctx = makeContext('vlm.finalize_run', { folderId: FOLDER, recognitionRunId: RUN }, sink);
 
     await expect(handler(ctx)).rejects.toThrow(VlmRecognitionCoverageError);
     expect(finishCalls[0]?.['status']).toBe('failed');
@@ -1673,11 +1636,7 @@ describe('createVlmFinalizeHandler', () => {
     });
     const sink = makeSink();
     const handler = createVlmFinalizeHandler(d);
-    const ctx = makeContext(
-      'vlm.finalize_run',
-      { revisionId: REVISION, recognitionRunId: RUN },
-      sink,
-    );
+    const ctx = makeContext('vlm.finalize_run', { folderId: FOLDER, recognitionRunId: RUN }, sink);
 
     await handler(ctx);
 
@@ -1722,11 +1681,7 @@ describe('createVlmFinalizeHandler', () => {
     });
     const sink = makeSink();
     const handler = createVlmFinalizeHandler(d);
-    const ctx = makeContext(
-      'vlm.finalize_run',
-      { revisionId: REVISION, recognitionRunId: RUN },
-      sink,
-    );
+    const ctx = makeContext('vlm.finalize_run', { folderId: FOLDER, recognitionRunId: RUN }, sink);
 
     await handler(ctx);
 
@@ -1747,11 +1702,7 @@ describe('createVlmFinalizeHandler', () => {
     });
     const sink = makeSink();
     const handler = createVlmFinalizeHandler(d);
-    const ctx = makeContext(
-      'vlm.finalize_run',
-      { revisionId: REVISION, recognitionRunId: RUN },
-      sink,
-    );
+    const ctx = makeContext('vlm.finalize_run', { folderId: FOLDER, recognitionRunId: RUN }, sink);
 
     await handler(ctx);
 
@@ -1778,7 +1729,7 @@ describe('createVlmFinalizeHandler', () => {
     const handler = createVlmFinalizeHandler(d);
     const ctx = makeContext(
       'vlm.finalize_run',
-      { revisionId: REVISION, recognitionRunId: RUN },
+      { folderId: FOLDER, recognitionRunId: RUN },
       sink,
       // Последняя попытка: именно на ней прежний отказ объявлял задачу мёртвой
       // и пытался закрыть прогон, которого больше нет.
@@ -1826,7 +1777,7 @@ describe('разворот содержимого доезжает до кроп
     await handler(
       makeContext(
         'vlm.recognize_page',
-        { revisionId: REVISION, recognitionRunId: RUN, pageIndex: 0 },
+        { folderId: FOLDER, recognitionRunId: RUN, pageIndex: 0 },
         makeSink(),
       ),
     );
@@ -1870,7 +1821,7 @@ describe('разворот содержимого доезжает до кроп
     await handler(
       makeContext(
         'vlm.recognize_page',
-        { revisionId: REVISION, recognitionRunId: RUN, pageIndex: 0 },
+        { folderId: FOLDER, recognitionRunId: RUN, pageIndex: 0 },
         makeSink(),
       ),
     );
@@ -1918,7 +1869,7 @@ describe('разворот содержимого доезжает до кроп
     await handler(
       makeContext(
         'vlm.recognize_page',
-        { revisionId: REVISION, recognitionRunId: RUN, pageIndex: 0 },
+        { folderId: FOLDER, recognitionRunId: RUN, pageIndex: 0 },
         makeSink(),
       ),
     );
@@ -1960,7 +1911,7 @@ describe('разворот содержимого доезжает до кроп
     await handler(
       makeContext(
         'vlm.recognize_page',
-        { revisionId: REVISION, recognitionRunId: RUN, pageIndex: 0 },
+        { folderId: FOLDER, recognitionRunId: RUN, pageIndex: 0 },
         makeSink(),
       ),
     );

@@ -27,7 +27,7 @@ import { App as AntApp } from 'antd';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 
 import { layout } from '../../api/endpoints.js';
-import { revisionKeys } from '../../api/keys.js';
+import { folderKeys } from '../../api/keys.js';
 import { describeError } from '../../api/problem.js';
 import type { Rotation } from './rotation.js';
 
@@ -41,7 +41,7 @@ export interface UsePageOrientationResult {
 }
 
 export function usePageOrientation(
-  revisionId: string,
+  folderId: string,
   bundleId: string | null,
 ): UsePageOrientationResult {
   const { message } = AntApp.useApp();
@@ -57,12 +57,12 @@ export function usePageOrientation(
    */
   const refresh = async (): Promise<void> => {
     if (bundleId === null) return;
-    await queryClient.invalidateQueries({ queryKey: revisionKeys.bundlePages(bundleId) });
+    await queryClient.invalidateQueries({ queryKey: folderKeys.bundlePages(bundleId) });
   };
 
   const setMutation = useMutation({
     mutationFn: (input: { sourcePageId: string; rotation: Rotation }) =>
-      layout.setOrientation(revisionId, input.sourcePageId, input.rotation),
+      layout.setOrientation(folderId, input.sourcePageId, input.rotation),
     onSuccess: async (view) => {
       message.success(
         view.contentRotation === 0
@@ -76,7 +76,7 @@ export function usePageOrientation(
   });
 
   const clearMutation = useMutation({
-    mutationFn: (sourcePageId: string) => layout.clearOrientation(revisionId, sourcePageId),
+    mutationFn: (sourcePageId: string) => layout.clearOrientation(folderId, sourcePageId),
     onSuccess: async (view) => {
       message.success(
         view.contentRotation === 0

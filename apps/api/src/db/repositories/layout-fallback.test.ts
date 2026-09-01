@@ -48,8 +48,7 @@ function id(n: number): string {
 const OBJECT = id(1);
 const ORG = id(2);
 const USER = id(3);
-const WORK = id(4);
-const REVISION = id(5);
+const FOLDER = id(5);
 const FILE = id(6);
 const BUNDLE = id(7);
 const LAYOUT = id(8);
@@ -78,9 +77,9 @@ async function insertBlock(input: {
   const [x0, y0, x1, y1] = input.rect;
   await testDb.query(
     `INSERT INTO layout_blocks
-       (layout_revision_id, revision_id, bundle_id, source_page_id, working_page_index, object_id,
+       (layout_revision_id, folder_id, bundle_id, source_page_id, working_page_index, object_id,
         block_type, shape_type, x0, y0, x1, y1, sort_order, source, detector_provenance)
-     VALUES ('${LAYOUT}', '${REVISION}', '${BUNDLE}', '${id(100 + input.page)}', ${input.page},
+     VALUES ('${LAYOUT}', '${FOLDER}', '${BUNDLE}', '${id(100 + input.page)}', ${input.page},
              '${OBJECT}', '${input.blockType}', 'rectangle', ${x0}, ${y0}, ${x1}, ${y1},
              ${input.sortOrder ?? 0}, '${input.source}', 'rf_detr')`,
   );
@@ -105,30 +104,28 @@ beforeAll(async () => {
     // (0028): комплект нельзя завести подрядчику, которого на объекте нет.
     `INSERT INTO object_contractors (object_id, contractor_id)
        VALUES ('${OBJECT}', '${ORG}') ON CONFLICT DO NOTHING`,
-    `INSERT INTO works
+    `INSERT INTO folders
        (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-       VALUES ('${WORK}', '${OBJECT}', '${ORG}', '${ORG}', 'roofing', DATE '2026-01-01', 'Комплект', '${USER}')`,
-    `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
-       VALUES ('${REVISION}', '${WORK}', '${OBJECT}', '${ORG}', 1, 'draft')`,
+     VALUES ('${FOLDER}', '${OBJECT}', '${ORG}', '${ORG}', 'roofing', DATE '2026-01-01', 'Комплект', '${USER}')`,
     `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
        VALUES ('${SHA}', 'blobs/${SHA}', 1024, 'application/pdf')`,
-    `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order, verify_state)
-       VALUES ('${FILE}', '${REVISION}', '${SHA}', 'комплект.pdf', 0, 'ok')`,
-    `INSERT INTO processing_bundles (id, revision_id, aggregate_manifest_hash, working_pdf_blob_sha256, builder_version)
-       VALUES ('${BUNDLE}', '${REVISION}', '${'b'.repeat(64)}', '${SHA}', 'bundle/1+pdf-lib')`,
-    `INSERT INTO layout_revisions (id, revision_id, object_id, bundle_id, revision_no, state)
-       VALUES ('${LAYOUT}', '${REVISION}', '${OBJECT}', '${BUNDLE}', 1, 'draft')`,
+    `INSERT INTO source_files (id, folder_id, blob_sha256, file_name, sort_order, verify_state)
+       VALUES ('${FILE}', '${FOLDER}', '${SHA}', 'комплект.pdf', 0, 'ok')`,
+    `INSERT INTO processing_bundles (id, folder_id, aggregate_manifest_hash, working_pdf_blob_sha256, builder_version)
+       VALUES ('${BUNDLE}', '${FOLDER}', '${'b'.repeat(64)}', '${SHA}', 'bundle/1+pdf-lib')`,
+    `INSERT INTO layout_revisions (id, folder_id, object_id, bundle_id, revision_no, state)
+       VALUES ('${LAYOUT}', '${FOLDER}', '${OBJECT}', '${BUNDLE}', 1, 'draft')`,
   ];
   for (const statement of fixture) await testDb.query(statement);
 
   for (let page = 0; page < PAGE_COUNT; page += 1) {
     await testDb.query(
-      `INSERT INTO source_pages (id, revision_id, source_file_id, file_page_index, revision_ordinal, width_px, height_px, rotation)
-         VALUES ('${id(100 + page)}', '${REVISION}', '${FILE}', ${page}, ${page}, 1654, 2339, 0)`,
+      `INSERT INTO source_pages (id, folder_id, source_file_id, file_page_index, folder_ordinal, width_px, height_px, rotation)
+         VALUES ('${id(100 + page)}', '${FOLDER}', '${FILE}', ${page}, ${page}, 1654, 2339, 0)`,
     );
     await testDb.query(
-      `INSERT INTO processing_bundle_pages (bundle_id, revision_id, working_page_index, source_page_id)
-         VALUES ('${BUNDLE}', '${REVISION}', ${page}, '${id(100 + page)}')`,
+      `INSERT INTO processing_bundle_pages (bundle_id, folder_id, working_page_index, source_page_id)
+         VALUES ('${BUNDLE}', '${FOLDER}', ${page}, '${id(100 + page)}')`,
     );
   }
 
@@ -226,7 +223,7 @@ describe('applyTextCoverageFallback', () => {
 
   it('отмечает тронутые страницы флагом внимания, не стирая прежние', async () => {
     const rows = await testDb.query<{ id: string; attention_flags: string[] }>(
-      `SELECT id, attention_flags FROM source_pages WHERE revision_id = '${REVISION}' ORDER BY revision_ordinal`,
+      `SELECT id, attention_flags FROM source_pages WHERE folder_id = '${FOLDER}' ORDER BY folder_ordinal`,
     );
     expect(rows[PAGE_EMPTY]?.attention_flags).toContain('text_fallback_applied');
     expect(rows[PAGE_SPARSE]?.attention_flags).toContain('text_fallback_applied');
@@ -250,10 +247,10 @@ describe('applyTextCoverageFallback', () => {
 
   it('нулевой порог оставляет скудные страницы детекции в покое', async () => {
     // Отдельная ревизия разметки: та, что выше, уже вся покрыта заплатками.
-    // Черновик у поставки ровно один (`ux_layout_revisions_single_draft`),
+    // Черновик у поставки ровно один (`ux_layout_folders_single_draft`),
     // поэтому прежний сначала уступает место.
     const layout2 = id(9);
-    // `layout_revisions_superseded_chk` требует у нечерновой ревизии хэш набора:
+    // `layout_folders_superseded_chk` требует у нечерновой ревизии хэш набора:
     // вытесненная разметка описывает набор, по которому уже прошёл прогон.
     await testDb.query(
       `UPDATE layout_revisions
@@ -261,14 +258,14 @@ describe('applyTextCoverageFallback', () => {
         WHERE id = '${LAYOUT}'`,
     );
     await testDb.query(
-      `INSERT INTO layout_revisions (id, revision_id, object_id, bundle_id, revision_no, state)
-         VALUES ('${layout2}', '${REVISION}', '${OBJECT}', '${BUNDLE}', 2, 'draft')`,
+      `INSERT INTO layout_revisions (id, folder_id, object_id, bundle_id, revision_no, state)
+         VALUES ('${layout2}', '${FOLDER}', '${OBJECT}', '${BUNDLE}', 2, 'draft')`,
     );
     await testDb.query(
       `INSERT INTO layout_blocks
-         (layout_revision_id, revision_id, bundle_id, source_page_id, working_page_index, object_id,
+         (layout_revision_id, folder_id, bundle_id, source_page_id, working_page_index, object_id,
           block_type, shape_type, x0, y0, x1, y1, sort_order, source, detector_provenance)
-       VALUES ('${layout2}', '${REVISION}', '${BUNDLE}', '${id(100 + PAGE_SPARSE)}', ${PAGE_SPARSE},
+       VALUES ('${layout2}', '${FOLDER}', '${BUNDLE}', '${id(100 + PAGE_SPARSE)}', ${PAGE_SPARSE},
                '${OBJECT}', 'text', 'rectangle', 0.1, 0.1, 0.9, 0.15, 0, 'auto', 'rf_detr')`,
     );
 
@@ -307,12 +304,12 @@ describe('applyTextCoverageFallback', () => {
       await testDb.query(
         `UPDATE layout_revisions
             SET state = 'superseded', blocks_hash = '${'d'.repeat(64)}'
-          WHERE state = 'draft' AND revision_id = '${REVISION}'`,
+          WHERE state = 'draft' AND folder_id = '${FOLDER}'`,
       );
       await testDb.query(
         `INSERT INTO layout_revisions
-           (id, revision_id, object_id, bundle_id, revision_no, state, markup_policy)
-         VALUES ('${layout3}', '${REVISION}', '${OBJECT}', '${BUNDLE}', 3, 'draft',
+           (id, folder_id, object_id, bundle_id, revision_no, state, markup_policy)
+         VALUES ('${layout3}', '${FOLDER}', '${OBJECT}', '${BUNDLE}', 3, 'draft',
                  '{"version":1,"sheetStrategy":"sheet_aware","numberZone":"near_stamp","numberZonePad":{"x":0.1,"y":0.25}}'::jsonb)`,
       );
     });

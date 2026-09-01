@@ -3,7 +3,7 @@
  *
  * Инженер размечает вид ИД каждой страницы прямо там, где её видит, — на экране
  * разметки, а не на вкладке «Документы» вслепую по номерам. Данные и мутации те
- * же, что у таблицы классификаций: `GET /revisions/{id}/classifications` и
+ * же, что у таблицы классификаций: `GET /folders/{id}/classifications` и
  * `PUT/DELETE …/manual-label` через общий хук `useManualLabel`.
  *
  * ## Значение селекта — только ручная метка
@@ -40,7 +40,7 @@ import { useManualLabel } from './useManualLabel.js';
 const POPUP_WIDTH = 560;
 
 export interface PageTypePanelProps {
-  readonly revisionId: string;
+  readonly folderId: string;
   /** Страница рабочего документа, открытая на канве. */
   readonly page: { readonly sourcePageId: string; readonly workingPageIndex: number };
   /** Строка классификации этой страницы; отсутствие строки — «тип не задан». */
@@ -53,7 +53,7 @@ export interface PageTypePanelProps {
 
 export function PageTypePanel(props: PageTypePanelProps): ReactNode {
   const { page, classification, docTypes, canEdit } = props;
-  const manual = useManualLabel(props.revisionId);
+  const manual = useManualLabel(props.folderId);
 
   const isManual = classification?.source === 'manual';
   const pageNo = page.workingPageIndex + 1;

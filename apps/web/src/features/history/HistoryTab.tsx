@@ -4,7 +4,7 @@
  * ## Здесь ничего не запускается и не решается (S24)
  *
  * Кнопок действий на вкладке нет ни одной. Карточка согласования переехала на
- * «Проверку» (`features/workflow/ApprovalCard.tsx`) — туда, где принимается
+ * «Проверку» — туда, где принимается
  * решение: под список замечаний. Здесь остался ответ на вопрос «что уже
  * происходило», и смешивать его с «что сделать дальше» — то самое устройство,
  * из-за которого «Подать на проверку» оказывалась на вкладке с журналом.
@@ -35,119 +35,41 @@
  * возвращается — свежесть экрана не должна зависеть от уведомлений (§3.8).
  */
 import { useState, type ReactNode } from 'react';
-import { Alert, Card, Descriptions, Space, Table, Tag, Timeline, Typography } from 'antd';
+import { Alert, Card, Descriptions, Space, Table, Tag, Typography } from 'antd';
 import { useQuery } from '@tanstack/react-query';
-import { recognition, revisionEvents, workflow } from '../../api/endpoints.js';
-import { revisionKeys } from '../../api/keys.js';
+import { recognition, folderEvents } from '../../api/endpoints.js';
+import { folderKeys } from '../../api/keys.js';
 import type {
   Artifact,
   BlockResult,
   ProcessingStatus,
   RecognitionRun,
   StageSummary,
-  WorkflowState,
 } from '../../api/types.js';
-import { useSession } from '../../app/session.js';
-import { Link } from '../../app/router.js';
 import { ErrorState, LoadingState } from '../../shared/ui.js';
-import { usePollingInterval } from '../revision/stream.js';
+import { usePollingInterval } from '../folder/stream.js';
 import { isDryRun, isVlmRun, recognitionProviderLabel, runProviderOf } from './runProvider.js';
-import {
-  PROCESSING_STAGE_LABELS,
-  RECOGNITION_STATUS_LABELS,
-  REVIEW_ACTION_LABELS,
-  WORKFLOW_STATUS_LABELS,
-  labelOf,
-} from '../../shared/labels.js';
+import { PROCESSING_STAGE_LABELS, RECOGNITION_STATUS_LABELS } from '../../shared/labels.js';
 
-export function HistoryTab({ revisionId }: { revisionId: string }): ReactNode {
-  const { can } = useSession();
+export function HistoryTab({ folderId }: { folderId: string }): ReactNode {
   const [openedRun, setOpenedRun] = useState<string | null>(null);
   const pollingInterval = usePollingInterval();
 
-  const state = useQuery({
-    queryKey: revisionKeys.workflow(revisionId),
-    queryFn: () => workflow.state(revisionId),
-  });
   const status = useQuery({
-    queryKey: revisionKeys.processingStatus(revisionId),
-    queryFn: ({ signal }) => revisionEvents.processingStatus(revisionId, signal),
+    queryKey: folderKeys.processingStatus(folderId),
+    queryFn: ({ signal }) => folderEvents.processingStatus(folderId, signal),
     // Функция, а не число: после отказа опрос обязан замолкнуть. Прежний
     // фиксированный интервал продолжал тикать и по 429 — то есть добивал уже
     // исчерпанный лимит запросов ровно тогда, когда сервер просил перестать.
     refetchInterval: (query) => (query.state.error === null ? pollingInterval : false),
   });
   const runs = useQuery({
-    queryKey: revisionKeys.recognitionRuns(revisionId),
-    queryFn: () => recognition.runs(revisionId),
+    queryKey: folderKeys.recognitionRuns(folderId),
+    queryFn: () => recognition.runs(folderId),
   });
-  const archive = useQuery({
-    queryKey: revisionKeys.archive(revisionId),
-    queryFn: () => workflow.archive(revisionId),
-  });
-
-  if (state.isPending) return <LoadingState label="Загрузка состояния согласования…" />;
-  if (state.isError) return <ErrorState error={state.error} />;
-
-  const data: WorkflowState = state.data;
 
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
-      {/*
-        Состояние согласования — только на чтение. Кнопки переходов живут на
-        вкладке «Проверка», под списком замечаний: решение принимают, глядя на
-        результат проверки, а не на журнал.
-      */}
-      <Card size="small" title="Состояние согласования">
-        <Descriptions size="small" column={2}>
-          <Descriptions.Item label="Статус">
-            <Tag data-testid="revision-status">
-              {labelOf(WORKFLOW_STATUS_LABELS, data.revision.status)}
-            </Tag>
-          </Descriptions.Item>
-          <Descriptions.Item label="Ревизия">№ {data.revision.revisionNo}</Descriptions.Item>
-          <Descriptions.Item label="Подана">{data.revision.submittedAt ?? '—'}</Descriptions.Item>
-          <Descriptions.Item label="Решение">{data.revision.decidedAt ?? '—'}</Descriptions.Item>
-          <Descriptions.Item label="Состав (хэш)">
-            {data.revision.aggregateManifestHash?.slice(0, 12) ?? '—'}
-          </Descriptions.Item>
-          <Descriptions.Item label="Версия">{data.revision.version}</Descriptions.Item>
-        </Descriptions>
-
-        {data.revision.returnReason !== null && (
-          <Alert
-            type="warning"
-            showIcon
-            style={{ marginTop: 12 }}
-            message="Причина возврата"
-            description={data.revision.returnReason}
-          />
-        )}
-
-        <Typography.Paragraph type="secondary" style={{ marginTop: 12, marginBottom: 0 }}>
-          Подать, согласовать или вернуть комплект можно на вкладке{' '}
-          <Link to={`/ids/revisions/${revisionId}?tab=checks`}>«Проверка»</Link>.
-        </Typography.Paragraph>
-      </Card>
-
-      <Card size="small" title="Действия по ревизии">
-        {data.actions.length === 0 ? (
-          <Typography.Text type="secondary">Действий пока не было</Typography.Text>
-        ) : (
-          <Timeline
-            items={data.actions.map((action) => ({
-              children: (
-                <>
-                  <div>{labelOf(REVIEW_ACTION_LABELS, action.action)}</div>
-                  <Typography.Text type="secondary">{action.at}</Typography.Text>
-                  {action.comment !== null && <div>{action.comment}</div>}
-                </>
-              ),
-            }))}
-          />
-        )}
-      </Card>
-
       <Card size="small" title="Стадии обработки">
         {status.isError && <ErrorState error={status.error} />}
         {status.isSuccess && (
@@ -264,24 +186,6 @@ export function HistoryTab({ revisionId }: { revisionId: string }): ReactNode {
               },
             ]}
           />
-        )}
-      </Card>
-
-      <Card size="small" title="Архив согласованной ревизии">
-        {archive.isSuccess && (
-          <Space direction="vertical">
-            <Typography.Text>
-              Состояние:{' '}
-              {archive.data.state === 'ready'
-                ? 'готов'
-                : archive.data.state === 'pending'
-                  ? 'собирается'
-                  : 'ревизия не согласована'}
-            </Typography.Text>
-            {archive.data.state === 'ready' && can('archive.download') && (
-              <a href={workflow.archiveUrl(revisionId)}>Скачать архив</a>
-            )}
-          </Space>
         )}
       </Card>
     </Space>

@@ -17,7 +17,6 @@ import type {
   RegistrationRequest,
   AppSetting,
   Artifact,
-  ArchiveState,
   AuditEntry,
   ErrorIssue,
   ErrorIssueActionInput,
@@ -85,8 +84,6 @@ import type {
   UploadTicket,
   UserCard,
   ValidationRun,
-  WorkflowResult,
-  WorkflowState,
 } from './types.js';
 import type { BlockType, ShapeType, UserRole } from '@id/contracts';
 
@@ -148,18 +145,18 @@ export interface CreateWorkWithFileInput {
   readonly sizeBytes: number;
 }
 
-export interface CreatedWorkWithFile {
+export interface CreatedFolderWithFile {
   readonly workId: string;
-  readonly revisionId: string;
+  readonly folderId: string;
   readonly upload: UploadTicket;
 }
 
 export const files = {
-  list: (revisionId: string) =>
-    get<{ items: SourceFile[] }>(`${V1}/revisions/${revisionId}/files`).then((r) => r.items),
+  list: (folderId: string) =>
+    get<{ items: SourceFile[] }>(`${V1}/folders/${folderId}/files`).then((r) => r.items),
 
-  initUpload: (revisionId: string, fileName: string, sizeBytes: number) =>
-    request<UploadTicket>('POST', `${V1}/revisions/${revisionId}/files/upload/init`, {
+  initUpload: (folderId: string, fileName: string, sizeBytes: number) =>
+    request<UploadTicket>('POST', `${V1}/folders/${folderId}/files/upload/init`, {
       body: { fileName, sizeBytes },
     }).then((r) => r.data),
 
@@ -170,11 +167,11 @@ export const files = {
    * дальше идут те же PUT и `completeUpload`, что и у обычного приёма, и
    * разносить половины одного потока по двум модулям было бы неверно.
    */
-  createWorkWithFile: (body: CreateWorkWithFileInput) =>
-    request<CreatedWorkWithFile>('POST', `${V1}/works/with-file`, { body }).then((r) => r.data),
+  createFolderWithFile: (body: CreateWorkWithFileInput) =>
+    request<CreatedFolderWithFile>('POST', `${V1}/works/with-file`, { body }).then((r) => r.data),
 
-  completeUpload: (revisionId: string, uploadId: string) =>
-    request<SourceFile>('POST', `${V1}/revisions/${revisionId}/files/upload/complete`, {
+  completeUpload: (folderId: string, uploadId: string) =>
+    request<SourceFile>('POST', `${V1}/folders/${folderId}/files/upload/complete`, {
       body: { uploadId },
       idempotencyKey: newIdempotencyKey('upload'),
     }).then((r) => r.data),
@@ -182,31 +179,28 @@ export const files = {
   /**
    * Замена файла — своя пара маршрутов, а не «удалить плюс загрузить».
    *
-   * Талон подписан другим ключом (`UploadPurpose = 'revision-file-replacement'`),
+   * Талон подписан другим ключом (`UploadPurpose = 'folder-file-replacement'`),
    * поэтому предъявить его обычному `complete` невозможно: подпись не сойдётся.
    * Порядок файлов держит сервер, отдельный `reorder` не нужен.
    */
-  initReplacement: (revisionId: string, fileId: string, fileName: string, sizeBytes: number) =>
-    request<UploadTicket>(
-      'POST',
-      `${V1}/revisions/${revisionId}/files/${fileId}/replacement/init`,
-      { body: { fileName, sizeBytes } },
-    ).then((r) => r.data),
+  initReplacement: (folderId: string, fileId: string, fileName: string, sizeBytes: number) =>
+    request<UploadTicket>('POST', `${V1}/folders/${folderId}/files/${fileId}/replacement/init`, {
+      body: { fileName, sizeBytes },
+    }).then((r) => r.data),
 
-  completeReplacement: (revisionId: string, fileId: string, uploadId: string) =>
-    request<SourceFile>(
-      'POST',
-      `${V1}/revisions/${revisionId}/files/${fileId}/replacement/complete`,
-      { body: { uploadId }, idempotencyKey: newIdempotencyKey('replace') },
-    ).then((r) => r.data),
+  completeReplacement: (folderId: string, fileId: string, uploadId: string) =>
+    request<SourceFile>('POST', `${V1}/folders/${folderId}/files/${fileId}/replacement/complete`, {
+      body: { uploadId },
+      idempotencyKey: newIdempotencyKey('replace'),
+    }).then((r) => r.data),
 
-  reorder: (revisionId: string, fileIds: readonly string[]) =>
-    request<{ items: SourceFile[] }>('PUT', `${V1}/revisions/${revisionId}/files/order`, {
+  reorder: (folderId: string, fileIds: readonly string[]) =>
+    request<{ items: SourceFile[] }>('PUT', `${V1}/folders/${folderId}/files/order`, {
       body: { fileIds: [...fileIds] },
     }).then((r) => r.data.items),
 
-  remove: (revisionId: string, fileId: string) =>
-    request<void>('DELETE', `${V1}/revisions/${revisionId}/files/${fileId}`),
+  remove: (folderId: string, fileId: string) =>
+    request<void>('DELETE', `${V1}/folders/${folderId}/files/${fileId}`),
 
   /**
    * Адрес содержимого файла — same-origin и под сессией (§4.2).
@@ -282,14 +276,14 @@ export interface RecognitionProgress {
  */
 export const pipeline = {
   /** Сборка рабочего документа и детекция блоков одним нажатием. */
-  markup: (revisionId: string) =>
-    request<StartMarkupPipelineResult>('POST', `${V1}/revisions/${revisionId}/markup`, {
+  markup: (folderId: string) =>
+    request<StartMarkupPipelineResult>('POST', `${V1}/folders/${folderId}/markup`, {
       idempotencyKey: newIdempotencyKey('pipeline-markup'),
     }).then((r) => r.data),
 
   /** Заморозка, распознавание, анализ и проверки одним нажатием. */
-  check: (revisionId: string, mode: RecheckMode = 'auto') =>
-    request<CheckPipelineResult>('POST', `${V1}/revisions/${revisionId}/check`, {
+  check: (folderId: string, mode: RecheckMode = 'auto') =>
+    request<CheckPipelineResult>('POST', `${V1}/folders/${folderId}/check`, {
       idempotencyKey: newIdempotencyKey('pipeline-check'),
       body: { mode },
     }).then((r) => r.data),
@@ -306,13 +300,13 @@ export const pipeline = {
 // =====================================================================
 
 export const bundles = {
-  build: (revisionId: string) =>
-    request<BundleBuildResult>('POST', `${V1}/revisions/${revisionId}/bundle`, {
+  build: (folderId: string) =>
+    request<BundleBuildResult>('POST', `${V1}/folders/${folderId}/bundle`, {
       idempotencyKey: newIdempotencyKey('bundle'),
     }).then((r) => r.data),
 
-  list: (revisionId: string) =>
-    get<{ items: Bundle[] }>(`${V1}/revisions/${revisionId}/bundles`).then((r) => r.items),
+  list: (folderId: string) =>
+    get<{ items: Bundle[] }>(`${V1}/folders/${folderId}/bundles`).then((r) => r.items),
 
   pages: (bundleId: string) =>
     get<{ bundleId: string; items: BundlePage[] }>(`${V1}/bundles/${bundleId}/pages`).then(
@@ -342,13 +336,13 @@ export interface BlockUpdateInput {
 
 export const layout = {
   /** Кнопка «Разметить файл» (§6.1): ставит первую задачу цепочки §12. */
-  start: (revisionId: string) =>
-    request<StartMarkupResult>('POST', `${V1}/revisions/${revisionId}/layout`, {
+  start: (folderId: string) =>
+    request<StartMarkupResult>('POST', `${V1}/folders/${folderId}/layout`, {
       idempotencyKey: newIdempotencyKey('markup'),
     }).then((r) => r.data),
 
-  listRevisions: (revisionId: string) =>
-    get<{ items: LayoutRevision[] }>(`${V1}/revisions/${revisionId}/layouts`).then((r) => r.items),
+  listFolders: (folderId: string) =>
+    get<{ items: LayoutRevision[] }>(`${V1}/folders/${folderId}/layouts`).then((r) => r.items),
 
   detail: (layoutId: string) => get<LayoutDetail>(`${V1}/layouts/${layoutId}`),
 
@@ -393,18 +387,16 @@ export const layout = {
    * её переживает ручная метка вида ИД. Право — `markup.edit`: разворот меняет
    * вход детекции и распознавания, то есть тот же конвейер, что рисует рамки.
    */
-  setOrientation: (revisionId: string, sourcePageId: string, rotation: 0 | 90 | 180 | 270) =>
-    request<PageOrientation>(
-      'PUT',
-      `${V1}/revisions/${revisionId}/pages/${sourcePageId}/orientation`,
-      { body: { rotation } },
-    ).then((r) => r.data),
+  setOrientation: (folderId: string, sourcePageId: string, rotation: 0 | 90 | 180 | 270) =>
+    request<PageOrientation>('PUT', `${V1}/folders/${folderId}/pages/${sourcePageId}/orientation`, {
+      body: { rotation },
+    }).then((r) => r.data),
 
   /** Снятие ручного разворота: действующим становится значение зонда. */
-  clearOrientation: (revisionId: string, sourcePageId: string) =>
+  clearOrientation: (folderId: string, sourcePageId: string) =>
     request<PageOrientation>(
       'DELETE',
-      `${V1}/revisions/${revisionId}/pages/${sourcePageId}/orientation`,
+      `${V1}/folders/${folderId}/pages/${sourcePageId}/orientation`,
     ).then((r) => r.data),
 };
 
@@ -415,14 +407,14 @@ export type BlockMutationResponse = ApiResponse<BlockMutationResult>;
 // =====================================================================
 
 export const recognition = {
-  start: (revisionId: string, layoutId: string) =>
-    request<RecognizeResult>('POST', `${V1}/revisions/${revisionId}/recognize`, {
+  start: (folderId: string, layoutId: string) =>
+    request<RecognizeResult>('POST', `${V1}/folders/${folderId}/recognize`, {
       body: { layoutId },
       idempotencyKey: newIdempotencyKey('recognize'),
     }).then((r) => r.data),
 
-  runs: (revisionId: string) =>
-    get<{ items: RecognitionRun[] }>(`${V1}/revisions/${revisionId}/recognition-runs`).then(
+  runs: (folderId: string) =>
+    get<{ items: RecognitionRun[] }>(`${V1}/folders/${folderId}/recognition-runs`).then(
       (r) => r.items,
     ),
 
@@ -446,49 +438,47 @@ export const recognition = {
 // =====================================================================
 
 export const documents = {
-  segment: (revisionId: string) =>
-    request<{ revisionId: string; jobId: string; jobCreated: boolean }>(
+  segment: (folderId: string) =>
+    request<{ folderId: string; jobId: string; jobCreated: boolean }>(
       'POST',
-      `${V1}/revisions/${revisionId}/segment`,
+      `${V1}/folders/${folderId}/segment`,
       { body: {}, idempotencyKey: newIdempotencyKey('segment') },
     ).then((r) => r.data),
 
-  list: (revisionId: string) =>
-    get<{ items: LogicalDocument[] }>(`${V1}/revisions/${revisionId}/documents`).then(
-      (r) => r.items,
-    ),
+  list: (folderId: string) =>
+    get<{ items: LogicalDocument[] }>(`${V1}/folders/${folderId}/documents`).then((r) => r.items),
 
   detail: (documentId: string) => get<DocumentDetail>(`${V1}/documents/${documentId}`),
 
   fields: (documentId: string) =>
     get<{ items: FieldValue[] }>(`${V1}/documents/${documentId}/fields`).then((r) => r.items),
 
-  pages: (revisionId: string) => get<PageAccounting>(`${V1}/revisions/${revisionId}/pages`),
+  pages: (folderId: string) => get<PageAccounting>(`${V1}/folders/${folderId}/pages`),
 
-  registry: (revisionId: string) =>
-    get<{ items: RegistryRow[] }>(`${V1}/revisions/${revisionId}/registry`).then((r) => r.items),
+  registry: (folderId: string) =>
+    get<{ items: RegistryRow[] }>(`${V1}/folders/${folderId}/registry`).then((r) => r.items),
 
-  classifications: (revisionId: string) =>
-    get<{ items: PageClassification[] }>(`${V1}/revisions/${revisionId}/classifications`).then(
+  classifications: (folderId: string) =>
+    get<{ items: PageClassification[] }>(`${V1}/folders/${folderId}/classifications`).then(
       (r) => r.items,
     ),
 
   /** Ручная метка страницы: приоритетна для сегментации и переживает пересборку. */
   setManualLabel: (
-    revisionId: string,
+    folderId: string,
     sourcePageId: string,
     body: { label: string; docTypeCode?: string | null; pageRoleCode?: string | null },
   ) =>
     request<ManualPageLabel>(
       'PUT',
-      `${V1}/revisions/${revisionId}/pages/${sourcePageId}/manual-label`,
+      `${V1}/folders/${folderId}/pages/${sourcePageId}/manual-label`,
       { body },
     ).then((r) => r.data),
 
-  clearManualLabel: (revisionId: string, sourcePageId: string) =>
+  clearManualLabel: (folderId: string, sourcePageId: string) =>
     request<undefined>(
       'DELETE',
-      `${V1}/revisions/${revisionId}/pages/${sourcePageId}/manual-label`,
+      `${V1}/folders/${folderId}/pages/${sourcePageId}/manual-label`,
     ).then(() => undefined),
 
   confirm: (
@@ -507,15 +497,15 @@ export const documents = {
 // =====================================================================
 
 export const checks = {
-  run: (revisionId: string) =>
+  run: (folderId: string) =>
     request<{ jobId: string | null; created: boolean }>(
       'POST',
-      `${V1}/revisions/${revisionId}/checks`,
+      `${V1}/folders/${folderId}/checks`,
       { idempotencyKey: newIdempotencyKey('checks') },
     ).then((r) => r.data),
 
-  runs: (revisionId: string) =>
-    get<{ items: ValidationRun[] }>(`${V1}/revisions/${revisionId}/checks`).then((r) => r.items),
+  runs: (folderId: string) =>
+    get<{ items: ValidationRun[] }>(`${V1}/folders/${folderId}/checks`).then((r) => r.items),
 
   /**
    * Замечания одного прогона вместе со сводкой экрана.
@@ -524,8 +514,8 @@ export const checks = {
    * которого пришёл список, и разносить их по двум вызовам значило бы дать
    * экрану возможность показать число из одной проверки над списком из другой.
    */
-  findings: (revisionId: string, validationRunId?: string) =>
-    get<FindingList>(`${V1}/revisions/${revisionId}/findings`, {
+  findings: (folderId: string, validationRunId?: string) =>
+    get<FindingList>(`${V1}/folders/${folderId}/findings`, {
       query: validationRunId === undefined ? {} : { validationRunId },
     }),
 
@@ -537,7 +527,7 @@ export const checks = {
    * возить его целиком на каждое обновление списка после снятия одного
    * замечания.
    */
-  report: (revisionId: string) => get<CheckReport>(`${V1}/revisions/${revisionId}/check-report`),
+  report: (folderId: string) => get<CheckReport>(`${V1}/folders/${folderId}/check-report`),
 
   ruleCatalog: () =>
     get<{ items: RuleCatalogEntry[] }>(`${V1}/admin/rule-catalog`).then((r) => r.items),
@@ -547,62 +537,11 @@ export const checks = {
 // Согласование (§4.1, §13)
 // =====================================================================
 
-export const workflow = {
-  state: (revisionId: string) => get<WorkflowState>(`${V1}/revisions/${revisionId}/workflow`),
-
-  submit: (revisionId: string, version: number, comment?: string) =>
-    request<WorkflowResult>('POST', `${V1}/revisions/${revisionId}/submit`, {
-      body: comment === undefined ? {} : { comment },
-      ifMatch: version,
-      idempotencyKey: newIdempotencyKey('submit'),
-    }).then((r) => r.data),
-
-  takeToReview: (revisionId: string, version: number, comment?: string) =>
-    request<WorkflowResult>('POST', `${V1}/revisions/${revisionId}/review`, {
-      body: comment === undefined ? {} : { comment },
-      ifMatch: version,
-      idempotencyKey: newIdempotencyKey('review'),
-    }).then((r) => r.data),
-
-  returnToContractor: (revisionId: string, version: number, reason: string) =>
-    request<WorkflowResult>('POST', `${V1}/revisions/${revisionId}/return`, {
-      body: { reason },
-      ifMatch: version,
-      idempotencyKey: newIdempotencyKey('return'),
-    }).then((r) => r.data),
-
-  approve: (revisionId: string, version: number, comment?: string) =>
-    request<WorkflowResult>('POST', `${V1}/revisions/${revisionId}/approve`, {
-      body: comment === undefined ? {} : { comment },
-      ifMatch: version,
-      idempotencyKey: newIdempotencyKey('approve'),
-    }).then((r) => r.data),
-
-  /** Обоснованный отказ от результата проверки — только руководитель (§9.6). */
-  override: (findingId: string, reason: string) =>
-    request<{ findingId: string; revisionId: string; ruleCode: string }>(
-      'POST',
-      `${V1}/findings/${findingId}/override`,
-      { body: { reason }, idempotencyKey: newIdempotencyKey('override') },
-    ).then((r) => r.data),
-
-  materialize: (revisionId: string) =>
-    request<{ revisionId: string; jobId: string | null; jobCreated: boolean }>(
-      'POST',
-      `${V1}/revisions/${revisionId}/materialize`,
-      { idempotencyKey: newIdempotencyKey('materialize') },
-    ).then((r) => r.data),
-
-  archive: (revisionId: string) => get<ArchiveState>(`${V1}/revisions/${revisionId}/archive`),
-  archiveUrl: (revisionId: string) => `${V1}/revisions/${revisionId}/archive/content`,
-  documentPdfUrl: (documentId: string) => `${V1}/documents/${documentId}/pdf`,
-};
-
 // =====================================================================
 // Наблюдаемость ревизии (§3.8, §11)
 // =====================================================================
 
-export const revisionEvents = {
+export const folderEvents = {
   /**
    * Сводка стадий конвейера.
    *
@@ -611,11 +550,11 @@ export const revisionEvents = {
    * Query. Без сигнала отменённый рефетч всё равно уезжал на сервер и съедал
    * слот лимита — а `invalidateQueries` отменяет рефетч на каждое событие.
    */
-  processingStatus: (revisionId: string, signal?: AbortSignal) =>
-    get<ProcessingStatus>(`${V1}/revisions/${revisionId}/processing-status`, {
+  processingStatus: (folderId: string, signal?: AbortSignal) =>
+    get<ProcessingStatus>(`${V1}/folders/${folderId}/processing-status`, {
       ...(signal === undefined ? {} : { signal }),
     }),
-  streamUrl: (revisionId: string) => `${V1}/revisions/${revisionId}/events`,
+  streamUrl: (folderId: string) => `${V1}/folders/${folderId}/events`,
 };
 
 // =====================================================================
@@ -1053,12 +992,12 @@ export const admin = {
       body: { to },
     }).then((r) => r.data),
 
-  jobs: (query?: { status?: string; type?: string; deadOnly?: boolean; revisionId?: string }) =>
+  jobs: (query?: { status?: string; type?: string; deadOnly?: boolean; folderId?: string }) =>
     get<Page<JobView>>(`${V1}/admin/jobs`, {
       query: {
         ...(query?.status === undefined ? {} : { status: query.status }),
         ...(query?.type === undefined ? {} : { type: query.type }),
-        ...(query?.revisionId === undefined ? {} : { revisionId: query.revisionId }),
+        ...(query?.folderId === undefined ? {} : { folderId: query.folderId }),
         ...(query?.deadOnly === true ? { deadOnly: 'true' } : {}),
         limit: 100,
       },

@@ -186,7 +186,7 @@ export function instrumentStorage(
   const measure = <T>(operation: string, key: string, call: () => Promise<T>): Promise<T> =>
     measureExternalCall(metrics, { service, operation }, call, {
       // Дочерний логгер создаётся внутри вызова: поля контекста (`request_id`,
-      // `user_id`, `revision_id`) берутся в момент операции, а не в момент
+      // `user_id`, `folder_id`) берутся в момент операции, а не в момент
       // сборки приложения, когда никакого запроса ещё нет.
       logger: childLogger(logger, { component: 'storage', storage_key: key }),
       slowExternalMs,

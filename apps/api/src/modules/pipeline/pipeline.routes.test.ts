@@ -54,20 +54,15 @@ const ORG_B = id(3);
 const OBJECT = id(4);
 
 /** Комплект с готовым рабочим документом: «Проверить» идёт по нему. */
-const WORK_READY = id(10);
-const REVISION_READY = id(11);
+const FOLDER_READY = id(11);
 /** Комплект с файлами, но без рабочего документа: «Разметить» ставит сборку. */
-const WORK_BARE = id(12);
-const REVISION_BARE = id(13);
+const FOLDER_BARE = id(13);
 /** Чужой комплект: недостижим обеими кнопками. */
-const WORK_OTHER = id(14);
-const REVISION_OTHER = id(15);
+const FOLDER_OTHER = id(15);
 /** Комплект с ЧЕРНОВОЙ разметкой и МЁРТВОЙ задачей детекции: кнопка не заперта. */
-const WORK_STUCK = id(16);
-const REVISION_STUCK = id(17);
+const FOLDER_STUCK = id(17);
 /** Комплект для проверки shadow-режима: dry-run отказывает, а не молчит. */
-const WORK_DRY = id(18);
-const REVISION_DRY = id(19);
+const FOLDER_DRY = id(19);
 
 const USER_A = id(20);
 const USER_B = id(21);
@@ -177,71 +172,61 @@ beforeAll(async () => {
        VALUES ('${OBJECT}', '${ORG_B}') ON CONFLICT DO NOTHING`,
 
     // --- Комплект с готовым рабочим документом и черновой разметкой ---
-    `INSERT INTO works
+    `INSERT INTO folders
        (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-       VALUES ('${WORK_READY}', '${OBJECT}', '${ORG_A}', '${ORG_A}', 'roofing', DATE '2026-01-01', 'Готовый комплект', '${USER_A}')`,
-    `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
-       VALUES ('${REVISION_READY}', '${WORK_READY}', '${OBJECT}', '${ORG_A}', 1, 'draft')`,
+     VALUES ('${FOLDER_READY}', '${OBJECT}', '${ORG_A}', '${ORG_A}', 'roofing', DATE '2026-01-01', 'Готовый комплект', '${USER_A}')`,
     `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
        VALUES ('${SHA_READY}', 'blobs/${SHA_READY}', 2048, 'application/pdf')`,
     `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
        VALUES ('${SHA_WORKING}', 'blobs/${SHA_WORKING}', 4096, 'application/pdf')`,
-    `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order, verify_state)
-       VALUES ('${FILE_READY}', '${REVISION_READY}', '${SHA_READY}', 'АОСР.pdf', 0, 'ok')`,
-    `INSERT INTO source_pages (id, revision_id, source_file_id, file_page_index, revision_ordinal, width_px, height_px, rotation)
-       VALUES ('${PAGE_READY}', '${REVISION_READY}', '${FILE_READY}', 0, 0, 1654, 2339, 0)`,
+    `INSERT INTO source_files (id, folder_id, blob_sha256, file_name, sort_order, verify_state)
+       VALUES ('${FILE_READY}', '${FOLDER_READY}', '${SHA_READY}', 'АОСР.pdf', 0, 'ok')`,
+    `INSERT INTO source_pages (id, folder_id, source_file_id, file_page_index, folder_ordinal, width_px, height_px, rotation)
+       VALUES ('${PAGE_READY}', '${FOLDER_READY}', '${FILE_READY}', 0, 0, 1654, 2339, 0)`,
 
     // --- Комплект без рабочего документа ---
-    `INSERT INTO works
+    `INSERT INTO folders
        (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-       VALUES ('${WORK_BARE}', '${OBJECT}', '${ORG_A}', '${ORG_A}', 'roofing', DATE '2026-01-01', 'Комплект без сборки', '${USER_A}')`,
-    `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
-       VALUES ('${REVISION_BARE}', '${WORK_BARE}', '${OBJECT}', '${ORG_A}', 1, 'draft')`,
+     VALUES ('${FOLDER_BARE}', '${OBJECT}', '${ORG_A}', '${ORG_A}', 'roofing', DATE '2026-01-01', 'Комплект без сборки', '${USER_A}')`,
     `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
        VALUES ('${SHA_BARE}', 'blobs/${SHA_BARE}', 1024, 'application/pdf')`,
-    `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order, verify_state)
-       VALUES ('${FILE_BARE}', '${REVISION_BARE}', '${SHA_BARE}', 'Без сборки.pdf', 0, 'ok')`,
-    `INSERT INTO source_pages (id, revision_id, source_file_id, file_page_index, revision_ordinal, width_px, height_px, rotation)
-       VALUES ('${PAGE_BARE}', '${REVISION_BARE}', '${FILE_BARE}', 0, 0, 1654, 2339, 0)`,
+    `INSERT INTO source_files (id, folder_id, blob_sha256, file_name, sort_order, verify_state)
+       VALUES ('${FILE_BARE}', '${FOLDER_BARE}', '${SHA_BARE}', 'Без сборки.pdf', 0, 'ok')`,
+    `INSERT INTO source_pages (id, folder_id, source_file_id, file_page_index, folder_ordinal, width_px, height_px, rotation)
+       VALUES ('${PAGE_BARE}', '${FOLDER_BARE}', '${FILE_BARE}', 0, 0, 1654, 2339, 0)`,
 
     // --- Чужой комплект ---
-    `INSERT INTO works
+    `INSERT INTO folders
        (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-       VALUES ('${WORK_OTHER}', '${OBJECT}', '${ORG_B}', '${ORG_B}', 'roofing', DATE '2026-01-01', 'Чужой комплект', '${USER_B}')`,
-    `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
-       VALUES ('${REVISION_OTHER}', '${WORK_OTHER}', '${OBJECT}', '${ORG_B}', 1, 'draft')`,
+     VALUES ('${FOLDER_OTHER}', '${OBJECT}', '${ORG_B}', '${ORG_B}', 'roofing', DATE '2026-01-01', 'Чужой комплект', '${USER_B}')`,
     `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
        VALUES ('${SHA_OTHER}', 'blobs/${SHA_OTHER}', 512, 'application/pdf')`,
-    `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order, verify_state)
-       VALUES ('${FILE_OTHER}', '${REVISION_OTHER}', '${SHA_OTHER}', 'Чужой.pdf', 0, 'ok')`,
-    `INSERT INTO source_pages (id, revision_id, source_file_id, file_page_index, revision_ordinal, width_px, height_px, rotation)
-       VALUES ('${PAGE_OTHER}', '${REVISION_OTHER}', '${FILE_OTHER}', 0, 0, 1654, 2339, 0)`,
+    `INSERT INTO source_files (id, folder_id, blob_sha256, file_name, sort_order, verify_state)
+       VALUES ('${FILE_OTHER}', '${FOLDER_OTHER}', '${SHA_OTHER}', 'Чужой.pdf', 0, 'ok')`,
+    `INSERT INTO source_pages (id, folder_id, source_file_id, file_page_index, folder_ordinal, width_px, height_px, rotation)
+       VALUES ('${PAGE_OTHER}', '${FOLDER_OTHER}', '${FILE_OTHER}', 0, 0, 1654, 2339, 0)`,
 
     // --- Комплект с черновой разметкой и мёртвой задачей детекции ---
-    `INSERT INTO works
+    `INSERT INTO folders
        (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-       VALUES ('${WORK_STUCK}', '${OBJECT}', '${ORG_A}', '${ORG_A}', 'roofing', DATE '2026-01-01', 'Комплект с мёртвой детекцией', '${USER_A}')`,
-    `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
-       VALUES ('${REVISION_STUCK}', '${WORK_STUCK}', '${OBJECT}', '${ORG_A}', 1, 'draft')`,
+     VALUES ('${FOLDER_STUCK}', '${OBJECT}', '${ORG_A}', '${ORG_A}', 'roofing', DATE '2026-01-01', 'Комплект с мёртвой детекцией', '${USER_A}')`,
     `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
        VALUES ('${SHA_STUCK}', 'blobs/${SHA_STUCK}', 1024, 'application/pdf')`,
-    `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order, verify_state)
-       VALUES ('${FILE_STUCK}', '${REVISION_STUCK}', '${SHA_STUCK}', 'Застрявший.pdf', 0, 'ok')`,
-    `INSERT INTO source_pages (id, revision_id, source_file_id, file_page_index, revision_ordinal, width_px, height_px, rotation)
-       VALUES ('${PAGE_STUCK}', '${REVISION_STUCK}', '${FILE_STUCK}', 0, 0, 1654, 2339, 0)`,
+    `INSERT INTO source_files (id, folder_id, blob_sha256, file_name, sort_order, verify_state)
+       VALUES ('${FILE_STUCK}', '${FOLDER_STUCK}', '${SHA_STUCK}', 'Застрявший.pdf', 0, 'ok')`,
+    `INSERT INTO source_pages (id, folder_id, source_file_id, file_page_index, folder_ordinal, width_px, height_px, rotation)
+       VALUES ('${PAGE_STUCK}', '${FOLDER_STUCK}', '${FILE_STUCK}', 0, 0, 1654, 2339, 0)`,
 
     // --- Комплект для проверки shadow-режима ---
-    `INSERT INTO works
+    `INSERT INTO folders
        (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-       VALUES ('${WORK_DRY}', '${OBJECT}', '${ORG_A}', '${ORG_A}', 'roofing', DATE '2026-01-01', 'Комплект для shadow-режима', '${USER_A}')`,
-    `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
-       VALUES ('${REVISION_DRY}', '${WORK_DRY}', '${OBJECT}', '${ORG_A}', 1, 'draft')`,
+     VALUES ('${FOLDER_DRY}', '${OBJECT}', '${ORG_A}', '${ORG_A}', 'roofing', DATE '2026-01-01', 'Комплект для shadow-режима', '${USER_A}')`,
     `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
        VALUES ('${SHA_DRY}', 'blobs/${SHA_DRY}', 1024, 'application/pdf')`,
-    `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order, verify_state)
-       VALUES ('${FILE_DRY}', '${REVISION_DRY}', '${SHA_DRY}', 'Теневой.pdf', 0, 'ok')`,
-    `INSERT INTO source_pages (id, revision_id, source_file_id, file_page_index, revision_ordinal, width_px, height_px, rotation)
-       VALUES ('${PAGE_DRY}', '${REVISION_DRY}', '${FILE_DRY}', 0, 0, 1654, 2339, 0)`,
+    `INSERT INTO source_files (id, folder_id, blob_sha256, file_name, sort_order, verify_state)
+       VALUES ('${FILE_DRY}', '${FOLDER_DRY}', '${SHA_DRY}', 'Теневой.pdf', 0, 'ok')`,
+    `INSERT INTO source_pages (id, folder_id, source_file_id, file_page_index, folder_ordinal, width_px, height_px, rotation)
+       VALUES ('${PAGE_DRY}', '${FOLDER_DRY}', '${FILE_DRY}', 0, 0, 1654, 2339, 0)`,
 
     // Распознавание — через VLM: у ветки RD WEB нет RD-документа, и прогон
     // отказал бы по причине, к этим маршрутам отношения не имеющей.
@@ -255,63 +240,63 @@ beforeAll(async () => {
 
   // Рабочий документ готового комплекта — с НАСТОЯЩИМ хэшем манифеста.
   await db.query(
-    `INSERT INTO processing_bundles (id, revision_id, aggregate_manifest_hash, working_pdf_blob_sha256, builder_version)
-       VALUES ('${BUNDLE_READY}', '${REVISION_READY}', '${manifestHash(SHA_READY)}', '${SHA_WORKING}', 'bundle/1+pdf-lib')`,
+    `INSERT INTO processing_bundles (id, folder_id, aggregate_manifest_hash, working_pdf_blob_sha256, builder_version)
+       VALUES ('${BUNDLE_READY}', '${FOLDER_READY}', '${manifestHash(SHA_READY)}', '${SHA_WORKING}', 'bundle/1+pdf-lib')`,
   );
   await db.query(
-    `INSERT INTO processing_bundle_pages (bundle_id, revision_id, working_page_index, source_page_id)
-       VALUES ('${BUNDLE_READY}', '${REVISION_READY}', 0, '${PAGE_READY}')`,
+    `INSERT INTO processing_bundle_pages (bundle_id, folder_id, working_page_index, source_page_id)
+       VALUES ('${BUNDLE_READY}', '${FOLDER_READY}', 0, '${PAGE_READY}')`,
   );
   await db.query(
-    `INSERT INTO layout_revisions (id, revision_id, object_id, bundle_id, revision_no, state)
-       VALUES ('${LAYOUT_READY}', '${REVISION_READY}', '${OBJECT}', '${BUNDLE_READY}', 1, 'draft')`,
+    `INSERT INTO layout_revisions (id, folder_id, object_id, bundle_id, revision_no, state)
+       VALUES ('${LAYOUT_READY}', '${FOLDER_READY}', '${OBJECT}', '${BUNDLE_READY}', 1, 'draft')`,
   );
   await db.query(
     `INSERT INTO layout_blocks
-       (id, layout_revision_id, revision_id, bundle_id, source_page_id, working_page_index, object_id,
+       (id, layout_revision_id, folder_id, bundle_id, source_page_id, working_page_index, object_id,
         block_type, shape_type, x0, y0, x1, y1, sort_order, source, detector_provenance)
-       VALUES ('${BLOCK_READY}', '${LAYOUT_READY}', '${REVISION_READY}', '${BUNDLE_READY}', '${PAGE_READY}', 0,
+       VALUES ('${BLOCK_READY}', '${LAYOUT_READY}', '${FOLDER_READY}', '${BUNDLE_READY}', '${PAGE_READY}', 0,
                '${OBJECT}', 'text', 'rectangle', 0.1, 0.1, 0.9, 0.4, 0, 'auto', 'rf_detr')`,
   );
 
   // Тот же комплект для ревизии с мёртвой детекцией.
   await db.query(
-    `INSERT INTO processing_bundles (id, revision_id, aggregate_manifest_hash, working_pdf_blob_sha256, builder_version)
-       VALUES ('${BUNDLE_STUCK}', '${REVISION_STUCK}', '${manifestHash(SHA_STUCK)}', '${SHA_WORKING}', 'bundle/1+pdf-lib')`,
+    `INSERT INTO processing_bundles (id, folder_id, aggregate_manifest_hash, working_pdf_blob_sha256, builder_version)
+       VALUES ('${BUNDLE_STUCK}', '${FOLDER_STUCK}', '${manifestHash(SHA_STUCK)}', '${SHA_WORKING}', 'bundle/1+pdf-lib')`,
   );
   await db.query(
-    `INSERT INTO processing_bundle_pages (bundle_id, revision_id, working_page_index, source_page_id)
-       VALUES ('${BUNDLE_STUCK}', '${REVISION_STUCK}', 0, '${PAGE_STUCK}')`,
+    `INSERT INTO processing_bundle_pages (bundle_id, folder_id, working_page_index, source_page_id)
+       VALUES ('${BUNDLE_STUCK}', '${FOLDER_STUCK}', 0, '${PAGE_STUCK}')`,
   );
   await db.query(
-    `INSERT INTO layout_revisions (id, revision_id, object_id, bundle_id, revision_no, state)
-       VALUES ('${LAYOUT_STUCK}', '${REVISION_STUCK}', '${OBJECT}', '${BUNDLE_STUCK}', 1, 'draft')`,
+    `INSERT INTO layout_revisions (id, folder_id, object_id, bundle_id, revision_no, state)
+       VALUES ('${LAYOUT_STUCK}', '${FOLDER_STUCK}', '${OBJECT}', '${BUNDLE_STUCK}', 1, 'draft')`,
   );
   await db.query(
     `INSERT INTO layout_blocks
-       (id, layout_revision_id, revision_id, bundle_id, source_page_id, working_page_index, object_id,
+       (id, layout_revision_id, folder_id, bundle_id, source_page_id, working_page_index, object_id,
         block_type, shape_type, x0, y0, x1, y1, sort_order, source, detector_provenance)
-       VALUES ('${BLOCK_STUCK}', '${LAYOUT_STUCK}', '${REVISION_STUCK}', '${BUNDLE_STUCK}', '${PAGE_STUCK}', 0,
+       VALUES ('${BLOCK_STUCK}', '${LAYOUT_STUCK}', '${FOLDER_STUCK}', '${BUNDLE_STUCK}', '${PAGE_STUCK}', 0,
                '${OBJECT}', 'text', 'rectangle', 0.1, 0.1, 0.9, 0.4, 0, 'auto', 'rf_detr')`,
   );
   // Тот же комплект для проверки shadow-режима.
   await db.query(
-    `INSERT INTO processing_bundles (id, revision_id, aggregate_manifest_hash, working_pdf_blob_sha256, builder_version)
-       VALUES ('${BUNDLE_DRY}', '${REVISION_DRY}', '${manifestHash(SHA_DRY)}', '${SHA_WORKING}', 'bundle/1+pdf-lib')`,
+    `INSERT INTO processing_bundles (id, folder_id, aggregate_manifest_hash, working_pdf_blob_sha256, builder_version)
+       VALUES ('${BUNDLE_DRY}', '${FOLDER_DRY}', '${manifestHash(SHA_DRY)}', '${SHA_WORKING}', 'bundle/1+pdf-lib')`,
   );
   await db.query(
-    `INSERT INTO processing_bundle_pages (bundle_id, revision_id, working_page_index, source_page_id)
-       VALUES ('${BUNDLE_DRY}', '${REVISION_DRY}', 0, '${PAGE_DRY}')`,
+    `INSERT INTO processing_bundle_pages (bundle_id, folder_id, working_page_index, source_page_id)
+       VALUES ('${BUNDLE_DRY}', '${FOLDER_DRY}', 0, '${PAGE_DRY}')`,
   );
   await db.query(
-    `INSERT INTO layout_revisions (id, revision_id, object_id, bundle_id, revision_no, state)
-       VALUES ('${LAYOUT_DRY}', '${REVISION_DRY}', '${OBJECT}', '${BUNDLE_DRY}', 1, 'draft')`,
+    `INSERT INTO layout_revisions (id, folder_id, object_id, bundle_id, revision_no, state)
+       VALUES ('${LAYOUT_DRY}', '${FOLDER_DRY}', '${OBJECT}', '${BUNDLE_DRY}', 1, 'draft')`,
   );
   await db.query(
     `INSERT INTO layout_blocks
-       (id, layout_revision_id, revision_id, bundle_id, source_page_id, working_page_index, object_id,
+       (id, layout_revision_id, folder_id, bundle_id, source_page_id, working_page_index, object_id,
         block_type, shape_type, x0, y0, x1, y1, sort_order, source, detector_provenance)
-       VALUES ('${BLOCK_DRY}', '${LAYOUT_DRY}', '${REVISION_DRY}', '${BUNDLE_DRY}', '${PAGE_DRY}', 0,
+       VALUES ('${BLOCK_DRY}', '${LAYOUT_DRY}', '${FOLDER_DRY}', '${BUNDLE_DRY}', '${PAGE_DRY}', 0,
                '${OBJECT}', 'text', 'rectangle', 0.1, 0.1, 0.9, 0.4, 0, 'auto', 'rf_detr')`,
   );
 
@@ -320,7 +305,7 @@ beforeAll(async () => {
   await db.query(
     `INSERT INTO jobs (type, payload, status, attempts, max_attempts, last_error)
        VALUES ('layout.detect_local',
-               '{"revisionId": "${REVISION_STUCK}", "layoutRevisionId": "${LAYOUT_STUCK}", "pageIndices": [0]}'::jsonb,
+               '{"folderId": "${FOLDER_STUCK}", "layoutRevisionId": "${LAYOUT_STUCK}", "pageIndices": [0]}'::jsonb,
                'failed', 3, 3, 'Замороженная разметка не принимает результаты детекции')`,
   );
 
@@ -329,10 +314,10 @@ beforeAll(async () => {
 }, 180_000);
 
 /** «Детекция закончилась»: воркера в тесте нет, задачи закрываются руками. */
-async function finishLayoutJobs(revisionId: string): Promise<void> {
+async function finishLayoutJobs(folderId: string): Promise<void> {
   await db.query(
     `UPDATE jobs SET status = 'done'
-      WHERE payload->>'revisionId' = '${revisionId}'
+      WHERE payload->>'folderId' = '${folderId}'
         AND status IN ('queued', 'running')`,
   );
 }
@@ -423,9 +408,9 @@ interface JobRow {
   readonly payload: { readonly autoContinue?: boolean; readonly startMarkup?: boolean };
 }
 
-async function jobsOf(revisionId: string): Promise<readonly JobRow[]> {
+async function jobsOf(folderId: string): Promise<readonly JobRow[]> {
   return db.query<JobRow>(
-    `SELECT type, payload FROM jobs WHERE payload->>'revisionId' = '${revisionId}' ORDER BY type`,
+    `SELECT type, payload FROM jobs WHERE payload->>'folderId' = '${folderId}' ORDER BY type`,
   );
 }
 
@@ -448,9 +433,9 @@ async function blocksHashOf(layoutId: string): Promise<string | null> {
 // Кнопка «Разметить»
 // =====================================================================
 
-describe('POST /revisions/{id}/markup', () => {
+describe('POST /folders/{id}/markup', () => {
   it('без рабочего документа ставит сборку с признаком продолжения разметкой', async () => {
-    const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_BARE}/markup`);
+    const response = await as(KC.a, 'POST', `/api/v1/folders/${FOLDER_BARE}/markup`);
     expect(response.statusCode).toBe(202);
 
     const body = response.json<{ bundleReady: boolean; layoutRevisionId: string | null }>();
@@ -459,14 +444,14 @@ describe('POST /revisions/{id}/markup', () => {
 
     // Признак в payload — единственное, что отличает эту сборку от нажатия
     // «Собрать рабочий документ»: по нему обработчик поставит `layout.start`.
-    const jobs = await jobsOf(REVISION_BARE);
+    const jobs = await jobsOf(FOLDER_BARE);
     const build = jobs.find((job) => job.type === 'bundle.build');
     expect(build).toBeDefined();
     expect(build?.payload.startMarkup).toBe(true);
   });
 
   it('при готовом рабочем документе размечает сразу, без второй сборки', async () => {
-    const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_READY}/markup`);
+    const response = await as(KC.a, 'POST', `/api/v1/folders/${FOLDER_READY}/markup`);
     expect(response.statusCode).toBe(202);
 
     const body = response.json<{ bundleReady: boolean; layoutRevisionId: string | null }>();
@@ -474,7 +459,7 @@ describe('POST /revisions/{id}/markup', () => {
     // Черновик разметки у ревизии уже есть — берётся он, а не создаётся второй.
     expect(body.layoutRevisionId).toBe(LAYOUT_READY);
 
-    const jobs = await jobsOf(REVISION_READY);
+    const jobs = await jobsOf(FOLDER_READY);
     expect(jobs.some((job) => job.type === 'bundle.build')).toBe(false);
     expect(jobs.some((job) => job.type.startsWith('rd.') || job.type.startsWith('layout.'))).toBe(
       true,
@@ -482,7 +467,7 @@ describe('POST /revisions/{id}/markup', () => {
   });
 
   it('чужая ревизия недостижима', async () => {
-    const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_OTHER}/markup`);
+    const response = await as(KC.a, 'POST', `/api/v1/folders/${FOLDER_OTHER}/markup`);
     expect(response.statusCode).toBe(404);
   });
 });
@@ -491,7 +476,7 @@ describe('POST /revisions/{id}/markup', () => {
 // Кнопка «Проверить»
 // =====================================================================
 
-describe('POST /revisions/{id}/check', () => {
+describe('POST /folders/{id}/check', () => {
   /**
    * Промпты стадии recognize этот файл НЕ публикует — ни здесь, ни где-либо ещё,
    * и это утверждение, а не упущение.
@@ -515,7 +500,7 @@ describe('POST /revisions/{id}/check', () => {
   });
 
   it('без разметки отказывает и называет первую кнопку', async () => {
-    const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_BARE}/check`, {
+    const response = await as(KC.a, 'POST', `/api/v1/folders/${FOLDER_BARE}/check`, {
       idempotencyKey: 'check-bare-1',
     });
     expect(response.statusCode).toBe(409);
@@ -526,7 +511,7 @@ describe('POST /revisions/{id}/check', () => {
     // Задачи стадии разметки стоят в очереди с нажатия «1. Выделить блоки» выше
     // по файлу: прогон, стартовавший сейчас, снял бы снимок половины набора, а
     // доложенные позже блоки остались бы нераспознанными.
-    const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_READY}/check`, {
+    const response = await as(KC.a, 'POST', `/api/v1/folders/${FOLDER_READY}/check`, {
       idempotencyKey: 'check-detecting-1',
     });
     expect(response.statusCode).toBe(409);
@@ -538,7 +523,7 @@ describe('POST /revisions/{id}/check', () => {
   it('мёртвая задача детекции кнопку не запирает', async () => {
     // В проде на момент разбора висели 34 задачи «исчерпали попытки». Если бы они
     // считались незаконченной работой, кнопка была бы заперта навсегда.
-    const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_STUCK}/check`, {
+    const response = await as(KC.a, 'POST', `/api/v1/folders/${FOLDER_STUCK}/check`, {
       idempotencyKey: 'check-stuck-1',
     });
     expect(response.statusCode).toBe(202);
@@ -547,10 +532,10 @@ describe('POST /revisions/{id}/check', () => {
   });
 
   it('ставит распознавание со сквозным признаком, не трогая состояние разметки', async () => {
-    await finishLayoutJobs(REVISION_READY);
+    await finishLayoutJobs(FOLDER_READY);
     expect(await layoutStateOf(LAYOUT_READY)).toBe('draft');
 
-    const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_READY}/check`, {
+    const response = await as(KC.a, 'POST', `/api/v1/folders/${FOLDER_READY}/check`, {
       idempotencyKey: 'check-ready-1',
     });
     expect(response.statusCode).toBe(202);
@@ -568,31 +553,31 @@ describe('POST /revisions/{id}/check', () => {
 
     // Признак сквозного прогона — то, ради чего кнопка существует: без него
     // цепочка встала бы после распознавания, и «Проверить» не проверяла бы.
-    const jobs = await jobsOf(REVISION_READY);
+    const jobs = await jobsOf(FOLDER_READY);
     const head = jobs.find((job) => job.type === 'vlm.start_recognition');
     expect(head).toBeDefined();
     expect(head?.payload.autoContinue).toBe(true);
   });
 
   it('повторное нажатие при идущем распознавании не плодит второй прогон', async () => {
-    const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_READY}/check`, {
+    const response = await as(KC.a, 'POST', `/api/v1/folders/${FOLDER_READY}/check`, {
       idempotencyKey: 'check-ready-2',
     });
     expect(response.statusCode).toBe(409);
 
     const runs = await db.query<{ count: string | number }>(
-      `SELECT count(*) AS count FROM recognition_runs WHERE revision_id = '${REVISION_READY}'`,
+      `SELECT count(*) AS count FROM recognition_runs WHERE folder_id = '${FOLDER_READY}'`,
     );
     expect(Number(runs[0]?.count ?? 0)).toBe(1);
   });
 
   it('заголовок идемпотентности обязателен', async () => {
-    const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_READY}/check`);
+    const response = await as(KC.a, 'POST', `/api/v1/folders/${FOLDER_READY}/check`);
     expect(response.statusCode).toBe(400);
   });
 
   it('чужая ревизия недостижима', async () => {
-    const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_OTHER}/check`, {
+    const response = await as(KC.a, 'POST', `/api/v1/folders/${FOLDER_OTHER}/check`, {
       idempotencyKey: 'check-other-1',
     });
     // 409 «разметки нет» тоже был бы утечкой: он отличал бы существующую чужую
@@ -609,10 +594,10 @@ describe('право pipeline.run', () => {
   it('инженеру объекта обе кнопки доступны', async () => {
     // До S21 инженер получал 403 на любой правке состава. Кнопки конвейера
     // правят производное и открыты ему наравне с подрядчиком.
-    const markup = await as(KC.engineer, 'POST', `/api/v1/revisions/${REVISION_BARE}/markup`);
+    const markup = await as(KC.engineer, 'POST', `/api/v1/folders/${FOLDER_BARE}/markup`);
     expect(markup.statusCode).toBe(202);
 
-    const check = await as(KC.engineer, 'POST', `/api/v1/revisions/${REVISION_BARE}/check`, {
+    const check = await as(KC.engineer, 'POST', `/api/v1/folders/${FOLDER_BARE}/check`, {
       idempotencyKey: 'check-engineer-1',
     });
     // 409 «разметки нет», а не 403: право есть, не хватает разметки.
@@ -627,7 +612,7 @@ describe('право pipeline.run', () => {
 describe('GET /recognition-runs/{id}/progress', () => {
   it('отдаёт постраничные счётчики прогона', async () => {
     const runs = await db.query<{ id: string }>(
-      `SELECT id FROM recognition_runs WHERE revision_id = '${REVISION_READY}' LIMIT 1`,
+      `SELECT id FROM recognition_runs WHERE folder_id = '${FOLDER_READY}' LIMIT 1`,
     );
     const runId = runs[0]?.id ?? '';
     expect(runId).not.toBe('');
@@ -661,7 +646,7 @@ describe('GET /recognition-runs/{id}/progress', () => {
 
   it('чужой прогон недостижим', async () => {
     const runs = await db.query<{ id: string }>(
-      `SELECT id FROM recognition_runs WHERE revision_id = '${REVISION_READY}' LIMIT 1`,
+      `SELECT id FROM recognition_runs WHERE folder_id = '${FOLDER_READY}' LIMIT 1`,
     );
     const response = await as(
       KC.b,
@@ -691,7 +676,7 @@ describe('GET /recognition-runs/{id}/progress', () => {
  * Набор идёт в СТРОГОМ режиме намеренно — `done` вычисляется только при
  * `enforceGates`, и в режиме тестирования утверждения ниже проверяли бы не то.
  */
-describe('POST /revisions/{id}/check в shadow-режиме', () => {
+describe('POST /folders/{id}/check в shadow-режиме', () => {
   const setDryRun = async (value: boolean): Promise<void> => {
     await db.query(
       `INSERT INTO app_settings (key, value) VALUES ('ai.dry_run_only', '${String(value)}'::jsonb)
@@ -702,7 +687,7 @@ describe('POST /revisions/{id}/check в shadow-режиме', () => {
   it('dry-run отказывает ДО правки разметки и объясняет, чем это кончится', async () => {
     await setDryRun(true);
 
-    const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_DRY}/check`, {
+    const response = await as(KC.a, 'POST', `/api/v1/folders/${FOLDER_DRY}/check`, {
       idempotencyKey: 'check-dry-1',
     });
 
@@ -713,16 +698,16 @@ describe('POST /revisions/{id}/check в shadow-режиме', () => {
     expect(await layoutStateOf(LAYOUT_DRY)).toBe('draft');
     // И ни одного прогона: сквозной путь не начат вовсе.
     const runs = await db.query<{ count: string | number }>(
-      `SELECT count(*) AS count FROM recognition_runs WHERE revision_id = '${REVISION_DRY}'`,
+      `SELECT count(*) AS count FROM recognition_runs WHERE folder_id = '${FOLDER_DRY}'`,
     );
     expect(Number(runs[0]?.count ?? 0)).toBe(0);
   });
 
   it('с выключенным dry-run та же кнопка проходит', async () => {
     await setDryRun(false);
-    await finishLayoutJobs(REVISION_DRY);
+    await finishLayoutJobs(FOLDER_DRY);
 
-    const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_DRY}/check`, {
+    const response = await as(KC.a, 'POST', `/api/v1/folders/${FOLDER_DRY}/check`, {
       idempotencyKey: 'check-dry-2',
     });
 
@@ -736,10 +721,10 @@ describe('POST /revisions/{id}/check в shadow-режиме', () => {
     // статус `done`, счётчики на месте, `page_text_versions` — ни одной.
     await db.query(
       `UPDATE recognition_runs SET status = 'done', finished_at = now()
-        WHERE revision_id = '${REVISION_DRY}'`,
+        WHERE folder_id = '${FOLDER_DRY}'`,
     );
 
-    const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_DRY}/check`, {
+    const response = await as(KC.a, 'POST', `/api/v1/folders/${FOLDER_DRY}/check`, {
       idempotencyKey: 'check-dry-3',
     });
 
@@ -749,7 +734,7 @@ describe('POST /revisions/{id}/check в shadow-режиме', () => {
     expect(response.json<{ stage: string }>().stage).toBe('recognition');
 
     const runs = await db.query<{ count: string | number }>(
-      `SELECT count(*) AS count FROM recognition_runs WHERE revision_id = '${REVISION_DRY}'`,
+      `SELECT count(*) AS count FROM recognition_runs WHERE folder_id = '${FOLDER_DRY}'`,
     );
     expect(Number(runs[0]?.count ?? 0)).toBe(2);
   });
@@ -757,7 +742,7 @@ describe('POST /revisions/{id}/check в shadow-режиме', () => {
   it('опубликованный прогон стадию закрывает: следующее нажатие идёт к анализу', async () => {
     const runs = await db.query<{ id: string }>(
       `SELECT id FROM recognition_runs
-        WHERE revision_id = '${REVISION_DRY}' AND status = 'running' ORDER BY started_at DESC`,
+        WHERE folder_id = '${FOLDER_DRY}' AND status = 'running' ORDER BY started_at DESC`,
     );
     const runId = runs[0]?.id;
     expect(runId).toBeDefined();
@@ -771,14 +756,14 @@ describe('POST /revisions/{id}/check в shadow-режиме', () => {
     );
     await db.query(
       `INSERT INTO page_text_versions
-         (revision_id, source_page_id, recognition_run_id, artifact_version_id, text_md, text_sha256)
-         VALUES ('${REVISION_DRY}', '${PAGE_DRY}', '${runId ?? ''}', '${artifact}', 'текст', '${'2'.repeat(64)}')`,
+         (folder_id, source_page_id, recognition_run_id, artifact_version_id, text_md, text_sha256)
+         VALUES ('${FOLDER_DRY}', '${PAGE_DRY}', '${runId ?? ''}', '${artifact}', 'текст', '${'2'.repeat(64)}')`,
     );
     await db.query(
       `UPDATE recognition_runs SET status = 'done', finished_at = now() WHERE id = '${runId ?? ''}'`,
     );
 
-    const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_DRY}/check`, {
+    const response = await as(KC.a, 'POST', `/api/v1/folders/${FOLDER_DRY}/check`, {
       idempotencyKey: 'check-dry-4',
     });
 
@@ -793,7 +778,7 @@ describe('POST /revisions/{id}/check в shadow-режиме', () => {
 // =====================================================================
 
 /**
- * Комплект `REVISION_DRY` дошёл сюда с ОПУБЛИКОВАННЫМ распознаванием: набор
+ * Комплект `FOLDER_DRY` дошёл сюда с ОПУБЛИКОВАННЫМ распознаванием: набор
  * выше довёл его до состояния «стадия пройдена, следующее нажатие идёт к
  * анализу». Это ровно то состояние, в котором и появляется выбор, — и ровно
  * то, в котором до S40 повторное нажатие модель не звало ни при каких
@@ -802,11 +787,11 @@ describe('POST /revisions/{id}/check в shadow-режиме', () => {
  * Набор идёт ДО режима тестирования: `full` обязан работать и в строгом режиме,
  * иначе пункт бесполезен там, где он нужен, — на боевом портале.
  */
-describe('POST /revisions/{id}/check с выбором режима', () => {
+describe('POST /folders/{id}/check с выбором режима', () => {
   it('нажатие без тела остаётся прежним нажатием', async () => {
     // Отрицательный контроль: `mode` необязателен, и вызывающие, которые о нём
     // не знают, обязаны получать ровно прежнее поведение.
-    const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_DRY}/check`, {
+    const response = await as(KC.a, 'POST', `/api/v1/folders/${FOLDER_DRY}/check`, {
       idempotencyKey: 'check-mode-absent',
     });
 
@@ -814,7 +799,7 @@ describe('POST /revisions/{id}/check с выбором режима', () => {
   });
 
   it('«только ошибки» на комплекте без замечаний доходит до правил и говорит об этом', async () => {
-    const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_DRY}/check`, {
+    const response = await as(KC.a, 'POST', `/api/v1/folders/${FOLDER_DRY}/check`, {
       idempotencyKey: 'check-mode-errors',
       body: { mode: 'errors' },
     });
@@ -827,7 +812,7 @@ describe('POST /revisions/{id}/check с выбором режима', () => {
   });
 
   it('«полностью» зовёт распознавание заново и родителя себе не берёт', async () => {
-    const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_DRY}/check`, {
+    const response = await as(KC.a, 'POST', `/api/v1/folders/${FOLDER_DRY}/check`, {
       idempotencyKey: 'check-mode-full',
       body: { mode: 'full' },
     });
@@ -841,7 +826,7 @@ describe('POST /revisions/{id}/check с выбором режима', () => {
 
   it('«полностью» сносит прежние прогоны, а не кладёт новый поверх', async () => {
     const runs = await db.query<{ count: string | number }>(
-      `SELECT count(*) AS count FROM recognition_runs WHERE revision_id = '${REVISION_DRY}'`,
+      `SELECT count(*) AS count FROM recognition_runs WHERE folder_id = '${FOLDER_DRY}'`,
     );
     expect(Number(runs[0]?.count ?? 0)).toBe(1);
   });
@@ -862,7 +847,7 @@ describe('POST /revisions/{id}/check с выбором режима', () => {
  * распознавание идущие выделения», «повторное распознавание просто заменяет
  * предыдущее, не создаёт новую ревизию».
  */
-describe('POST /revisions/{id}/check при выключенной неизменяемости', () => {
+describe('POST /folders/{id}/check при выключенной неизменяемости', () => {
   beforeAll(async () => {
     await db.query(
       `INSERT INTO app_settings (key, value) VALUES ('core.enforce_immutability', 'false'::jsonb)
@@ -871,11 +856,11 @@ describe('POST /revisions/{id}/check при выключенной неизме�
   });
 
   it('повторное выделение блоков перезаписывает разметку, а не заводит следующую', async () => {
-    // REVISION_STUCK пришла сюда с ЗАМОРОЖЕННОЙ разметкой и прогоном по ней:
+    // FOLDER_STUCK пришла сюда с ЗАМОРОЖЕННОЙ разметкой и прогоном по ней:
     // в строгом режиме это ровно тот случай, когда заводилась «Ревизия 2».
     expect(await blocksHashOf(LAYOUT_STUCK)).not.toBeNull();
 
-    const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_STUCK}/markup`);
+    const response = await as(KC.a, 'POST', `/api/v1/folders/${FOLDER_STUCK}/markup`);
     expect(response.statusCode).toBe(202);
 
     const body = response.json<{ layoutRevisionId: string | null }>();
@@ -883,14 +868,14 @@ describe('POST /revisions/{id}/check при выключенной неизме�
     expect(await layoutStateOf(LAYOUT_STUCK)).toBe('draft');
 
     const layouts = await db.query<{ count: string | number }>(
-      `SELECT count(*) AS count FROM layout_revisions WHERE revision_id = '${REVISION_STUCK}'`,
+      `SELECT count(*) AS count FROM layout_revisions WHERE folder_id = '${FOLDER_STUCK}'`,
     );
     expect(Number(layouts[0]?.count ?? 0)).toBe(1);
 
     // Сброс снёс производное прежнего распознавания: без него детекция упёрлась
     // бы в block_results.layout_block_id ON DELETE RESTRICT.
     const runs = await db.query<{ count: string | number }>(
-      `SELECT count(*) AS count FROM recognition_runs WHERE revision_id = '${REVISION_STUCK}'`,
+      `SELECT count(*) AS count FROM recognition_runs WHERE folder_id = '${FOLDER_STUCK}'`,
     );
     expect(Number(runs[0]?.count ?? 0)).toBe(0);
   });
@@ -899,11 +884,11 @@ describe('POST /revisions/{id}/check при выключенной неизме�
     // Задачи детекции от нажатия выше стоят в очереди.
     const before = await db.query<{ count: string | number }>(
       `SELECT count(*) AS count FROM jobs
-        WHERE payload->>'revisionId' = '${REVISION_STUCK}' AND status IN ('queued', 'running')`,
+        WHERE payload->>'folderId' = '${FOLDER_STUCK}' AND status IN ('queued', 'running')`,
     );
     expect(Number(before[0]?.count ?? 0)).toBeGreaterThan(0);
 
-    const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_STUCK}/check`, {
+    const response = await as(KC.a, 'POST', `/api/v1/folders/${FOLDER_STUCK}/check`, {
       idempotencyKey: 'check-soft-1',
     });
     expect(response.statusCode).toBe(202);
@@ -913,7 +898,7 @@ describe('POST /revisions/{id}/check при выключенной неизме�
     // набора, в очереди не остаются.
     const layoutPending = await db.query<{ count: string | number }>(
       `SELECT count(*) AS count FROM jobs
-        WHERE payload->>'revisionId' = '${REVISION_STUCK}'
+        WHERE payload->>'folderId' = '${FOLDER_STUCK}'
           AND type LIKE 'layout.%' AND status IN ('queued', 'running')`,
     );
     expect(Number(layoutPending[0]?.count ?? 0)).toBe(0);
@@ -922,11 +907,11 @@ describe('POST /revisions/{id}/check при выключенной неизме�
   it('повторное распознавание заменяет прежний прогон, а не отказывает', async () => {
     const before = await db.query<{ id: string }>(
       `SELECT id FROM recognition_runs
-        WHERE revision_id = '${REVISION_STUCK}' AND status = 'running'`,
+        WHERE folder_id = '${FOLDER_STUCK}' AND status = 'running'`,
     );
     expect(before).toHaveLength(1);
 
-    const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_STUCK}/check`, {
+    const response = await as(KC.a, 'POST', `/api/v1/folders/${FOLDER_STUCK}/check`, {
       idempotencyKey: 'check-soft-2',
     });
     expect(response.statusCode).toBe(202);
@@ -935,7 +920,7 @@ describe('POST /revisions/{id}/check при выключенной неизме�
     // Прогон ровно один — новый. Прежний снесён сбросом вместе со своими
     // страницами: «заменяет предыдущее» здесь буквально.
     const after = await db.query<{ id: string; status: string }>(
-      `SELECT id, status FROM recognition_runs WHERE revision_id = '${REVISION_STUCK}'`,
+      `SELECT id, status FROM recognition_runs WHERE folder_id = '${FOLDER_STUCK}'`,
     );
     expect(after).toHaveLength(1);
     expect(after[0]?.status).toBe('running');

@@ -211,8 +211,8 @@ describe('дедупликация по отпечатку', () => {
   });
 
   it('склеивает одинаковый класс с разными uuid и числами в сообщении', async () => {
-    function pageMissing(revisionId: string, pageNumber: number): Error {
-      return new Error(`страница ${pageNumber} ревизии ${revisionId} не найдена`);
+    function pageMissing(folderId: string, pageNumber: number): Error {
+      return new Error(`страница ${pageNumber} ревизии ${folderId} не найдена`);
     }
 
     await report(pageMissing('7f000000-0000-4000-8000-000000000001', 42));
@@ -231,7 +231,7 @@ describe('дедупликация по отпечатку', () => {
     }
 
     await report(relationMissing('page_assignments'));
-    await report(relationMissing('submission_revisions'));
+    await report(relationMissing('folders'));
 
     const rows = await issues();
 
@@ -296,7 +296,7 @@ describe('пример', () => {
     await report(new Error('падение с контекстом'), {
       requestId: 'req-0000000000000001',
       userId: '7f000000-0000-4000-8000-00000000000a',
-      route: '/api/revisions/:revisionId/blocks',
+      route: '/api/folders/:folderId/blocks',
       objectId: '7f000000-0000-4000-8000-00000000000b',
       jobType: 'ocr_block',
       attempt: 3,
@@ -307,7 +307,7 @@ describe('пример', () => {
 
     expect(row?.request_id).toBe('req-0000000000000001');
     expect(row?.user_id).toBe('7f000000-0000-4000-8000-00000000000a');
-    expect(row?.route).toBe('/api/revisions/:revisionId/blocks');
+    expect(row?.route).toBe('/api/folders/:folderId/blocks');
     expect(row?.object_id).toBe('7f000000-0000-4000-8000-00000000000b');
     expect(row?.job_type).toBe('ocr_block');
     expect(row?.attempt).toBe(3);

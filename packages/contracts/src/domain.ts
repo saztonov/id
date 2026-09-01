@@ -38,7 +38,6 @@ import {
   shapeTypeSchema,
   signatureProbeResultSchema,
   verifyStateSchema,
-  workflowStatusSchema,
 } from './enums.js';
 
 // =====================================================================
@@ -322,29 +321,21 @@ export const periodSchema = isoDateSchema.refine((value) => value.endsWith('-01'
 });
 
 /**
- * Что за единицу подачи представляет строка `works`.
+ * Папка ИД — то, что подрядчик загружает и что проходит конвейер (§3).
  *
- * `complect` — комплект ИД по одной работе: АОСР и его приложения. `registry` —
- * подписанный скан самой описи. Второй вид существует потому, что весь конвейер
- * из 23 задач адресуется ревизией, а `source_files.revision_id` объявлен
- * NOT NULL: отдельная таблица под один файл означала бы второй конвейер.
- */
-export const workKindSchema = z.enum(['complect', 'registry']);
-export type WorkKind = z.infer<typeof workKindSchema>;
-
-/**
- * Комплект работы — то, что подрядчик собирает и подаёт (§3).
+ * Уровень «ревизия поставки» схлопнут в неё же (S44): у папки один файл-пакет,
+ * одни страницы, одна разметка и один прогон распознавания. Комплекты — акт со
+ * своими приложениями — живут УРОВНЕМ НИЖЕ и создаются сегментацией.
  *
  * `objectId` и `contractorId` денормализованы сознательно: на них опирается
  * третий уровень изоляции доступа — составной внешний ключ (§4.1). Без них
  * проверка области видимости требовала бы join'а на каждый запрос.
  *
  * `managedByContractorId` отделён от `contractorId` намеренно. Первое — кто
- * ВЕДЁТ комплект в портале, второе — кто ВЫПОЛНИЛ работу. Они расходятся, когда
- * инженер ПТО генподрядчика заводит комплект за субподрядчика: состав в этом
- * случае правит генподрядчик, а исполнителем в реестре остаётся субподрядчик.
+ * ВЕДЁТ папку в портале, второе — кто ВЫПОЛНИЛ работу. Они расходятся, когда
+ * инженер ПТО генподрядчика загружает папку за субподрядчика.
  */
-export const workSchema = z.object({
+export const folderSchema = z.object({
   id: uuidSchema,
   objectId: uuidSchema,
   sectionCode: sectionCodeSchema,
@@ -391,18 +382,17 @@ export const workSchema = z.object({
    */
   contractorRaw: z.string().nullable(),
   managedByContractorId: uuidSchema,
-  kind: workKindSchema,
   title: z.string().min(1).max(1000),
-  /** Реестр, в который комплект включён. `null` — собран, но ещё не в папке. */
-  registryId: uuidSchema.nullable(),
-  /** Порядок работы в реестре — тот же, что в бумаге. */
+  /** Порядок папки в разделе — тот же, что в бумаге. */
   ordinal: sortOrderSchema.nullable(),
   autoRunEnabled: z.boolean(),
-  currentRevisionId: uuidSchema.nullable(),
+  /** Хэш состава (файлы и их порядок): им сверяется переиспользование прогонов. */
+  aggregateManifestHash: sha256Schema.nullable(),
+  version: rowVersionSchema,
   createdBy: uuidSchema,
   createdAt: isoDateTimeSchema,
 });
-export type Work = z.infer<typeof workSchema>;
+export type Folder = z.infer<typeof folderSchema>;
 
 /**
  * Состояние реестра передачи.
@@ -438,7 +428,7 @@ export const registrySchema = z.object({
   issuedBy: uuidSchema.nullable(),
   issuedAt: isoDateTimeSchema.nullable(),
   /** Ревизия файла-скана, поданная на момент передачи. */
-  issuedFileRevisionId: uuidSchema.nullable(),
+  issuedFileFolderId: uuidSchema.nullable(),
   acceptedBy: uuidSchema.nullable(),
   acceptedAt: isoDateTimeSchema.nullable(),
   createdBy: uuidSchema,
@@ -457,7 +447,7 @@ export const registryItemSchema = z.object({
   registryId: uuidSchema,
   ordinal: z.int().positive(),
   workId: uuidSchema,
-  revisionId: uuidSchema,
+  folderId: uuidSchema,
   contractorId: uuidSchema,
   title: z.string().min(1).max(1000),
 });
@@ -493,7 +483,7 @@ export type ReconciliationMatchState = z.infer<typeof reconciliationMatchStateSc
 /** Комплект папки со СВОИМ вердиктом: единица выдачи подрядчику и инженеру. */
 export const reconciliationWorkSchema = z.object({
   workId: uuidSchema,
-  matchedRevisionId: uuidSchema.nullable(),
+  matchedFolderId: uuidSchema.nullable(),
   contractorId: uuidSchema,
   title: z.string().min(1).max(1000),
   contractorName: z.string().max(255).nullable(),
@@ -518,7 +508,7 @@ export const reconciliationGroupSchema = z.object({
   actNoNorm: z.string().max(255).nullable(),
   contractorRaw: z.string().max(255).nullable(),
   matchedWorkId: uuidSchema.nullable(),
-  matchedRevisionId: uuidSchema.nullable(),
+  matchedFolderId: uuidSchema.nullable(),
   matchedContractorId: uuidSchema.nullable(),
   matchState: reconciliationMatchStateSchema,
   matchScore: confidenceSchema.nullable(),
@@ -562,7 +552,7 @@ export type ReconciliationRow = z.infer<typeof reconciliationRowSchema>;
 export const reconciliationExtraDocumentSchema = z.object({
   documentId: uuidSchema,
   workId: uuidSchema,
-  revisionId: uuidSchema,
+  folderId: uuidSchema,
   contractorId: uuidSchema,
   docNoRaw: z.string().max(255).nullable(),
   docNameRaw: z.string().max(2000).nullable(),
@@ -580,7 +570,7 @@ export type ReconciliationExtraDocument = z.infer<typeof reconciliationExtraDocu
 export const registryReconciliationSchema = z.object({
   id: uuidSchema,
   registryId: uuidSchema,
-  revisionId: uuidSchema,
+  folderId: uuidSchema,
   verdict: reconciliationVerdictSchema,
   version: rowVersionSchema,
   headerRegistryNo: z.string().max(128).nullable(),
@@ -609,39 +599,6 @@ export const registryReconciliationSchema = z.object({
 });
 export type RegistryReconciliation = z.infer<typeof registryReconciliationSchema>;
 
-/**
- * Ревизия комплекта — неизменяемая после submit единица прохождения конвейера.
- *
- * `aggregateManifestHash` — хэш состава ревизии (файлы и их порядок). Только
- * его совпадение разрешает переиспользовать результаты предыдущей ревизии
- * при повторной подаче после возврата.
- *
- * Тип и таблица сохранили имя `submissionRevision` после переезда поставки в
- * комплект (0028): переименование не изменило бы ни одного инварианта, а стоило
- * бы правки пятнадцати репозиториев и трёх функций-триггеров.
- */
-export const submissionRevisionSchema = z
-  .object({
-    id: uuidSchema,
-    workId: uuidSchema,
-    revisionNo: z.int().positive(),
-    parentRevisionId: uuidSchema.nullable(),
-    status: workflowStatusSchema,
-    aggregateManifestHash: sha256Schema.nullable(),
-    version: rowVersionSchema,
-    createdAt: isoDateTimeSchema,
-    submittedAt: isoDateTimeSchema.nullable(),
-    submittedBy: uuidSchema.nullable(),
-    decidedAt: isoDateTimeSchema.nullable(),
-    decidedBy: uuidSchema.nullable(),
-    returnReason: z.string().max(4000).nullable(),
-  })
-  .refine((r) => r.revisionNo === 1 || r.parentRevisionId !== null, {
-    message: 'У ревизии старше первой обязана быть родительская',
-    path: ['parentRevisionId'],
-  });
-export type SubmissionRevision = z.infer<typeof submissionRevisionSchema>;
-
 // =====================================================================
 // §3.3 Файлы, страницы, рабочий документ
 // =====================================================================
@@ -666,7 +623,7 @@ export type SignatureProbe = z.infer<typeof signatureProbeSchema>;
 
 export const sourceFileSchema = z.object({
   id: uuidSchema,
-  revisionId: uuidSchema,
+  folderId: uuidSchema,
   blobSha256: sha256Schema,
   fileName: z.string().min(1).max(500),
   sortOrder: sortOrderSchema,
@@ -685,10 +642,10 @@ export type SourceFile = z.infer<typeof sourceFileSchema>;
  */
 export const sourcePageSchema = z.object({
   id: uuidSchema,
-  revisionId: uuidSchema,
+  folderId: uuidSchema,
   sourceFileId: uuidSchema,
   filePageIndex: z.int().nonnegative(),
-  revisionOrdinal: z.int().nonnegative(),
+  folderOrdinal: z.int().nonnegative(),
   widthPx: z.int().positive(),
   heightPx: z.int().positive(),
   rotation: z.literal([0, 90, 180, 270]),
@@ -705,7 +662,7 @@ export type SourcePage = z.infer<typeof sourcePageSchema>;
  */
 export const processingBundleSchema = z.object({
   id: uuidSchema,
-  revisionId: uuidSchema,
+  folderId: uuidSchema,
   aggregateManifestHash: sha256Schema,
   workingPdfBlobSha256: sha256Schema,
   builderVersion: z.string().min(1).max(64),
@@ -727,7 +684,7 @@ export type ProcessingBundlePage = z.infer<typeof processingBundlePageSchema>;
 export const layoutRevisionSchema = z
   .object({
     id: uuidSchema,
-    revisionId: uuidSchema,
+    folderId: uuidSchema,
     bundleId: uuidSchema,
     revisionNo: z.int().positive(),
     state: layoutRevisionStateSchema,
@@ -828,7 +785,7 @@ export type RecognitionWarning = z.infer<typeof recognitionWarningSchema>;
 export const recognitionRunSchema = z
   .object({
     id: uuidSchema,
-    revisionId: uuidSchema,
+    folderId: uuidSchema,
     layoutRevisionId: uuidSchema,
     rdRunDocumentId: uuidSchema,
     rdJobId: z.string().max(128).nullable(),
@@ -893,7 +850,7 @@ export type PageTextVersion = z.infer<typeof pageTextVersionSchema>;
 export const logicalDocumentSchema = z
   .object({
     id: uuidSchema,
-    revisionId: uuidSchema,
+    folderId: uuidSchema,
     objectId: uuidSchema,
     contractorId: uuidSchema,
     docTypeCode: docTypeCodeSchema.nullable(),
@@ -918,7 +875,7 @@ export type LogicalDocument = z.infer<typeof logicalDocumentSchema>;
 
 export const documentPageSchema = z.object({
   id: uuidSchema,
-  revisionId: uuidSchema,
+  folderId: uuidSchema,
   documentId: uuidSchema,
   sourcePageId: uuidSchema,
   sortOrder: sortOrderSchema,
@@ -976,7 +933,7 @@ export type FieldValue = z.infer<typeof fieldValueSchema>;
  */
 export const registryRowSchema = z.object({
   id: uuidSchema,
-  revisionId: uuidSchema,
+  folderId: uuidSchema,
   documentId: uuidSchema,
   rowNo: z.int().positive(),
   sectionTitle: z.string().max(1000).nullable(),
@@ -996,7 +953,7 @@ export type RegistryRow = z.infer<typeof registryRowSchema>;
 
 export const materialSchema = z.object({
   id: uuidSchema,
-  revisionId: uuidSchema,
+  folderId: uuidSchema,
   nameRaw: z.string().min(1).max(2000),
   nameNorm: z.string().min(1).max(2000),
   mark: z.string().max(256).nullable(),
@@ -1030,7 +987,7 @@ export type Batch = z.infer<typeof batchSchema>;
 
 export const validationRunSchema = z.object({
   id: uuidSchema,
-  revisionId: uuidSchema,
+  folderId: uuidSchema,
   rulesetVersionId: uuidSchema,
   objectRuleProfileId: uuidSchema.nullable(),
   startedAt: isoDateTimeSchema,
@@ -1052,7 +1009,7 @@ export const findingSchema = z
   .object({
     id: uuidSchema,
     validationRunId: uuidSchema,
-    revisionId: uuidSchema,
+    folderId: uuidSchema,
     objectId: uuidSchema,
     contractorId: uuidSchema,
     ruleCode: ruleCodeSchema,

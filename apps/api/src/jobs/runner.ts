@@ -62,7 +62,7 @@ import {
 } from '../db/repositories/jobs.js';
 import type { Database } from '../db/repositories/users.js';
 import { pruneJournal } from '../db/repositories/error-journal.js';
-import { emitRevisionEvent, type JobContext, type JobRegistry } from './registry.js';
+import { emitFolderEvent, type JobContext, type JobRegistry } from './registry.js';
 import {
   backoffDelayMs,
   clampConcurrency,
@@ -859,7 +859,7 @@ export class JobRunner {
         jobType: job.type,
         jobId: job.jobId,
         attempt: job.attempt,
-        ...(job.revisionId !== null ? { revisionId: job.revisionId } : {}),
+        ...(job.folderId !== null ? { folderId: job.folderId } : {}),
       },
       async () => {
         const logger = childLogger(this.#options.logger, {
@@ -993,14 +993,14 @@ export class JobRunner {
       type: job.type as JobType,
       attempt: job.attempt,
       maxAttempts: job.maxAttempts,
-      revisionId: job.revisionId,
+      folderId: job.folderId,
       payload: payload as JobContext<JobType>['payload'],
       db: this.#options.db,
       logger,
       signal,
       enqueue: (input) => enqueueSystemJob(this.#options.db, input),
       emit: (eventType, eventPayload) =>
-        emitRevisionEvent(this.#options.db, job.revisionId, logger, eventType, eventPayload),
+        emitFolderEvent(this.#options.db, job.folderId, logger, eventType, eventPayload),
     };
   }
 
@@ -1189,7 +1189,7 @@ export class JobRunner {
       ...(definition?.queue === 'llm' && classifyErrorDomain(failure.error) === 'unknown'
         ? { domain: 'llm' as const }
         : {}),
-      ...(job.revisionId !== null ? { revisionId: job.revisionId } : {}),
+      ...(job.folderId !== null ? { folderId: job.folderId } : {}),
     });
 
     const fields = {
@@ -1227,16 +1227,16 @@ export class JobRunner {
     eventType: string,
     payload: Record<string, unknown>,
   ): Promise<void> {
-    if (job.revisionId === null) return;
+    if (job.folderId === null) return;
     try {
-      await emitRevisionEvent(this.#options.db, job.revisionId, logger, eventType, {
+      await emitFolderEvent(this.#options.db, job.folderId, logger, eventType, {
         jobId: job.jobId,
         jobType: job.type,
         ...payload,
       });
     } catch (error) {
       logger.warn(
-        { event: 'revision_event_failed', event_type: eventType, error_class: errorClassOf(error) },
+        { event: 'folder_event_failed', event_type: eventType, error_class: errorClassOf(error) },
         'событие ревизии не записано',
       );
     }

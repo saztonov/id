@@ -18,7 +18,7 @@
  * ## Порядок выведен из схемы, а не придуман
  *
  * Список ниже — топологическая сортировка подграфа внешних ключей, растущего
- * вниз от `submission_revisions`, снятая с настоящей схемы (все 34 миграции на
+ * вниз от `folders`, снятая с настоящей схемы (все 34 миграции на
  * pglite). Он не «примерно правильный», он полный на момент написания, и
  * `purge.test.ts` заполняет каждую перечисленную таблицу и требует, чтобы
  * удаление прошло. Новая таблица со ссылкой на ревизию сломает этот тест — и
@@ -31,8 +31,8 @@
  *
  * ## Что считается производным, а что историей
  *
- * `purgeDerivedForRevision` НЕ трогает `job_runs`, `ai_runs`, `review_actions` и
- * `revision_events`. Это журнал: что портал делал с комплектом и сколько это
+ * `purgeDerivedForFolder` НЕ трогает `job_runs`, `ai_runs` и
+ * `folder_events`. Это журнал: что портал делал с комплектом и сколько это
  * стоило. Пересборка разметки не отменяет факта, что прошлая разметка была, и
  * стирать след предыдущей попытки вместе с её результатом значило бы прятать от
  * пользователя, что попытка вообще случалась.
@@ -47,8 +47,8 @@
  * `next_run_at`, не находила ни прогона, ни разметки и рождала нового мертвеца:
  * сброс не заканчивал прошлую попытку, а размножал её.
  *
- * Поэтому каждая из трёх операций сначала зовёт `cancelJobsOfRevision`, и в
- * `purgeRevisionEntirely` — обязательно ДО `REVISION_DELETES`, где `job_runs`
+ * Поэтому каждая из трёх операций сначала зовёт `cancelJobsOfFolder`, и в
+ * `purgeFolderEntirely` — обязательно ДО `FOLDER_DELETES`, где `job_runs`
  * удаляются: закрывать открытые попытки после было бы уже нечего.
  *
  * При полном удалении комплекта журнал уходит вместе с ним: строки ссылаются на
@@ -57,7 +57,7 @@
  */
 import { sql, type SQL } from 'drizzle-orm';
 
-import { cancelJobsOfRevision } from './jobs.js';
+import { cancelJobsOfFolder } from './jobs.js';
 import type { Database } from './users.js';
 
 type Executor = Pick<Database, 'execute'>;
@@ -65,7 +65,7 @@ type Executor = Pick<Database, 'execute'>;
 /**
  * Производное содержимое ревизии, от листьев к корню.
  *
- * Каждая строка — один `DELETE`. Таблицы с собственной колонкой `revision_id`
+ * Каждая строка — один `DELETE`. Таблицы с собственной колонкой `folder_id`
  * отбираются по ней напрямую; остальные — подзапросом по родителю, и подзапрос
  * назван явно, а не выведен из имени, чтобы связь читалась на месте.
  */
@@ -84,66 +84,62 @@ export interface PurgeStep {
 export const DERIVED_DELETES: readonly PurgeStep[] = [
   {
     table: 'finding_evidence',
-    where: (id: SQL) => sql`finding_id in (select id from findings where revision_id = ${id})`,
+    where: (id: SQL) => sql`finding_id in (select id from findings where folder_id = ${id})`,
   },
-  { table: 'findings', where: (id: SQL) => sql`revision_id = ${id}` },
+  { table: 'findings', where: (id: SQL) => sql`folder_id = ${id}` },
   {
     table: 'current_block_result',
     where: (id: SQL) =>
-      sql`layout_block_id in (select id from layout_blocks where revision_id = ${id})`,
+      sql`layout_block_id in (select id from layout_blocks where folder_id = ${id})`,
   },
   {
     table: 'block_results',
     where: (id: SQL) =>
-      sql`layout_block_id in (select id from layout_blocks where revision_id = ${id})`,
+      sql`layout_block_id in (select id from layout_blocks where folder_id = ${id})`,
   },
-  { table: 'field_values', where: (id: SQL) => sql`revision_id = ${id}` },
+  { table: 'field_values', where: (id: SQL) => sql`folder_id = ${id}` },
   {
     table: 'layout_block_points',
-    where: (id: SQL) => sql`block_id in (select id from layout_blocks where revision_id = ${id})`,
+    where: (id: SQL) => sql`block_id in (select id from layout_blocks where folder_id = ${id})`,
   },
-  { table: 'layout_blocks', where: (id: SQL) => sql`revision_id = ${id}` },
-  { table: 'page_classifications', where: (id: SQL) => sql`revision_id = ${id}` },
+  { table: 'layout_blocks', where: (id: SQL) => sql`folder_id = ${id}` },
+  { table: 'page_classifications', where: (id: SQL) => sql`folder_id = ${id}` },
   // Разворот содержимого (0052) — производное решение о странице, как и
   // классификация: ссылается на `source_pages` и обязан уйти ДО них.
-  { table: 'page_orientations', where: (id: SQL) => sql`revision_id = ${id}` },
-  { table: 'page_text_versions', where: (id: SQL) => sql`revision_id = ${id}` },
+  { table: 'page_orientations', where: (id: SQL) => sql`folder_id = ${id}` },
+  { table: 'page_text_versions', where: (id: SQL) => sql`folder_id = ${id}` },
   {
     table: 'artifact_versions',
     where: (id: SQL) =>
-      sql`recognition_run_id in (select id from recognition_runs where revision_id = ${id})`,
+      sql`recognition_run_id in (select id from recognition_runs where folder_id = ${id})`,
   },
   {
     table: 'recognition_run_pages',
     where: (id: SQL) =>
-      sql`recognition_run_id in (select id from recognition_runs where revision_id = ${id})`,
+      sql`recognition_run_id in (select id from recognition_runs where folder_id = ${id})`,
   },
-  { table: 'recognition_runs', where: (id: SQL) => sql`revision_id = ${id}` },
+  { table: 'recognition_runs', where: (id: SQL) => sql`folder_id = ${id}` },
   {
     table: 'rd_run_documents',
     where: (id: SQL) =>
-      sql`layout_revision_id in (select id from layout_revisions where revision_id = ${id})`,
+      sql`layout_revision_id in (select id from layout_revisions where folder_id = ${id})`,
   },
-  { table: 'layout_revisions', where: (id: SQL) => sql`revision_id = ${id}` },
-  { table: 'document_relations', where: (id: SQL) => sql`revision_id = ${id}` },
-  { table: 'material_documents', where: (id: SQL) => sql`revision_id = ${id}` },
-  { table: 'page_assignments', where: (id: SQL) => sql`revision_id = ${id}` },
-  { table: 'registry_reconciliation_extra_docs', where: (id: SQL) => sql`revision_id = ${id}` },
-  { table: 'registry_reconciliation_rows', where: (id: SQL) => sql`revision_id = ${id}` },
-  { table: 'registry_row_candidates', where: (id: SQL) => sql`revision_id = ${id}` },
-  { table: 'registry_rows', where: (id: SQL) => sql`revision_id = ${id}` },
-  { table: 'logical_documents', where: (id: SQL) => sql`revision_id = ${id}` },
+  { table: 'layout_revisions', where: (id: SQL) => sql`folder_id = ${id}` },
+  { table: 'document_relations', where: (id: SQL) => sql`folder_id = ${id}` },
+  { table: 'material_documents', where: (id: SQL) => sql`folder_id = ${id}` },
+  { table: 'page_assignments', where: (id: SQL) => sql`folder_id = ${id}` },
+  { table: 'registry_row_candidates', where: (id: SQL) => sql`folder_id = ${id}` },
+  { table: 'registry_rows', where: (id: SQL) => sql`folder_id = ${id}` },
+  { table: 'logical_documents', where: (id: SQL) => sql`folder_id = ${id}` },
+  { table: 'complects', where: (id: SQL) => sql`folder_id = ${id}` },
   {
     table: 'batches',
-    where: (id: SQL) => sql`material_id in (select id from materials where revision_id = ${id})`,
+    where: (id: SQL) => sql`material_id in (select id from materials where folder_id = ${id})`,
   },
-  { table: 'materials', where: (id: SQL) => sql`revision_id = ${id}` },
-  { table: 'processing_bundle_pages', where: (id: SQL) => sql`revision_id = ${id}` },
-  { table: 'processing_bundles', where: (id: SQL) => sql`revision_id = ${id}` },
-  { table: 'registry_reconciliation_groups', where: (id: SQL) => sql`revision_id = ${id}` },
-  { table: 'registry_reconciliation_works', where: (id: SQL) => sql`revision_id = ${id}` },
-  { table: 'registry_reconciliations', where: (id: SQL) => sql`revision_id = ${id}` },
-  { table: 'validation_runs', where: (id: SQL) => sql`revision_id = ${id}` },
+  { table: 'materials', where: (id: SQL) => sql`folder_id = ${id}` },
+  { table: 'processing_bundle_pages', where: (id: SQL) => sql`folder_id = ${id}` },
+  { table: 'processing_bundles', where: (id: SQL) => sql`folder_id = ${id}` },
+  { table: 'validation_runs', where: (id: SQL) => sql`folder_id = ${id}` },
 ];
 
 /**
@@ -195,48 +191,22 @@ export const PIPELINE_RESET_DELETES: readonly PurgeStep[] = DERIVED_DELETES.filt
  * продолжает тот же топологический ряд: страницы раньше файлов, всё остальное —
  * после производного.
  */
-export const REVISION_DELETES: readonly PurgeStep[] = [
-  { table: 'ai_runs', where: (id: SQL) => sql`revision_id = ${id}` },
-  { table: 'job_runs', where: (id: SQL) => sql`revision_id = ${id}` },
-  { table: 'legal_holds', where: (id: SQL) => sql`revision_id = ${id}` },
-  { table: 'registry_items', where: (id: SQL) => sql`revision_id = ${id}` },
-  { table: 'review_actions', where: (id: SQL) => sql`revision_id = ${id}` },
-  { table: 'revision_events', where: (id: SQL) => sql`revision_id = ${id}` },
-  { table: 'submission_archives', where: (id: SQL) => sql`revision_id = ${id}` },
-  { table: 'source_pages', where: (id: SQL) => sql`revision_id = ${id}` },
-  { table: 'source_files', where: (id: SQL) => sql`revision_id = ${id}` },
-];
-
-/**
- * Что держит РЕЕСТР помимо ревизий его файла описи (S37).
- *
- * Отдельный список, потому что растёт он от другого корня: `registries`, а не
- * `submission_revisions`. Комплекты состава реестром не держатся — у них
- * `registry_id` обнуляется, — а вот снимок состава и прогоны сверки ссылаются
- * на сам реестр и удаление отвергнут.
- *
- * `registry_reconciliation_works/_groups/_rows/_extra_docs` здесь НЕ
- * перечислены: все четыре объявлены `ON DELETE CASCADE` от
- * `registry_reconciliations` (0030), и повторять каскад руками значило бы
- * держать второй порядок удаления рядом с настоящим.
- *
- * Список живёт здесь, а не в `navigation.ts`, по той же причине, по которой
- * здесь живут остальные: порядок удаления обязан быть в одном месте, и его
- * полноту сверяет `purge.test.ts`.
- */
-export const REGISTRY_DELETES: readonly PurgeStep[] = [
-  { table: 'registry_reconciliations', where: (id: SQL) => sql`registry_id = ${id}` },
-  { table: 'registry_items', where: (id: SQL) => sql`registry_id = ${id}` },
+export const FOLDER_DELETES: readonly PurgeStep[] = [
+  { table: 'ai_runs', where: (id: SQL) => sql`folder_id = ${id}` },
+  { table: 'job_runs', where: (id: SQL) => sql`folder_id = ${id}` },
+  { table: 'folder_events', where: (id: SQL) => sql`folder_id = ${id}` },
+  { table: 'source_pages', where: (id: SQL) => sql`folder_id = ${id}` },
+  { table: 'source_files', where: (id: SQL) => sql`folder_id = ${id}` },
 ];
 
 async function runDeletes(
   executor: Executor,
   steps: readonly PurgeStep[],
-  revisionId: string,
+  folderId: string,
 ): Promise<void> {
   // Имя таблицы уходит через `sql.raw`: оно берётся из константы в этом файле и
   // снаружи не приходит. Идентификатор ревизии — всегда связанный параметр.
-  const id = sql`${revisionId}::uuid`;
+  const id = sql`${folderId}::uuid`;
   for (const step of steps) {
     await executor.execute(sql`delete from ${sql.raw(step.table)} where ${step.where(id)}`);
   }
@@ -250,12 +220,9 @@ async function runDeletes(
  * документы и замечания придётся получать заново — об этом обязан предупредить
  * интерфейс ДО нажатия, а не после.
  */
-export async function purgeDerivedForRevision(
-  executor: Executor,
-  revisionId: string,
-): Promise<void> {
-  await cancelJobsOfRevision(executor, revisionId);
-  await runDeletes(executor, DERIVED_DELETES, revisionId);
+export async function purgeDerivedForFolder(executor: Executor, folderId: string): Promise<void> {
+  await cancelJobsOfFolder(executor, folderId);
+  await runDeletes(executor, DERIVED_DELETES, folderId);
 }
 
 /**
@@ -267,47 +234,28 @@ export async function purgeDerivedForRevision(
  * половинчатая чистка оставила бы документы и замечания, указывающие на блоки с
  * другими идентификаторами. Такие данные выглядят целыми и врут.
  */
-export async function resetPipelineForRevision(
-  executor: Executor,
-  revisionId: string,
-): Promise<void> {
+export async function resetPipelineForFolder(executor: Executor, folderId: string): Promise<void> {
   // Стадии перечислены, а не сняты все: сброс конвейера оставляет рабочий
   // документ и разметку, поэтому задачи `uploaded` и `layout` относятся к тому,
   // что переживает сброс, и снимать их было бы отменой чужой живой работы.
-  await cancelJobsOfRevision(executor, revisionId, {
+  await cancelJobsOfFolder(executor, folderId, {
     stages: ['recognition', 'analysis', 'checks'],
   });
-  await runDeletes(executor, PIPELINE_RESET_DELETES, revisionId);
+  await runDeletes(executor, PIPELINE_RESET_DELETES, folderId);
 }
 
 /**
- * Снести то, что держит реестр, кроме комплектов его состава.
+ * Снести папку целиком вместе с составом и журналом.
  *
- * Зовётся из `deleteRegistry` последним шагом перед удалением самой строки:
- * комплекты к этому моменту уже отвязаны, а файл описи удалён целиком вместе со
- * своими ревизиями. Остаются снимок состава и прогоны сверки — они ссылаются на
- * реестр, а не на ревизию, и `purgeRevisionEntirely` их не касается.
+ * Строка `folders` удаляется последней: до неё на папку не должно остаться ни
+ * одной ссылки, иначе отказ придёт от внешнего ключа посреди транзакции.
  */
-export async function purgeRegistryTail(executor: Executor, registryId: string): Promise<void> {
-  const id = sql`${registryId}::uuid`;
-  for (const step of REGISTRY_DELETES) {
-    await executor.execute(sql`delete from ${sql.raw(step.table)} where ${step.where(id)}`);
-  }
-}
-
-/**
- * Снести ревизию целиком вместе с составом и журналом.
- *
- * Строка `submission_revisions` удаляется последней: до неё на ревизию не должно
- * остаться ни одной ссылки, иначе отказ придёт от внешнего ключа посреди
- * транзакции.
- */
-export async function purgeRevisionEntirely(executor: Executor, revisionId: string): Promise<void> {
-  // Отмена — ДО `REVISION_DELETES`: там удаляются `job_runs`, и закрывать
+export async function purgeFolderEntirely(executor: Executor, folderId: string): Promise<void> {
+  // Отмена — ДО `FOLDER_DELETES`: там удаляются `job_runs`, и закрывать
   // открытые попытки после было бы уже нечего. Порядок здесь такой же
   // обязательный, как топологический порядок самих удалений.
-  await cancelJobsOfRevision(executor, revisionId);
-  await runDeletes(executor, DERIVED_DELETES, revisionId);
-  await runDeletes(executor, REVISION_DELETES, revisionId);
-  await executor.execute(sql`delete from submission_revisions where id = ${revisionId}`);
+  await cancelJobsOfFolder(executor, folderId);
+  await runDeletes(executor, DERIVED_DELETES, folderId);
+  await runDeletes(executor, FOLDER_DELETES, folderId);
+  await executor.execute(sql`delete from folders where id = ${folderId}`);
 }

@@ -34,7 +34,7 @@ import {
   type RunDocumentRef,
 } from './markup.js';
 
-const REVISION = '00000000-0000-4000-8000-000000000011';
+const FOLDER = '00000000-0000-4000-8000-000000000011';
 const BUNDLE = '00000000-0000-4000-8000-000000000012';
 const LAYOUT = '00000000-0000-4000-8000-000000000013';
 
@@ -67,7 +67,7 @@ function makeContext<T extends Record<string, unknown>>(
     type: 'rd.create_run_document',
     attempt: 1,
     maxAttempts: 5,
-    revisionId: REVISION,
+    folderId: FOLDER,
     payload,
     db: undefined,
     logger: recordingLogger(sink.logs),
@@ -83,7 +83,7 @@ function makeContext<T extends Record<string, unknown>>(
 function target(overrides: Partial<MarkupTarget> = {}): MarkupTarget {
   return {
     layoutRevisionId: LAYOUT,
-    revisionId: REVISION,
+    folderId: FOLDER,
     bundleId: BUNDLE,
     objectId: '00000000-0000-4000-8000-000000000004',
     state: 'draft',
@@ -161,7 +161,7 @@ function remoteBlock(pageIndex: number, y0: number): RemoteBlock {
   };
 }
 
-const markupPayload = { revisionId: REVISION, bundleId: BUNDLE, layoutRevisionId: LAYOUT };
+const markupPayload = { folderId: FOLDER, bundleId: BUNDLE, layoutRevisionId: LAYOUT };
 
 // =====================================================================
 // Задача 4: создание RD-документа
@@ -394,7 +394,7 @@ describe('rd.upload_working_pdf', () => {
 // =====================================================================
 
 const detectPayload = {
-  revisionId: REVISION,
+  folderId: FOLDER,
   layoutRevisionId: LAYOUT,
   pageIndices: [0, 1, 2],
 };
@@ -515,10 +515,7 @@ describe('layout.detect_pages', () => {
     const sink = { enqueued: [] as Enqueued[], logs: [] as LogEntry[] };
 
     await createDetectPagesHandler(deps)(
-      makeContext(
-        { revisionId: REVISION, layoutRevisionId: LAYOUT, overwriteExisting: true },
-        sink,
-      ),
+      makeContext({ folderId: FOLDER, layoutRevisionId: LAYOUT, overwriteExisting: true }, sink),
     );
 
     expect(sink.enqueued).toHaveLength(1);
@@ -535,7 +532,7 @@ describe('layout.detect_pages', () => {
     const sink = { enqueued: [] as Enqueued[], logs: [] as LogEntry[] };
 
     await createDetectPagesHandler(deps)(
-      makeContext({ revisionId: REVISION, layoutRevisionId: LAYOUT }, sink),
+      makeContext({ folderId: FOLDER, layoutRevisionId: LAYOUT }, sink),
     );
 
     expect(sink.enqueued[0]?.payload['overwriteExisting']).toBeUndefined();

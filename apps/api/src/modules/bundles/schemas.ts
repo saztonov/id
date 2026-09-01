@@ -14,7 +14,7 @@ import {
   uuidSchema,
 } from '@id/contracts';
 
-export const revisionIdParamSchema = z.object({ revisionId: uuidSchema });
+export const folderIdParamSchema = z.object({ folderId: uuidSchema });
 export const bundleIdParamSchema = z.object({ bundleId: uuidSchema });
 export const bundlePageParamSchema = z.object({
   bundleId: uuidSchema,
@@ -23,7 +23,7 @@ export const bundlePageParamSchema = z.object({
 
 export const bundleSchema = z.object({
   id: uuidSchema,
-  revisionId: uuidSchema,
+  folderId: uuidSchema,
   aggregateManifestHash: z.string(),
   workingPdfBlobSha256: z.string(),
   builderVersion: z.string(),

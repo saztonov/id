@@ -33,7 +33,7 @@ export interface LayoutStartDeps {
    * ревизии успели сменить, и повторять нечего.
    */
   readonly start: (input: {
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly logger: Logger;
   }) => Promise<LayoutStartResult | null>;
 }
@@ -47,12 +47,12 @@ export class LayoutStartStateError extends Error {
 
 export function createLayoutStartHandler(deps: LayoutStartDeps): JobHandler<'layout.start'> {
   return async (ctx: JobContext<'layout.start'>): Promise<void> => {
-    const { revisionId } = ctx.payload;
+    const { folderId } = ctx.payload;
 
-    const started = await deps.start({ revisionId, logger: ctx.logger });
+    const started = await deps.start({ folderId, logger: ctx.logger });
     if (started === null) {
       throw new LayoutStartStateError(
-        `Ревизия ${revisionId}: рабочего документа нет, разметку начать не с чего. ` +
+        `Ревизия ${folderId}: рабочего документа нет, разметку начать не с чего. ` +
           'Состав ревизии сменился после постановки сборки.',
       );
     }

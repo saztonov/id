@@ -56,8 +56,7 @@ import {
   rulesetRules,
   rulesetVersions,
   sourcePages,
-  submissionRevisions,
-  works,
+  folders,
   validationRuns,
 } from '@id/db';
 import type {
@@ -85,9 +84,9 @@ import { RULESET_ACTIVE_VERSION_KEY } from '../../modules/admin/schemas.js';
 import { resolveEffectiveRules } from './object-rule-profiles.js';
 import type { Database } from './users.js';
 
-const REVISION_SCOPE: ScopeTarget = {
-  objectId: submissionRevisions.objectId,
-  contractorId: submissionRevisions.contractorId,
+const FOLDER_SCOPE: ScopeTarget = {
+  objectId: folders.objectId,
+  contractorId: folders.contractorId,
 };
 
 /** То же, что в остальных репозиториях: одинаково подходит и базе, и транзакции. */
@@ -182,44 +181,41 @@ export async function listRuleDefinitionCodes(db: Database): Promise<readonly st
 // Сборка графа
 // =====================================================================
 
-/** Ревизия с разделом и видом раздела: корень графа. */
-interface RevisionContext {
+/** Папка с разделом и видом раздела: корень графа. */
+interface FolderContext {
   readonly id: string;
   readonly objectId: string;
   readonly contractorId: string;
   readonly sectionCode: string;
   /** Наименование работы: попадает в тексты замечаний вместо кода тома. */
-  readonly workTitle: string;
+  readonly folderTitle: string;
   /** Месяц комплекта, `ГГГГ-ММ-01`: с ним сверяются даты актов (`AOSR.ACT.032`). */
   readonly period: string;
-  readonly status: string;
 }
 
-async function loadRevisionContext(
+async function loadFolderContext(
   db: Database,
   scope: AuthScope,
-  revisionId: string,
-): Promise<RevisionContext> {
+  folderId: string,
+): Promise<FolderContext> {
   const rows = await db
     .select({
-      id: submissionRevisions.id,
-      objectId: submissionRevisions.objectId,
-      contractorId: submissionRevisions.contractorId,
-      sectionCode: works.sectionCode,
-      workTitle: works.title,
+      id: folders.id,
+      objectId: folders.objectId,
+      contractorId: folders.contractorId,
+      sectionCode: folders.sectionCode,
+      folderTitle: folders.title,
       // Дата без времени: месяц — это `ГГГГ-ММ-01`, а не метка времени, и
       // `to_char` здесь тот же, что в `WORK_SELECTION` навигации. Без него
       // драйвер отдал бы `Date`, и правило сравнивало бы объект со строкой.
-      period: sql<string>`to_char(${works.period}, 'YYYY-MM-DD')`.as('work_period'),
-      status: submissionRevisions.status,
+      period: sql<string>`to_char(${folders.period}, 'YYYY-MM-DD')`.as('folder_period'),
     })
-    .from(submissionRevisions)
-    .innerJoin(works, eq(submissionRevisions.workId, works.id))
-    .where(withScope(scope, REVISION_SCOPE, eq(submissionRevisions.id, revisionId)))
+    .from(folders)
+    .where(withScope(scope, FOLDER_SCOPE, eq(folders.id, folderId)))
     .limit(1);
 
   const row = rows[0];
-  if (row === undefined) throw notFound('Ревизия комплекта не найдена.');
+  if (row === undefined) throw notFound('Папка не найдена.');
   return row;
 }
 
@@ -232,7 +228,7 @@ async function loadRevisionContext(
  * акта, и требование «два битых значения — разные вердикты» стало бы
  * невыполнимым (`docs/CORPUS_FINDINGS.md`).
  */
-async function loadFields(db: Database, revisionId: string): Promise<Map<string, FieldNode[]>> {
+async function loadFields(db: Database, folderId: string): Promise<Map<string, FieldNode[]>> {
   const rows = await db
     .select({
       id: fieldValues.id,
@@ -256,7 +252,7 @@ async function loadFields(db: Database, revisionId: string): Promise<Map<string,
     .from(fieldValues)
     .leftJoin(layoutBlocks, eq(fieldValues.sourceBlockId, layoutBlocks.id))
     .leftJoin(pageTextVersions, eq(fieldValues.pageTextVersionId, pageTextVersions.id))
-    .where(eq(fieldValues.revisionId, revisionId))
+    .where(eq(fieldValues.folderId, folderId))
     .orderBy(asc(fieldValues.documentId), asc(fieldValues.fieldCode));
 
   const byDocument = new Map<string, FieldNode[]>();
@@ -294,18 +290,18 @@ async function loadFields(db: Database, revisionId: string): Promise<Map<string,
 export async function loadCheckGraph(
   db: Database,
   scope: AuthScope,
-  input: { readonly revisionId: string; readonly today: string },
+  input: { readonly folderId: string; readonly today: string },
 ): Promise<Omit<CheckGraph, 'external'>> {
-  const revision = await loadRevisionContext(db, scope, input.revisionId);
+  const folder = await loadFolderContext(db, scope, input.folderId);
 
   const rules = await resolveEffectiveRules(
     db,
     scope,
-    { objectId: revision.objectId, sectionCode: revision.sectionCode },
+    { objectId: folder.objectId, sectionCode: folder.sectionCode },
     input.today,
   );
   if (rules === null) {
-    throw internal({ logDetail: `раздел ${revision.sectionCode} не разрешился для объекта` });
+    throw internal({ logDetail: `раздел ${folder.sectionCode} не разрешился для объекта` });
   }
 
   const objectRows = await db
@@ -322,7 +318,7 @@ export async function loadCheckGraph(
       generalContractorId: constructionObjects.generalContractorId,
     })
     .from(constructionObjects)
-    .where(eq(constructionObjects.id, revision.objectId))
+    .where(eq(constructionObjects.id, folder.objectId))
     .limit(1);
   const object = objectRows[0];
   if (object === undefined) throw internal({ logDetail: 'карточка объекта не найдена' });
@@ -350,7 +346,7 @@ export async function loadCheckGraph(
         isActive: rdDocuments.isActive,
       })
       .from(rdDocuments)
-      .where(eq(rdDocuments.objectId, revision.objectId))
+      .where(eq(rdDocuments.objectId, folder.objectId))
       .orderBy(asc(rdDocuments.cipher))
   ).map((row) => ({ ...row, name: row.name ?? row.cipher }));
 
@@ -366,7 +362,7 @@ export async function loadCheckGraph(
       isConfirmed: logicalDocuments.isConfirmed,
     })
     .from(logicalDocuments)
-    .where(eq(logicalDocuments.revisionId, input.revisionId))
+    .where(eq(logicalDocuments.folderId, input.folderId))
     .orderBy(asc(logicalDocuments.ordinal));
 
   const pageRows = await db
@@ -377,10 +373,10 @@ export async function loadCheckGraph(
       pageRoleCode: pageAssignments.pageRoleCode,
     })
     .from(pageAssignments)
-    .where(eq(pageAssignments.revisionId, input.revisionId))
+    .where(eq(pageAssignments.folderId, input.folderId))
     .orderBy(asc(pageAssignments.sortOrder));
 
-  const fieldsByDocument = await loadFields(db, input.revisionId);
+  const fieldsByDocument = await loadFields(db, input.folderId);
 
   const documents: readonly DocumentNode[] = documentRows.map((row) => {
     const code = row.docTypeCode;
@@ -433,7 +429,7 @@ export async function loadCheckGraph(
         matchState: registryRows.matchState,
       })
       .from(registryRows)
-      .where(eq(registryRows.revisionId, input.revisionId))
+      .where(eq(registryRows.folderId, input.folderId))
       .orderBy(asc(registryRows.documentId), asc(registryRows.ordinal))
   ).map((row) => ({ ...row, matchState: row.matchState as RegistryRowNode['matchState'] }));
 
@@ -447,7 +443,7 @@ export async function loadCheckGraph(
       documentId: registryRowCandidates.documentId,
     })
     .from(registryRowCandidates)
-    .where(eq(registryRowCandidates.revisionId, input.revisionId))
+    .where(eq(registryRowCandidates.folderId, input.folderId))
     .orderBy(desc(registryRowCandidates.score))) {
     const bucket = candidatesByRow.get(candidate.registryRowId);
     if (bucket === undefined) candidatesByRow.set(candidate.registryRowId, [candidate.documentId]);
@@ -476,7 +472,7 @@ export async function loadCheckGraph(
     .select({ count: sql<number>`count(*)::int` })
     .from(pageTextVersions)
     .innerJoin(sourcePages, eq(pageTextVersions.sourcePageId, sourcePages.id))
-    .where(eq(sourcePages.revisionId, input.revisionId));
+    .where(eq(sourcePages.folderId, input.folderId));
 
   // Пробелы покрытия: листы, которых портал НЕ разобрал.
   //
@@ -509,10 +505,10 @@ export async function loadCheckGraph(
       )::int`,
     })
     .from(sourcePages)
-    .where(eq(sourcePages.revisionId, input.revisionId));
+    .where(eq(sourcePages.folderId, input.folderId));
 
   return {
-    revision,
+    folder,
     object,
     profile: {
       sectionProfileId: rules.sectionProfileId,
@@ -563,9 +559,9 @@ export interface SaveMaterialsOutcome {
 export async function saveDerivedMaterials(
   db: Database,
   scope: AuthScope,
-  input: { readonly revisionId: string; readonly documents: readonly DocumentNode[] },
+  input: { readonly folderId: string; readonly documents: readonly DocumentNode[] },
 ): Promise<SaveMaterialsOutcome> {
-  await loadRevisionContext(db, scope, input.revisionId);
+  await loadFolderContext(db, scope, input.folderId);
 
   let materialSeq = 0;
   let batchSeq = 0;
@@ -577,7 +573,7 @@ export async function saveDerivedMaterials(
   return db.transaction(async (tx) => {
     const removed = await tx
       .delete(materials)
-      .where(eq(materials.revisionId, input.revisionId))
+      .where(eq(materials.folderId, input.folderId))
       .returning({ id: materials.id });
 
     const nodes: MaterialNode[] = [];
@@ -588,7 +584,7 @@ export async function saveDerivedMaterials(
       const inserted = await tx
         .insert(materials)
         .values({
-          revisionId: input.revisionId,
+          folderId: input.folderId,
           nameRaw: material.nameRaw,
           nameNorm: material.nameNorm,
           mark: material.mark,
@@ -621,7 +617,7 @@ export async function saveDerivedMaterials(
           await tx
             .insert(materialDocuments)
             .values({
-              revisionId: input.revisionId,
+              folderId: input.folderId,
               materialId,
               documentId,
               batchId,
@@ -636,7 +632,7 @@ export async function saveDerivedMaterials(
         await tx
           .insert(materialDocuments)
           .values({
-            revisionId: input.revisionId,
+            folderId: input.folderId,
             materialId,
             documentId,
             batchId: null,
@@ -664,7 +660,7 @@ export async function saveDerivedMaterials(
 // =====================================================================
 
 export interface StartValidationRunInput {
-  readonly revisionId: string;
+  readonly folderId: string;
   readonly rulesetVersionId: string;
   readonly sectionProfileId: string | null;
   readonly objectRuleProfileId: string | null;
@@ -675,12 +671,12 @@ export async function startValidationRun(
   scope: AuthScope,
   input: StartValidationRunInput,
 ): Promise<{ readonly id: string }> {
-  await loadRevisionContext(db, scope, input.revisionId);
+  await loadFolderContext(db, scope, input.folderId);
 
   const rows = await db
     .insert(validationRuns)
     .values({
-      revisionId: input.revisionId,
+      folderId: input.folderId,
       rulesetVersionId: input.rulesetVersionId,
       sectionProfileId: input.sectionProfileId,
       objectRuleProfileId: input.objectRuleProfileId,
@@ -715,11 +711,11 @@ export async function saveFindings(
   scope: AuthScope,
   input: {
     readonly validationRunId: string;
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly findings: readonly PreparedFinding[];
   },
 ): Promise<SaveFindingsOutcome> {
-  const revision = await loadRevisionContext(db, scope, input.revisionId);
+  const folder = await loadFolderContext(db, scope, input.folderId);
 
   return db.transaction(async (tx) => {
     const removed = await tx
@@ -735,9 +731,9 @@ export async function saveFindings(
         .insert(findings)
         .values({
           validationRunId: input.validationRunId,
-          revisionId: input.revisionId,
-          objectId: revision.objectId,
-          contractorId: revision.contractorId,
+          folderId: input.folderId,
+          objectId: folder.objectId,
+          contractorId: folder.contractorId,
           ruleCode: finding.ruleCode,
           severity: finding.severity,
           state: finding.state,
@@ -804,11 +800,11 @@ export async function saveLlmFindings(
   scope: AuthScope,
   input: {
     readonly validationRunId: string;
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly findings: readonly PreparedFinding[];
   },
 ): Promise<SaveFindingsOutcome> {
-  const revision = await loadRevisionContext(db, scope, input.revisionId);
+  const folder = await loadFolderContext(db, scope, input.folderId);
 
   return db.transaction(async (tx) => {
     const removed = await tx
@@ -824,9 +820,9 @@ export async function saveLlmFindings(
         .insert(findings)
         .values({
           validationRunId: input.validationRunId,
-          revisionId: input.revisionId,
-          objectId: revision.objectId,
-          contractorId: revision.contractorId,
+          folderId: input.folderId,
+          objectId: folder.objectId,
+          contractorId: folder.contractorId,
           ruleCode: finding.ruleCode,
           severity: finding.severity,
           state: finding.state,
@@ -905,11 +901,11 @@ export async function saveRunJournal(
   scope: AuthScope,
   input: {
     readonly validationRunId: string;
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly journal: RuleExecutionJournal;
   },
 ): Promise<void> {
-  await loadRevisionContext(db, scope, input.revisionId);
+  await loadFolderContext(db, scope, input.folderId);
 
   const updated = await db
     .update(validationRuns)
@@ -917,7 +913,7 @@ export async function saveRunJournal(
     .where(
       and(
         eq(validationRuns.id, input.validationRunId),
-        eq(validationRuns.revisionId, input.revisionId),
+        eq(validationRuns.folderId, input.folderId),
       ),
     )
     .returning({ id: validationRuns.id });
@@ -929,9 +925,9 @@ export async function saveRunJournal(
 export async function loadRunJournal(
   db: Database,
   scope: AuthScope,
-  input: { readonly validationRunId: string; readonly revisionId: string },
+  input: { readonly validationRunId: string; readonly folderId: string },
 ): Promise<RuleExecutionJournal | null> {
-  await loadRevisionContext(db, scope, input.revisionId);
+  await loadFolderContext(db, scope, input.folderId);
   return readRunJournal(db, input);
 }
 
@@ -945,7 +941,7 @@ export async function loadRunJournal(
  */
 export async function readRunJournal(
   db: Executor,
-  input: { readonly validationRunId: string; readonly revisionId: string },
+  input: { readonly validationRunId: string; readonly folderId: string },
 ): Promise<RuleExecutionJournal | null> {
   const rows = await db
     .select({ counts: validationRuns.counts })
@@ -953,7 +949,7 @@ export async function readRunJournal(
     .where(
       and(
         eq(validationRuns.id, input.validationRunId),
-        eq(validationRuns.revisionId, input.revisionId),
+        eq(validationRuns.folderId, input.folderId),
       ),
     )
     .limit(1);
@@ -969,11 +965,11 @@ export async function finishValidationRun(
   scope: AuthScope,
   input: {
     readonly validationRunId: string;
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly summary: ValidationSummary;
   },
 ): Promise<void> {
-  await loadRevisionContext(db, scope, input.revisionId);
+  await loadFolderContext(db, scope, input.folderId);
 
   const updated = await db
     .update(validationRuns)
@@ -981,7 +977,7 @@ export async function finishValidationRun(
     .where(
       and(
         eq(validationRuns.id, input.validationRunId),
-        eq(validationRuns.revisionId, input.revisionId),
+        eq(validationRuns.folderId, input.folderId),
       ),
     )
     .returning({ id: validationRuns.id });
@@ -993,7 +989,7 @@ export async function finishValidationRun(
 
 export interface ValidationRunView {
   readonly id: string;
-  readonly revisionId: string;
+  readonly folderId: string;
   readonly rulesetVersionId: string;
   readonly sectionProfileId: string | null;
   readonly objectRuleProfileId: string | null;
@@ -1005,12 +1001,12 @@ export interface ValidationRunView {
 export async function listValidationRuns(
   db: Database,
   scope: AuthScope,
-  revisionId: string,
+  folderId: string,
 ): Promise<readonly ValidationRunView[]> {
   const rows = await db
     .select({
       id: validationRuns.id,
-      revisionId: validationRuns.revisionId,
+      folderId: validationRuns.folderId,
       rulesetVersionId: validationRuns.rulesetVersionId,
       sectionProfileId: validationRuns.sectionProfileId,
       objectRuleProfileId: validationRuns.objectRuleProfileId,
@@ -1021,8 +1017,8 @@ export async function listValidationRuns(
       counts: validationRuns.counts,
     })
     .from(validationRuns)
-    .innerJoin(submissionRevisions, eq(validationRuns.revisionId, submissionRevisions.id))
-    .where(withScope(scope, REVISION_SCOPE, eq(validationRuns.revisionId, revisionId)))
+    .innerJoin(folders, eq(validationRuns.folderId, folders.id))
+    .where(withScope(scope, FOLDER_SCOPE, eq(validationRuns.folderId, folderId)))
     .orderBy(desc(validationRuns.startedAt));
 
   return rows.map((row) => ({
@@ -1054,7 +1050,7 @@ export interface FindingView {
 }
 
 export interface FindingPageView {
-  /** Сквозной номер страницы по комплекту: `source_pages.revision_ordinal + 1`. */
+  /** Сквозной номер страницы по комплекту: `source_pages.folder_ordinal + 1`. */
   readonly number: number;
   /** Страница рабочего документа — только для ссылки на разметку. */
   readonly workingPageIndex: number | null;
@@ -1071,7 +1067,7 @@ export interface FindingDocumentView {
 
 export interface FindingTargetView {
   readonly kind:
-    'document' | 'material' | 'batch' | 'registry_row' | 'page' | 'field' | 'revision' | 'gone';
+    'document' | 'material' | 'batch' | 'registry_row' | 'page' | 'field' | 'folder' | 'gone';
   readonly label: string;
   readonly detail: string | null;
 }
@@ -1111,18 +1107,18 @@ function findingText(row: { readonly message: string }): string {
 /**
  * Подзапрос «авторитетный прогон» для коррелирующих счётчиков.
  *
- * Ревизия названа ТЕКСТОМ (`submission_revisions.id`), поэтому фрагмент годится
- * только внутри запроса, который сам выбирает из `submission_revisions`. Это не
+ * Ревизия названа ТЕКСТОМ (`folders.id`), поэтому фрагмент годится
+ * только внутри запроса, который сам выбирает из `folders`. Это не
  * ограничение, а условие корректности: в запросе без джойнов Drizzle рендерит
  * колонку без имени таблицы, и коррелирующее условие связалось бы с
  * одноимённой колонкой внутренней таблицы — счётчик молча вернул бы ноль (тем
  * же способом много этапов подряд был сломан `hasBundle` в `files.ts`).
  *
- * Читают его `loadRevisionReadiness` (блокеры согласования) и счётчики архива.
+ * Читают его `loadFolderReadiness` (блокеры согласования) и счётчики архива.
  */
 export const LATEST_VALIDATION_RUN = sql`(
   select v.id from validation_runs v
-   where v.revision_id = submission_revisions.id
+   where v.folder_id = folders.id
    order by v.started_at desc, v.id desc
    limit 1)`;
 
@@ -1147,7 +1143,7 @@ export interface ChecksRunView {
 export async function resolveShownRun(
   db: Executor,
   scope: AuthScope,
-  revisionId: string,
+  folderId: string,
   requested: string | undefined,
 ): Promise<{ readonly latest: ChecksRunView | null; readonly shownRunId: string | null }> {
   // Область видимости обязательна и здесь, хотя findings ниже отбираются ею
@@ -1163,8 +1159,8 @@ export async function resolveShownRun(
       >`to_char(${validationRuns.finishedAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`,
     })
     .from(validationRuns)
-    .innerJoin(submissionRevisions, eq(validationRuns.revisionId, submissionRevisions.id))
-    .where(withScope(scope, REVISION_SCOPE, eq(validationRuns.revisionId, revisionId)))
+    .innerJoin(folders, eq(validationRuns.folderId, folders.id))
+    .where(withScope(scope, FOLDER_SCOPE, eq(validationRuns.folderId, folderId)))
     .orderBy(desc(validationRuns.startedAt), desc(validationRuns.id))
     .limit(2);
 
@@ -1181,13 +1177,13 @@ export async function resolveShownRun(
     const owned = await db
       .select({ id: validationRuns.id })
       .from(validationRuns)
-      .innerJoin(submissionRevisions, eq(validationRuns.revisionId, submissionRevisions.id))
+      .innerJoin(folders, eq(validationRuns.folderId, folders.id))
       .where(
         withScope(
           scope,
-          REVISION_SCOPE,
+          FOLDER_SCOPE,
           eq(validationRuns.id, requested),
-          eq(validationRuns.revisionId, revisionId),
+          eq(validationRuns.folderId, folderId),
         ),
       )
       .limit(1);
@@ -1210,8 +1206,8 @@ export async function resolveShownRun(
  * Сводка экрана проверки.
  *
  * Одним запросом с коррелирующими подзапросами — по образцу
- * `loadRevisionReadiness`, включая его урок: внешняя таблица названа ТЕКСТОМ
- * (`submission_revisions.id`), потому что в запросе без джойнов Drizzle
+ * `loadFolderReadiness`, включая его урок: внешняя таблица названа ТЕКСТОМ
+ * (`folders.id`), потому что в запросе без джойнов Drizzle
  * рендерит колонку без имени таблицы и коррелирующее условие связывается с
  * одноимённой колонкой внутренней таблицы — каждый счётчик молча вернул бы ноль.
  *
@@ -1252,28 +1248,28 @@ const UNASSIGNED_PAGES_SHOWN = 20;
 export async function loadChecksCoverage(
   db: Executor,
   scope: AuthScope,
-  revisionId: string,
+  folderId: string,
 ): Promise<ChecksCoverage> {
   const rows = await db
     .select({
-      pagesTotal: sql<number>`(select count(*)::int from ${sourcePages} p where p.revision_id = submission_revisions.id)`,
-      pagesRecognized: sql<number>`(select count(distinct t.source_page_id)::int from ${pageTextVersions} t where t.revision_id = submission_revisions.id)`,
-      pagesAssigned: sql<number>`(select count(*)::int from ${pageAssignments} a where a.revision_id = submission_revisions.id and a.document_id is not null)`,
-      pagesUnassigned: sql<number>`(select count(*)::int from ${pageAssignments} a where a.revision_id = submission_revisions.id and a.document_id is null)`,
+      pagesTotal: sql<number>`(select count(*)::int from ${sourcePages} p where p.folder_id = folders.id)`,
+      pagesRecognized: sql<number>`(select count(distinct t.source_page_id)::int from ${pageTextVersions} t where t.folder_id = folders.id)`,
+      pagesAssigned: sql<number>`(select count(*)::int from ${pageAssignments} a where a.folder_id = folders.id and a.document_id is not null)`,
+      pagesUnassigned: sql<number>`(select count(*)::int from ${pageAssignments} a where a.folder_id = folders.id and a.document_id is null)`,
       unassignedPageNumbers: sql<number[]>`(
-        select coalesce(array_agg(p.revision_ordinal + 1 order by p.revision_ordinal), '{}'::int[])
+        select coalesce(array_agg(p.folder_ordinal + 1 order by p.folder_ordinal), '{}'::int[])
           from ${pageAssignments} a
           join ${sourcePages} p on p.id = a.source_page_id
-         where a.revision_id = submission_revisions.id and a.document_id is null)`,
-      documentsTotal: sql<number>`(select count(*)::int from ${logicalDocuments} d where d.revision_id = submission_revisions.id)`,
+         where a.folder_id = folders.id and a.document_id is null)`,
+      documentsTotal: sql<number>`(select count(*)::int from ${logicalDocuments} d where d.folder_id = folders.id)`,
       documentsUnknownType: sql<number>`(
         select count(*)::int from ${logicalDocuments} d
          left join ${docTypes} t on t.code = d.doc_type_code
-         where d.revision_id = submission_revisions.id
+         where d.folder_id = folders.id
            and (d.doc_type_code is null or t.is_fallback))`,
     })
-    .from(submissionRevisions)
-    .where(withScope(scope, REVISION_SCOPE, eq(submissionRevisions.id, revisionId)))
+    .from(folders)
+    .where(withScope(scope, FOLDER_SCOPE, eq(folders.id, folderId)))
     .limit(1);
 
   const row = rows[0];
@@ -1353,7 +1349,7 @@ export interface FindingListView {
 export async function listFindings(
   db: Database,
   scope: AuthScope,
-  input: { readonly revisionId: string; readonly validationRunId?: string | undefined },
+  input: { readonly folderId: string; readonly validationRunId?: string | undefined },
 ): Promise<readonly FindingView[]> {
   const view = await listFindingsView(db, scope, input);
   return view.items;
@@ -1362,18 +1358,18 @@ export async function listFindings(
 export async function listFindingsView(
   db: Database,
   scope: AuthScope,
-  input: { readonly revisionId: string; readonly validationRunId?: string | undefined },
+  input: { readonly folderId: string; readonly validationRunId?: string | undefined },
 ): Promise<FindingListView> {
   return db.transaction(async (tx) => {
     const { latest, shownRunId } = await resolveShownRun(
       tx,
       scope,
-      input.revisionId,
+      input.folderId,
       input.validationRunId,
     );
     if (shownRunId === null) return { items: [], latestRun: latest, shownRunId: null };
 
-    const items = await collectFindings(tx, scope, input.revisionId, shownRunId);
+    const items = await collectFindings(tx, scope, input.folderId, shownRunId);
     return { items, latestRun: latest, shownRunId };
   });
 }
@@ -1390,7 +1386,7 @@ export async function listFindingsView(
 export async function collectFindings(
   tx: Executor,
   scope: AuthScope,
-  revisionId: string,
+  folderId: string,
   shownRunId: string,
 ): Promise<readonly FindingView[]> {
   const rows = await tx
@@ -1410,12 +1406,12 @@ export async function collectFindings(
       hint: findings.hint,
     })
     .from(findings)
-    .innerJoin(submissionRevisions, eq(findings.revisionId, submissionRevisions.id))
+    .innerJoin(folders, eq(findings.folderId, folders.id))
     .where(
       withScope(
         scope,
-        REVISION_SCOPE,
-        eq(findings.revisionId, revisionId),
+        FOLDER_SCOPE,
+        eq(findings.folderId, folderId),
         eq(findings.validationRunId, shownRunId),
       ),
     )
@@ -1425,7 +1421,7 @@ export async function collectFindings(
 
   const context = await loadFindingContext(
     tx,
-    revisionId,
+    folderId,
     rows.map((row) => row.id),
   );
 
@@ -1506,7 +1502,7 @@ export interface FindingContext {
 
 export async function loadFindingContext(
   db: Executor,
-  revisionId: string,
+  folderId: string,
   findingIds: readonly string[],
 ): Promise<FindingContext> {
   // 1. Страницы ревизии вместе с их местом в рабочем документе и документом,
@@ -1516,7 +1512,7 @@ export async function loadFindingContext(
   const pageRows = await db
     .select({
       id: sourcePages.id,
-      revisionOrdinal: sourcePages.revisionOrdinal,
+      folderOrdinal: sourcePages.folderOrdinal,
       workingPageIndex: processingBundlePages.workingPageIndex,
       documentId: pageAssignments.documentId,
     })
@@ -1524,7 +1520,7 @@ export async function loadFindingContext(
     .leftJoin(
       pageAssignments,
       and(
-        eq(pageAssignments.revisionId, sourcePages.revisionId),
+        eq(pageAssignments.folderId, sourcePages.folderId),
         eq(pageAssignments.sourcePageId, sourcePages.id),
       ),
     )
@@ -1535,17 +1531,17 @@ export async function loadFindingContext(
         eq(
           processingBundlePages.bundleId,
           sql`(select b.id from ${processingBundles} b
-                where b.revision_id = ${revisionId}
+                where b.folder_id = ${folderId}
                 order by b.created_at desc limit 1)`,
         ),
       ),
     )
-    .where(eq(sourcePages.revisionId, revisionId));
+    .where(eq(sourcePages.folderId, folderId));
 
   const pages = new Map<string, PageFacts>();
   for (const row of pageRows) {
     pages.set(row.id, {
-      number: row.revisionOrdinal + 1,
+      number: row.folderOrdinal + 1,
       workingPageIndex: row.workingPageIndex,
       documentId: row.documentId,
     });
@@ -1570,7 +1566,7 @@ export async function loadFindingContext(
     .from(logicalDocuments)
     .leftJoin(docTypes, eq(docTypes.code, logicalDocuments.docTypeCode))
     .leftJoin(docTypeOverrides, eq(docTypeOverrides.docTypeCode, logicalDocuments.docTypeCode))
-    .where(eq(logicalDocuments.revisionId, revisionId));
+    .where(eq(logicalDocuments.folderId, folderId));
 
   const documents = new Map<string, DocumentFacts>();
   for (const row of documentRows) {
@@ -1597,7 +1593,7 @@ export async function loadFindingContext(
     .from(fieldValues)
     .leftJoin(layoutBlocks, eq(fieldValues.sourceBlockId, layoutBlocks.id))
     .leftJoin(pageTextVersions, eq(fieldValues.pageTextVersionId, pageTextVersions.id))
-    .where(eq(fieldValues.revisionId, revisionId));
+    .where(eq(fieldValues.folderId, folderId));
 
   const fields = new Map<
     string,
@@ -1616,7 +1612,7 @@ export async function loadFindingContext(
   const materialRows = await db
     .select({ id: materials.id, nameRaw: materials.nameRaw })
     .from(materials)
-    .where(eq(materials.revisionId, revisionId));
+    .where(eq(materials.folderId, folderId));
   const materialNames = new Map(materialRows.map((row) => [row.id, row.nameRaw]));
 
   const batchRows = await db
@@ -1628,7 +1624,7 @@ export async function loadFindingContext(
     })
     .from(batches)
     .innerJoin(materials, eq(batches.materialId, materials.id))
-    .where(eq(materials.revisionId, revisionId));
+    .where(eq(materials.folderId, folderId));
   const batchFacts = new Map<string, { material: string; detail: string | null }>();
   for (const row of batchRows) {
     const parts: string[] = [];
@@ -1648,7 +1644,7 @@ export async function loadFindingContext(
       docNoRaw: registryRows.docNoRaw,
     })
     .from(registryRows)
-    .where(eq(registryRows.revisionId, revisionId));
+    .where(eq(registryRows.folderId, folderId));
   for (const row of registryRowRows) {
     registryRowFacts.set(row.id, {
       label: row.docNameRaw,
@@ -1804,8 +1800,8 @@ function describeTarget(row: SubjectRow, context: FindingContext): FindingTarget
   };
 
   switch (row.targetType) {
-    case 'revision':
-      return { kind: 'revision', label: 'Комплект целиком', detail: null };
+    case 'folder':
+      return { kind: 'folder', label: 'Комплект целиком', detail: null };
     case 'document': {
       if (row.targetId === null) return gone;
       const facts = context.documents.get(row.targetId);

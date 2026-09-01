@@ -60,7 +60,7 @@ export interface ErrorEventContext {
   readonly userId?: string | undefined;
   readonly route?: string | undefined;
   readonly objectId?: string | undefined;
-  readonly revisionId?: string | undefined;
+  readonly folderId?: string | undefined;
   readonly jobType?: string | undefined;
   readonly jobId?: string | undefined;
   readonly attempt?: number | undefined;
@@ -263,7 +263,7 @@ function isSchemaIdentifier(value: string, precedingText: string): boolean {
 /**
  * Нормализация сообщения: убираются uuid, отпечатки, даты, числа и значения в
  * кавычках. Содержимое кавычек сохраняется, если это похоже на идентификатор:
- * `relation "submission_revisions" does not exist` и
+ * `relation "folders" does not exist` и
  * `relation "page_assignments" does not exist` — разные дефекты, а после полного
  * вычёркивания кавычек они стали бы одной записью.
  */
@@ -470,7 +470,7 @@ function mergeWithContext(context: ErrorEventContext | undefined): ErrorEventCon
     userId: context?.userId ?? ambient.userId,
     route: context?.route ?? ambient.route,
     objectId: context?.objectId ?? ambient.objectId,
-    revisionId: context?.revisionId ?? ambient.revisionId,
+    folderId: context?.folderId ?? ambient.folderId,
     jobType: context?.jobType ?? ambient.jobType,
     jobId: context?.jobId ?? ambient.jobId,
     attempt: context?.attempt ?? ambient.attempt,

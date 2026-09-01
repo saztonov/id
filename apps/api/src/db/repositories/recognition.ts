@@ -23,9 +23,9 @@
  * ## Область видимости
  *
  * Ни один запрос файла не выполняется без `withScope()`. У `recognition_runs`
- * есть денормализованный `revision_id`, но `object_id`/`contractor_id` живут на
+ * есть денормализованный `folder_id`, но `object_id`/`contractor_id` живут на
  * ревизии поставки, поэтому область применяется соединением с
- * `submission_revisions` — как в `layout.ts` и `bundles.ts`. Подрядчик не видит
+ * `folders` — как в `layout.ts` и `bundles.ts`. Подрядчик не видит
  * чужой прогон ни списком, ни по прямому идентификатору, ни через выдачу файла
  * артефакта: ключ объекта в хранилище выдаётся только тем же соединением.
  */
@@ -42,19 +42,19 @@ import {
   rdRunDocuments,
   recognitionRunPages,
   recognitionRuns,
-  submissionRevisions,
+  folders,
 } from '@id/db';
 import type { AuthScope } from '../../auth/scope.js';
 import { conflict, internal, notFound } from '../../lib/problem.js';
 import { artifactKey, type ArtifactKind } from '../../storage/keys.js';
 import { withScope, type ScopeTarget } from '../scoped.js';
-import { appendRevisionEvent, cancelJobsOfRecognitionRun, enqueueSystemJob } from './jobs.js';
+import { appendFolderEvent, cancelJobsOfRecognitionRun, enqueueSystemJob } from './jobs.js';
 import { computeBlocksHash, listLayoutBlocks } from './layout.js';
 import type { Database } from './users.js';
 
-const REVISION_SCOPE: ScopeTarget = {
-  objectId: submissionRevisions.objectId,
-  contractorId: submissionRevisions.contractorId,
+const FOLDER_SCOPE: ScopeTarget = {
+  objectId: folders.objectId,
+  contractorId: folders.contractorId,
 };
 
 export type RecognitionRunStatus = 'running' | 'done' | 'integrity_error' | 'failed';
@@ -63,7 +63,7 @@ const TERMINAL_RUN_STATUSES: ReadonlySet<string> = new Set(['done', 'integrity_e
 
 export interface RecognitionRunView {
   readonly id: string;
-  readonly revisionId: string;
+  readonly folderId: string;
   readonly objectId: string;
   readonly layoutRevisionId: string;
   /**
@@ -98,8 +98,8 @@ const isoAt = (column: unknown, alias: string) =>
 
 const RUN_SELECTION = {
   id: recognitionRuns.id,
-  revisionId: recognitionRuns.revisionId,
-  objectId: submissionRevisions.objectId,
+  folderId: recognitionRuns.folderId,
+  objectId: folders.objectId,
   layoutRevisionId: recognitionRuns.layoutRevisionId,
   rdRunDocumentId: recognitionRuns.rdRunDocumentId,
   rdDocumentId: rdRunDocuments.rdDocumentId,
@@ -139,8 +139,8 @@ function runQuery(db: Database, scope: AuthScope, ...conditions: SQL[]) {
       // внутреннее соединение молча выкинуло бы такие прогоны из всех выборок —
       // они «исчезали» бы из истории и из finalize.
       .leftJoin(rdRunDocuments, eq(recognitionRuns.rdRunDocumentId, rdRunDocuments.id))
-      .innerJoin(submissionRevisions, eq(recognitionRuns.revisionId, submissionRevisions.id))
-      .where(withScope(scope, REVISION_SCOPE, ...conditions))
+      .innerJoin(folders, eq(recognitionRuns.folderId, folders.id))
+      .where(withScope(scope, FOLDER_SCOPE, ...conditions))
   );
 }
 
@@ -157,9 +157,9 @@ export async function findRecognitionRun(
 export async function listRecognitionRuns(
   db: Database,
   scope: AuthScope,
-  revisionId: string,
+  folderId: string,
 ): Promise<readonly RecognitionRunView[]> {
-  const rows = await runQuery(db, scope, eq(recognitionRuns.revisionId, revisionId)).orderBy(
+  const rows = await runQuery(db, scope, eq(recognitionRuns.folderId, folderId)).orderBy(
     desc(recognitionRuns.startedAt),
   );
   return rows.map(toView);
@@ -197,17 +197,17 @@ export async function listRecognitionRuns(
 export async function hasPublishedRecognition(
   db: Database,
   scope: AuthScope,
-  input: { readonly revisionId: string; readonly layoutRevisionId?: string | undefined },
+  input: { readonly folderId: string; readonly layoutRevisionId?: string | undefined },
 ): Promise<boolean> {
   const rows = await db
     .select({ id: recognitionRuns.id })
     .from(recognitionRuns)
-    .innerJoin(submissionRevisions, eq(recognitionRuns.revisionId, submissionRevisions.id))
+    .innerJoin(folders, eq(recognitionRuns.folderId, folders.id))
     .where(
       withScope(
         scope,
-        REVISION_SCOPE,
-        eq(recognitionRuns.revisionId, input.revisionId),
+        FOLDER_SCOPE,
+        eq(recognitionRuns.folderId, input.folderId),
         eq(recognitionRuns.status, 'done'),
         ...(input.layoutRevisionId === undefined
           ? []
@@ -301,15 +301,14 @@ export async function startRecognitionRun(
   const layout = await db
     .select({
       id: layoutRevisions.id,
-      revisionId: layoutRevisions.revisionId,
+      folderId: layoutRevisions.folderId,
       state: layoutRevisions.state,
       blocksHash: layoutRevisions.blocksHash,
       bundleId: layoutRevisions.bundleId,
-      submissionStatus: submissionRevisions.status,
     })
     .from(layoutRevisions)
-    .innerJoin(submissionRevisions, eq(layoutRevisions.revisionId, submissionRevisions.id))
-    .where(withScope(scope, REVISION_SCOPE, eq(layoutRevisions.id, input.layoutRevisionId)))
+    .innerJoin(folders, eq(layoutRevisions.folderId, folders.id))
+    .where(withScope(scope, FOLDER_SCOPE, eq(layoutRevisions.id, input.layoutRevisionId)))
     .limit(1);
 
   const found = layout[0];
@@ -373,7 +372,7 @@ export async function startRecognitionRun(
     const rows = await tx
       .insert(recognitionRuns)
       .values({
-        revisionId: found.revisionId,
+        folderId: found.folderId,
         layoutRevisionId: found.id,
         rdRunDocumentId,
         localLayoutHash: blocksHash,
@@ -398,7 +397,7 @@ export async function startRecognitionRun(
     const cancelledParentJobs =
       input.repairOfRunId == null
         ? 0
-        : await cancelJobsOfRecognitionRun(tx, found.revisionId, input.repairOfRunId);
+        : await cancelJobsOfRecognitionRun(tx, found.folderId, input.repairOfRunId);
 
     /**
      * Снимок хэша копируется и в строку разметки — той же транзакцией.
@@ -414,8 +413,8 @@ export async function startRecognitionRun(
       .set({ blocksHash, updatedAt: sql`now()` })
       .where(eq(layoutRevisions.id, found.id));
 
-    await appendRevisionEvent(tx, {
-      revisionId: found.revisionId,
+    await appendFolderEvent(tx, {
+      folderId: found.folderId,
       eventType: 'recognition.started',
       payload: {
         layoutRevisionId: found.id,
@@ -538,8 +537,8 @@ export async function finishRecognitionRun(
     const row = updated.rows[0];
     if (row === undefined) return { changed: false, status: run.status };
 
-    await appendRevisionEvent(tx, {
-      revisionId: run.revisionId,
+    await appendFolderEvent(tx, {
+      folderId: run.folderId,
       eventType: input.status === 'done' ? 'recognition.done' : 'recognition.failed',
       payload: {
         recognitionRunId: input.runId,
@@ -577,13 +576,13 @@ export async function closeRunDocument(
     .select({
       id: rdRunDocuments.id,
       rdDocumentId: rdRunDocuments.rdDocumentId,
-      revisionId: layoutRevisions.revisionId,
+      folderId: layoutRevisions.folderId,
       closedAt: rdRunDocuments.closedAt,
     })
     .from(rdRunDocuments)
     .innerJoin(layoutRevisions, eq(rdRunDocuments.layoutRevisionId, layoutRevisions.id))
-    .innerJoin(submissionRevisions, eq(layoutRevisions.revisionId, submissionRevisions.id))
-    .where(withScope(scope, REVISION_SCOPE, eq(rdRunDocuments.layoutRevisionId, layoutRevisionId)))
+    .innerJoin(folders, eq(layoutRevisions.folderId, folders.id))
+    .where(withScope(scope, FOLDER_SCOPE, eq(rdRunDocuments.layoutRevisionId, layoutRevisionId)))
     .limit(1);
 
   const found = rows[0];
@@ -598,8 +597,8 @@ export async function closeRunDocument(
       .returning({ id: rdRunDocuments.id });
     if (updated.length === 0) return { changed: false, rdDocumentId: found.rdDocumentId };
 
-    await appendRevisionEvent(tx, {
-      revisionId: found.revisionId,
+    await appendFolderEvent(tx, {
+      folderId: found.folderId,
       eventType: 'layout.run_document_closed',
       payload: { layoutRevisionId, rdDocumentId: found.rdDocumentId },
     });
@@ -676,7 +675,7 @@ export async function findArtifact(
     .where(
       withScope(
         scope,
-        REVISION_SCOPE,
+        FOLDER_SCOPE,
         eq(artifactVersions.recognitionRunId, recognitionRunId),
         eq(artifactVersions.kind, kind),
       ),
@@ -692,9 +691,7 @@ export async function listArtifacts(
   recognitionRunId: string,
 ): Promise<readonly ArtifactView[]> {
   const rows = await artifactQuery(db)
-    .where(
-      withScope(scope, REVISION_SCOPE, eq(artifactVersions.recognitionRunId, recognitionRunId)),
-    )
+    .where(withScope(scope, FOLDER_SCOPE, eq(artifactVersions.recognitionRunId, recognitionRunId)))
     .orderBy(asc(artifactVersions.kind));
   return rows.map((row) => ({ ...row, kind: row.kind as ArtifactKind }));
 }
@@ -711,7 +708,7 @@ function artifactQuery(db: Database) {
     })
     .from(artifactVersions)
     .innerJoin(recognitionRuns, eq(artifactVersions.recognitionRunId, recognitionRuns.id))
-    .innerJoin(submissionRevisions, eq(recognitionRuns.revisionId, submissionRevisions.id));
+    .innerJoin(folders, eq(recognitionRuns.folderId, folders.id));
 }
 
 // =====================================================================
@@ -747,7 +744,7 @@ export async function listPageTexts(
     })
     .from(pageTextVersions)
     .innerJoin(recognitionRuns, eq(pageTextVersions.recognitionRunId, recognitionRuns.id))
-    .innerJoin(submissionRevisions, eq(pageTextVersions.revisionId, submissionRevisions.id))
+    .innerJoin(folders, eq(pageTextVersions.folderId, folders.id))
     .innerJoin(layoutRevisions, eq(recognitionRuns.layoutRevisionId, layoutRevisions.id))
     .leftJoin(
       processingBundlePages,
@@ -756,9 +753,7 @@ export async function listPageTexts(
         eq(processingBundlePages.sourcePageId, pageTextVersions.sourcePageId),
       ),
     )
-    .where(
-      withScope(scope, REVISION_SCOPE, eq(pageTextVersions.recognitionRunId, recognitionRunId)),
-    )
+    .where(withScope(scope, FOLDER_SCOPE, eq(pageTextVersions.recognitionRunId, recognitionRunId)))
     .orderBy(asc(processingBundlePages.workingPageIndex));
   return rows;
 }
@@ -895,7 +890,7 @@ export async function saveRecognitionResults(
         continue;
       }
       await tx.insert(pageTextVersions).values({
-        revisionId: run.revisionId,
+        folderId: run.folderId,
         sourcePageId,
         recognitionRunId: input.recognitionRunId,
         artifactVersionId: input.artifactVersionId,
@@ -968,8 +963,8 @@ async function loadPageMap(
     })
     .from(processingBundlePages)
     .innerJoin(layoutRevisions, eq(layoutRevisions.bundleId, processingBundlePages.bundleId))
-    .innerJoin(submissionRevisions, eq(layoutRevisions.revisionId, submissionRevisions.id))
-    .where(withScope(scope, REVISION_SCOPE, eq(layoutRevisions.id, layoutRevisionId)));
+    .innerJoin(folders, eq(layoutRevisions.folderId, folders.id))
+    .where(withScope(scope, FOLDER_SCOPE, eq(layoutRevisions.id, layoutRevisionId)));
   return new Map(rows.map((row) => [row.workingPageIndex, row.sourcePageId]));
 }
 
@@ -1185,7 +1180,7 @@ export async function scheduleRunRecoveryRound(
       await enqueueSystemJob(tx, {
         type: 'vlm.recognize_page',
         payload: {
-          revisionId: run.revisionId,
+          folderId: run.folderId,
           recognitionRunId: input.runId,
           pageIndex,
         },
@@ -1347,7 +1342,7 @@ export async function publishVlmRunResults(
         continue;
       }
       await tx.insert(pageTextVersions).values({
-        revisionId: run.revisionId,
+        folderId: run.folderId,
         sourcePageId,
         recognitionRunId: input.recognitionRunId,
         artifactVersionId: input.artifactVersionId,
@@ -1401,9 +1396,9 @@ export async function listBlockResults(
     })
     .from(blockResults)
     .innerJoin(recognitionRuns, eq(blockResults.recognitionRunId, recognitionRuns.id))
-    .innerJoin(submissionRevisions, eq(recognitionRuns.revisionId, submissionRevisions.id))
+    .innerJoin(folders, eq(recognitionRuns.folderId, folders.id))
     .leftJoin(currentBlockResult, eq(currentBlockResult.layoutBlockId, blockResults.layoutBlockId))
-    .where(withScope(scope, REVISION_SCOPE, eq(blockResults.recognitionRunId, runId)))
+    .where(withScope(scope, FOLDER_SCOPE, eq(blockResults.recognitionRunId, runId)))
     .orderBy(asc(blockResults.layoutBlockId));
 
   return rows.map((row) => ({
@@ -1455,7 +1450,7 @@ export async function listPagesToRerecognize(
   db: Database,
   scope: AuthScope,
   input: {
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly layoutRevisionId: string;
     /** Прогон, чьи отказы считаются; `null` — прогонов ещё не было. */
     readonly parentRunId: string | null;
@@ -1481,25 +1476,25 @@ export async function listPagesToRerecognize(
   const troubled = await db
     .select({ workingPageIndex: layoutBlocks.workingPageIndex })
     .from(layoutBlocks)
-    .innerJoin(submissionRevisions, eq(layoutBlocks.revisionId, submissionRevisions.id))
+    .innerJoin(folders, eq(layoutBlocks.folderId, folders.id))
     .where(
       withScope(
         scope,
-        REVISION_SCOPE,
+        FOLDER_SCOPE,
         eq(layoutBlocks.layoutRevisionId, input.layoutRevisionId),
         sql`${layoutBlocks.sourcePageId} in (
             select pa.source_page_id
               from page_assignments pa
               join findings f
                 on f.target_id = pa.document_id and f.target_type = 'document'
-             where f.revision_id = ${input.revisionId}
+             where f.folder_id = ${input.folderId}
                and f.origin <> 'external_unavailable'
                and f.state in ('open', 'undetermined')
                and (f.severity = 'error' or f.state = 'undetermined')
             union
             select f.source_page_id
               from findings f
-             where f.revision_id = ${input.revisionId}
+             where f.folder_id = ${input.folderId}
                and f.source_page_id is not null
                and f.origin <> 'external_unavailable'
                and f.state in ('open', 'undetermined')

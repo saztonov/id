@@ -512,7 +512,7 @@ export const docTypeCandidateSchema = z.object({
   occurrences: z.int().positive(),
   firstSeenAt: isoDateTimeSchema,
   lastSeenAt: isoDateTimeSchema,
-  sampleRevisionId: uuidSchema.nullable(),
+  sampleFolderId: uuidSchema.nullable(),
   sampleSourcePageId: uuidSchema.nullable(),
   status: docTypeCandidateStatusSchema,
   mappedDocTypeCode: docTypeCodeSchema.nullable(),

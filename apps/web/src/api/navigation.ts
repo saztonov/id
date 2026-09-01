@@ -14,7 +14,7 @@
  * | `GET /api/v1/works` | `objectId`, `sectionCode`, `period`, `unassigned`, `search` |
  * | `GET /api/v1/works/{workId}` | — |
  * | `POST /api/v1/works` | заводит комплект и первую ревизию |
- * | `GET|POST /api/v1/works/{id}/revisions` | — |
+ * | `GET|POST /api/v1/works/{id}/folders` | — |
  * | `GET /api/v1/registries` | `objectId`, `sectionCode`, `period`, `status` |
  * | `GET /api/v1/registries/{id}` | состав и блокеры — по правам актора |
  * | `PUT|DELETE /api/v1/registries/{id}/works/{workId}` | состав, `If-Match` |
@@ -101,7 +101,7 @@ export interface Work {
   registryId: string | null;
   ordinal: number | null;
   autoRunEnabled: boolean;
-  currentRevisionId: string | null;
+  currentFolderId: string | null;
   createdBy: string;
   createdAt: string;
 }
@@ -122,7 +122,7 @@ export interface Registry {
   version: number;
   issuedBy: string | null;
   issuedAt: string | null;
-  issuedFileRevisionId: string | null;
+  issuedFileFolderId: string | null;
   acceptedBy: string | null;
   acceptedAt: string | null;
   createdBy: string;
@@ -134,7 +134,7 @@ export interface RegistryItem {
   registryId: string;
   ordinal: number;
   workId: string;
-  revisionId: string;
+  folderId: string;
   contractorId: string;
   title: string;
 }
@@ -145,12 +145,12 @@ export interface RegistryBlocker {
   message: string;
 }
 
-export interface SubmissionRevisionSummary {
+export interface FolderSummary {
   id: string;
   workId: string;
   revisionNo: number;
   status: string;
-  parentRevisionId: string | null;
+  parentFolderId: string | null;
   aggregateManifestHash: string | null;
   version: number;
   createdAt: string;
@@ -177,9 +177,9 @@ export const NAVIGATION_ROUTES = {
   works: `${V1}/works`,
   work: (workId: string) => `${V1}/works/${workId}`,
   sectionCounts: (objectId: string) => `${V1}/objects/${objectId}/sections/counts`,
-  worksPipeline: (objectId: string) => `${V1}/objects/${objectId}/works/pipeline`,
-  revisionsOfWork: (workId: string) => `${V1}/works/${workId}/revisions`,
-  workDeletionPreview: (workId: string) => `${V1}/works/${workId}/deletion-preview`,
+  foldersPipeline: (objectId: string) => `${V1}/objects/${objectId}/works/pipeline`,
+  foldersOfWork: (workId: string) => `${V1}/works/${workId}/folders`,
+  folderDeletionPreview: (workId: string) => `${V1}/works/${workId}/deletion-preview`,
   registries: `${V1}/registries`,
   registry: (registryId: string) => `${V1}/registries/${registryId}`,
   registryWork: (registryId: string, workId: string) =>
@@ -194,7 +194,7 @@ export const NAVIGATION_ROUTES = {
   registryReconciliation: (registryId: string) => `${V1}/registries/${registryId}/reconciliation`,
   registryReconciliationReview: (registryId: string) =>
     `${V1}/registries/${registryId}/reconciliation/review`,
-  revisionReconciliation: (revisionId: string) => `${V1}/revisions/${revisionId}/reconciliation`,
+  folderReconciliation: (folderId: string) => `${V1}/folders/${folderId}/reconciliation`,
 } as const;
 
 export type UnavailableReason = 'route-missing' | 'forbidden';
@@ -297,7 +297,7 @@ export interface WorkFilter {
   readonly cursor?: string | null | undefined;
 }
 
-export async function listWorks(
+export async function listFolders(
   filter: WorkFilter = {},
 ): Promise<NavigationResult<CursorPage<Work>>> {
   return loadNavigation(NAVIGATION_ROUTES.works, () =>
@@ -322,7 +322,7 @@ export async function listWorks(
 }
 
 /** Сколько комплектов видно спрашивающему в каждом разделе объекта. */
-export interface SectionWorkCount {
+export interface SectionFolderCount {
   readonly sectionCode: string;
   readonly works: number;
 }
@@ -330,7 +330,7 @@ export interface SectionWorkCount {
 /**
  * Счётчики для заголовков дерева разделов.
  *
- * Фильтры передаются те же, что и в `listWorks`, и это не удобство вызывающего:
+ * Фильтры передаются те же, что и в `listFolders`, и это не удобство вызывающего:
  * число над панелью обязано считать ровно то множество, которое панель покажет
  * при раскрытии. Разошлись бы они — заголовок обещал бы комплекты, которых в
  * теле нет.
@@ -338,10 +338,10 @@ export interface SectionWorkCount {
 export async function listSectionCounts(
   objectId: string,
   filter: Omit<WorkFilter, 'objectId' | 'cursor' | 'registryId'> = {},
-): Promise<NavigationResult<SectionWorkCount[]>> {
+): Promise<NavigationResult<SectionFolderCount[]>> {
   const route = NAVIGATION_ROUTES.sectionCounts(objectId);
   return loadNavigation(route, () =>
-    get<SectionWorkCount[]>(route, {
+    get<SectionFolderCount[]>(route, {
       query: {
         ...(filter.sectionCode === undefined ? {} : { sectionCode: filter.sectionCode }),
         ...(filter.period === undefined ? {} : { period: filter.period }),
@@ -356,13 +356,13 @@ export async function listSectionCounts(
   );
 }
 
-export async function getWork(workId: string): Promise<NavigationResult<Work>> {
+export async function getFolder(workId: string): Promise<NavigationResult<Work>> {
   return loadNavigation(NAVIGATION_ROUTES.work(workId), () =>
     get<Work>(NAVIGATION_ROUTES.work(workId)),
   );
 }
 
-export interface CreateWorkInput {
+export interface CreateFolderInput {
   readonly objectId: string;
   readonly sectionCode: string;
   readonly title: string;
@@ -370,9 +370,9 @@ export interface CreateWorkInput {
   readonly contractorId?: string | undefined;
 }
 
-export interface CreatedWork {
+export interface CreatedFolder {
   work: Work;
-  revision: SubmissionRevisionSummary;
+  folder: FolderSummary;
 }
 
 /**
@@ -387,8 +387,8 @@ export interface CreatedWork {
  * (freeze, recognize, checks, переходы workflow), а вставка одной строки к ним
  * не относится — повтор виден в списке и правится человеком.
  */
-export async function createWork(input: CreateWorkInput): Promise<CreatedWork> {
-  const response = await request<CreatedWork>('POST', NAVIGATION_ROUTES.works, {
+export async function createFolder(input: CreateFolderInput): Promise<CreatedFolder> {
+  const response = await request<CreatedFolder>('POST', NAVIGATION_ROUTES.works, {
     body: {
       objectId: input.objectId,
       sectionCode: input.sectionCode,
@@ -407,10 +407,10 @@ export async function createWork(input: CreateWorkInput): Promise<CreatedWork> {
  * `blockers` тот же список, которым ответит отказ, — препятствия показываются до
  * нажатия, а не выясняются им.
  */
-export interface WorkDeletionPreview {
+export interface FolderDeletionPreview {
   workId: string;
   title: string;
-  revisions: number;
+  folders: number;
   files: number;
   pages: number;
   layoutBlocks: number;
@@ -419,21 +419,19 @@ export interface WorkDeletionPreview {
   blockers: string[];
 }
 
-export async function getWorkDeletionPreview(workId: string): Promise<WorkDeletionPreview> {
-  return get<WorkDeletionPreview>(NAVIGATION_ROUTES.workDeletionPreview(workId));
+export async function getFolderDeletionPreview(workId: string): Promise<FolderDeletionPreview> {
+  return get<FolderDeletionPreview>(NAVIGATION_ROUTES.folderDeletionPreview(workId));
 }
 
 /**
- * Удаление комплекта со всем содержимым.
+ * Удаление папки со всем содержимым.
  *
- * Право — `submission.delete`, оно есть у всех пяти ролей (S37). Сервер
- * отвергает удаление 409 с перечислением помех, если у комплекта есть
- * согласованная ревизия, он включён в переданный реестр или на ревизию наложен
- * юридический запрет: это уже ушло наружу и перестало быть внутренним делом
- * портала.
+ * Право — `submission.delete`, оно есть у всех пяти ролей (S37). Помех
+ * удалению больше нет: они держались на согласовании и неизменяемости, снятых
+ * в S44.
  */
-export async function deleteWork(workId: string): Promise<void> {
-  await request<void>('DELETE', NAVIGATION_ROUTES.work(workId));
+export async function deleteFolder(folderId: string): Promise<void> {
+  await request<void>('DELETE', `/api/v1/folders/${folderId}`);
 }
 
 /**
@@ -453,7 +451,7 @@ export interface RegistryDeletionPreview {
   file: {
     workId: string;
     title: string;
-    revisions: number;
+    folders: number;
     files: number;
     pages: number;
   } | null;
@@ -488,9 +486,9 @@ export async function deleteRegistry(registryId: string, version: number): Promi
  * Строка, которой в ответе нет, — это «нет данных», а не «не запускалось».
  * Разбирает это `pipelineState`, здесь только транспорт.
  */
-export interface WorkPipelineSummary {
+export interface FolderPipelineSummary {
   workId: string;
-  revisionId: string;
+  folderId: string;
   stage: ProcessingStage;
   queued: number;
   running: number;
@@ -500,9 +498,9 @@ export interface WorkPipelineSummary {
 export async function listWorkPipeline(
   objectId: string,
   workIds: readonly string[],
-): Promise<readonly WorkPipelineSummary[]> {
+): Promise<readonly FolderPipelineSummary[]> {
   if (workIds.length === 0) return [];
-  return get<WorkPipelineSummary[]>(NAVIGATION_ROUTES.worksPipeline(objectId), {
+  return get<FolderPipelineSummary[]>(NAVIGATION_ROUTES.foldersPipeline(objectId), {
     query: { workIds: workIds.join(',') },
   });
 }
@@ -510,22 +508,6 @@ export async function listWorkPipeline(
 // =====================================================================
 // Ревизии комплекта
 // =====================================================================
-
-/**
- * Удаление одной ревизии со всем производным.
- *
- * Право — `settings.manage` (администратор), то же, что у удаления комплекта.
- * Сервер отвергает 409 с перечислением помех: согласованная ревизия, переданный
- * реестр, юридический запрет и «это единственная ревизия комплекта» — последнее
- * означает, что удалять надо комплект целиком.
- *
- * Клиентских функций `listRevisions`/`createRevision` здесь больше нет: их не
- * вызывал ни один экран, а ряд ревизий как понятие с интерфейса убран — работа
- * идёт с комплектом. Маршруты на сервере остались, наружу они не выведены.
- */
-export async function deleteRevision(revisionId: string): Promise<void> {
-  await request<void>('DELETE', `/api/v1/revisions/${revisionId}`);
-}
 
 // =====================================================================
 // Реестры передачи
@@ -656,8 +638,8 @@ export async function excludeWork(
 }
 
 /** Заведение файла описи: сам скан грузится обычным приёмом на его ревизию. */
-export async function attachRegistryFile(registryId: string): Promise<CreatedWork> {
-  const response = await request<CreatedWork>('POST', NAVIGATION_ROUTES.registryFile(registryId));
+export async function attachRegistryFile(registryId: string): Promise<CreatedFolder> {
+  const response = await request<CreatedFolder>('POST', NAVIGATION_ROUTES.registryFile(registryId));
   return response.data;
 }
 
@@ -695,7 +677,7 @@ export type ReconciliationMatchState = 'matched' | 'missing' | 'ambiguous';
 /** Комплект папки со своим вердиктом: единица выдачи подрядчику и инженеру. */
 export interface ReconciliationWork {
   workId: string;
-  matchedRevisionId: string | null;
+  matchedFolderId: string | null;
   contractorId: string;
   title: string;
   contractorName: string | null;
@@ -717,7 +699,7 @@ export interface ReconciliationGroup {
   actNoNorm: string | null;
   contractorRaw: string | null;
   matchedWorkId: string | null;
-  matchedRevisionId: string | null;
+  matchedFolderId: string | null;
   matchedContractorId: string | null;
   matchState: ReconciliationMatchState;
   matchScore: number | null;
@@ -750,7 +732,7 @@ export interface ReconciliationRow {
 export interface ReconciliationExtraDocument {
   documentId: string;
   workId: string;
-  revisionId: string;
+  folderId: string;
   contractorId: string;
   docNoRaw: string | null;
   docNameRaw: string | null;
@@ -760,7 +742,7 @@ export interface ReconciliationExtraDocument {
 export interface RegistryReconciliation {
   id: string;
   registryId: string;
-  revisionId: string;
+  folderId: string;
   verdict: ReconciliationVerdict;
   version: number;
   headerRegistryNo: string | null;
@@ -836,8 +818,8 @@ export async function getRegistryReconciliation(
   return loadNavigation(route, () => get<RegistryReconciliationView>(route));
 }
 
-export async function getWorkReconciliation(revisionId: string): Promise<WorkReconciliationView> {
-  return get<WorkReconciliationView>(NAVIGATION_ROUTES.revisionReconciliation(revisionId));
+export async function getFolderReconciliation(folderId: string): Promise<WorkReconciliationView> {
+  return get<WorkReconciliationView>(NAVIGATION_ROUTES.folderReconciliation(folderId));
 }
 
 export async function reviewReconciliation(

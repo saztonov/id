@@ -41,7 +41,7 @@ export interface FeedbackFilters {
   readonly promptVersion?: number | undefined;
   readonly model?: string | undefined;
   readonly docTypeCode?: string | undefined;
-  readonly revisionId?: string | undefined;
+  readonly folderId?: string | undefined;
   readonly from?: string | undefined;
   readonly to?: string | undefined;
 }
@@ -52,7 +52,7 @@ export interface FeedbackEventView {
   readonly feedbackType: string;
   readonly reasonCode: string;
   readonly severity: string;
-  readonly revisionId: string | null;
+  readonly folderId: string | null;
   readonly recognitionRunId: string | null;
   readonly sourcePageId: string | null;
   readonly workingPageIndex: number | null;
@@ -124,9 +124,7 @@ function conditions(params: FeedbackFilters): (SQL | undefined)[] {
     params.docTypeCode === undefined
       ? undefined
       : eq(processingFeedback.docTypeCode, params.docTypeCode),
-    params.revisionId === undefined
-      ? undefined
-      : eq(processingFeedback.revisionId, params.revisionId),
+    params.folderId === undefined ? undefined : eq(processingFeedback.folderId, params.folderId),
     params.from === undefined ? undefined : gte(processingFeedback.at, params.from),
     params.to === undefined ? undefined : lte(processingFeedback.at, params.to),
   ];
@@ -139,7 +137,7 @@ const selection = {
   feedbackType: processingFeedback.feedbackType,
   reasonCode: processingFeedback.reasonCode,
   severity: processingFeedback.severity,
-  revisionId: processingFeedback.revisionId,
+  folderId: processingFeedback.folderId,
   recognitionRunId: processingFeedback.recognitionRunId,
   sourcePageId: processingFeedback.sourcePageId,
   workingPageIndex: processingFeedback.workingPageIndex,

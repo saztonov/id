@@ -288,23 +288,22 @@ export interface RdDocumentNode {
   readonly isActive: boolean;
 }
 
-/** Ревизия поставки — корень графа. */
-export interface RevisionNode {
+/** Папка ИД — корень графа. */
+export interface FolderNode {
   readonly id: string;
   readonly objectId: string;
   readonly contractorId: string;
   readonly sectionCode: string;
-  /** Наименование работы: им подписывается комплект в реестре. */
-  readonly workTitle: string;
+  /** Наименование папки: им она подписывается в текстах замечаний. */
+  readonly folderTitle: string;
   /**
-   * Месяца комплекта здесь нет намеренно (S30).
+   * Ни месяца, ни статуса здесь нет, и оба отсутствуют намеренно.
    *
-   * Он был нужен единственному правилу — `AOSR.ACT.032`, сверявшему акт с
-   * месяцем, который человек называл руками. Месяц теперь ВЫВОДИТСЯ порталом из
-   * самого раннего акта, правило снято, и поле осталось бы тем, что этот проект
-   * называет мёртвым флагом: величиной, которую граф возит, а не читает никто.
+   * Месяц был нужен единственному правилу — `AOSR.ACT.032`, сверявшему акт с
+   * месяцем, который человек называл руками; месяц теперь ВЫВОДИТСЯ порталом из
+   * самого раннего акта, правило снято (S30). Статус подачи снят вместе с
+   * согласованием (S44): правила не спрашивают разрешения у рабочего процесса.
    */
-  readonly status: string;
 }
 
 /**
@@ -384,7 +383,7 @@ export interface ExternalRegistriesSnapshot {
 
 /** Полный вход движка правил. Собирается один раз на прогон. */
 export interface CheckGraph {
-  readonly revision: RevisionNode;
+  readonly folder: FolderNode;
   readonly object: ObjectNode;
   readonly profile: ProfileNode;
   readonly counterparties: readonly CounterpartyNode[];
@@ -442,7 +441,7 @@ export type RuleFn = (graph: CheckGraph, params: RuleParams) => RuleResult;
 /**
  * Уровень правила: к чему оно относится. Совпадает с `rule_definitions.level`.
  */
-export type RuleLevel = 'revision' | 'document' | 'material' | 'registry' | 'signature';
+export type RuleLevel = 'folder' | 'document' | 'material' | 'registry' | 'signature';
 
 /** Группа правила. Совпадает с `rule_definitions.kind`. */
 export type RuleKind =

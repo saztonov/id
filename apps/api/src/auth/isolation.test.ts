@@ -40,7 +40,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { createPgliteDatabase, type TestDatabase, createTestPool } from '@id/db-harness';
 import { loadMigrations } from '@id/migrator';
-import { revisionEvents, sourceFiles, storedBlobs, submissionRevisions, works } from '@id/db';
+import { folderEvents, sourceFiles, storedBlobs, folders } from '@id/db';
 
 import { buildApp, type AppInstance } from '../app.js';
 import { loadEnv } from '../config/env.js';
@@ -73,10 +73,8 @@ const CONTRACTOR_B = id(2);
 const OBJECT_A = id(3);
 const OBJECT_B = id(4);
 
-const SUBMISSION_A = id(10);
-const SUBMISSION_B = id(11);
-const REVISION_A = id(12);
-const REVISION_B = id(13);
+const FOLDER_A = id(10);
+const FOLDER_B = id(11);
 const FILE_A = id(14);
 const FILE_B = id(15);
 
@@ -165,33 +163,29 @@ const FIXTURE: readonly string[] = [
 
   `INSERT INTO object_contractors (object_id, contractor_id)
        VALUES ('${OBJECT_A}', '${CONTRACTOR_A}') ON CONFLICT DO NOTHING`,
-  `INSERT INTO works
+  `INSERT INTO folders
        (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-     VALUES ('${SUBMISSION_A}', '${OBJECT_A}', '${CONTRACTOR_A}', '${CONTRACTOR_A}', 'roofing', DATE '2026-01-01', '${TITLE_A}', '${USER_CONTRACTOR_A}')`,
+     VALUES ('${FOLDER_A}', '${OBJECT_A}', '${CONTRACTOR_A}', '${CONTRACTOR_A}', 'roofing', DATE '2026-01-01', '${TITLE_A}', '${USER_CONTRACTOR_A}')`,
   `INSERT INTO object_contractors (object_id, contractor_id)
        VALUES ('${OBJECT_B}', '${CONTRACTOR_B}') ON CONFLICT DO NOTHING`,
-  `INSERT INTO works
+  `INSERT INTO folders
        (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-     VALUES ('${SUBMISSION_B}', '${OBJECT_B}', '${CONTRACTOR_B}', '${CONTRACTOR_B}', 'roofing', DATE '2026-01-01', '${TITLE_B}', '${USER_CONTRACTOR_B}')`,
-  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no)
-     VALUES ('${REVISION_A}', '${SUBMISSION_A}', '${OBJECT_A}', '${CONTRACTOR_A}', 1)`,
-  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no)
-     VALUES ('${REVISION_B}', '${SUBMISSION_B}', '${OBJECT_B}', '${CONTRACTOR_B}', 1)`,
+     VALUES ('${FOLDER_B}', '${OBJECT_B}', '${CONTRACTOR_B}', '${CONTRACTOR_B}', 'roofing', DATE '2026-01-01', '${TITLE_B}', '${USER_CONTRACTOR_B}')`,
 
   `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
      VALUES ('${SHA_A}', '${S3_KEY_A}', 1024, 'application/pdf')`,
   `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
      VALUES ('${SHA_B}', '${S3_KEY_B}', 2048, 'application/pdf')`,
-  `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order)
-     VALUES ('${FILE_A}', '${REVISION_A}', '${SHA_A}', 'komplekt-a.pdf', 0)`,
-  `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order)
-     VALUES ('${FILE_B}', '${REVISION_B}', '${SHA_B}', 'komplekt-b.pdf', 0)`,
+  `INSERT INTO source_files (id, folder_id, blob_sha256, file_name, sort_order)
+     VALUES ('${FILE_A}', '${FOLDER_A}', '${SHA_A}', 'komplekt-a.pdf', 0)`,
+  `INSERT INTO source_files (id, folder_id, blob_sha256, file_name, sort_order)
+     VALUES ('${FILE_B}', '${FOLDER_B}', '${SHA_B}', 'komplekt-b.pdf', 0)`,
 
-  `INSERT INTO revision_events (revision_id, seq, event_type, payload)
-     VALUES ('${REVISION_A}', 1, 'revision.created',
+  `INSERT INTO folder_events (folder_id, seq, event_type, payload)
+     VALUES ('${FOLDER_A}', 1, 'folder.created',
              '{"marker": "${EVENT_MARKER_A}"}'::jsonb)`,
-  `INSERT INTO revision_events (revision_id, seq, event_type, payload)
-     VALUES ('${REVISION_B}', 1, 'revision.created',
+  `INSERT INTO folder_events (folder_id, seq, event_type, payload)
+     VALUES ('${FOLDER_B}', 1, 'folder.created',
              '{"marker": "${EVENT_MARKER_B}"}'::jsonb)`,
 ];
 
@@ -209,13 +203,13 @@ const TEST_ENV = loadEnv({
 });
 
 const WORK_SCOPE: ScopeTarget = {
-  objectId: works.objectId,
-  contractorId: works.contractorId,
+  objectId: folders.objectId,
+  contractorId: folders.contractorId,
 };
 
-const REVISION_SCOPE: ScopeTarget = {
-  objectId: submissionRevisions.objectId,
-  contractorId: submissionRevisions.contractorId,
+const FOLDER_SCOPE: ScopeTarget = {
+  objectId: folders.objectId,
+  contractorId: folders.contractorId,
 };
 
 const idParams = z.object({ id: z.uuid() });
@@ -248,15 +242,15 @@ function registerIsolationRoutes(app: AppInstance): void {
 
   // Путь 1: список.
   app.get(
-    '/api/v1/_isolation/works',
+    '/api/v1/_isolation/folders',
     { preHandler: requirePermission('submission.read') },
     async (request) => {
       const { scope } = currentAuth(request);
       const query = new QueryBuilder()
-        .select({ id: works.id, title: works.title })
-        .from(works)
+        .select({ id: folders.id, title: folders.title })
+        .from(folders)
         .where(withScope(scope, WORK_SCOPE))
-        .orderBy(asc(works.title))
+        .orderBy(asc(folders.title))
         .toSQL();
 
       const result = await pool.query<WorkListRow>(query.sql, [...query.params]);
@@ -266,19 +260,19 @@ function registerIsolationRoutes(app: AppInstance): void {
 
   // Путь 2: прямой доступ по идентификатору.
   app.get(
-    '/api/v1/_isolation/works/:id',
+    '/api/v1/_isolation/folders/:id',
     { schema: { params: idParams }, preHandler: requirePermission('submission.read') },
     async (request) => {
       const { scope } = currentAuth(request);
       const query = new QueryBuilder()
         .select({
-          id: works.id,
-          title: works.title,
-          objectId: works.objectId,
-          contractorId: works.contractorId,
+          id: folders.id,
+          title: folders.title,
+          objectId: folders.objectId,
+          contractorId: folders.contractorId,
         })
-        .from(works)
-        .where(withScope(scope, WORK_SCOPE, eq(works.id, request.params.id)))
+        .from(folders)
+        .where(withScope(scope, WORK_SCOPE, eq(folders.id, request.params.id)))
         .toSQL();
 
       const result = await pool.query<WorkRow>(query.sql, [...query.params]);
@@ -303,14 +297,14 @@ function registerIsolationRoutes(app: AppInstance): void {
    * `jobs/engine.test.ts` на поднятом сокете.
    */
   app.get(
-    '/api/v1/_isolation/revisions/:id/events',
+    '/api/v1/_isolation/folders/:id/events',
     { schema: { params: idParams }, preHandler: requirePermission('submission.read') },
     async (request, reply) => {
       const { scope } = currentAuth(request);
       const visible = new QueryBuilder()
-        .select({ id: submissionRevisions.id })
-        .from(submissionRevisions)
-        .where(withScope(scope, REVISION_SCOPE, eq(submissionRevisions.id, request.params.id)))
+        .select({ id: folders.id })
+        .from(folders)
+        .where(withScope(scope, FOLDER_SCOPE, eq(folders.id, request.params.id)))
         .toSQL();
 
       const allowed = await pool.query<{ id: string }>(visible.sql, [...visible.params]);
@@ -320,13 +314,13 @@ function registerIsolationRoutes(app: AppInstance): void {
 
       const events = new QueryBuilder()
         .select({
-          seq: revisionEvents.seq,
-          eventType: revisionEvents.eventType,
-          payload: revisionEvents.payload,
+          seq: folderEvents.seq,
+          eventType: folderEvents.eventType,
+          payload: folderEvents.payload,
         })
-        .from(revisionEvents)
-        .where(eq(revisionEvents.revisionId, request.params.id))
-        .orderBy(asc(revisionEvents.seq))
+        .from(folderEvents)
+        .where(eq(folderEvents.folderId, request.params.id))
+        .orderBy(asc(folderEvents.seq))
         .toSQL();
 
       const stream = await pool.query<EventRow>(events.sql, [...events.params]);
@@ -354,11 +348,11 @@ function registerIsolationRoutes(app: AppInstance): void {
         .select({
           id: sourceFiles.id,
           s3Key: storedBlobs.s3Key,
-          objectId: submissionRevisions.objectId,
-          contractorId: submissionRevisions.contractorId,
+          objectId: folders.objectId,
+          contractorId: folders.contractorId,
         })
         .from(sourceFiles)
-        .innerJoin(submissionRevisions, eq(submissionRevisions.id, sourceFiles.revisionId))
+        .innerJoin(folders, eq(folders.id, sourceFiles.folderId))
         .innerJoin(storedBlobs, eq(storedBlobs.sha256, sourceFiles.blobSha256))
         .where(eq(sourceFiles.id, request.params.id))
         .toSQL();
@@ -379,14 +373,14 @@ function registerIsolationRoutes(app: AppInstance): void {
   // Небезопасный метод: нужен для проверки CSRF и того, что запись подчиняется
   // той же области видимости, что и чтение.
   app.post(
-    '/api/v1/_isolation/works/:id/submit',
+    '/api/v1/_isolation/folders/:id/submit',
     { schema: { params: idParams }, preHandler: requirePermission('submission.submit') },
     async (request) => {
       const { scope } = currentAuth(request);
       const query = new QueryBuilder()
-        .select({ id: works.id })
-        .from(works)
-        .where(withScope(scope, WORK_SCOPE, eq(works.id, request.params.id)))
+        .select({ id: folders.id })
+        .from(folders)
+        .where(withScope(scope, WORK_SCOPE, eq(folders.id, request.params.id)))
         .toSQL();
 
       const result = await pool.query<{ id: string }>(query.sql, [...query.params]);
@@ -516,7 +510,7 @@ function get(url: string, session: SignedIn | null): Promise<LightMyRequestRespo
   });
 }
 
-function submissionIds(response: LightMyRequestResponse): string[] {
+function folderIds(response: LightMyRequestResponse): string[] {
   return response.json<{ items: WorkListRow[] }>().items.map((item) => item.id);
 }
 
@@ -542,23 +536,23 @@ const SECRETS_OF_B = [TITLE_B, OBJECT_B, CONTRACTOR_B, S3_KEY_B, EVENT_MARKER_B]
 
 describe('путь 1: список', () => {
   it('подрядчик А не видит поставку подрядчика Б', async () => {
-    const response = await get('/api/v1/_isolation/works', await sessionFor(KC.contractorA));
+    const response = await get('/api/v1/_isolation/folders', await sessionFor(KC.contractorA));
     expect(response.statusCode).toBe(200);
-    expect(submissionIds(response)).toEqual([SUBMISSION_A]);
+    expect(folderIds(response)).toEqual([FOLDER_A]);
     expectNoLeak(response, SECRETS_OF_B);
   });
 
   it('подрядчик Б не видит поставку подрядчика А', async () => {
-    const response = await get('/api/v1/_isolation/works', await sessionFor(KC.contractorB));
+    const response = await get('/api/v1/_isolation/folders', await sessionFor(KC.contractorB));
     expect(response.statusCode).toBe(200);
-    expect(submissionIds(response)).toEqual([SUBMISSION_B]);
+    expect(folderIds(response)).toEqual([FOLDER_B]);
     expectNoLeak(response, [TITLE_A, OBJECT_A, CONTRACTOR_A]);
   });
 
   it('администратор видит обе поставки: список не пуст сам по себе', async () => {
-    const response = await get('/api/v1/_isolation/works', await sessionFor(KC.admin));
+    const response = await get('/api/v1/_isolation/folders', await sessionFor(KC.admin));
     expect(response.statusCode).toBe(200);
-    expect(submissionIds(response)).toEqual([SUBMISSION_A, SUBMISSION_B]);
+    expect(folderIds(response)).toEqual([FOLDER_A, FOLDER_B]);
   });
 });
 
@@ -569,7 +563,7 @@ describe('путь 1: список', () => {
 describe('путь 2: прямой доступ по id', () => {
   it('подрядчик А не получает поставку Б и не узнаёт о ней из ошибки', async () => {
     const response = await get(
-      `/api/v1/_isolation/works/${SUBMISSION_B}`,
+      `/api/v1/_isolation/folders/${FOLDER_B}`,
       await sessionFor(KC.contractorA),
     );
     expect(response.statusCode).not.toBe(200);
@@ -579,7 +573,7 @@ describe('путь 2: прямой доступ по id', () => {
 
   it('свою поставку по тому же маршруту получает: отказ выше не про маршрут', async () => {
     const response = await get(
-      `/api/v1/_isolation/works/${SUBMISSION_A}`,
+      `/api/v1/_isolation/folders/${FOLDER_A}`,
       await sessionFor(KC.contractorA),
     );
     expect(response.statusCode).toBe(200);
@@ -594,7 +588,7 @@ describe('путь 2: прямой доступ по id', () => {
 describe('путь 3: поток событий', () => {
   it('подрядчик А не получает поток ревизии подрядчика Б', async () => {
     const response = await get(
-      `/api/v1/_isolation/revisions/${REVISION_B}/events`,
+      `/api/v1/_isolation/folders/${FOLDER_B}/events`,
       await sessionFor(KC.contractorA),
     );
     expect([403, 404]).toContain(response.statusCode);
@@ -606,7 +600,7 @@ describe('путь 3: поток событий', () => {
 
   it('свой поток открывается и содержит события: отказ выше не про пустую таблицу', async () => {
     const response = await get(
-      `/api/v1/_isolation/revisions/${REVISION_A}/events`,
+      `/api/v1/_isolation/folders/${FOLDER_A}/events`,
       await sessionFor(KC.contractorA),
     );
     expect(response.statusCode).toBe(200);
@@ -620,7 +614,7 @@ describe('путь 3: поток событий', () => {
     // проверяющему поток открыт — иначе он не увидел бы хода разбора
     // комплекта, который сам же и запустил.
     const response = await get(
-      `/api/v1/_isolation/revisions/${REVISION_B}/events`,
+      `/api/v1/_isolation/folders/${FOLDER_B}/events`,
       await sessionFor(KC.engineerA),
     );
     expect(response.statusCode).toBe(200);
@@ -675,14 +669,14 @@ describe('путь 4: файл и presigned URL', () => {
  */
 describe('инженер и объекты', () => {
   it('видит поставки обоих объектов', async () => {
-    const response = await get('/api/v1/_isolation/works', await sessionFor(KC.engineerA));
+    const response = await get('/api/v1/_isolation/folders', await sessionFor(KC.engineerA));
     expect(response.statusCode).toBe(200);
-    expect([...submissionIds(response)].sort()).toEqual([SUBMISSION_A, SUBMISSION_B].sort());
+    expect([...folderIds(response)].sort()).toEqual([FOLDER_A, FOLDER_B].sort());
   });
 
   it('получает поставку любого объекта по прямому id', async () => {
     const response = await get(
-      `/api/v1/_isolation/works/${SUBMISSION_B}`,
+      `/api/v1/_isolation/folders/${FOLDER_B}`,
       await sessionFor(KC.engineerA),
     );
     expect(response.statusCode).toBe(200);
@@ -691,11 +685,11 @@ describe('инженер и объекты', () => {
   it('инженер без назначений видит ровно то же, что и назначенный', async () => {
     const session = await sessionFor(KC.engineerWithoutObjects);
 
-    const list = await get('/api/v1/_isolation/works', session);
+    const list = await get('/api/v1/_isolation/folders', session);
     expect(list.statusCode).toBe(200);
-    expect([...submissionIds(list)].sort()).toEqual([SUBMISSION_A, SUBMISSION_B].sort());
+    expect([...folderIds(list)].sort()).toEqual([FOLDER_A, FOLDER_B].sort());
 
-    const direct = await get(`/api/v1/_isolation/works/${SUBMISSION_A}`, session);
+    const direct = await get(`/api/v1/_isolation/folders/${FOLDER_A}`, session);
     expect(direct.statusCode).toBe(200);
   });
 });
@@ -718,7 +712,7 @@ describe('роль из токена', () => {
 
     expect((await get(ADMIN_PROBE_ROUTE, session)).statusCode).toBe(403);
 
-    const list = await get('/api/v1/_isolation/works', session);
+    const list = await get('/api/v1/_isolation/folders', session);
     expect(list.statusCode).toBe(403);
     expectNoLeak(list, [TITLE_A, TITLE_B]);
   });
@@ -742,13 +736,13 @@ describe('подрядчик без users.contractor_id', () => {
   it('не видит ничего, а не всё', async () => {
     const session = await signIn(KC.withoutOrganization);
 
-    const list = await get('/api/v1/_isolation/works', session);
+    const list = await get('/api/v1/_isolation/folders', session);
     // Область видимости за него не придумывается: без организации у роли
     // `contractor` её нет, и запрос отклоняется целиком.
     expect(list.statusCode).toBe(403);
     expectNoLeak(list, [TITLE_A, TITLE_B, S3_KEY_A, S3_KEY_B]);
 
-    const direct = await get(`/api/v1/_isolation/works/${SUBMISSION_A}`, session);
+    const direct = await get(`/api/v1/_isolation/folders/${FOLDER_A}`, session);
     expect(direct.statusCode).toBe(403);
     expectNoLeak(direct, [TITLE_A]);
   });
@@ -770,7 +764,7 @@ describe('CSRF', () => {
     const session = await sessionFor(KC.contractorA);
     const response = await app.inject({
       method: 'POST',
-      url: `/api/v1/_isolation/works/${SUBMISSION_A}/submit`,
+      url: `/api/v1/_isolation/folders/${FOLDER_A}/submit`,
       headers: { cookie: session.cookie },
     });
     expect(response.statusCode).toBe(403);
@@ -781,7 +775,7 @@ describe('CSRF', () => {
     const session = await sessionFor(KC.contractorA);
     const response = await app.inject({
       method: 'POST',
-      url: `/api/v1/_isolation/works/${SUBMISSION_A}/submit`,
+      url: `/api/v1/_isolation/folders/${FOLDER_A}/submit`,
       headers: { cookie: session.cookie, [CSRF_HEADER]: 'postoronnij-token' },
     });
     expect(response.statusCode).toBe(403);
@@ -792,18 +786,18 @@ describe('CSRF', () => {
     const session = await sessionFor(KC.contractorA);
     const response = await app.inject({
       method: 'POST',
-      url: `/api/v1/_isolation/works/${SUBMISSION_A}/submit`,
+      url: `/api/v1/_isolation/folders/${FOLDER_A}/submit`,
       headers: { cookie: session.cookie, [CSRF_HEADER]: session.csrfToken },
     });
     expect(response.statusCode).toBe(200);
-    expect(response.json<{ submitted: string }>().submitted).toBe(SUBMISSION_A);
+    expect(response.json<{ submitted: string }>().submitted).toBe(FOLDER_A);
   });
 
   it('верный CSRF-токен не открывает чужую поставку', async () => {
     const session = await sessionFor(KC.contractorA);
     const response = await app.inject({
       method: 'POST',
-      url: `/api/v1/_isolation/works/${SUBMISSION_B}/submit`,
+      url: `/api/v1/_isolation/folders/${FOLDER_B}/submit`,
       headers: { cookie: session.cookie, [CSRF_HEADER]: session.csrfToken },
     });
     expect([403, 404]).toContain(response.statusCode);
@@ -817,7 +811,7 @@ describe('CSRF', () => {
 
 describe('сессия', () => {
   it('без cookie сессии — 401', async () => {
-    const response = await get('/api/v1/_isolation/works', null);
+    const response = await get('/api/v1/_isolation/folders', null);
     expect(response.statusCode).toBe(401);
     // Без WWW-Authenticate клиент не отличает «войди» от «этот маршрут открыт».
     expect(response.headers['www-authenticate']).toBeDefined();
@@ -827,7 +821,7 @@ describe('сессия', () => {
   it('неподписанное значение в cookie сессии — 401, а не 500', async () => {
     const response = await app.inject({
       method: 'GET',
-      url: '/api/v1/_isolation/works',
+      url: '/api/v1/_isolation/folders',
       headers: { cookie: `${SESSION_COOKIE}=00000000-0000-4000-8000-000000000099` },
     });
     expect(response.statusCode).toBe(401);
@@ -835,7 +829,7 @@ describe('сессия', () => {
 
   it('истёкшая сессия — 401', async () => {
     const session = await signIn(KC.sessionProbe);
-    expect((await get('/api/v1/_isolation/works', session)).statusCode).toBe(200);
+    expect((await get('/api/v1/_isolation/folders', session)).statusCode).toBe(200);
 
     // Истекает только эта сессия: у остальных пользователей свои строки.
     await db.query(
@@ -846,7 +840,7 @@ describe('сессия', () => {
       [USER_SESSION_PROBE],
     );
 
-    const response = await get('/api/v1/_isolation/works', session);
+    const response = await get('/api/v1/_isolation/folders', session);
     expect(response.statusCode).toBe(401);
     expectNoLeak(response, [TITLE_A]);
   });

@@ -47,107 +47,48 @@
 import type { FastifyRequest } from 'fastify';
 import type { AppInstance } from '../../app.js';
 import { conflict, notFound } from '../../lib/problem.js';
-import { requireIdempotencyKey, requireIfMatch } from '../../lib/http-headers.js';
 import { currentAuth } from '../../middleware/require-auth.js';
-import {
-  hasPermission,
-  requireAnyPermission,
-  requirePermission,
-} from '../../middleware/require-permission.js';
+import { requirePermission } from '../../middleware/require-permission.js';
 import { auditEmailHmac } from '../../db/repositories/admin.js';
 import type { AuditActor } from '../../db/repositories/audit.js';
 import {
-  acceptRegistry,
-  attachRegistryFile,
-  countWorksBySection,
-  createDraftRevision,
-  createRegistry,
-  createWork,
-  deleteRevision,
-  deleteRegistry,
-  deleteWork,
-  excludeWork,
-  findRegistry,
-  findRegistryFile,
-  findWork,
-  includeWork,
-  issueBlockers,
-  issueRegistry,
-  listRegistries,
-  listRegistryItems,
-  listRegistryWorks,
-  listWorkRevisions,
-  listWorks,
-  previewRegistryDeletion,
-  summarizeWorkPipeline,
-  previewWorkDeletion,
-  updateRegistry,
-  updateWork,
+  countFoldersBySection,
+  createFolder,
+  deleteFolder,
+  findFolder,
+  listFolders,
+  previewFolderDeletion,
+  summarizeFolderPipeline,
+  updateFolder,
 } from '../../db/repositories/navigation.js';
-import { readImmutabilityEnforced } from '../../config/portal-settings.js';
+import { updateContext } from '../../observability/context.js';
 import {
-  findRegistryReconciliation,
-  findWorkReconciliation,
-  reviewReconciliation,
-} from '../../db/repositories/reconciliation.js';
-import { dedupeKeyFor } from '../../jobs/types.js';
-import { enqueueJob } from '../../db/repositories/jobs.js';
-import { tracePayload, updateContext } from '../../observability/context.js';
-import {
-  createRegistryBodySchema,
-  createWorkBodySchema,
-  createdWorkSchema,
-  includeWorkBodySchema,
-  reconcileResponseSchema,
-  registryIdParamSchema,
-  registryItemListSchema,
-  registryListQuerySchema,
-  registryPageSchema,
-  registryReconciliationViewSchema,
-  registryViewSchema,
+  createFolderBodySchema,
+  createdFolderSchema,
+  folderDeletionPreviewSchema,
+  folderIdParamSchema,
+  folderListQuerySchema,
+  folderPageSchema,
+  folderPipelineQuerySchema,
+  folderPipelineSchema,
   objectIdParamSchema,
-  registryWorkParamsSchema,
-  revisionIdParamSchema,
-  revisionListQuerySchema,
-  revisionPageSchema,
-  reviewReconciliationBodySchema,
   sectionCountsQuerySchema,
   sectionCountsSchema,
-  updateRegistryBodySchema,
-  updateWorkBodySchema,
-  registryDeletionPreviewSchema,
-  workDeletionPreviewSchema,
-  workPipelineQuerySchema,
-  workPipelineSchema,
-  workIdParamSchema,
-  workListQuerySchema,
-  workPageSchema,
-  workReconciliationViewSchema,
+  updateFolderBodySchema,
 } from './schemas.js';
-import {
-  registryReconciliationSchema,
-  registrySchema,
-  submissionRevisionSchema,
-  workSchema,
-} from '@id/contracts';
+import { folderSchema } from '@id/contracts';
 
 const PREFIX = '/api/v1';
 
-const readWorks = requirePermission('submission.read');
-const uploadWorks = requirePermission('submission.upload');
+const readFolders = requirePermission('submission.read');
+const uploadFolders = requirePermission('submission.upload');
 /**
- * Удаление комплекта, ревизии и черновика реестра — у всех пяти ролей (S37).
+ * Удаление папки — у всех пяти ролей (S37).
  *
  * Отдельное право, а не `submission.upload`: это разные действия, и матрица
- * обязана называть каждое своим именем. Общее у трёх удалений одно — вес: что
- * именно удалять нельзя, решают помехи (`workDeletionBlockers`,
- * `registryDeletionBlockers`), и они одинаковы для всех ролей.
+ * обязана называть каждое своим именем.
  */
 const deleteContent = requirePermission('submission.delete');
-const manageRegistry = requirePermission('registry.manage');
-const acceptRegistryPermission = requirePermission('registry.accept');
-/** Чтение реестра доступно всем, кто вообще видит ИД. */
-const readRegistries = requireAnyPermission(['submission.read']);
 
 function auditActor(app: AppInstance, request: FastifyRequest): AuditActor {
   const auth = currentAuth(request);
@@ -159,25 +100,23 @@ function auditActor(app: AppInstance, request: FastifyRequest): AuditActor {
 }
 
 export function registerNavigationRoutes(app: AppInstance): void {
-  registerWorkRoutes(app);
-  registerRevisionRoutes(app);
-  registerRegistryRoutes(app);
+  registerFolderRoutes(app);
 }
 
 // =====================================================================
-// Комплекты работ
+// Папки ИД
 // =====================================================================
 
-function registerWorkRoutes(app: AppInstance): void {
+function registerFolderRoutes(app: AppInstance): void {
   app.get(
-    `${PREFIX}/works`,
+    `${PREFIX}/folders`,
     {
-      preHandler: readWorks,
-      schema: { querystring: workListQuerySchema, response: { 200: workPageSchema } },
+      preHandler: readFolders,
+      schema: { querystring: folderListQuerySchema, response: { 200: folderPageSchema } },
     },
     async (request, reply) => {
       const { scope } = currentAuth(request);
-      const page = await listWorks(app.db, scope, request.query);
+      const page = await listFolders(app.db, scope, request.query);
       return reply.code(200).send({ items: [...page.items], nextCursor: page.nextCursor });
     },
   );
@@ -194,7 +133,7 @@ function registerWorkRoutes(app: AppInstance): void {
   app.get(
     `${PREFIX}/objects/:objectId/sections/counts`,
     {
-      preHandler: readWorks,
+      preHandler: readFolders,
       schema: {
         params: objectIdParamSchema,
         querystring: sectionCountsQuerySchema,
@@ -205,56 +144,56 @@ function registerWorkRoutes(app: AppInstance): void {
       const { scope } = currentAuth(request);
       const { objectId } = request.params;
       updateContext({ objectId });
-      const counts = await countWorksBySection(app.db, scope, objectId, request.query);
+      const counts = await countFoldersBySection(app.db, scope, objectId, request.query);
       return reply.code(200).send([...counts]);
     },
   );
 
   app.get(
-    `${PREFIX}/works/:workId`,
+    `${PREFIX}/folders/:folderId`,
     {
-      preHandler: readWorks,
-      schema: { params: workIdParamSchema, response: { 200: workSchema } },
+      preHandler: readFolders,
+      schema: { params: folderIdParamSchema, response: { 200: folderSchema } },
     },
     async (request, reply) => {
       const { scope } = currentAuth(request);
-      const work = await findWork(app.db, scope, request.params.workId);
-      if (work === null) throw notFound('Комплект не найден.');
-      updateContext({ objectId: work.objectId });
-      return reply.code(200).send(work);
+      const folder = await findFolder(app.db, scope, request.params.folderId);
+      if (folder === null) throw notFound('Комплект не найден.');
+      updateContext({ objectId: folder.objectId });
+      return reply.code(200).send(folder);
     },
   );
 
   app.post(
-    `${PREFIX}/works`,
+    `${PREFIX}/folders`,
     {
-      preHandler: uploadWorks,
-      schema: { body: createWorkBodySchema, response: { 201: createdWorkSchema } },
+      preHandler: uploadFolders,
+      schema: { body: createFolderBodySchema, response: { 201: createdFolderSchema } },
     },
     async (request, reply) => {
       const { scope } = currentAuth(request);
-      const created = await createWork(app.db, scope, request.body, auditActor(app, request));
-      updateContext({ objectId: created.work.objectId, revisionId: created.revision.id });
+      const created = await createFolder(app.db, scope, request.body, auditActor(app, request));
+      updateContext({ objectId: created.folder.objectId, folderId: created.folder.id });
       return reply.code(201).send(created);
     },
   );
 
   app.patch(
-    `${PREFIX}/works/:workId`,
+    `${PREFIX}/folders/:folderId`,
     {
-      preHandler: uploadWorks,
+      preHandler: uploadFolders,
       schema: {
-        params: workIdParamSchema,
-        body: updateWorkBodySchema,
-        response: { 200: workSchema },
+        params: folderIdParamSchema,
+        body: updateFolderBodySchema,
+        response: { 200: folderSchema },
       },
     },
     async (request, reply) => {
       const { scope } = currentAuth(request);
-      const updated = await updateWork(
+      const updated = await updateFolder(
         app.db,
         scope,
-        request.params.workId,
+        request.params.folderId,
         request.body,
         auditActor(app, request),
       );
@@ -286,38 +225,38 @@ function registerWorkRoutes(app: AppInstance): void {
    * что человек и так видит в его карточке.
    */
   app.get(
-    `${PREFIX}/objects/:objectId/works/pipeline`,
+    `${PREFIX}/objects/:objectId/folders/pipeline`,
     {
-      preHandler: readWorks,
+      preHandler: readFolders,
       schema: {
         params: objectIdParamSchema,
-        querystring: workPipelineQuerySchema,
-        response: { 200: workPipelineSchema },
+        querystring: folderPipelineQuerySchema,
+        response: { 200: folderPipelineSchema },
       },
     },
     async (request, reply) => {
       const { scope } = currentAuth(request);
       const { objectId } = request.params;
       updateContext({ objectId });
-      const summaries = await summarizeWorkPipeline(app.db, scope, objectId, request.query.workIds);
+      const summaries = await summarizeFolderPipeline(
+        app.db,
+        scope,
+        objectId,
+        request.query.folderIds,
+      );
       return reply.code(200).send([...summaries]);
     },
   );
 
   app.get(
-    `${PREFIX}/works/:workId/deletion-preview`,
+    `${PREFIX}/folders/:folderId/deletion-preview`,
     {
       preHandler: deleteContent,
-      schema: { params: workIdParamSchema, response: { 200: workDeletionPreviewSchema } },
+      schema: { params: folderIdParamSchema, response: { 200: folderDeletionPreviewSchema } },
     },
     async (request, reply) => {
       const { scope } = currentAuth(request);
-      const preview = await previewWorkDeletion(
-        app.db,
-        scope,
-        request.params.workId,
-        await readImmutabilityEnforced(app.db),
-      );
+      const preview = await previewFolderDeletion(app.db, scope, request.params.folderId);
       if (preview === null) throw notFound('Комплект не найден.');
       return reply.code(200).send({ ...preview, blockers: [...preview.blockers] });
     },
@@ -336,588 +275,22 @@ function registerWorkRoutes(app: AppInstance): void {
    */
   app.route({
     method: 'DELETE',
-    url: `${PREFIX}/works/:workId`,
+    url: `${PREFIX}/folders/:folderId`,
     preHandler: deleteContent,
-    schema: { params: workIdParamSchema },
+    schema: { params: folderIdParamSchema },
     handler: async (request, reply) => {
       const { scope } = currentAuth(request);
-      const result = await deleteWork(
+      const result = await deleteFolder(
         app.db,
         scope,
-        request.params.workId,
+        request.params.folderId,
         auditActor(app, request),
-        await readImmutabilityEnforced(app.db),
       );
       if (result === null) throw notFound('Комплект не найден.');
       if (!result.deleted) {
-        throw conflict(`Комплект удалить нельзя: ${result.blockers.join('; ')}.`);
+        throw conflict(`Папку удалить нельзя: ${result.blockers.join('; ')}.`);
       }
       return reply.code(204).send();
     },
   });
-}
-
-// =====================================================================
-// Ревизии комплекта
-// =====================================================================
-
-function registerRevisionRoutes(app: AppInstance): void {
-  app.get(
-    `${PREFIX}/works/:workId/revisions`,
-    {
-      preHandler: readWorks,
-      schema: {
-        params: workIdParamSchema,
-        querystring: revisionListQuerySchema,
-        response: { 200: revisionPageSchema },
-      },
-    },
-    async (request, reply) => {
-      const { scope } = currentAuth(request);
-      const page = await listWorkRevisions(app.db, scope, request.params.workId, request.query);
-      return reply.code(200).send({ items: [...page.items], nextCursor: page.nextCursor });
-    },
-  );
-
-  app.post(
-    `${PREFIX}/works/:workId/revisions`,
-    {
-      preHandler: uploadWorks,
-      schema: { params: workIdParamSchema, response: { 201: submissionRevisionSchema } },
-    },
-    async (request, reply) => {
-      const { scope } = currentAuth(request);
-      const revision = await createDraftRevision(
-        app.db,
-        scope,
-        request.params.workId,
-        auditActor(app, request),
-      );
-      updateContext({ revisionId: revision.id });
-      return reply.code(201).send(revision);
-    },
-  );
-
-  /**
-   * Удаление одной ревизии со всем производным.
-   *
-   * Право то же, что у удаления комплекта, — `settings.manage`: стереть чужую
-   * работу вместе с историей проверок тяжелее, чем завести свою.
-   *
-   * `app.route`, а не `app.delete`: правило eslint, запрещающее запросы к БД вне
-   * `db/repositories/`, ищет вызовы `.delete()` по имени метода и не отличает
-   * `db.delete` от `app.delete` (так же сделаны остальные DELETE портала).
-   */
-  app.route({
-    method: 'DELETE',
-    url: `${PREFIX}/revisions/:revisionId`,
-    preHandler: deleteContent,
-    schema: { params: revisionIdParamSchema },
-    handler: async (request, reply) => {
-      const { scope } = currentAuth(request);
-      const result = await deleteRevision(
-        app.db,
-        scope,
-        request.params.revisionId,
-        auditActor(app, request),
-        await readImmutabilityEnforced(app.db),
-      );
-      if (result === null) throw notFound('Ревизия не найдена.');
-      if (!result.deleted) {
-        throw conflict(`Ревизию удалить нельзя: ${result.blockers.join('; ')}.`);
-      }
-      return reply.code(204).send();
-    },
-  });
-}
-
-// =====================================================================
-// Реестры
-// =====================================================================
-
-function registerRegistryRoutes(app: AppInstance): void {
-  app.get(
-    `${PREFIX}/registries`,
-    {
-      preHandler: readRegistries,
-      schema: { querystring: registryListQuerySchema, response: { 200: registryPageSchema } },
-    },
-    async (request, reply) => {
-      const { scope } = currentAuth(request);
-      const page = await listRegistries(app.db, scope, request.query);
-      return reply.code(200).send({ items: [...page.items], nextCursor: page.nextCursor });
-    },
-  );
-
-  /**
-   * Карточка реестра. Состав ответа зависит от прав актора, а не от статуса.
-   *
-   * Ведущий реестр видит его целиком — состав, файл описи и блокеры передачи.
-   * Подрядчику отдаётся только сам реестр: остальное сообщало бы ему о работе
-   * соседей по папке.
-   */
-  app.get(
-    `${PREFIX}/registries/:registryId`,
-    {
-      preHandler: readRegistries,
-      schema: { params: registryIdParamSchema, response: { 200: registryViewSchema } },
-    },
-    async (request, reply) => {
-      const { scope, roles } = currentAuth(request);
-      const { registryId } = request.params;
-      const registry = await findRegistry(app.db, scope, registryId);
-      if (registry === null) throw notFound('Реестр не найден.');
-      updateContext({ objectId: registry.objectId });
-
-      const manages =
-        hasPermission(roles, 'registry.manage') || hasPermission(roles, 'registry.accept');
-      if (!manages) return reply.code(200).send({ registry });
-
-      const [works, file, blockers] = await Promise.all([
-        listRegistryWorks(app.db, scope, registryId),
-        findRegistryFile(app.db, scope, registryId),
-        issueBlockers(app.db, scope, registryId),
-      ]);
-
-      // Сводка сверки — только тому, кто ВЕДЁТ папку, а не всякому, кто её
-      // видит. Признак `manages` выше объединяет `registry.manage` и
-      // `registry.accept`, и переиспользовать его здесь нельзя: заказчик
-      // назвал получателем сводки по папке сотрудников генподрядчика.
-      const reconciliation = hasPermission(roles, 'registry.manage')
-        ? ((
-            await findRegistryReconciliation(
-              app.db,
-              registryId,
-              registry.status === 'draft' ? null : registry.issuedFileRevisionId,
-            )
-          )?.reconciliation ?? null)
-        : undefined;
-
-      return reply.code(200).send({
-        registry,
-        works: [...works],
-        file,
-        blockers: [...blockers],
-        ...(reconciliation === undefined ? {} : { reconciliation }),
-      });
-    },
-  );
-
-  app.post(
-    `${PREFIX}/registries`,
-    {
-      preHandler: manageRegistry,
-      schema: { body: createRegistryBodySchema, response: { 201: registrySchema } },
-    },
-    async (request, reply) => {
-      const { scope } = currentAuth(request);
-      const created = await createRegistry(app.db, scope, request.body, auditActor(app, request));
-      updateContext({ objectId: created.objectId });
-      return reply.code(201).send(created);
-    },
-  );
-
-  app.patch(
-    `${PREFIX}/registries/:registryId`,
-    {
-      preHandler: manageRegistry,
-      schema: {
-        params: registryIdParamSchema,
-        body: updateRegistryBodySchema,
-        response: { 200: registrySchema },
-      },
-    },
-    async (request, reply) => {
-      const { scope } = currentAuth(request);
-      const updated = await updateRegistry(
-        app.db,
-        scope,
-        request.params.registryId,
-        requireIfMatch(request, 'реестра'),
-        request.body,
-        auditActor(app, request),
-      );
-      return reply.code(200).send(updated);
-    },
-  );
-
-  app.route({
-    method: 'PUT',
-    url: `${PREFIX}/registries/:registryId/works/:workId`,
-    preHandler: manageRegistry,
-    schema: {
-      params: registryWorkParamsSchema,
-      body: includeWorkBodySchema,
-      response: { 200: registrySchema },
-    },
-    handler: async (request, reply) => {
-      const { scope } = currentAuth(request);
-      const updated = await includeWork(
-        app.db,
-        scope,
-        request.params.registryId,
-        request.params.workId,
-        requireIfMatch(request, 'реестра'),
-        request.body.ordinal ?? null,
-        auditActor(app, request),
-      );
-      return reply.code(200).send(updated);
-    },
-  });
-
-  app.route({
-    method: 'DELETE',
-    url: `${PREFIX}/registries/:registryId/works/:workId`,
-    preHandler: manageRegistry,
-    schema: { params: registryWorkParamsSchema, response: { 200: registrySchema } },
-    handler: async (request, reply) => {
-      const { scope } = currentAuth(request);
-      const updated = await excludeWork(
-        app.db,
-        scope,
-        request.params.registryId,
-        request.params.workId,
-        requireIfMatch(request, 'реестра'),
-        auditActor(app, request),
-      );
-      return reply.code(200).send(updated);
-    },
-  });
-
-  /**
-   * Заведение файла описи.
-   *
-   * Возвращает комплект и его первую ревизию: сам скан грузится обычным приёмом
-   * файлов на эту ревизию и подаётся `POST /revisions/{id}/submit`. Отдельного
-   * пути загрузки для описи нет намеренно — он был бы вторым конвейером с теми
-   * же проверками, расходящимся с первым при каждой правке.
-   */
-  app.post(
-    `${PREFIX}/registries/:registryId/file`,
-    {
-      preHandler: manageRegistry,
-      schema: { params: registryIdParamSchema, response: { 201: createdWorkSchema } },
-    },
-    async (request, reply) => {
-      const { scope } = currentAuth(request);
-      const created = await attachRegistryFile(
-        app.db,
-        scope,
-        request.params.registryId,
-        auditActor(app, request),
-      );
-      updateContext({ revisionId: created.revision.id });
-      return reply.code(201).send(created);
-    },
-  );
-
-  /**
-   * Что исчезнет вместе с реестром.
-   *
-   * Тот же приём, что у комплекта: числа знает только БД, а «нельзя» без
-   * причины отправляет человека искать её по схеме. Право на просмотр то же,
-   * что на удаление, — иначе предпросмотр рассказывал бы о папке больше, чем
-   * само действие с ней позволяет.
-   */
-  app.get(
-    `${PREFIX}/registries/:registryId/deletion-preview`,
-    {
-      preHandler: deleteContent,
-      schema: {
-        params: registryIdParamSchema,
-        response: { 200: registryDeletionPreviewSchema },
-      },
-    },
-    async (request, reply) => {
-      const { scope } = currentAuth(request);
-      const preview = await previewRegistryDeletion(
-        app.db,
-        scope,
-        request.params.registryId,
-        await readImmutabilityEnforced(app.db),
-      );
-      if (preview === null) throw notFound('Реестр не найден.');
-      return reply.code(200).send({ ...preview, blockers: [...preview.blockers] });
-    },
-  );
-
-  /**
-   * Удаление реестра: папка снимается с объекта, комплекты остаются.
-   *
-   * `app.route`, а не `app.delete`, — по той же причине, что у комплекта:
-   * правило eslint, запрещающее запросы к БД вне `db/repositories/`, ищет
-   * вызовы `.delete()` по имени метода и не отличает `db.delete` от
-   * `app.delete`.
-   *
-   * `If-Match` обязателен, как у всех правящих маршрутов реестра. Здесь он
-   * нужен сильнее прочих: между «увидел состав» и «нажал удалить» папку могли
-   * передать, и версия — единственное, что об этом скажет.
-   */
-  app.route({
-    method: 'DELETE',
-    url: `${PREFIX}/registries/:registryId`,
-    preHandler: deleteContent,
-    schema: { params: registryIdParamSchema },
-    handler: async (request, reply) => {
-      const { scope } = currentAuth(request);
-      const result = await deleteRegistry(
-        app.db,
-        scope,
-        request.params.registryId,
-        requireIfMatch(request, 'реестра'),
-        auditActor(app, request),
-        await readImmutabilityEnforced(app.db),
-      );
-      if (result === null) throw notFound('Реестр не найден.');
-      if (!result.deleted) {
-        throw conflict(`Реестр удалить нельзя: ${result.blockers.join('; ')}.`);
-      }
-      return reply.code(204).send();
-    },
-  });
-
-  app.post(
-    `${PREFIX}/registries/:registryId/issue`,
-    {
-      preHandler: manageRegistry,
-      schema: { params: registryIdParamSchema, response: { 200: registrySchema } },
-    },
-    async (request, reply) => {
-      const { scope } = currentAuth(request);
-      const issued = await issueRegistry(
-        app.db,
-        scope,
-        request.params.registryId,
-        requireIfMatch(request, 'реестра'),
-        auditActor(app, request),
-      );
-      return reply.code(200).send(issued);
-    },
-  );
-
-  app.post(
-    `${PREFIX}/registries/:registryId/accept`,
-    {
-      preHandler: acceptRegistryPermission,
-      schema: { params: registryIdParamSchema, response: { 200: registrySchema } },
-    },
-    async (request, reply) => {
-      const { scope } = currentAuth(request);
-      const accepted = await acceptRegistry(
-        app.db,
-        scope,
-        request.params.registryId,
-        requireIfMatch(request, 'реестра'),
-        auditActor(app, request),
-      );
-      return reply.code(200).send(accepted);
-    },
-  );
-
-  app.get(
-    `${PREFIX}/registries/:registryId/items`,
-    {
-      preHandler: readRegistries,
-      schema: { params: registryIdParamSchema, response: { 200: registryItemListSchema } },
-    },
-    async (request, reply) => {
-      const { scope } = currentAuth(request);
-      const items = await listRegistryItems(app.db, scope, request.params.registryId);
-      return reply.code(200).send([...items]);
-    },
-  );
-
-  registerReconciliationRoutes(app);
-}
-
-// =====================================================================
-// Сверка описи передачи (S20)
-// =====================================================================
-
-/**
- * Три маршрута и ДВА РАЗНЫХ адреса чтения — это решение, а не оформление.
- *
- * Заказчик: «данные по каждому комплекту формируются отдельно; данные по
- * реестру показываются только сотрудникам генподрядчика». Один маршрут,
- * урезающий ответ по роли, выразил бы это условием внутри обработчика — то
- * есть местом, где однажды забудут ветку, и подрядчик увидит работы соседей по
- * папке. Два адреса выражают то же типом ответа: в схеме результата по
- * комплекту нет ни одного поля о папке, и положить их туда нечего.
- *
- * Запускать сверку вправе всякий, кто видит реестр (`submission.read`).
- * `registry.manage` для этого не годится: оно есть только у генподрядчика и
- * администратора, а заказчик прямо назвал инженера, руководителя и подрядчика —
- * «важна информация о том, есть ли ошибки в документе». Рубеж доступа создаёт
- * не право, а `findRegistry` по области: без него инженер, знающий UUID чужого
- * реестра на чужом объекте, получил бы наименования работ и номера документов
- * чужих подрядчиков.
- */
-function registerReconciliationRoutes(app: AppInstance): void {
-  app.post(
-    `${PREFIX}/registries/:registryId/reconcile`,
-    {
-      preHandler: readRegistries,
-      schema: { params: registryIdParamSchema, response: { 202: reconcileResponseSchema } },
-    },
-    async (request, reply) => {
-      const { scope } = currentAuth(request);
-      const { registryId } = request.params;
-      // Заголовок обязателен (§14: сверка читает документы всей папки), но в
-      // ключ дедупликации НЕ кладётся — см. ниже.
-      requireIdempotencyKey(request);
-
-      const registry = await findRegistry(app.db, scope, registryId);
-      if (registry === null) throw notFound('Реестр не найден.');
-      updateContext({ objectId: registry.objectId });
-
-      // Файл описи по области НЕ ищется, и это не упущение: он подан
-      // генподрядчиком, а запускать сверку вправе и субподрядчик — под его
-      // областью файл невидим. Рубеж здесь создал `findRegistry` выше; саму
-      // ревизию скана обработчик найдёт по ключу, поэтому payload её и не
-      // называет (см. докстринг `registry.reconcile` в `jobs/types.ts`).
-      const { jobId, created } = await enqueueJob(app.db, scope, {
-        type: 'registry.reconcile',
-        payload: tracePayload({ registryId }),
-        // Ключ по РЕЕСТРУ, без `Idempotency-Key`. Отступление от образца
-        // `doc.classify_pages` намеренное: там ключ включает заголовок, и два
-        // нажатия дают две задачи. Здесь две задачи по одной папке одновременно
-        // делали бы `DELETE`+`INSERT` под уникальным ключом, и защитой
-        // оставалась бы одна advisory-блокировка. С ключом по реестру второе
-        // нажатие получает уже стоящую задачу — то самое «повторная постановка
-        // безопасна» из §12.
-        dedupeKey: dedupeKeyFor('registry.reconcile', registryId),
-      });
-
-      request.log.info(
-        { event: 'job_enqueued', jobType: 'registry.reconcile', jobId, created, registryId },
-        'сверка описи поставлена',
-      );
-      return reply.code(202).send({ jobId, created });
-    },
-  );
-
-  /**
-   * Сводка по ПАПКЕ — только под `registry.manage`.
-   *
-   * `readRegistries` здесь не годится: под ним ответ увидел бы подрядчик, а в
-   * нём шапка описи, группы без комплекта и комплекты соседей.
-   */
-  app.get(
-    `${PREFIX}/registries/:registryId/reconciliation`,
-    {
-      preHandler: manageRegistry,
-      schema: {
-        params: registryIdParamSchema,
-        response: { 200: registryReconciliationViewSchema },
-      },
-    },
-    async (request, reply) => {
-      const { scope } = currentAuth(request);
-      const { registryId } = request.params;
-
-      const registry = await findRegistry(app.db, scope, registryId);
-      if (registry === null) throw notFound('Реестр не найден.');
-      updateContext({ objectId: registry.objectId });
-
-      // У переданной папки читается сверка ТОГО скана, который подписан, а не
-      // текущего: иначе замена файла молча показала бы более позднюю сверку под
-      // прежней подписью.
-      const view = await findRegistryReconciliation(
-        app.db,
-        registryId,
-        registry.status === 'draft' ? null : registry.issuedFileRevisionId,
-      );
-      if (view === null) return reply.code(200).send({ reconciliation: null });
-
-      return reply.code(200).send({
-        reconciliation: view.reconciliation,
-        works: [...view.works],
-        groups: [...view.groups],
-        rows: [...view.rows],
-        extraDocuments: [...view.extraDocuments],
-      });
-    },
-  );
-
-  /**
-   * Результат по ОДНОМУ комплекту, адресуемый его ревизией.
-   *
-   * Право `submission.read` — все пять ролей; рубеж создаёт область по ревизии
-   * комплекта, тем же `withScope`, каким закрыты остальные чтения ревизии.
-   * `work: null` — комплект не включён в реестр либо сверки ещё не было; `404`
-   * означает только «ревизия не видна».
-   */
-  app.get(
-    `${PREFIX}/revisions/:revisionId/reconciliation`,
-    {
-      preHandler: readRegistries,
-      schema: {
-        params: revisionIdParamSchema,
-        response: { 200: workReconciliationViewSchema },
-      },
-    },
-    async (request, reply) => {
-      const { scope } = currentAuth(request);
-      const { revisionId } = request.params;
-      updateContext({ revisionId });
-
-      const view = await findWorkReconciliation(app.db, scope, revisionId);
-      if (view === null) {
-        return reply.code(200).send({
-          work: null,
-          rows: [],
-          extraDocuments: [],
-          parserVersion: null,
-          finishedAt: null,
-        });
-      }
-
-      return reply.code(200).send({
-        work: view.work,
-        rows: [...view.rows],
-        extraDocuments: [...view.extraDocuments],
-        parserVersion: view.parserVersion,
-        finishedAt: view.finishedAt,
-      });
-    },
-  );
-
-  /**
-   * Отметка «расхождение разобрано, дефекта нет».
-   *
-   * Под `registry.accept`: это суждение ПРИНИМАЮЩЕЙ стороны, а не наблюдение
-   * портала. Пояснение обязательно — отметка без объяснения не отличима от
-   * «закрыл, чтобы не мозолило», и следующий человек не поймёт, разобрано
-   * расхождение или спрятано.
-   */
-  app.post(
-    `${PREFIX}/registries/:registryId/reconciliation/review`,
-    {
-      preHandler: acceptRegistryPermission,
-      schema: {
-        params: registryIdParamSchema,
-        body: reviewReconciliationBodySchema,
-        response: { 200: registryReconciliationSchema },
-      },
-    },
-    async (request, reply) => {
-      const { scope, user } = currentAuth(request);
-      const { registryId } = request.params;
-
-      const registry = await findRegistry(app.db, scope, registryId);
-      if (registry === null) throw notFound('Реестр не найден.');
-      updateContext({ objectId: registry.objectId });
-
-      const reviewed = await reviewReconciliation(
-        app.db,
-        registryId,
-        requireIfMatch(request, 'сверки'),
-        request.body.note,
-        user.id,
-        auditActor(app, request),
-        scope,
-      );
-      return reply.code(200).send(reviewed);
-    },
-  );
 }

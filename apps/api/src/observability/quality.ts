@@ -49,7 +49,7 @@ export interface ProcessingFeedbackEvent {
   readonly reasonCode: ProcessingFeedbackReason;
   readonly severity?: 'info' | 'warn' | 'error' | undefined;
 
-  readonly revisionId?: string | undefined;
+  readonly folderId?: string | undefined;
   readonly recognitionRunId?: string | undefined;
   readonly sourcePageId?: string | undefined;
   readonly workingPageIndex?: number | undefined;
@@ -89,7 +89,7 @@ export interface ProcessingFeedbackSink {
 const INSERT_FEEDBACK = `
   INSERT INTO processing_feedback (
     feedback_type, reason_code, severity,
-    revision_id, recognition_run_id, source_page_id, working_page_index, layout_block_id,
+    folder_id, recognition_run_id, source_page_id, working_page_index, layout_block_id,
     field_code, finding_id, job_run_id, ai_run_id,
     doc_type_code, pipeline_stage, provider, model, prompt_code, prompt_version,
     detector_model_version, ruleset_version, app_release,
@@ -131,7 +131,7 @@ export class DbProcessingFeedbackSink implements ProcessingFeedbackSink {
         event.feedbackType,
         event.reasonCode,
         event.severity ?? 'warn',
-        event.revisionId ?? null,
+        event.folderId ?? null,
         event.recognitionRunId ?? null,
         event.sourcePageId ?? null,
         event.workingPageIndex ?? null,

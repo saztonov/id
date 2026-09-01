@@ -37,7 +37,7 @@ import {
   isFallbackCode,
   makeGraph,
   makeProfile,
-  makeRevision,
+  makeFolder,
   makeUnavailableRegistries,
   makeUnconfiguredProfile,
   RULE_CATALOG,
@@ -97,7 +97,7 @@ export interface PackageRunResult {
 function toPageInputs(dir: string, source: ReturnType<typeof parseSourcePackage>): PageInput[] {
   return source.map((page) => ({
     sourcePageId: `p${page.pageNo}`,
-    revisionOrdinal: page.pageNo - 1,
+    folderOrdinal: page.pageNo - 1,
     sourceFileId: basename(dir),
     filePageIndex: page.pageNo - 1,
     // Ненулевая версия текста обязательна: без неё `extractFields` не строит
@@ -301,7 +301,7 @@ export function runPackage(dir: string, options: HarnessOptions): PackageRunResu
 
   const graph = makeGraph({
     profile: options.unconfiguredProfile ? makeUnconfiguredProfile() : makeProfile(),
-    revision: makeRevision(),
+    folder: makeFolder(),
     documents,
     registryRows,
     relations,

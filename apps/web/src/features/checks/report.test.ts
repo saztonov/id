@@ -20,7 +20,7 @@ import {
   toneOf,
 } from './report.js';
 
-const REVISION = '00000000-0000-4000-8000-000000000001';
+const FOLDER = '00000000-0000-4000-8000-000000000001';
 
 function row(over: Partial<ReportRow> & { id: string }): ReportRow {
   return {
@@ -166,23 +166,23 @@ describe('datesLabel', () => {
 
 describe('rowHref и pagesLabel', () => {
   it('ведёт на страницу разметки', () => {
-    const href = rowHref(REVISION, row({ id: 'a', page: { number: 5, workingPageIndex: 4 } }));
-    expect(href).toBe(`/ids/revisions/${REVISION}?tab=markup&page=4`);
+    const href = rowHref(FOLDER, row({ id: 'a', page: { number: 5, workingPageIndex: 4 } }));
+    expect(href).toBe(`/ids/folders/${FOLDER}?tab=markup&page=4`);
   });
 
   it('выделяет блок замечания, когда он известен (§16)', () => {
     const href = rowHref(
-      REVISION,
+      FOLDER,
       row({ id: 'a', page: { number: 5, workingPageIndex: 4 }, blockId: 'blk' }),
     );
-    expect(href).toBe(`/ids/revisions/${REVISION}?tab=markup&page=4&block=blk`);
+    expect(href).toBe(`/ids/folders/${FOLDER}?tab=markup&page=4&block=blk`);
   });
 
   it('без рабочего документа ссылки нет: неработающая хуже отсутствия', () => {
     expect(
-      rowHref(REVISION, row({ id: 'a', page: { number: 5, workingPageIndex: null } })),
+      rowHref(FOLDER, row({ id: 'a', page: { number: 5, workingPageIndex: null } })),
     ).toBeNull();
-    expect(rowHref(REVISION, row({ id: 'a', page: null }))).toBeNull();
+    expect(rowHref(FOLDER, row({ id: 'a', page: null }))).toBeNull();
   });
 
   it('у строки без замечания печатается диапазон документа', () => {
@@ -202,7 +202,7 @@ describe('rowHref и pagesLabel', () => {
       statusRuleCode: 'AOSR.HDR.022',
     });
     expect(pagesLabel(withFinding)).toBe('2');
-    expect(rowHref(REVISION, withFinding)).toContain('page=1');
+    expect(rowHref(FOLDER, withFinding)).toContain('page=1');
   });
 });
 

@@ -52,11 +52,11 @@ export interface ChecksLlmReviewDeps {
    * Реквизиты идут в промт не для полноты: без них код `LLM.FILL.020`
    * («извлечённое значение расходится с документом») сравнивать не с чем.
    */
-  loadReviewDocuments(revisionId: string): Promise<readonly ReviewDocument[]>;
+  loadReviewDocuments(folderId: string): Promise<readonly ReviewDocument[]>;
 
   saveLlmFindings(input: {
     readonly validationRunId: string;
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly findings: readonly PreparedFinding[];
   }): Promise<{ readonly removed: number; readonly written: number }>;
 
@@ -78,7 +78,7 @@ export interface ChecksLlmReviewDeps {
     | null;
 
   recordAiRun(input: {
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly stage: LlmTextStage;
     readonly provider: LlmProviderName;
     readonly model: string;
@@ -99,7 +99,7 @@ export function createChecksLlmReviewHandler(
   deps: ChecksLlmReviewDeps,
 ): JobHandler<'checks.llm_review'> {
   return async (ctx: JobContext<'checks.llm_review'>) => {
-    const { revisionId, validationRunId } = ctx.payload;
+    const { folderId, validationRunId } = ctx.payload;
 
     const prompt = await deps.stagePrompt(LLM_REVIEW_STAGE);
     if (prompt === null || deps.callLlm === null) {
@@ -115,7 +115,7 @@ export function createChecksLlmReviewHandler(
       return;
     }
 
-    const documents = await deps.loadReviewDocuments(revisionId);
+    const documents = await deps.loadReviewDocuments(folderId);
     const accepted: PreparedFinding[] = [];
     const problems: string[] = [];
     let stop: string | null = null;
@@ -123,7 +123,10 @@ export function createChecksLlmReviewHandler(
 
     for (const document of documents) {
       if (stop !== null) break;
-      const outcome = await runOne(deps, ctx, { revisionId, document, prompt });
+      // Кооперативная отмена: без неё брошенная по аренде попытка продолжала
+      // обходить весь комплект рядом с новой, взятой ей на смену (S44).
+      ctx.signal.throwIfAborted();
+      const outcome = await runOne(deps, ctx, { folderId, document, prompt });
       accepted.push(...outcome.findings);
       problems.push(...outcome.problems);
       stop = outcome.stop;
@@ -135,7 +138,7 @@ export function createChecksLlmReviewHandler(
     // предыдущих документов на каждом шаге.
     const saved = await deps.saveLlmFindings({
       validationRunId,
-      revisionId,
+      folderId,
       findings: accepted,
     });
 
@@ -164,7 +167,7 @@ async function enqueueSummary(ctx: JobContext<'checks.llm_review'>): Promise<voi
   await ctx.enqueue({
     type: 'checks.summarize',
     payload: {
-      revisionId: ctx.payload.revisionId,
+      folderId: ctx.payload.folderId,
       validationRunId: ctx.payload.validationRunId,
     },
     dedupeKey: `checks.summarize:${ctx.payload.validationRunId}`,
@@ -181,7 +184,7 @@ async function runOne(
   deps: ChecksLlmReviewDeps,
   ctx: JobContext<'checks.llm_review'>,
   input: {
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly document: ReviewDocument;
     readonly prompt: PublishedPrompt;
   },
@@ -244,14 +247,14 @@ async function runOne(
 async function writeAiRun(
   deps: ChecksLlmReviewDeps,
   ctx: JobContext<'checks.llm_review'>,
-  input: { readonly revisionId: string; readonly prompt: PublishedPrompt },
+  input: { readonly folderId: string; readonly prompt: PublishedPrompt },
   call: LlmCallResult | null,
   structured: { documentId: string; accepted: number; problems: readonly string[] },
 ): Promise<void> {
   if (call === null) return;
 
   await deps.recordAiRun({
-    revisionId: input.revisionId,
+    folderId: input.folderId,
     stage: LLM_REVIEW_STAGE,
     provider: call.provider,
     model: call.model,

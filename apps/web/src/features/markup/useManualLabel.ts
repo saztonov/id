@@ -20,7 +20,7 @@
 import { App as AntApp } from 'antd';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { documents } from '../../api/endpoints.js';
-import { revisionKeys } from '../../api/keys.js';
+import { folderKeys } from '../../api/keys.js';
 import { describeError } from '../../api/problem.js';
 
 export interface UseManualLabelResult {
@@ -34,17 +34,17 @@ export interface UseManualLabelResult {
   readonly clear: (sourcePageId: string) => void;
 }
 
-export function useManualLabel(revisionId: string): UseManualLabelResult {
+export function useManualLabel(folderId: string): UseManualLabelResult {
   const { message } = AntApp.useApp();
   const queryClient = useQueryClient();
 
   const refreshClassifications = async (): Promise<void> => {
-    await queryClient.invalidateQueries({ queryKey: revisionKeys.classifications(revisionId) });
+    await queryClient.invalidateQueries({ queryKey: folderKeys.classifications(folderId) });
   };
 
   const setManual = useMutation({
     mutationFn: (input: { sourcePageId: string; label: string; docTypeCode: string | null }) =>
-      documents.setManualLabel(revisionId, input.sourcePageId, {
+      documents.setManualLabel(folderId, input.sourcePageId, {
         label: input.label,
         docTypeCode: input.docTypeCode,
       }),
@@ -56,7 +56,7 @@ export function useManualLabel(revisionId: string): UseManualLabelResult {
   });
 
   const clearManual = useMutation({
-    mutationFn: (sourcePageId: string) => documents.clearManualLabel(revisionId, sourcePageId),
+    mutationFn: (sourcePageId: string) => documents.clearManualLabel(folderId, sourcePageId),
     onSuccess: async () => {
       message.success('Ручная метка снята: страница классифицируется при следующей сборке');
       await refreshClassifications();

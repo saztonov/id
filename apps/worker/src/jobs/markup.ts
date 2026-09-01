@@ -57,7 +57,7 @@ import {
 /** Ревизия разметки в объёме, нужном задачам конвейера. */
 export interface MarkupTarget {
   readonly layoutRevisionId: string;
-  readonly revisionId: string;
+  readonly folderId: string;
   readonly bundleId: string;
   readonly objectId: string;
   readonly state: string;
@@ -119,14 +119,14 @@ export interface MarkupDeps {
   readonly previewCached: boolean;
 
   loadTargetByLayout(input: {
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly layoutRevisionId: string;
   }): Promise<MarkupTarget | null>;
 
   findRunDocument(layoutRevisionId: string): Promise<RunDocumentRef | null>;
   saveRunDocument(input: {
     readonly layoutRevisionId: string;
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly rdDocumentId: string;
     readonly rdProjectId: string;
   }): Promise<void>;
@@ -139,7 +139,7 @@ export interface MarkupDeps {
    */
   replaceRunDocument(input: {
     readonly layoutRevisionId: string;
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly rdDocumentId: string;
     readonly rdProjectId: string;
   }): Promise<void>;
@@ -150,19 +150,19 @@ export interface MarkupDeps {
   }>;
 
   importBlocks(input: {
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly layoutRevisionId: string;
     readonly workingPageIndices: readonly number[];
     readonly blocks: readonly DetectedBlockInput[];
   }): Promise<{ readonly imported: number; readonly skippedPages: readonly number[] }>;
 
   loadPageBlocks(input: {
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly layoutRevisionId: string;
   }): Promise<readonly PageBlocksSnapshot[]>;
 
   saveFlags(input: {
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly flags: ReadonlyMap<string, readonly AttentionFlag[]>;
   }): Promise<{ readonly written: boolean; readonly reason?: string }>;
 
@@ -210,18 +210,18 @@ function requirePort(deps: MarkupDeps): RdWebPort {
 async function loadMarkupTarget(
   deps: MarkupDeps,
   payload: {
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly layoutRevisionId: string;
     readonly bundleId: string;
   },
 ): Promise<MarkupTarget> {
   const target = await deps.loadTargetByLayout({
-    revisionId: payload.revisionId,
+    folderId: payload.folderId,
     layoutRevisionId: payload.layoutRevisionId,
   });
   if (target === null) {
     throw new MarkupStateError(
-      'Ревизия разметки не найдена: цепочка разметки начинается с ' + 'POST /revisions/{id}/layout',
+      'Ревизия разметки не найдена: цепочка разметки начинается с ' + 'POST /folders/{id}/layout',
     );
   }
   if (target.bundleId !== payload.bundleId) {
@@ -269,7 +269,7 @@ export function createRunDocumentHandler(deps: MarkupDeps): JobHandler<'rd.creat
       // Имя папки прогона — идентификатор ревизии, а не название объекта или
       // подрядчика: имя видно людям на стороне RD WEB (§13, тот же принцип, что
       // у ключей хранилища).
-      name: `portal-revision-${target.revisionId}`,
+      name: `portal-folder-${target.folderId}`,
     });
 
     const created = await port.createRunDocument({
@@ -287,7 +287,7 @@ export function createRunDocumentHandler(deps: MarkupDeps): JobHandler<'rd.creat
     // наша запись. См. заголовок файла и ADR-0004 §2.
     await deps.saveRunDocument({
       layoutRevisionId: target.layoutRevisionId,
-      revisionId: target.revisionId,
+      folderId: target.folderId,
       rdDocumentId: created.documentId,
       rdProjectId: projectId,
     });
@@ -320,7 +320,7 @@ async function enqueueUploadCheck(
   await ctx.enqueue({
     type: 'rd.upload_working_pdf',
     payload: {
-      revisionId: target.revisionId,
+      folderId: target.folderId,
       bundleId: target.bundleId,
       layoutRevisionId: target.layoutRevisionId,
     },
@@ -390,7 +390,7 @@ export function createUploadWorkingPdfHandler(
 
     const { nodeId } = await port.ensureNode({
       projectId,
-      name: `portal-revision-${target.revisionId}`,
+      name: `portal-folder-${target.folderId}`,
     });
     const created = await port.createRunDocument({
       projectId,
@@ -405,7 +405,7 @@ export function createUploadWorkingPdfHandler(
     // завести третий.
     await deps.replaceRunDocument({
       layoutRevisionId: target.layoutRevisionId,
-      revisionId: target.revisionId,
+      folderId: target.folderId,
       rdDocumentId: created.documentId,
       rdProjectId: projectId,
     });
@@ -462,7 +462,7 @@ async function enqueueWaitPages(
   await ctx.enqueue({
     type: 'rd.wait_pages',
     payload: {
-      revisionId: target.revisionId,
+      folderId: target.folderId,
       bundleId: target.bundleId,
       layoutRevisionId: target.layoutRevisionId,
     },
@@ -543,7 +543,7 @@ export function createWaitPagesHandler(
       await ctx.enqueue({
         type: 'layout.detect_pages',
         payload: {
-          revisionId: target.revisionId,
+          folderId: target.folderId,
           layoutRevisionId: target.layoutRevisionId,
         },
         dedupeKey: `layout.detect_pages:${target.layoutRevisionId}:fanout`,
@@ -601,7 +601,7 @@ export function createDetectPagesHandler(deps: MarkupDeps): JobHandler<'layout.d
   return async (ctx: JobContext<'layout.detect_pages'>) => {
     const port = requirePort(deps);
     const target = await deps.loadTargetByLayout({
-      revisionId: ctx.payload.revisionId,
+      folderId: ctx.payload.folderId,
       layoutRevisionId: ctx.payload.layoutRevisionId,
     });
     if (target === null) throw new MarkupStateError('Ревизия разметки не найдена');
@@ -633,7 +633,7 @@ export function createDetectPagesHandler(deps: MarkupDeps): JobHandler<'layout.d
         await ctx.enqueue({
           type: 'layout.detect_pages',
           payload: {
-            revisionId: target.revisionId,
+            folderId: target.folderId,
             layoutRevisionId: target.layoutRevisionId,
             pageIndices: [...batch],
             // Флаг перезаписи наследуется дочерними пачками: иначе явная
@@ -721,7 +721,7 @@ export function createDetectPagesHandler(deps: MarkupDeps): JobHandler<'layout.d
     });
 
     const imported = await deps.importBlocks({
-      revisionId: target.revisionId,
+      folderId: target.folderId,
       layoutRevisionId: target.layoutRevisionId,
       workingPageIndices: importPages,
       blocks,
@@ -754,7 +754,7 @@ export function createDetectPagesHandler(deps: MarkupDeps): JobHandler<'layout.d
     await ctx.enqueue({
       type: 'layout.analyze_coverage',
       payload: {
-        revisionId: target.revisionId,
+        folderId: target.folderId,
         layoutRevisionId: target.layoutRevisionId,
       },
       dedupeKey: `layout.analyze_coverage:${target.layoutRevisionId}`,
@@ -772,13 +772,13 @@ export function createAnalyzeCoverageHandler(
 ): JobHandler<'layout.analyze_coverage'> {
   return async (ctx: JobContext<'layout.analyze_coverage'>) => {
     const target = await deps.loadTargetByLayout({
-      revisionId: ctx.payload.revisionId,
+      folderId: ctx.payload.folderId,
       layoutRevisionId: ctx.payload.layoutRevisionId,
     });
     if (target === null) throw new MarkupStateError('Ревизия разметки не найдена');
 
     const snapshots = await deps.loadPageBlocks({
-      revisionId: target.revisionId,
+      folderId: target.folderId,
       layoutRevisionId: target.layoutRevisionId,
     });
 
@@ -811,7 +811,7 @@ export function createAnalyzeCoverageHandler(
       if (sourcePageId !== undefined) flags.set(sourcePageId, page.flags);
     }
 
-    const outcome = await deps.saveFlags({ revisionId: target.revisionId, flags });
+    const outcome = await deps.saveFlags({ folderId: target.folderId, flags });
 
     const summary = summarizeAnalysis(analysis);
     await ctx.emit('layout.coverage_analyzed', {
@@ -845,7 +845,7 @@ export function createAnalyzeCoverageHandler(
       await ctx.enqueue({
         type: 'preview.cache_pages',
         payload: {
-          revisionId: target.revisionId,
+          folderId: target.folderId,
           bundleId: target.bundleId,
           layoutRevisionId: target.layoutRevisionId,
         },

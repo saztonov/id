@@ -619,7 +619,7 @@ describe('DATE.332 — аккредитация подтверждена вне�
     const findings = findingsOf(result);
     expect(findings).toHaveLength(1);
     expect(findings[0]?.origin).toBe('external_unavailable');
-    expect(findings[0]?.targetType).toBe('revision');
+    expect(findings[0]?.targetType).toBe('folder');
     expect(messages(result)).toContain('ребуется ручная проверка');
     expect(messages(result)).toContain('источник данных не подключён');
     expect(messages(result)).toContain(ATTESTAT);

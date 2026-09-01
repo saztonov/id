@@ -59,7 +59,7 @@ import {
 } from '@id/contracts';
 
 import { bundles, catalog, documents, layout, recognition } from '../../api/endpoints.js';
-import { catalogKeys, layoutKeys, recognitionKeys, revisionKeys } from '../../api/keys.js';
+import { catalogKeys, layoutKeys, recognitionKeys, folderKeys } from '../../api/keys.js';
 import { describeError } from '../../api/problem.js';
 import type { LayoutBlock, PageClassification } from '../../api/types.js';
 import { files as filesApi } from '../../api/endpoints.js';
@@ -99,7 +99,7 @@ import { useShallow } from 'zustand/react/shallow';
 import { useMarkupStore } from './store.js';
 
 export interface MarkupScreenProps {
-  readonly revisionId: string;
+  readonly folderId: string;
 }
 
 /**
@@ -113,14 +113,14 @@ export interface MarkupScreenProps {
 const WORKSPACE_HEIGHT = '72vh';
 const WORKSPACE_MIN_HEIGHT = 420;
 
-export function MarkupScreen({ revisionId }: MarkupScreenProps): ReactNode {
+export function MarkupScreen({ folderId }: MarkupScreenProps): ReactNode {
   const { can } = useSession();
   const { message } = AntApp.useApp();
   const queryClient = useQueryClient();
 
-  const revisions = useQuery({
-    queryKey: layoutKeys.revisions(revisionId),
-    queryFn: () => layout.listRevisions(revisionId),
+  const folders = useQuery({
+    queryKey: layoutKeys.folders(folderId),
+    queryFn: () => layout.listFolders(folderId),
   });
 
   useEvidenceTarget();
@@ -134,10 +134,10 @@ export function MarkupScreen({ revisionId }: MarkupScreenProps): ReactNode {
    * держать в голове, какая из них сейчас настоящая. Теперь разметка у поставки
    * одна и всегда правимая, поэтому берётся последняя — она же единственная.
    */
-  const layoutId = revisions.data?.[revisions.data.length - 1]?.id ?? null;
+  const layoutId = folders.data?.[folders.data.length - 1]?.id ?? null;
 
-  if (revisions.isPending) return <LoadingState label="Загрузка разметки…" />;
-  if (revisions.isError) return <ErrorState error={revisions.error} />;
+  if (folders.isPending) return <LoadingState label="Загрузка разметки…" />;
+  if (folders.isError) return <ErrorState error={folders.error} />;
   if (layoutId === null) {
     return (
       <Alert
@@ -155,14 +155,14 @@ export function MarkupScreen({ revisionId }: MarkupScreenProps): ReactNode {
   return (
     <LayoutWorkspace
       key={layoutId}
-      revisionId={revisionId}
+      folderId={folderId}
       layoutId={layoutId}
       canEdit={can('markup.edit')}
       canRecognize={can('recognition.start')}
       canLabelPages={can('document.edit')}
       onAfterRecognize={() => {
         void queryClient.invalidateQueries({
-          queryKey: revisionKeys.recognitionRuns(revisionId),
+          queryKey: folderKeys.recognitionRuns(folderId),
         });
       }}
       notify={message}
@@ -171,7 +171,7 @@ export function MarkupScreen({ revisionId }: MarkupScreenProps): ReactNode {
 }
 
 interface WorkspaceProps {
-  readonly revisionId: string;
+  readonly folderId: string;
   readonly layoutId: string;
   readonly canEdit: boolean;
   readonly canRecognize: boolean;
@@ -182,7 +182,7 @@ interface WorkspaceProps {
 }
 
 function LayoutWorkspace(props: WorkspaceProps): ReactNode {
-  const { revisionId, layoutId, canEdit, canRecognize, canLabelPages, notify } = props;
+  const { folderId, layoutId, canEdit, canRecognize, canLabelPages, notify } = props;
 
   const detail = useQuery({
     queryKey: layoutKeys.detail(layoutId),
@@ -194,7 +194,7 @@ function LayoutWorkspace(props: WorkspaceProps): ReactNode {
   });
   const bundleId = detail.data?.bundleId ?? null;
   const pages = useQuery({
-    queryKey: revisionKeys.bundlePages(bundleId ?? 'none'),
+    queryKey: folderKeys.bundlePages(bundleId ?? 'none'),
     queryFn: () => bundles.pages(bundleId ?? ''),
     enabled: bundleId !== null,
   });
@@ -202,8 +202,8 @@ function LayoutWorkspace(props: WorkspaceProps): ReactNode {
   // ленте. Ключи кэша те же, что на вкладке «Документы»: метка, поставленная
   // здесь, видна там без второй загрузки, и наоборот.
   const classifications = useQuery({
-    queryKey: revisionKeys.classifications(revisionId),
-    queryFn: () => documents.classifications(revisionId),
+    queryKey: folderKeys.classifications(folderId),
+    queryFn: () => documents.classifications(folderId),
   });
   const docTypes = useQuery({
     queryKey: catalogKeys.docTypes(false),
@@ -219,8 +219,8 @@ function LayoutWorkspace(props: WorkspaceProps): ReactNode {
    * обесценивается после нажатия «Распознать».
    */
   const runs = useQuery({
-    queryKey: revisionKeys.recognitionRuns(revisionId),
-    queryFn: () => recognition.runs(revisionId),
+    queryKey: folderKeys.recognitionRuns(folderId),
+    queryFn: () => recognition.runs(folderId),
   });
   const latestRunId =
     [...(runs.data ?? [])]
@@ -306,7 +306,7 @@ function LayoutWorkspace(props: WorkspaceProps): ReactNode {
   });
 
   const recognize = useMutation({
-    mutationFn: () => recognition.start(revisionId, layoutId),
+    mutationFn: () => recognition.start(folderId, layoutId),
     onSuccess: (result) => {
       notify.success(
         result.created
@@ -318,7 +318,7 @@ function LayoutWorkspace(props: WorkspaceProps): ReactNode {
     onError: (error) => notify.error(describeError(error)),
   });
 
-  const orientation = usePageOrientation(revisionId, bundleId);
+  const orientation = usePageOrientation(folderId, bundleId);
 
   /**
    * Ширины колонок и ключ перемонтирования `Splitter`.
@@ -612,7 +612,7 @@ function LayoutWorkspace(props: WorkspaceProps): ReactNode {
               }}
             >
               <PageTypePanel
-                revisionId={revisionId}
+                folderId={folderId}
                 page={currentPage}
                 classification={classByPage.get(currentPage.sourcePageId)}
                 docTypes={docTypes.data ?? []}

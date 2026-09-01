@@ -45,7 +45,7 @@
  * дважды. Проверяется тестом, а не намерением.
  */
 import { asc, eq } from 'drizzle-orm';
-import { ruleDefinitions, submissionRevisions } from '@id/db';
+import { ruleDefinitions, folders } from '@id/db';
 import { isAnalysisAnchor, isQualityDocCode, isRegistryCode } from '@id/doc-types';
 
 import type { AuthScope } from '../../auth/scope.js';
@@ -59,15 +59,15 @@ import {
   type FindingContext,
   type FindingView,
 } from './checks.js';
-import { listFieldValuesOfRevisions, listRegistryRows } from './documents.js';
+import { listFieldValuesOfFolders, listRegistryRows } from './documents.js';
 import type { RegistryRowView } from './documents.js';
 import type { Database } from './users.js';
 
 type ReadExecutor = Pick<Database, 'select'>;
 
-const REVISION_SCOPE: ScopeTarget = {
-  objectId: submissionRevisions.objectId,
-  contractorId: submissionRevisions.contractorId,
+const FOLDER_SCOPE: ScopeTarget = {
+  objectId: folders.objectId,
+  contractorId: folders.contractorId,
 };
 
 /**
@@ -193,7 +193,7 @@ const CHECKLIST_PREFIX = 'AOSR.';
 export async function buildCheckReport(
   db: Database,
   scope: AuthScope,
-  revisionId: string,
+  folderId: string,
 ): Promise<CheckReportView> {
   return db.transaction(async (tx) => {
     /**
@@ -213,29 +213,29 @@ export async function buildCheckReport(
      * поставки ответ не сообщает ничего (§16).
      */
     const visible = await tx
-      .select({ id: submissionRevisions.id })
-      .from(submissionRevisions)
-      .where(withScope(scope, REVISION_SCOPE, eq(submissionRevisions.id, revisionId)))
+      .select({ id: folders.id })
+      .from(folders)
+      .where(withScope(scope, FOLDER_SCOPE, eq(folders.id, folderId)))
       .limit(1);
     if (visible.length === 0) return { runId: null, sections: [] };
 
-    const { shownRunId } = await resolveShownRun(tx, scope, revisionId, undefined);
+    const { shownRunId } = await resolveShownRun(tx, scope, folderId, undefined);
 
     const findings =
-      shownRunId === null ? [] : await collectFindings(tx, scope, revisionId, shownRunId);
+      shownRunId === null ? [] : await collectFindings(tx, scope, folderId, shownRunId);
     // Контекст читается ВСЕГДА, в том числе без прогона: состав комплекта виден
     // и до проверки — ровно это заказчик и не мог увидеть на пустом экране.
     const context = await loadFindingContext(
       tx,
-      revisionId,
+      folderId,
       findings.map((finding) => finding.id),
     );
-    const registry = await listRegistryRows(tx, scope, revisionId);
-    const fields = await listFieldValuesOfRevisions(tx, scope, [revisionId], REPORT_FIELD_CODES);
+    const registry = await listRegistryRows(tx, scope, folderId);
+    const fields = await listFieldValuesOfFolders(tx, scope, [folderId], REPORT_FIELD_CODES);
     const journal =
       shownRunId === null
         ? null
-        : await readRunJournal(tx, { validationRunId: shownRunId, revisionId });
+        : await readRunJournal(tx, { validationRunId: shownRunId, folderId });
     const titles = await loadRuleTitles(tx);
 
     const facts = new ReportFacts({

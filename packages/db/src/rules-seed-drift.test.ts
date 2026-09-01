@@ -54,10 +54,18 @@ describe('seed реестра правил не отстаёт от катало
   it.each(RULE_SEED_BATCHES.map((batch) => [batch.migration, batch] as const))(
     '%s совпадает с текущим выводом generateRuleSeedSql()',
     (migration, batch) => {
+      // `seededAs` — замены, которыми застывший файл отличается от нынешнего
+      // каталога (переименование значения существующего правила). Настоящий
+      // дрейф — новое правило, другой заголовок, съехавшая тяжесть — они не
+      // маскируют: подстановки точечные и объявлены в каталоге поимённо.
+      const generated = (batch.seededAs ?? []).reduce(
+        (sql, [now, seeded]) => sql.split(now).join(seeded),
+        generateRuleSeedSql(batch.rules),
+      );
       expect(
         checksumOf(committedSeedOf(migration)),
         `${migration}.sql разошёлся с каталогом. Перегенерируйте: pnpm rules:seed:generate`,
-      ).toBe(checksumOf(generateRuleSeedSql(batch.rules)));
+      ).toBe(checksumOf(generated));
     },
   );
 

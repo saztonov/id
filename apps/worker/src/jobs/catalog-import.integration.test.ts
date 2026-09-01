@@ -94,7 +94,7 @@ function context(importId: string): JobContext<'catalog.import.parse'> {
     type: 'catalog.import.parse',
     attempt: 1,
     maxAttempts: 2,
-    revisionId: null,
+    folderId: null,
     payload: { importId },
     db: drizzle,
     logger: {

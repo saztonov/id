@@ -52,11 +52,29 @@ export interface RuleSeedBatch {
   /** Имя файла миграции без расширения — по нему сверка находит файл. */
   readonly migration: string;
   readonly rules: readonly RuleSpec[];
+  /**
+   * Замены, которыми ЗАСТЫВШИЙ файл отличается от нынешнего каталога.
+   *
+   * Партии append-only не хватает на один случай: значение поля существующего
+   * правила переименовано. Так вышло в S44 с уровнем `revision` → `folder`:
+   * ревизия поставки перестала существовать как сущность, а строки в
+   * `rule_definitions` были засеяны применёнными миграциями и заморожены
+   * контрольной суммой.
+   *
+   * Переписывать применённый файл нельзя (раннер объявит его `modified`),
+   * поэтому значение в БД правит ОТДЕЛЬНАЯ миграция, а здесь записано, чем
+   * старый текст отличается от нового. Сверка применяет замены к выводу
+   * генератора перед сравнением — и продолжает ловить настоящий дрейф:
+   * добавленное правило, изменённый заголовок, съехавшую тяжесть.
+   */
+  readonly seededAs?: readonly (readonly [string, string])[];
 }
 
 export const RULE_SEED_BATCHES: readonly RuleSeedBatch[] = [
   {
     migration: '0017_seed_rule_definitions',
+    // Уровень `folder` засеян как `revision`: см. `seededAs` и миграцию S44.
+    seededAs: [['$rules$folder$rules$', '$rules$revision$rules$']],
     rules: [
       ...DATE_RULES,
       ...SIGNATURE_RULES,
@@ -72,6 +90,7 @@ export const RULE_SEED_BATCHES: readonly RuleSeedBatch[] = [
     // старте сравнивает таблицу с каталогом в обе стороны. Исполняет их задача
     // `checks.llm_review`, движок отвечает `n_a` с названной причиной.
     migration: '0031_seed_llm_review_rules',
+    seededAs: [['$rules$folder$rules$', '$rules$revision$rules$']],
     rules: LLM_REVIEW_RULES,
   },
 ];

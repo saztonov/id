@@ -97,7 +97,7 @@ export const LLM_REVIEW_RULES: readonly RuleSpec[] = [
   llmRule({
     code: 'LLM.FILL.030',
     title: 'Реквизиты документов комплекта противоречат друг другу',
-    level: 'revision',
+    level: 'folder',
     severity: 'warning',
   }),
   llmRule({

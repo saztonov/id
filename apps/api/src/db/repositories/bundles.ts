@@ -19,7 +19,7 @@
  * Ни у `source_files`, ни у `source_pages`, ни у `processing_bundles` нет
  * собственных `object_id`/`contractor_id` — они есть у ревизии, а составные FK
  * (0003) не дают дочерней строке принадлежать другой ревизии. Поэтому область
- * применяется соединением с `submission_revisions` и `withScope()` по её
+ * применяется соединением с `folders` и `withScope()` по её
  * колонкам. Это касается и выдачи ссылок, и обратного поиска страницы: любой
  * доступ к файлу, странице и поставке проходит проверку принадлежности.
  *
@@ -39,13 +39,13 @@ import {
   sourceFiles,
   sourcePages,
   storedBlobs,
-  submissionRevisions,
+  folders,
 } from '@id/db';
 import type { ContentRotation, ContentRotationSource } from '@id/contracts';
 import type { AuthScope } from '../../auth/scope.js';
 import { conflict, internal, notFound } from '../../lib/problem.js';
 import { withScope, type ScopeTarget } from '../scoped.js';
-import { appendRevisionEvent } from './jobs.js';
+import { appendFolderEvent } from './jobs.js';
 import type { Database } from './users.js';
 
 /**
@@ -54,13 +54,12 @@ import type { Database } from './users.js';
  * Одна на все запросы этого файла. Второй экземпляр правила доступа рядом
  * означал бы два источника правды для изоляции подрядчиков.
  */
-const REVISION_SCOPE: ScopeTarget = {
-  objectId: submissionRevisions.objectId,
-  contractorId: submissionRevisions.contractorId,
+const FOLDER_SCOPE: ScopeTarget = {
+  objectId: folders.objectId,
+  contractorId: folders.contractorId,
 };
 
 /** Статусы, в которых состав ревизии ещё можно менять (0008, класс `source`). */
-const MUTABLE_STATUSES = new Set(['draft']);
 
 // =====================================================================
 // Хэш состава
@@ -122,10 +121,9 @@ export interface BundlePlanFile {
 }
 
 export interface BundlePlan {
-  readonly revisionId: string;
+  readonly folderId: string;
   readonly objectId: string;
   readonly contractorId: string;
-  readonly status: string;
   readonly files: readonly BundlePlanFile[];
   readonly aggregateManifestHash: string;
   /** Пусто — можно собирать; иначе перечень причин, почему нельзя. */
@@ -147,21 +145,20 @@ export interface BundlePlan {
 export async function loadBundlePlan(
   db: Database,
   scope: AuthScope,
-  revisionId: string,
+  folderId: string,
 ): Promise<BundlePlan | null> {
-  const revisions = await db
+  const visible = await db
     .select({
-      id: submissionRevisions.id,
-      objectId: submissionRevisions.objectId,
-      contractorId: submissionRevisions.contractorId,
-      status: submissionRevisions.status,
+      id: folders.id,
+      objectId: folders.objectId,
+      contractorId: folders.contractorId,
     })
-    .from(submissionRevisions)
-    .where(withScope(scope, REVISION_SCOPE, eq(submissionRevisions.id, revisionId)))
+    .from(folders)
+    .where(withScope(scope, FOLDER_SCOPE, eq(folders.id, folderId)))
     .limit(1);
 
-  const revision = revisions[0];
-  if (revision === undefined) return null;
+  const folder = visible[0];
+  if (folder === undefined) return null;
 
   const rows = await db
     .select({
@@ -177,13 +174,13 @@ export async function loadBundlePlan(
       filePageIndex: sourcePages.filePageIndex,
     })
     .from(sourceFiles)
-    .innerJoin(submissionRevisions, eq(sourceFiles.revisionId, submissionRevisions.id))
+    .innerJoin(folders, eq(sourceFiles.folderId, folders.id))
     .innerJoin(storedBlobs, eq(sourceFiles.blobSha256, storedBlobs.sha256))
     // LEFT: файл без страниц обязан остаться в плане и стать препятствием,
     // а INNER JOIN молча выбросил бы его из состава — и рабочий документ
     // собрался бы без него, не сообщив об этом никому.
     .leftJoin(sourcePages, eq(sourcePages.sourceFileId, sourceFiles.id))
-    .where(withScope(scope, REVISION_SCOPE, eq(sourceFiles.revisionId, revisionId)))
+    .where(withScope(scope, FOLDER_SCOPE, eq(sourceFiles.folderId, folderId)))
     .orderBy(asc(sourceFiles.sortOrder), asc(sourcePages.filePageIndex));
 
   const byFile = new Map<
@@ -219,26 +216,19 @@ export async function loadBundlePlan(
   }));
 
   return {
-    revisionId: revision.id,
-    objectId: revision.objectId,
-    contractorId: revision.contractorId,
-    status: revision.status,
+    folderId: folder.id,
+    objectId: folder.objectId,
+    contractorId: folder.contractorId,
     files,
     aggregateManifestHash: computeAggregateManifestHash(files),
-    blockers: collectBlockers(revision.status, files),
+    blockers: collectBlockers(files),
   };
 }
 
-function collectBlockers(status: string, files: readonly BundlePlanFile[]): readonly string[] {
+function collectBlockers(files: readonly BundlePlanFile[]): readonly string[] {
   const blockers: string[] = [];
 
-  if (!MUTABLE_STATUSES.has(status)) {
-    blockers.push(
-      `ревизия в статусе «${status}»: состав поданной ревизии неизменяем, ` +
-        'рабочий документ собирается до подачи',
-    );
-  }
-  if (files.length === 0) blockers.push('в ревизии нет ни одного файла');
+  if (files.length === 0) blockers.push('в папке нет ни одного файла');
 
   for (const file of files) {
     if (file.verifyState === 'quarantined') {
@@ -266,7 +256,7 @@ function collectBlockers(status: string, files: readonly BundlePlanFile[]): read
 
 export interface BundleView {
   readonly id: string;
-  readonly revisionId: string;
+  readonly folderId: string;
   readonly aggregateManifestHash: string;
   readonly workingPdfBlobSha256: string;
   readonly builderVersion: string;
@@ -276,7 +266,7 @@ export interface BundleView {
 
 const BUNDLE_SELECTION = {
   id: processingBundles.id,
-  revisionId: processingBundles.revisionId,
+  folderId: processingBundles.folderId,
   aggregateManifestHash: processingBundles.aggregateManifestHash,
   workingPdfBlobSha256: processingBundles.workingPdfBlobSha256,
   builderVersion: processingBundles.builderVersion,
@@ -304,8 +294,8 @@ export async function findBundle(
   const rows = await db
     .select(BUNDLE_SELECTION)
     .from(processingBundles)
-    .innerJoin(submissionRevisions, eq(processingBundles.revisionId, submissionRevisions.id))
-    .where(withScope(scope, REVISION_SCOPE, eq(processingBundles.id, bundleId)))
+    .innerJoin(folders, eq(processingBundles.folderId, folders.id))
+    .where(withScope(scope, FOLDER_SCOPE, eq(processingBundles.id, bundleId)))
     .limit(1);
   return rows[0] ?? null;
 }
@@ -315,7 +305,7 @@ export async function findBundleByManifest(
   db: Database,
   scope: AuthScope,
   target: {
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly aggregateManifestHash: string;
     readonly builderVersion: string;
   },
@@ -323,12 +313,12 @@ export async function findBundleByManifest(
   const rows = await db
     .select(BUNDLE_SELECTION)
     .from(processingBundles)
-    .innerJoin(submissionRevisions, eq(processingBundles.revisionId, submissionRevisions.id))
+    .innerJoin(folders, eq(processingBundles.folderId, folders.id))
     .where(
       withScope(
         scope,
-        REVISION_SCOPE,
-        eq(processingBundles.revisionId, target.revisionId),
+        FOLDER_SCOPE,
+        eq(processingBundles.folderId, target.folderId),
         eq(processingBundles.aggregateManifestHash, target.aggregateManifestHash),
         eq(processingBundles.builderVersion, target.builderVersion),
       ),
@@ -340,13 +330,13 @@ export async function findBundleByManifest(
 export async function listBundles(
   db: Database,
   scope: AuthScope,
-  revisionId: string,
+  folderId: string,
 ): Promise<readonly BundleView[]> {
   return db
     .select(BUNDLE_SELECTION)
     .from(processingBundles)
-    .innerJoin(submissionRevisions, eq(processingBundles.revisionId, submissionRevisions.id))
-    .where(withScope(scope, REVISION_SCOPE, eq(processingBundles.revisionId, revisionId)))
+    .innerJoin(folders, eq(processingBundles.folderId, folders.id))
+    .where(withScope(scope, FOLDER_SCOPE, eq(processingBundles.folderId, folderId)))
     .orderBy(asc(processingBundles.createdAt));
 }
 
@@ -408,7 +398,7 @@ const PAGE_MAP_SELECTION = {
  * сегодня это так, но схема этого не обещает.
  */
 const ORIENTATION_JOIN = and(
-  eq(pageOrientations.revisionId, processingBundles.revisionId),
+  eq(pageOrientations.folderId, processingBundles.folderId),
   eq(pageOrientations.sourcePageId, processingBundlePages.sourcePageId),
 );
 
@@ -454,11 +444,11 @@ export async function listBundlePages(
     .select(PAGE_MAP_SELECTION)
     .from(processingBundlePages)
     .innerJoin(processingBundles, eq(processingBundlePages.bundleId, processingBundles.id))
-    .innerJoin(submissionRevisions, eq(processingBundles.revisionId, submissionRevisions.id))
+    .innerJoin(folders, eq(processingBundles.folderId, folders.id))
     .innerJoin(sourcePages, eq(processingBundlePages.sourcePageId, sourcePages.id))
     .innerJoin(sourceFiles, eq(sourcePages.sourceFileId, sourceFiles.id))
     .leftJoin(pageOrientations, ORIENTATION_JOIN)
-    .where(withScope(scope, REVISION_SCOPE, eq(processingBundlePages.bundleId, bundleId)))
+    .where(withScope(scope, FOLDER_SCOPE, eq(processingBundlePages.bundleId, bundleId)))
     .orderBy(asc(processingBundlePages.workingPageIndex));
   return rows.map(toPageView);
 }
@@ -480,14 +470,14 @@ export async function findSourceOfWorkingPage(
     .select(PAGE_MAP_SELECTION)
     .from(processingBundlePages)
     .innerJoin(processingBundles, eq(processingBundlePages.bundleId, processingBundles.id))
-    .innerJoin(submissionRevisions, eq(processingBundles.revisionId, submissionRevisions.id))
+    .innerJoin(folders, eq(processingBundles.folderId, folders.id))
     .innerJoin(sourcePages, eq(processingBundlePages.sourcePageId, sourcePages.id))
     .innerJoin(sourceFiles, eq(sourcePages.sourceFileId, sourceFiles.id))
     .leftJoin(pageOrientations, ORIENTATION_JOIN)
     .where(
       withScope(
         scope,
-        REVISION_SCOPE,
+        FOLDER_SCOPE,
         eq(processingBundlePages.bundleId, bundleId),
         eq(processingBundlePages.workingPageIndex, workingPageIndex),
       ),
@@ -509,7 +499,7 @@ export interface WorkingPdfBlob {
 }
 
 export interface CreateBundleInput {
-  readonly revisionId: string;
+  readonly folderId: string;
   readonly aggregateManifestHash: string;
   readonly builderVersion: string;
   readonly workingPdf: WorkingPdfBlob;
@@ -547,20 +537,13 @@ export async function createBundle(
   const bundleId = await db.transaction(async (tx) => {
     // Область видимости проверяется внутри транзакции: строка ревизии здесь и
     // разрешение на запись — одно решение, и разносить их нельзя.
-    const revisions = await tx
-      .select({ id: submissionRevisions.id, status: submissionRevisions.status })
-      .from(submissionRevisions)
-      .where(withScope(scope, REVISION_SCOPE, eq(submissionRevisions.id, input.revisionId)))
+    const visible = await tx
+      .select({ id: folders.id })
+      .from(folders)
+      .where(withScope(scope, FOLDER_SCOPE, eq(folders.id, input.folderId)))
       .limit(1);
 
-    const revision = revisions[0];
-    if (revision === undefined) throw notFound('Ревизия поставки не найдена.');
-    if (!MUTABLE_STATUSES.has(revision.status)) {
-      throw conflict(
-        `Рабочий документ нельзя собрать для ревизии в статусе «${revision.status}»: ` +
-          'поданный состав неизменяем.',
-      );
-    }
+    if (visible[0] === undefined) throw notFound('Папка не найдена.');
 
     // Дедупликация по содержимому (§3.3): те же байты второй раз не хранятся.
     // Конфликт возможен и по s3_key — тогда запись тоже пропускается, а
@@ -578,7 +561,7 @@ export async function createBundle(
     const inserted = await tx
       .insert(processingBundles)
       .values({
-        revisionId: input.revisionId,
+        folderId: input.folderId,
         aggregateManifestHash: input.aggregateManifestHash,
         workingPdfBlobSha256: input.workingPdf.sha256,
         builderVersion: input.builderVersion,
@@ -594,7 +577,7 @@ export async function createBundle(
       await tx.insert(processingBundlePages).values(
         input.pages.map((page) => ({
           bundleId: row.id,
-          revisionId: input.revisionId,
+          folderId: input.folderId,
           workingPageIndex: page.workingPageIndex,
           sourcePageId: page.sourcePageId,
         })),
@@ -604,8 +587,8 @@ export async function createBundle(
     // Событие пишется той же транзакцией и общей функцией из `jobs.ts`:
     // второй выдачи `seq` быть не должно — расхождение номеров означало бы
     // пропущенное событие у SSE-клиента с `Last-Event-ID`.
-    await appendRevisionEvent(tx, {
-      revisionId: input.revisionId,
+    await appendFolderEvent(tx, {
+      folderId: input.folderId,
       eventType: 'bundle.created',
       payload: {
         bundleId: row.id,

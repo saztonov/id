@@ -70,13 +70,13 @@ export class ChecksStateError extends Error {
 export interface ChecksDeps {
   /** Граф ревизии без ответов внешних реестров. */
   loadGraph(input: {
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly today: string;
   }): Promise<Omit<CheckGraph, 'external'>>;
 
   /** Вывод материалов и партий с записью в БД; возвращает узлы с id строк. */
   saveDerivedMaterials(input: {
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly documents: CheckGraph['documents'];
   }): Promise<{ readonly nodes: readonly MaterialNode[]; readonly materials: number }>;
 
@@ -87,7 +87,7 @@ export interface ChecksDeps {
   listRuleDefinitionCodes(): Promise<readonly string[]>;
 
   startValidationRun(input: {
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly rulesetVersionId: string;
     readonly sectionProfileId: string | null;
     readonly objectRuleProfileId: string | null;
@@ -95,31 +95,31 @@ export interface ChecksDeps {
 
   saveFindings(input: {
     readonly validationRunId: string;
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly findings: readonly PreparedFinding[];
   }): Promise<{ readonly removed: number; readonly written: number; readonly evidence: number }>;
 
   /** Журнал исполнения правил: пишется задачей 20, читается задачей 21. */
   saveRunJournal(input: {
     readonly validationRunId: string;
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly journal: RuleExecutionJournal;
   }): Promise<void>;
 
   loadRunJournal(input: {
     readonly validationRunId: string;
-    readonly revisionId: string;
+    readonly folderId: string;
   }): Promise<RuleExecutionJournal | null>;
 
   /** Замечания прогона ЧИТАЮТСЯ обратно: сводка описывает записанное. */
   listFindings(input: {
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly validationRunId: string;
   }): Promise<readonly FindingView[]>;
 
   finishValidationRun(input: {
     readonly validationRunId: string;
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly summary: ValidationSummary;
   }): Promise<void>;
 
@@ -149,7 +149,7 @@ export interface ChecksDeps {
  */
 export function createChecksRunHandler(deps: ChecksDeps): JobHandler<'checks.run'> {
   return async (ctx: JobContext<'checks.run'>) => {
-    const { revisionId } = ctx.payload;
+    const { folderId } = ctx.payload;
 
     // 1. Сверка §9.6. Ошибка — не «предупреждение в журнале»: правило,
     // включённое администратором и не имеющее реализации, молча не исполняется,
@@ -192,22 +192,22 @@ export function createChecksRunHandler(deps: ChecksDeps): JobHandler<'checks.run
       const reason =
         'Активная версия набора правил не назначена: опубликуйте набор и укажите его ' +
         'активным в администрировании (§3.7).';
-      await ctx.emit('checks.configuration_missing', { revisionId, reason });
+      await ctx.emit('checks.configuration_missing', { folderId, reason });
       throw new ChecksStateError(reason);
     }
 
     const today = new Date().toISOString().slice(0, 10);
-    const base = await deps.loadGraph({ revisionId, today });
+    const base = await deps.loadGraph({ folderId, today });
 
     if (base.documents.length === 0) {
       throw new ChecksStateError(
-        `Ревизия ${revisionId}: логических документов нет, проверять нечего. ` +
+        `Ревизия ${folderId}: логических документов нет, проверять нечего. ` +
           'Сначала должна отработать сегментация (задачи 14–19).',
       );
     }
 
     const derived = await deps.saveDerivedMaterials({
-      revisionId,
+      folderId,
       documents: base.documents,
     });
 
@@ -215,7 +215,7 @@ export function createChecksRunHandler(deps: ChecksDeps): JobHandler<'checks.run
     const graph: CheckGraph = { ...base, materials: derived.nodes, external };
 
     const run = await deps.startValidationRun({
-      revisionId,
+      folderId,
       rulesetVersionId: snapshot.versionId,
       sectionProfileId: graph.profile.sectionProfileId,
       objectRuleProfileId: graph.profile.objectProfileIds.at(-1) ?? null,
@@ -236,7 +236,7 @@ export function createChecksRunHandler(deps: ChecksDeps): JobHandler<'checks.run
     // Ни одно правило не исполнилось — это отказ, а не «замечаний нет».
     if (result.executions.length === 0) {
       throw new ChecksStateError(
-        `Ревизия ${revisionId}: не исполнено ни одного правила. ` +
+        `Ревизия ${folderId}: не исполнено ни одного правила. ` +
           `Пропущено ${String(Object.keys(result.skipped).length)} кодов; ` +
           'проверьте enabled_rule_codes профиля и состав снимка набора правил.',
       );
@@ -244,7 +244,7 @@ export function createChecksRunHandler(deps: ChecksDeps): JobHandler<'checks.run
 
     const saved = await deps.saveFindings({
       validationRunId: run.id,
-      revisionId,
+      folderId,
       findings: result.findings,
     });
 
@@ -258,7 +258,7 @@ export function createChecksRunHandler(deps: ChecksDeps): JobHandler<'checks.run
     // его в базе независимо от того, какой процесс её подхватит.
     await deps.saveRunJournal({
       validationRunId: run.id,
-      revisionId,
+      folderId,
       journal: {
         engineVersion: CHECKS_ENGINE_VERSION,
         rulesetVersion: snapshot.version,
@@ -292,7 +292,7 @@ export function createChecksRunHandler(deps: ChecksDeps): JobHandler<'checks.run
     // внешняя модель не настроена.
     await ctx.enqueue({
       type: 'checks.llm_review',
-      payload: { revisionId, validationRunId: run.id },
+      payload: { folderId, validationRunId: run.id },
       dedupeKey: `checks.llm_review:${run.id}`,
     });
   };
@@ -324,8 +324,8 @@ function queryOf(graph: Omit<CheckGraph, 'external'>): RegistryQuery {
   }
 
   return {
-    objectId: graph.revision.objectId,
-    contractorId: graph.revision.contractorId,
+    objectId: graph.folder.objectId,
+    contractorId: graph.folder.contractorId,
     inns: [...inns],
     people: [...people],
     accreditationNumbers: [...accreditations],
@@ -347,10 +347,10 @@ function queryOf(graph: Omit<CheckGraph, 'external'>): RegistryQuery {
  */
 export function createChecksSummarizeHandler(deps: ChecksDeps): JobHandler<'checks.summarize'> {
   return async (ctx: JobContext<'checks.summarize'>) => {
-    const { revisionId, validationRunId } = ctx.payload;
+    const { folderId, validationRunId } = ctx.payload;
 
-    const stored = await deps.listFindings({ revisionId, validationRunId });
-    const journal = await deps.loadRunJournal({ revisionId, validationRunId });
+    const stored = await deps.listFindings({ folderId, validationRunId });
+    const journal = await deps.loadRunJournal({ folderId, validationRunId });
 
     // Журнала нет — значит задача 20 по этому прогону не отработала. Сводка,
     // построенная в таком состоянии, показала бы «ноль замечаний» как
@@ -382,7 +382,7 @@ export function createChecksSummarizeHandler(deps: ChecksDeps): JobHandler<'chec
       journal,
     };
 
-    await deps.finishValidationRun({ validationRunId, revisionId, summary });
+    await deps.finishValidationRun({ validationRunId, folderId, summary });
 
     ctx.logger.info(
       { validationRunId, findings: summary.findings, blocking: summary.blocking },

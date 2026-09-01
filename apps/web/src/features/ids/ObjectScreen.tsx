@@ -65,16 +65,13 @@ import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tansta
 import { catalog, files } from '../../api/endpoints.js';
 import { catalogKeys, navigationKeys } from '../../api/keys.js';
 import {
-  createRegistry,
-  deleteWork,
-  getWorkDeletionPreview,
-  listRegistries,
+  deleteFolder,
+  getFolderDeletionPreview,
   listSectionCounts,
   listWorkPipeline,
-  listWorks,
+  listFolders,
   pagesBlocked,
   pagesItems,
-  type Registry,
   type Work,
   type WorkFilter,
 } from '../../api/navigation.js';
@@ -87,7 +84,6 @@ import {
   ScreenHeading,
   UnavailableState,
 } from '../../shared/ui.js';
-import { REGISTRY_STATUS_LABELS, labelOf } from '../../shared/labels.js';
 import { IconAction, RowActions } from '../../shared/RowActions.js';
 import { TrashIcon } from '../../shared/icons.js';
 import { Link, useNavigate } from '../../app/router.js';
@@ -95,39 +91,11 @@ import { useSession } from '../../app/session.js';
 import { uploadToTicket } from '../files/upload.js';
 import {
   contractorLabel,
-  monthLabel,
   periodLabel,
   pipelineBusy,
   pipelineLabel,
   type WorkPipeline,
 } from './pipelineState.js';
-
-/** Текущий месяц первым числом — то, что подставляется в форму по умолчанию. */
-function currentPeriod(): string {
-  const now = new Date();
-  return `${String(now.getUTCFullYear())}-${String(now.getUTCMonth() + 1).padStart(2, '0')}-01`;
-}
-
-/**
- * Месяцы для селекта: год назад и месяц вперёд от текущего.
- *
- * Полем `type="date"` месяц выбирать нельзя честно: оно требует выбрать ЧИСЛО,
- * а комплект относится к месяцу, и «первое число» было приписано подсказкой,
- * которую надо было прочитать. Селект убирает это требование вовсе.
- *
- * Границы взяты с запасом в обе стороны: комплект заводят и задним числом (акт
- * за прошлый квартал подшивают позже), и наперёд — редко, но заводят.
- */
-function periodOptions(): { value: string; label: string }[] {
-  const now = new Date();
-  const options: { value: string; label: string }[] = [];
-  for (let shift = 1; shift >= -12; shift -= 1) {
-    const date = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + shift, 1));
-    const value = `${String(date.getUTCFullYear())}-${String(date.getUTCMonth() + 1).padStart(2, '0')}-01`;
-    options.push({ value, label: monthLabel(value) });
-  }
-  return options;
-}
 
 /** `2026-08` из `<input type="month">` → `2026-08-01`, как ждёт сервер. */
 function monthToPeriod(value: string): string | undefined {
@@ -159,13 +127,6 @@ export function ObjectScreen({ objectId }: { objectId: string }): ReactNode {
     queryFn: () => listSectionCounts(objectId, filter),
   });
 
-  const registries = useInfiniteQuery({
-    queryKey: navigationKeys.registries(objectId),
-    queryFn: ({ pageParam }) => listRegistries({ objectId, cursor: pageParam }),
-    initialPageParam: null as string | null,
-    getNextPageParam: (last) => (last.kind === 'available' ? last.data.nextCursor : null),
-  });
-
   const enabled = (sections.data ?? []).filter((row) => row.isActive);
 
   const countOf = (sectionCode: string): number | null => {
@@ -173,8 +134,6 @@ export function ObjectScreen({ objectId }: { objectId: string }): ReactNode {
     if (result === undefined || result.kind !== 'available') return null;
     return result.data.find((row) => row.sectionCode === sectionCode)?.works ?? 0;
   };
-
-  const registriesBlocked = pagesBlocked(registries.data?.pages);
 
   return (
     <>
@@ -193,7 +152,7 @@ export function ObjectScreen({ objectId }: { objectId: string }): ReactNode {
         loading={sections.isPending || contractors.isPending}
       />
 
-      <WorkFilters value={filter} onChange={setFilter} />
+      <FolderFilters value={filter} onChange={setFilter} />
 
       <Card size="small" title="Разделы работ" style={{ marginTop: 16 }}>
         {sections.isPending && <LoadingState label="Загрузка разделов…" />}
@@ -237,81 +196,6 @@ export function ObjectScreen({ objectId }: { objectId: string }): ReactNode {
           />
         )}
       </Card>
-
-      <Card
-        size="small"
-        title="Реестры передачи"
-        style={{ marginTop: 16 }}
-        extra={
-          can('registry.manage') ? (
-            <NewRegistryButton objectId={objectId} sections={enabled} />
-          ) : null
-        }
-      >
-        {registries.isPending && <LoadingState label="Загрузка реестров…" />}
-        {registries.isError && <ErrorState error={registries.error} />}
-        {registriesBlocked !== null && (
-          <UnavailableState
-            route={registriesBlocked.route}
-            what="Реестры объекта"
-            reason={registriesBlocked.reason}
-            detail={registriesBlocked.detail}
-          />
-        )}
-        {registries.isSuccess && registriesBlocked === null && (
-          <>
-            <Table<Registry>
-              rowKey="id"
-              size="small"
-              pagination={false}
-              dataSource={pagesItems(registries.data.pages)}
-              locale={{ emptyText: 'Реестров на объекте нет' }}
-              columns={[
-                {
-                  title: '№',
-                  dataIndex: 'number',
-                  key: 'number',
-                  render: (number: string | null, row) => (
-                    <Link to={`/ids/registries/${row.id}`}>{number ?? 'без номера'}</Link>
-                  ),
-                },
-                {
-                  title: 'Раздел',
-                  dataIndex: 'sectionCode',
-                  key: 'sectionCode',
-                  render: (code: string) =>
-                    (sections.data ?? []).find((row) => row.sectionCode === code)?.name ?? code,
-                },
-                {
-                  title: 'Месяц',
-                  dataIndex: 'period',
-                  key: 'period',
-                  render: (period: string) => monthLabel(period),
-                },
-                {
-                  title: 'Состояние',
-                  dataIndex: 'status',
-                  key: 'status',
-                  render: (status: string) => <Tag>{labelOf(REGISTRY_STATUS_LABELS, status)}</Tag>,
-                },
-              ]}
-            />
-            {registries.hasNextPage && (
-              <Button
-                style={{ marginTop: 12 }}
-                size="small"
-                data-testid="registries-more"
-                loading={registries.isFetchingNextPage}
-                onClick={() => {
-                  void registries.fetchNextPage();
-                }}
-              >
-                Показать ещё реестры
-              </Button>
-            )}
-          </>
-        )}
-      </Card>
     </>
   );
 }
@@ -350,7 +234,7 @@ interface FilterFormValues {
  * его столько раз, сколько разделов. Отбор применяется и к счётчикам в
  * заголовках — иначе число обещало бы комплекты, которых в теле панели нет.
  */
-function WorkFilters({
+function FolderFilters({
   value,
   onChange,
 }: {
@@ -449,13 +333,13 @@ function DeleteWorkAction({ work }: { work: Work }): ReactNode {
   const [open, setOpen] = useState(false);
 
   const preview = useQuery({
-    queryKey: navigationKeys.workDeletionPreview(work.id),
-    queryFn: () => getWorkDeletionPreview(work.id),
+    queryKey: navigationKeys.folderDeletionPreview(work.id),
+    queryFn: () => getFolderDeletionPreview(work.id),
     enabled: open,
   });
 
   const remove = useMutation({
-    mutationFn: () => deleteWork(work.id),
+    mutationFn: () => deleteFolder(work.id),
     onSuccess: async () => {
       message.success(`Комплект «${work.title}» удалён`);
       setOpen(false);
@@ -511,7 +395,7 @@ function DeleteWorkAction({ work }: { work: Work }): ReactNode {
             <Space direction="vertical" size={8}>
               <Typography.Text>Будет удалено безвозвратно:</Typography.Text>
               <ul style={{ margin: 0, paddingLeft: 18 }}>
-                <li>ревизий: {preview.data.revisions}</li>
+                <li>ревизий: {preview.data.folders}</li>
                 <li>
                   файлов: {preview.data.files}, страниц: {preview.data.pages}
                 </li>
@@ -552,8 +436,8 @@ function SectionPanel({
   const scoped: WorkFilter = { ...filter, objectId, sectionCode: section.sectionCode };
 
   const works = useInfiniteQuery({
-    queryKey: navigationKeys.works(JSON.stringify(scoped)),
-    queryFn: ({ pageParam }) => listWorks({ ...scoped, cursor: pageParam }),
+    queryKey: navigationKeys.folderList(JSON.stringify(scoped)),
+    queryFn: ({ pageParam }) => listFolders({ ...scoped, cursor: pageParam }),
     initialPageParam: null as string | null,
     getNextPageParam: (last) => (last.kind === 'available' ? last.data.nextCursor : null),
   });
@@ -574,7 +458,7 @@ function SectionPanel({
    */
   const workIds = items.map((item) => item.id);
   const pipeline = useQuery({
-    queryKey: navigationKeys.worksPipeline(objectId, workIds.join(',')),
+    queryKey: navigationKeys.foldersPipeline(objectId, workIds.join(',')),
     queryFn: () => listWorkPipeline(objectId, workIds),
     enabled: workIds.length > 0,
     refetchInterval: (query) =>
@@ -615,10 +499,10 @@ function SectionPanel({
                 dataIndex: 'title',
                 key: 'title',
                 render: (title: string, row) =>
-                  row.currentRevisionId === null ? (
+                  row.currentFolderId === null ? (
                     title
                   ) : (
-                    <Link to={`/ids/revisions/${row.currentRevisionId}`}>{title}</Link>
+                    <Link to={`/ids/folders/${row.currentFolderId}`}>{title}</Link>
                   ),
               },
               {
@@ -737,7 +621,7 @@ function NewWorkWithFileCard({
     mutationFn: async (values: WorkFormValues) => {
       if (file === null) throw new Error('Файл не выбран');
 
-      const created = await files.createWorkWithFile({
+      const created = await files.createFolderWithFile({
         objectId,
         sectionCode,
         title: values.title,
@@ -756,10 +640,10 @@ function NewWorkWithFileCard({
             `Хранилище не приняло файл, повтор ${String(attempt)} из ${String(total)}…`,
           );
         });
-        const stored = await files.completeUpload(created.revisionId, created.upload.uploadId);
+        const stored = await files.completeUpload(created.folderId, created.upload.uploadId);
         return { created, stored };
       } catch (error) {
-        setOrphan(created.revisionId);
+        setOrphan(created.folderId);
         throw new Error(describeUploadFailure(error), { cause: error });
       }
     },
@@ -779,7 +663,7 @@ function NewWorkWithFileCard({
         // комплекта человек видит идущий конвейер, которого не запускал.
         message.success('Комплект заведён: собираем рабочий документ, дальше — выделение блоков');
       }
-      navigate(`/ids/revisions/${created.revisionId}`);
+      navigate(`/ids/folders/${created.folderId}`);
     },
     // Отказ показывается на месте формы, а не всплывашкой: причина отказа —
     // часть объяснения ограничения, и она обязана оставаться на экране.
@@ -818,7 +702,7 @@ function NewWorkWithFileCard({
         {orphan !== null && (
           <ExplainedLimitation title="Комплект заведён, а файл не принят" testId="upload-orphan">
             Карточка комплекта и его черновая ревизия созданы — они не потеряны. Файл догрузите на
-            вкладке «Файлы»: <Link to={`/ids/revisions/${orphan}`}>открыть ревизию</Link>.
+            вкладке «Файлы»: <Link to={`/ids/folders/${orphan}`}>открыть ревизию</Link>.
           </ExplainedLimitation>
         )}
 
@@ -1062,96 +946,3 @@ function AssignContractor({
 // =====================================================================
 // Реестры
 // =====================================================================
-
-interface RegistryFormValues {
-  sectionCode: string;
-  period: string;
-  number?: string;
-}
-
-function NewRegistryButton({
-  objectId,
-  sections,
-}: {
-  objectId: string;
-  sections: readonly ObjectSection[];
-}): ReactNode {
-  const { message } = AntApp.useApp();
-  const navigate = useNavigate();
-  const queryClient = useQueryClient();
-  const [open, setOpen] = useState(false);
-  const [form] = Form.useForm<RegistryFormValues>();
-
-  const create = useMutation({
-    mutationFn: (values: RegistryFormValues) =>
-      createRegistry({
-        objectId,
-        sectionCode: values.sectionCode,
-        period: values.period,
-        ...(values.number === undefined ? {} : { number: values.number }),
-      }),
-    onSuccess: async (registry) => {
-      setOpen(false);
-      form.resetFields();
-      await queryClient.invalidateQueries({ queryKey: ['nav'] });
-      navigate(`/ids/registries/${registry.id}`);
-    },
-    onError: (error) => message.error(describeError(error)),
-  });
-
-  return (
-    <>
-      <Button size="small" type="primary" data-testid="new-registry" onClick={() => setOpen(true)}>
-        Новый реестр
-      </Button>
-      {open && (
-        <Card
-          size="small"
-          title="Новый реестр"
-          style={{ marginTop: 12 }}
-          extra={
-            <Button size="small" onClick={() => setOpen(false)}>
-              Отмена
-            </Button>
-          }
-        >
-          <Form<RegistryFormValues>
-            form={form}
-            layout="inline"
-            initialValues={{ period: currentPeriod() }}
-            onFinish={(values) => {
-              create.mutate(values);
-            }}
-          >
-            <Form.Item
-              name="sectionCode"
-              label="Раздел"
-              rules={[{ required: true, message: 'Раздел обязателен' }]}
-            >
-              <Select
-                style={{ width: 240 }}
-                options={sections.map((row) => ({ value: row.sectionCode, label: row.name }))}
-                data-testid="registry-section"
-              />
-            </Form.Item>
-            <Form.Item name="period" label="Месяц" rules={[{ required: true }]}>
-              <Select
-                style={{ width: 180 }}
-                options={periodOptions()}
-                data-testid="registry-period"
-              />
-            </Form.Item>
-            <Form.Item name="number" label="№" extra="Можно присвоить позже">
-              <Input style={{ width: 120 }} data-testid="registry-number" />
-            </Form.Item>
-            <Form.Item>
-              <Button type="primary" htmlType="submit" loading={create.isPending}>
-                Создать
-              </Button>
-            </Form.Item>
-          </Form>
-        </Card>
-      )}
-    </>
-  );
-}

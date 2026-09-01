@@ -65,7 +65,7 @@ function makeContext<T extends Record<string, unknown>>(
     type: 'file.verify',
     attempt: 1,
     maxAttempts: 3,
-    revisionId: (payload['revisionId'] as string | undefined) ?? null,
+    folderId: (payload['folderId'] as string | undefined) ?? null,
     payload,
     // База обработчику не нужна: он работает через связанные функции портов.
     db: undefined,
@@ -82,7 +82,7 @@ function makeContext<T extends Record<string, unknown>>(
 
 const FILE: FileForVerification = {
   fileId: '00000000-0000-4000-8000-0000000000f1',
-  revisionId: '00000000-0000-4000-8000-0000000000r1'.replace('r', 'a'),
+  folderId: '00000000-0000-4000-8000-0000000000r1'.replace('r', 'a'),
   fileName: 'akt.pdf',
   verifyState: 'ok',
   storageKey: 'blobs/aa',
@@ -91,7 +91,7 @@ const FILE: FileForVerification = {
 };
 
 /** Соседняя ревизия того же подрядчика: область её пропускает, сверка — нет. */
-const OTHER_REVISION = '00000000-0000-4000-8000-0000000000a2';
+const OTHER_FOLDER = '00000000-0000-4000-8000-0000000000a2';
 
 const OK_VERDICT: FileVerdict = {
   state: 'ok',
@@ -143,7 +143,7 @@ describe('file.verify', () => {
     const evaluate = vi.fn((_bytes: Uint8Array, _policy: EvaluatePolicy) => OK_VERDICT);
     const handler = createFileVerifyHandler(verifyDeps({ evaluate }));
 
-    await handler(makeContext({ revisionId: FILE.revisionId, sourceFileId: FILE.fileId }, emitted));
+    await handler(makeContext({ folderId: FILE.folderId, sourceFileId: FILE.fileId }, emitted));
 
     expect(emitted.map((event) => event.type)).toEqual(['file.verified']);
     expect(emitted[0]?.payload).toMatchObject({ pageCount: 2, signature: 'none_detected' });
@@ -161,7 +161,7 @@ describe('file.verify', () => {
       }),
     );
 
-    await handler(makeContext({ revisionId: FILE.revisionId, sourceFileId: FILE.fileId }, emitted));
+    await handler(makeContext({ folderId: FILE.folderId, sourceFileId: FILE.fileId }, emitted));
 
     expect(emitted).toHaveLength(1);
     expect(emitted[0]?.type).toBe('file.quarantined');
@@ -174,7 +174,7 @@ describe('file.verify', () => {
     const handler = createFileVerifyHandler(verifyDeps({ evaluate: () => QUARANTINE_VERDICT }));
 
     await expect(
-      handler(makeContext({ revisionId: FILE.revisionId, sourceFileId: FILE.fileId }, emitted)),
+      handler(makeContext({ folderId: FILE.folderId, sourceFileId: FILE.fileId }, emitted)),
     ).rejects.toThrow(/расходится|записан как/i);
     expect(emitted.map((event) => event.type)).toEqual(['file.verify_mismatch']);
   });
@@ -182,14 +182,14 @@ describe('file.verify', () => {
   it('при наличии записи вердикта расхождение не отказ, а запись', async () => {
     const emitted: Emitted[] = [];
     const saveVerdict = vi.fn(
-      (_input: { fileId: string; revisionId: string; verdict: FileVerdict }) =>
+      (_input: { fileId: string; folderId: string; verdict: FileVerdict }) =>
         Promise.resolve({ written: true }),
     );
     const handler = createFileVerifyHandler(
       verifyDeps({ evaluate: () => QUARANTINE_VERDICT, saveVerdict }),
     );
 
-    await handler(makeContext({ revisionId: FILE.revisionId, sourceFileId: FILE.fileId }, emitted));
+    await handler(makeContext({ folderId: FILE.folderId, sourceFileId: FILE.fileId }, emitted));
 
     expect(saveVerdict).toHaveBeenCalledOnce();
     expect(saveVerdict.mock.calls[0]?.[0]).toMatchObject({ fileId: FILE.fileId });
@@ -200,7 +200,7 @@ describe('file.verify', () => {
     const handler = createFileVerifyHandler(verifyDeps({ loadFile: () => Promise.resolve(null) }));
 
     await expect(
-      handler(makeContext({ revisionId: FILE.revisionId, sourceFileId: FILE.fileId }, [])),
+      handler(makeContext({ folderId: FILE.folderId, sourceFileId: FILE.fileId }, [])),
     ).rejects.toThrow(/не найден или недоступен/);
   });
 
@@ -210,7 +210,7 @@ describe('file.verify', () => {
     const handler = createFileVerifyHandler(verifyDeps());
 
     await expect(
-      handler(makeContext({ revisionId: OTHER_REVISION, sourceFileId: FILE.fileId }, [])),
+      handler(makeContext({ folderId: OTHER_FOLDER, sourceFileId: FILE.fileId }, [])),
     ).rejects.toThrow(/принадлежит ревизии/);
   });
 });
@@ -229,7 +229,7 @@ describe('file.signature_probe', () => {
   it('найденная подпись фиксируется как detected_unverified и не признаётся действительной', async () => {
     const emitted: Emitted[] = [];
     const saveProbe = vi.fn(
-      (_input: { fileId: string; revisionId: string; probe: StoredSignatureProbe }) =>
+      (_input: { fileId: string; folderId: string; probe: StoredSignatureProbe }) =>
         Promise.resolve({ written: true }),
     );
     const handler = createSignatureProbeHandler(
@@ -248,7 +248,7 @@ describe('file.signature_probe', () => {
       }),
     );
 
-    await handler(makeContext({ revisionId: FILE.revisionId, sourceFileId: FILE.fileId }, emitted));
+    await handler(makeContext({ folderId: FILE.folderId, sourceFileId: FILE.fileId }, emitted));
 
     expect(saveProbe.mock.calls[0]?.[0]).toMatchObject({
       probe: {
@@ -264,7 +264,7 @@ describe('file.signature_probe', () => {
   it('недоступное хранилище даёт unknown с причиной, а не падение задачи', async () => {
     const emitted: Emitted[] = [];
     const saveProbe = vi.fn(
-      (_input: { fileId: string; revisionId: string; probe: StoredSignatureProbe }) =>
+      (_input: { fileId: string; folderId: string; probe: StoredSignatureProbe }) =>
         Promise.resolve({ written: true }),
     );
     const handler = createSignatureProbeHandler(
@@ -274,7 +274,7 @@ describe('file.signature_probe', () => {
       }),
     );
 
-    await handler(makeContext({ revisionId: FILE.revisionId, sourceFileId: FILE.fileId }, emitted));
+    await handler(makeContext({ folderId: FILE.folderId, sourceFileId: FILE.fileId }, emitted));
 
     expect(saveProbe.mock.calls[0]?.[0]).toMatchObject({
       probe: { result: 'unknown', probeError: 'S3 недоступен' },
@@ -287,17 +287,16 @@ describe('file.signature_probe', () => {
     const handler = createSignatureProbeHandler(probeDeps());
 
     await expect(
-      handler(makeContext({ revisionId: OTHER_REVISION, sourceFileId: FILE.fileId }, [])),
+      handler(makeContext({ folderId: OTHER_FOLDER, sourceFileId: FILE.fileId }, [])),
     ).rejects.toThrow(/принадлежит ревизии/);
   });
 });
 
 describe('bundle.build', () => {
-  const REVISION = '00000000-0000-4000-8000-0000000000e1';
+  const FOLDER = '00000000-0000-4000-8000-0000000000e1';
 
   const PLAN: BundlePlan = {
-    revisionId: REVISION,
-    status: 'draft',
+    folderId: FOLDER,
     aggregateManifestHash: 'b'.repeat(64),
     blockers: [],
     files: [
@@ -332,8 +331,6 @@ describe('bundle.build', () => {
       loadPlan: () => Promise.resolve(PLAN),
       findExistingBundle: () => Promise.resolve(null),
       // По умолчанию переиспользовать нечего: у ревизии нет предков.
-      findReusableWorkingPdf: () => Promise.resolve(null),
-      workingPdfExists: () => Promise.resolve(true),
       fetchOriginal: (_key, path) => writeFile(path, 'PDF'),
       storeWorkingPdf: () =>
         Promise.resolve({ sha256: 'e'.repeat(64), sizeBytes: 4096, s3Key: 'blobs/ee' }),
@@ -365,7 +362,7 @@ describe('bundle.build', () => {
     );
     const handler = createBundleBuildHandler(bundleDeps({ createBundle }));
 
-    await handler(makeContext({ revisionId: REVISION }, emitted));
+    await handler(makeContext({ folderId: FOLDER }, emitted));
 
     const input = createBundle.mock.calls[0]?.[0];
     expect(input?.pages).toEqual([
@@ -388,61 +385,10 @@ describe('bundle.build', () => {
       }),
     );
 
-    await handler(makeContext({ revisionId: REVISION }, emitted));
+    await handler(makeContext({ folderId: FOLDER }, emitted));
 
     expect(fetchOriginal).not.toHaveBeenCalled();
     expect(emitted[0]?.payload).toMatchObject({ bundleId: 'bundle-0', reused: true });
-  });
-
-  /**
-   * §3: «результаты предыдущей ревизии переиспользуются только при совпадении
-   * `aggregate_manifest_hash`». Совпадение ищет репозиторий по цепочке
-   * `parent_revision_id`; здесь проверяется поведение задачи при найденном и
-   * при негодном кандидате.
-   */
-  const REUSABLE = {
-    revisionId: 'parent-revision',
-    workingPdfBlobSha256: 'f'.repeat(64),
-    sizeBytes: 8192,
-    s3Key: `blobs/ff/ff/${'f'.repeat(64)}`,
-    pageCount: 3,
-  };
-
-  it('состав, совпавший с предыдущей ревизией, не пересобирается заново', async () => {
-    const emitted: Emitted[] = [];
-    const fetchOriginal = vi.fn(() => Promise.resolve());
-    const storeWorkingPdf = vi.fn(() =>
-      Promise.resolve({ sha256: 'e'.repeat(64), sizeBytes: 4096, s3Key: 'blobs/ee' }),
-    );
-    const createBundle = vi.fn((_input: CreateBundleInput) =>
-      Promise.resolve({ bundle: { id: 'bundle-2', pageCount: 3 }, created: true }),
-    );
-
-    const handler = createBundleBuildHandler(
-      bundleDeps({
-        fetchOriginal,
-        storeWorkingPdf,
-        createBundle,
-        findReusableWorkingPdf: () => Promise.resolve(REUSABLE),
-      }),
-    );
-    await handler(makeContext({ revisionId: REVISION }, emitted));
-
-    // 86 МБ не качаются и не склеиваются, но своя строка bundle и своя карта
-    // страниц у ревизии появляются: идентификаторы страниц у неё собственные.
-    expect(fetchOriginal).not.toHaveBeenCalled();
-    expect(storeWorkingPdf).not.toHaveBeenCalled();
-    const input = createBundle.mock.calls[0]?.[0];
-    expect(input?.workingPdf.sha256).toBe(REUSABLE.workingPdfBlobSha256);
-    expect(input?.pages).toEqual([
-      { workingPageIndex: 0, sourcePageId: 'page-1' },
-      { workingPageIndex: 1, sourcePageId: 'page-2' },
-      { workingPageIndex: 2, sourcePageId: 'page-3' },
-    ]);
-    expect(emitted[0]?.payload).toMatchObject({
-      reused: true,
-      reusedFromRevisionId: 'parent-revision',
-    });
   });
 
   it('переиспользование не берётся на веру: без объекта в хранилище идёт обычная сборка', async () => {
@@ -450,12 +396,10 @@ describe('bundle.build', () => {
     const handler = createBundleBuildHandler(
       bundleDeps({
         fetchOriginal,
-        findReusableWorkingPdf: () => Promise.resolve(REUSABLE),
-        workingPdfExists: () => Promise.resolve(false),
       }),
     );
 
-    await handler(makeContext({ revisionId: REVISION }, []));
+    await handler(makeContext({ folderId: FOLDER }, []));
     expect(fetchOriginal).toHaveBeenCalled();
   });
 
@@ -464,11 +408,10 @@ describe('bundle.build', () => {
     const handler = createBundleBuildHandler(
       bundleDeps({
         fetchOriginal,
-        findReusableWorkingPdf: () => Promise.resolve({ ...REUSABLE, pageCount: 2 }),
       }),
     );
 
-    await handler(makeContext({ revisionId: REVISION }, []));
+    await handler(makeContext({ folderId: FOLDER }, []));
     expect(fetchOriginal).toHaveBeenCalled();
   });
 
@@ -481,7 +424,7 @@ describe('bundle.build', () => {
       }),
     );
 
-    await expect(handler(makeContext({ revisionId: REVISION }, []))).rejects.toThrow(/в карантине/);
+    await expect(handler(makeContext({ folderId: FOLDER }, []))).rejects.toThrow(/в карантине/);
     expect(fetchOriginal).not.toHaveBeenCalled();
   });
 
@@ -505,7 +448,7 @@ describe('bundle.build', () => {
       }),
     );
 
-    await expect(handler(makeContext({ revisionId: REVISION }, []))).rejects.toThrow(
+    await expect(handler(makeContext({ folderId: FOLDER }, []))).rejects.toThrow(
       /не найдено соответствие/,
     );
     expect(createBundle).not.toHaveBeenCalled();
@@ -522,7 +465,7 @@ describe('bundle.build', () => {
       }),
     );
 
-    await expect(handler(makeContext({ revisionId: REVISION }, []))).rejects.toThrow(
+    await expect(handler(makeContext({ folderId: FOLDER }, []))).rejects.toThrow(
       /хранилище недоступно/,
     );
 
@@ -540,9 +483,9 @@ describe('bundle.build', () => {
     const fetchOriginal = vi.fn(() => Promise.resolve());
     const handler = createBundleBuildHandler(bundleDeps({ fetchOriginal }));
 
-    await expect(
-      handler(makeContext({ revisionId: REVISION }, [], controller.signal)),
-    ).rejects.toThrow(/прервана/);
+    await expect(handler(makeContext({ folderId: FOLDER }, [], controller.signal))).rejects.toThrow(
+      /прервана/,
+    );
     expect(fetchOriginal).not.toHaveBeenCalled();
   });
 });

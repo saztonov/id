@@ -173,7 +173,7 @@ const RECOVERY_INSTRUCTION =
  */
 export interface VlmRunTarget {
   readonly runId: string;
-  readonly revisionId: string;
+  readonly folderId: string;
   readonly layoutRevisionId: string;
   readonly status: string;
   readonly localLayoutHash: string;
@@ -419,7 +419,7 @@ export interface VlmSaveBlockResultInput {
  * заимствован из `@id/api`, а объявлен локально.
  */
 export interface VlmRecordAiRunInput {
-  readonly revisionId: string;
+  readonly folderId: string;
   readonly stage: 'recognize';
   readonly provider: LlmProviderName;
   readonly model: string;
@@ -448,13 +448,13 @@ export interface VlmRecordAiRunInput {
 export interface VlmRecognitionDeps {
   /**
    * Как wired: `findRecognitionRun(db, scope, recognitionRunId)` (область —
-   * от `revisionId` payload'а, как `pinScope` в `pipeline.ts`), с явной
-   * сверкой `run.revisionId === revisionId` (payload с чужим прогоном не
+   * от `folderId` payload'а, как `pinScope` в `pipeline.ts`), с явной
+   * сверкой `run.folderId === folderId` (payload с чужим прогоном не
    * находит его через область — тот же приём, что в `recognition.ts`).
    * `null` — прогона нет или он принадлежит другой ревизии.
    */
   loadRun(input: {
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly recognitionRunId: string;
   }): Promise<VlmRunTarget | null>;
 
@@ -900,7 +900,7 @@ function withVlmRunTermination<T extends VlmJobType>(
 async function loadRunningVlmRun(
   deps: VlmRecognitionDeps,
   ctx: { readonly logger: JobContext<VlmJobType>['logger']; readonly type: string },
-  payload: { readonly revisionId: string; readonly recognitionRunId: string },
+  payload: { readonly folderId: string; readonly recognitionRunId: string },
 ): Promise<VlmRunTarget | null> {
   const run = await deps.loadRun(payload);
   if (run === null || run.status !== 'running') {
@@ -1078,7 +1078,7 @@ async function reuseParentResults(
   expected: RepairConditions,
 ): Promise<number> {
   const parent = await deps.loadRun({
-    revisionId: run.revisionId,
+    folderId: run.folderId,
     recognitionRunId: parentRunId,
   });
   if (parent === null) {
@@ -1431,7 +1431,7 @@ export function createVlmStartHandler(
       await ctx.enqueue({
         type: 'vlm.recognize_page',
         payload: {
-          revisionId: run.revisionId,
+          folderId: run.folderId,
           recognitionRunId: run.runId,
           pageIndex: page.workingPageIndex,
         },
@@ -1458,7 +1458,7 @@ export function createVlmStartHandler(
     await ctx.enqueue({
       type: 'vlm.finalize_run',
       payload: {
-        revisionId: run.revisionId,
+        folderId: run.folderId,
         recognitionRunId: run.runId,
         ...(ctx.payload.autoContinue === true ? { autoContinue: true } : {}),
       },
@@ -1503,7 +1503,7 @@ async function recordBlockFeedback(
     feedbackType: 'recognition_failure',
     reasonCode: input.reasonCode,
     severity: 'warn',
-    revisionId: run.revisionId,
+    folderId: run.folderId,
     recognitionRunId: run.runId,
     layoutBlockId: block.id,
     workingPageIndex: ctx.payload.pageIndex,
@@ -1542,7 +1542,7 @@ async function recordBlockAiRuns(
   for (const [index, response] of outcome.calls.entries()) {
     if (response.cacheHit) continue;
     await deps.recordAiRun({
-      revisionId: run.revisionId,
+      folderId: run.folderId,
       stage: 'recognize',
       provider: response.provider,
       model: response.model,
@@ -1591,7 +1591,7 @@ async function recordFailureAiRun(
   const attempt = llmAttemptOf(error);
   if (attempt === null) return; // вызов до сети не дошёл — хэшей нет, строка не пишется.
   await deps.recordAiRun({
-    revisionId: run.revisionId,
+    folderId: run.folderId,
     stage: 'recognize',
     provider: attempt.provider,
     model: attempt.model,
@@ -2570,7 +2570,7 @@ async function continueWithAnalysis(
   if (!(fresh ?? ctx.payload.autoContinue === true)) return;
   await ctx.enqueue({
     type: 'doc.classify_pages',
-    payload: { revisionId: ctx.payload.revisionId, autoContinue: true },
-    dedupeKey: `doc.classify_pages:${ctx.payload.revisionId}`,
+    payload: { folderId: ctx.payload.folderId, autoContinue: true },
+    dedupeKey: `doc.classify_pages:${ctx.payload.folderId}`,
   });
 }

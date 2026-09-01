@@ -388,7 +388,7 @@ export interface SampleView {
   readonly statusCode: number | null;
   readonly errorCode: string | null;
   readonly objectId: string | null;
-  readonly revisionId: string | null;
+  readonly folderId: string | null;
   readonly jobId: string | null;
   readonly jobType: string | null;
   readonly attempt: number | null;
@@ -503,7 +503,7 @@ function sampleSelection() {
     statusCode: errorSamples.statusCode,
     errorCode: errorSamples.errorCode,
     objectId: errorSamples.objectId,
-    revisionId: errorSamples.revisionId,
+    folderId: errorSamples.folderId,
     jobId: errorSamples.jobId,
     jobType: errorSamples.jobType,
     attempt: errorSamples.attempt,

@@ -9,7 +9,7 @@
  * закончил. Поэтому сборка — первая подстадия кнопки «Разметить файл» (§6.1):
  * пользователь заявляет, что состав и порядок окончательны.
  *
- * После сборки состав ревизии заперт (`requireEditableRevision` отвергает
+ * После сборки состав ревизии заперт (`requireEditableFolder` отвергает
  * загрузку при наличии bundle): разметка ложится на страницы рабочего
  * документа, и добавленный позже файл сдвинул бы их нумерацию.
  *
@@ -53,7 +53,7 @@ import {
   bundlePageParamSchema,
   bundlePageSchema,
   bundleSchema,
-  revisionIdParamSchema,
+  folderIdParamSchema,
 } from './schemas.js';
 
 const PREFIX = '/api/v1';
@@ -74,21 +74,21 @@ export function registerBundleRoutes(app: AppInstance): void {
 
 function registerBuildRoute(app: AppInstance): void {
   app.post(
-    `${PREFIX}/revisions/:revisionId/bundle`,
+    `${PREFIX}/folders/:folderId/bundle`,
     {
       preHandler: buildBundle,
       schema: {
-        params: revisionIdParamSchema,
+        params: folderIdParamSchema,
         response: { 202: bundleBuildResponseSchema },
       },
     },
     async (request, reply) => {
       const { scope } = currentAuth(request);
-      const { revisionId } = request.params;
+      const { folderId } = request.params;
 
-      const plan = await loadBundlePlan(app.db, scope, revisionId);
+      const plan = await loadBundlePlan(app.db, scope, folderId);
       if (plan === null) throw notFound('Ревизия поставки не найдена.');
-      updateContext({ revisionId, objectId: plan.objectId });
+      updateContext({ folderId, objectId: plan.objectId });
 
       // Уже собранный документ того же состава возвращается без постановки
       // задачи: сборка идемпотентна по манифесту, и второй прогон склеил бы те
@@ -113,10 +113,10 @@ function registerBuildRoute(app: AppInstance): void {
 
       const { jobId, created } = await enqueueJob(app.db, scope, {
         type: 'bundle.build',
-        payload: tracePayload({ revisionId }),
+        payload: tracePayload({ folderId }),
         // Манифест в ключе: изменившийся состав обязан дать новую задачу, а не
         // слиться с уже стоящей в очереди сборкой прежнего комплекта.
-        dedupeKey: dedupeKeyFor('bundle.build', revisionId, plan.aggregateManifestHash),
+        dedupeKey: dedupeKeyFor('bundle.build', folderId, plan.aggregateManifestHash),
       });
 
       request.log.info(
@@ -139,7 +139,7 @@ async function findCurrentBundle(
   scope: AuthScope,
   plan: BundlePlan,
 ): Promise<BundleView | null> {
-  const bundles = await listBundles(app.db, scope, plan.revisionId);
+  const bundles = await listBundles(app.db, scope, plan.folderId);
   return (
     bundles.find((bundle) => bundle.aggregateManifestHash === plan.aggregateManifestHash) ?? null
   );
@@ -151,18 +151,18 @@ async function findCurrentBundle(
 
 function registerListRoute(app: AppInstance): void {
   app.get(
-    `${PREFIX}/revisions/:revisionId/bundles`,
+    `${PREFIX}/folders/:folderId/bundles`,
     {
       preHandler: readBundle,
-      schema: { params: revisionIdParamSchema, response: { 200: bundleListSchema } },
+      schema: { params: folderIdParamSchema, response: { 200: bundleListSchema } },
     },
     async (request, reply) => {
       const { scope } = currentAuth(request);
-      const items = await listBundles(app.db, scope, request.params.revisionId);
+      const items = await listBundles(app.db, scope, request.params.folderId);
       // Пустой список чужой ревизии неотличим от пустого списка своей: наличие
       // рабочего документа — это факт о чужой поставке (§16).
       if (items.length === 0) {
-        await requireVisibleRevision(app, request, request.params.revisionId);
+        await requireVisibleFolder(app, request, request.params.folderId);
         return reply.code(200).send({ items: [] });
       }
 
@@ -170,7 +170,7 @@ function registerListRoute(app: AppInstance): void {
       // запрос: манифест — функция от набора файлов, а не от конкретного
       // документа, и считать его в цикле значило бы платить за один и тот же
       // ответ столько раз, сколько сборок было у ревизии.
-      const plan = await loadBundlePlan(app.db, scope, request.params.revisionId);
+      const plan = await loadBundlePlan(app.db, scope, request.params.folderId);
       return reply.code(200).send({
         items: items.map((bundle) => ({
           ...bundle,
@@ -193,7 +193,7 @@ function registerBundleRoute(app: AppInstance): void {
       const { scope } = currentAuth(request);
       const bundle = await findBundle(app.db, scope, request.params.bundleId);
       if (bundle === null) throw notFound('Рабочий документ не найден.');
-      updateContext({ revisionId: bundle.revisionId });
+      updateContext({ folderId: bundle.folderId });
       return reply.code(200).send(bundle);
     },
   );
@@ -241,13 +241,13 @@ function registerPageMapRoutes(app: AppInstance): void {
   );
 }
 
-async function requireVisibleRevision(
+async function requireVisibleFolder(
   app: AppInstance,
   request: FastifyRequest,
-  revisionId: string,
+  folderId: string,
 ): Promise<void> {
   const { scope } = currentAuth(request);
-  if ((await loadBundlePlan(app.db, scope, revisionId)) === null) {
+  if ((await loadBundlePlan(app.db, scope, folderId)) === null) {
     throw notFound('Ревизия поставки не найдена.');
   }
 }

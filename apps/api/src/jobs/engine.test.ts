@@ -46,8 +46,8 @@ import {
   publishOutboxBatch,
   queueSnapshot,
   reapExpiredLeases,
-  readRevisionEvents,
-  OUTBOX_REVISION_AGGREGATE,
+  readFolderEvents,
+  OUTBOX_FOLDER_AGGREGATE,
 } from '../db/repositories/jobs.js';
 import type { AuthScope } from '../auth/scope.js';
 import { JobRegistry, type JobContext } from './registry.js';
@@ -82,10 +82,8 @@ const ORG_CONTRACTOR_A = id(2);
 const ORG_CONTRACTOR_B = id(3);
 const OBJECT = id(4);
 
-const SUBMISSION_A = id(10);
-const REVISION_A = id(11);
-const SUBMISSION_B = id(12);
-const REVISION_B = id(13);
+const FOLDER_A = id(11);
+const FOLDER_B = id(13);
 
 const USER_ADMIN = id(20);
 const USER_CONTRACTOR_A = id(21);
@@ -123,18 +121,14 @@ const FIXTURE: readonly string[] = [
 
   `INSERT INTO object_contractors (object_id, contractor_id)
        VALUES ('${OBJECT}', '${ORG_CONTRACTOR_A}') ON CONFLICT DO NOTHING`,
-  `INSERT INTO works
+  `INSERT INTO folders
        (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-     VALUES ('${SUBMISSION_A}', '${OBJECT}', '${ORG_CONTRACTOR_A}', '${ORG_CONTRACTOR_A}', 'roofing', DATE '2026-01-01', 'Комплект А', '${USER_CONTRACTOR_A}')`,
-  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no)
-     VALUES ('${REVISION_A}', '${SUBMISSION_A}', '${OBJECT}', '${ORG_CONTRACTOR_A}', 1)`,
+     VALUES ('${FOLDER_A}', '${OBJECT}', '${ORG_CONTRACTOR_A}', '${ORG_CONTRACTOR_A}', 'roofing', DATE '2026-01-01', 'Комплект А', '${USER_CONTRACTOR_A}')`,
   `INSERT INTO object_contractors (object_id, contractor_id)
        VALUES ('${OBJECT}', '${ORG_CONTRACTOR_B}') ON CONFLICT DO NOTHING`,
-  `INSERT INTO works
+  `INSERT INTO folders
        (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-     VALUES ('${SUBMISSION_B}', '${OBJECT}', '${ORG_CONTRACTOR_B}', '${ORG_CONTRACTOR_B}', 'roofing', DATE '2026-01-01', 'Комплект Б', '${USER_CONTRACTOR_B}')`,
-  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no)
-     VALUES ('${REVISION_B}', '${SUBMISSION_B}', '${OBJECT}', '${ORG_CONTRACTOR_B}', 1)`,
+     VALUES ('${FOLDER_B}', '${OBJECT}', '${ORG_CONTRACTOR_B}', '${ORG_CONTRACTOR_B}', 'roofing', DATE '2026-01-01', 'Комплект Б', '${USER_CONTRACTOR_B}')`,
 ];
 
 const TEST_ENV = loadEnv({
@@ -279,10 +273,10 @@ async function runsOf(jobId: string): Promise<Record<string, unknown>[]> {
   );
 }
 
-async function eventTypesOf(revisionId: string): Promise<string[]> {
+async function eventTypesOf(folderId: string): Promise<string[]> {
   const rows = await db.query<{ event_type: string }>(
-    `SELECT event_type FROM revision_events WHERE revision_id = $1 ORDER BY seq`,
-    [revisionId],
+    `SELECT event_type FROM folder_events WHERE folder_id = $1 ORDER BY seq`,
+    [folderId],
   );
   return rows.map((row) => row.event_type);
 }
@@ -300,15 +294,15 @@ async function makeRunnable(jobId: string): Promise<void> {
 
 describe('очередь задач', () => {
   it('идемпотентна по dedupe_key: повторная постановка не создаёт вторую задачу', async () => {
-    const key = dedupeKeyFor('graph.build', REVISION_A, 'idempotency');
+    const key = dedupeKeyFor('graph.build', FOLDER_A, 'idempotency');
     const first = await enqueueSystemJob(app.db, {
       type: 'graph.build',
-      payload: { revisionId: REVISION_A },
+      payload: { folderId: FOLDER_A },
       dedupeKey: key,
     });
     const second = await enqueueSystemJob(app.db, {
       type: 'graph.build',
-      payload: { revisionId: REVISION_A },
+      payload: { folderId: FOLDER_A },
       dedupeKey: key,
     });
 
@@ -332,10 +326,10 @@ describe('очередь задач', () => {
   it('выполняет задачу, пишет попытку с длительностью и событие ревизии', async () => {
     const enqueued = await enqueueSystemJob(app.db, {
       type: 'graph.build',
-      payload: { revisionId: REVISION_A, request_id: 'req-graph-build' },
+      payload: { folderId: FOLDER_A, request_id: 'req-graph-build' },
     });
     behaviours.set(enqueued.jobId, async (ctx) => {
-      expect(ctx.revisionId).toBe(REVISION_A);
+      expect(ctx.folderId).toBe(FOLDER_A);
       expect(ctx.attempt).toBe(1);
       await ctx.emit('graph.built', { nodes: 3 });
     });
@@ -356,7 +350,7 @@ describe('очередь задач', () => {
     expect(runs[0]?.['request_id']).toBe('req-graph-build');
     expect(runs[0]?.['payload_digest']).toMatch(/^[0-9a-f]{64}$/);
 
-    const events = await eventTypesOf(REVISION_A);
+    const events = await eventTypesOf(FOLDER_A);
     expect(events).toContain('job.started');
     expect(events).toContain('graph.built');
     expect(events).toContain('job.succeeded');
@@ -365,7 +359,7 @@ describe('очередь задач', () => {
   it('повторяет упавшую задачу и уводит в dead после max_attempts', async () => {
     const enqueued = await enqueueSystemJob(app.db, {
       type: 'checks.run',
-      payload: { revisionId: REVISION_A },
+      payload: { folderId: FOLDER_A },
       maxAttempts: 2,
     });
     behaviours.set(enqueued.jobId, () => Promise.reject(new Error('внешний сервис не ответил')));
@@ -386,7 +380,7 @@ describe('очередь задач', () => {
     const runs = await runsOf(enqueued.jobId);
     expect(runs).toHaveLength(2);
     expect(runs.every((run) => run['outcome'] === 'failed')).toBe(true);
-    expect(await eventTypesOf(REVISION_A)).toContain('job.dead');
+    expect(await eventTypesOf(FOLDER_A)).toContain('job.dead');
 
     // Мёртвая задача видна в консоли и повторяется вручную (§12).
     const view = await findJob(app.db, ADMIN_SCOPE, enqueued.jobId);
@@ -413,7 +407,7 @@ describe('очередь задач', () => {
   it('reaper освобождает аренду убитого воркера и закрывает попытку', async () => {
     const enqueued = await enqueueSystemJob(app.db, {
       type: 'graph.build',
-      payload: { revisionId: REVISION_A },
+      payload: { folderId: FOLDER_A },
     });
     // Имитация воркера, убитого сигналом: задача занята, аренда истекла,
     // попытка осталась незакрытой.
@@ -424,9 +418,9 @@ describe('очередь задач', () => {
       [enqueued.jobId],
     );
     await db.query(
-      `INSERT INTO job_runs (job_id, job_type, revision_id, attempt, started_at)
+      `INSERT INTO job_runs (job_id, job_type, folder_id, attempt, started_at)
        VALUES ($1, 'graph.build', $2, 1, now() - interval '2 minutes')`,
-      [enqueued.jobId, REVISION_A],
+      [enqueued.jobId, FOLDER_A],
     );
 
     const result = await reapExpiredLeases(app.db, {});
@@ -508,7 +502,7 @@ describe('очередь задач', () => {
 
 describe('вычисляемая сводка обработки', () => {
   it('считается по job_runs, а не по хранимому полю', async () => {
-    const status = await computeProcessingStatus(app.db, ADMIN_SCOPE, REVISION_A);
+    const status = await computeProcessingStatus(app.db, ADMIN_SCOPE, FOLDER_A);
     expect(status).not.toBeNull();
     expect(status?.attempts).toBeGreaterThan(0);
     expect(status?.jobTypes.some((summary) => summary.jobType === 'graph.build')).toBe(true);
@@ -518,28 +512,28 @@ describe('вычисляемая сводка обработки', () => {
 
     const columns = await db.query<{ column_name: string }>(
       `SELECT column_name FROM information_schema.columns
-        WHERE table_name = 'submission_revisions' AND column_name = 'processing_status'`,
+        WHERE table_name = 'folders' AND column_name = 'processing_status'`,
     );
     expect(columns).toHaveLength(0);
   });
 
   it('не отдаётся чужой области видимости', async () => {
-    expect(await computeProcessingStatus(app.db, CONTRACTOR_B_SCOPE, REVISION_A)).toBeNull();
-    expect(await computeProcessingStatus(app.db, CONTRACTOR_A_SCOPE, REVISION_A)).not.toBeNull();
+    expect(await computeProcessingStatus(app.db, CONTRACTOR_B_SCOPE, FOLDER_A)).toBeNull();
+    expect(await computeProcessingStatus(app.db, CONTRACTOR_A_SCOPE, FOLDER_A)).not.toBeNull();
   });
 });
 
 describe('события ревизии', () => {
   it('outbox публикуется в ленту с монотонным seq', async () => {
     await appendOutbox(app.db, {
-      aggregateType: OUTBOX_REVISION_AGGREGATE,
-      aggregateId: REVISION_B,
-      eventType: 'revision.submitted',
+      aggregateType: OUTBOX_FOLDER_AGGREGATE,
+      aggregateId: FOLDER_B,
+      eventType: 'folder.submitted',
       payload: { revisionNo: 1 },
     });
     await appendOutbox(app.db, {
       aggregateType: 'unknown_aggregate',
-      aggregateId: REVISION_B,
+      aggregateId: FOLDER_B,
       eventType: 'ignored.event',
     });
 
@@ -547,8 +541,8 @@ describe('события ревизии', () => {
     expect(result.published).toBe(2);
     expect(result.events).toBe(1);
 
-    const window = await readRevisionEvents(app.db, { revisionId: REVISION_B, limit: 50 });
-    expect(window.events.map((event) => event.eventType)).toEqual(['revision.submitted']);
+    const window = await readFolderEvents(app.db, { folderId: FOLDER_B, limit: 50 });
+    expect(window.events.map((event) => event.eventType)).toEqual(['folder.submitted']);
     expect(window.events[0]?.seq).toBe(1);
 
     const unpublished = await db.query<{ count: number }>(
@@ -558,13 +552,13 @@ describe('события ревизии', () => {
   });
 
   it('seq монотонен и окно отдаётся начиная с указанного', async () => {
-    const all = await readRevisionEvents(app.db, { revisionId: REVISION_A, limit: 500 });
+    const all = await readFolderEvents(app.db, { folderId: FOLDER_A, limit: 500 });
     const sequences = all.events.map((event) => event.seq);
     expect(sequences).toEqual([...sequences].sort((a, b) => a - b));
     expect(new Set(sequences).size).toBe(sequences.length);
 
-    const tail = await readRevisionEvents(app.db, {
-      revisionId: REVISION_A,
+    const tail = await readFolderEvents(app.db, {
+      folderId: FOLDER_A,
       afterSeq: sequences[0] ?? 0,
       limit: 500,
     });
@@ -592,12 +586,12 @@ describe('изоляция задач по области видимости', (
     expect(asAdmin.items.some((job) => job.id === maintenance.jobId)).toBe(true);
     // Обслуживающая задача не относится ни к какой поставке: подрядчику её не видно.
     expect(asContractorA.items.some((job) => job.id === maintenance.jobId)).toBe(false);
-    expect(asContractorA.items.every((job) => job.revisionId === REVISION_A)).toBe(true);
+    expect(asContractorA.items.every((job) => job.folderId === FOLDER_A)).toBe(true);
     expect(asContractorB.items).toHaveLength(0);
 
     expect(await findJob(app.db, CONTRACTOR_B_SCOPE, maintenance.jobId)).toBeNull();
     expect(
-      await listJobRuns(app.db, CONTRACTOR_B_SCOPE, { revisionId: REVISION_A, limit: 10 }),
+      await listJobRuns(app.db, CONTRACTOR_B_SCOPE, { folderId: FOLDER_A, limit: 10 }),
     ).toEqual([]);
 
     await cancelJob(app.db, ADMIN_SCOPE, maintenance.jobId, {
@@ -681,14 +675,14 @@ describe('поток событий ревизии', () => {
     const contractorB = await sessionFor(KC.contractorB);
     const denied = await app.inject({
       method: 'GET',
-      url: `/api/v1/revisions/${REVISION_A}/events`,
+      url: `/api/v1/folders/${FOLDER_A}/events`,
       headers: { cookie: contractorB.cookie },
     });
     expect(denied.statusCode).toBe(404);
 
     const status = await app.inject({
       method: 'GET',
-      url: `/api/v1/revisions/${REVISION_A}/processing-status`,
+      url: `/api/v1/folders/${FOLDER_A}/processing-status`,
       headers: { cookie: contractorB.cookie },
     });
     expect(status.statusCode).toBe(404);
@@ -699,9 +693,9 @@ describe('поток событий ревизии', () => {
 
     await app.listen({ port: 0, host: '127.0.0.1' });
     const address = app.server.address() as AddressInfo;
-    const url = `http://127.0.0.1:${address.port}/api/v1/revisions/${REVISION_A}/events`;
+    const url = `http://127.0.0.1:${address.port}/api/v1/folders/${FOLDER_A}/events`;
 
-    const all = await readRevisionEvents(app.db, { revisionId: REVISION_A, limit: 500 });
+    const all = await readFolderEvents(app.db, { folderId: FOLDER_A, limit: 500 });
     expect(all.events.length).toBeGreaterThan(2);
     const fromSeq = all.events[0]?.seq ?? 0;
 
@@ -799,7 +793,7 @@ describe('остановка воркера', () => {
 
     const held = await enqueueSystemJob(app.db, {
       type: 'graph.build',
-      payload: { revisionId: REVISION_A },
+      payload: { folderId: FOLDER_A },
     });
 
     let entered = false;
@@ -824,7 +818,7 @@ describe('остановка воркера', () => {
     const stopping = shutdownRunner.stop();
     const untouched = await enqueueSystemJob(app.db, {
       type: 'checks.run',
-      payload: { revisionId: REVISION_A },
+      payload: { folderId: FOLDER_A },
     });
 
     expect(finished).toBe(false);

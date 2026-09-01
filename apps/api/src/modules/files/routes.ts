@@ -1,5 +1,5 @@
 /**
- * Приём файлов и выдача содержимого (§4.2, §14): `/api/v1/revisions/:id/files/*`
+ * Приём файлов и выдача содержимого (§4.2, §14): `/api/v1/folders/:id/files/*`
  * и `/api/v1/files/:id/content`.
  *
  * ## Приём в три шага
@@ -61,12 +61,12 @@ import type { AuditActor } from '../../db/repositories/audit.js';
 import {
   deleteSourceFile,
   findFileContent,
-  findRevisionForFiles,
+  findFolderForFiles,
   listSourceFiles,
   recordUploadedFile,
   reorderSourceFiles,
   replaceSourceFile,
-  requireEditableRevision,
+  requireEditableFolder,
 } from '../../db/repositories/files.js';
 import { loadBundlePlan } from '../../db/repositories/bundles.js';
 import { enqueueMarkupBuild } from '../layout/start.js';
@@ -76,15 +76,15 @@ import { isStorageError, type ByteRange } from '../../storage/provider.js';
 import { blobKey, uploadKey } from '../../storage/keys.js';
 import { deriveTicketKey, signUploadTicket, verifyUploadTicket } from './upload-token.js';
 import { UploadTooLargeError, verifyUploadedObject } from './verify.js';
-import { createWork } from '../../db/repositories/navigation.js';
+import { createFolder } from '../../db/repositories/navigation.js';
 import {
-  createdWorkWithFileSchema,
-  createWorkWithFileBodySchema,
+  createdFolderWithFileSchema,
+  createFolderWithFileBodySchema,
   fileIdParamSchema,
   fileOrderBodySchema,
   localUploadQuerySchema,
-  revisionFileParamSchema,
-  revisionIdParamSchema,
+  folderFileParamSchema,
+  folderIdParamSchema,
   sourceFileListSchema,
   sourceFileViewSchema,
   uploadCompleteBodySchema,
@@ -111,12 +111,12 @@ export function registerFileRoutes(app: AppInstance): void {
   // необязателен, и тогда талоны не переживают перезапуск — для незавершённой
   // загрузки это корректно, повторный `init` дешевле хранимого состояния.
   const secret = app.env.CSRF_SECRET ?? randomBytes(32).toString('hex');
-  const ticketKey = deriveTicketKey(secret, 'revision-file');
+  const ticketKey = deriveTicketKey(secret, 'folder-file');
   // Замена подписывается ДРУГИМ ключом, а не тем же с полем-признаком внутри:
   // талон обычного приёма нельзя предъявить замене и наоборот — подпись не
   // сойдётся, — и это свойство не зависит от того, забыли ли где-то проверить
   // поле. Тот же довод разводит приём файла ревизии и импорт справочника.
-  const replacementTicketKey = deriveTicketKey(secret, 'revision-file-replacement');
+  const replacementTicketKey = deriveTicketKey(secret, 'folder-file-replacement');
 
   registerListRoute(app);
   registerUploadRoutes(app, ticketKey);
@@ -133,20 +133,20 @@ export function registerFileRoutes(app: AppInstance): void {
 
 function registerListRoute(app: AppInstance): void {
   app.get(
-    `${PREFIX}/revisions/:revisionId/files`,
+    `${PREFIX}/folders/:folderId/files`,
     {
       preHandler: readFiles,
       schema: {
-        params: revisionIdParamSchema,
+        params: folderIdParamSchema,
         response: { 200: sourceFileListSchema },
       },
     },
     async (request, reply) => {
       const { scope } = currentAuth(request);
-      const items = await listSourceFiles(app.db, scope, request.params.revisionId);
+      const items = await listSourceFiles(app.db, scope, request.params.folderId);
       // Пустой список у чужой ревизии — это ответ «она есть, но пуста». 404
       // делает «нет такой» и «не ваша» неразличимыми.
-      if (items.length === 0) await requireVisibleRevision(app, request, request.params.revisionId);
+      if (items.length === 0) await requireVisibleFolder(app, request, request.params.folderId);
       return reply.code(200).send({ items: [...items] });
     },
   );
@@ -177,22 +177,21 @@ function registerUploadRoutes(app: AppInstance, ticketKey: Buffer): void {
    *
    * ## Что происходит при отказе на заливке
    *
-   * Ничего не откатывается, и это решение. Комплект остаётся заведённым с
-   * пустой черновой ревизией — рабочим состоянием, в которое файл догружается
-   * вкладкой «Файлы». Удаление комплекта здесь потребовало бы удалять и строку
-   * аудита `work.created`, которую `createWork` уже записал, то есть править
-   * журнал ради косметики.
+   * Ничего не откатывается, и это решение. Папка остаётся заведённой пустой —
+   * рабочим состоянием, в которое файл догружается вкладкой «Файлы». Удаление
+   * папки здесь потребовало бы удалять и строку аудита `folder.created`,
+   * которую `createFolder` уже записал, то есть править журнал ради косметики.
    *
    * Право — `submission.upload`: маршрут делает ровно то, что делают `POST
-   * /works` и `POST /revisions/{id}/files/upload/init`, и авторизуется тем же.
+   * /folders` и `POST /folders/{id}/files/upload/init`, и авторизуется тем же.
    */
   app.post(
-    `${PREFIX}/works/with-file`,
+    `${PREFIX}/folders/with-file`,
     {
       preHandler: uploadFiles,
       schema: {
-        body: createWorkWithFileBodySchema,
-        response: { 201: createdWorkWithFileSchema },
+        body: createFolderWithFileBodySchema,
+        response: { 201: createdFolderWithFileSchema },
       },
     },
     async (request, reply) => {
@@ -204,7 +203,7 @@ function registerUploadRoutes(app: AppInstance, ticketKey: Buffer): void {
       const maxBytes = app.env.MAX_UPLOAD_BYTES;
       if (body.sizeBytes > maxBytes) throw tooLarge(maxBytes);
 
-      const created = await createWork(
+      const created = await createFolder(
         app.db,
         scope,
         {
@@ -215,7 +214,7 @@ function registerUploadRoutes(app: AppInstance, ticketKey: Buffer): void {
         },
         auditActor(app, request),
       );
-      updateContext({ objectId: created.work.objectId, revisionId: created.revision.id });
+      updateContext({ objectId: created.folder.objectId, folderId: created.folder.id });
 
       const uploadId = randomUUID();
       const key = uploadKey(uploadId);
@@ -227,7 +226,7 @@ function registerUploadRoutes(app: AppInstance, ticketKey: Buffer): void {
 
       const ticket = signUploadTicket(ticketKey, {
         uploadId,
-        targetId: created.revision.id,
+        targetId: created.folder.id,
         userId: user.id,
         fileName: body.fileName,
         key,
@@ -238,8 +237,7 @@ function registerUploadRoutes(app: AppInstance, ticketKey: Buffer): void {
       });
 
       return reply.code(201).send({
-        workId: created.work.id,
-        revisionId: created.revision.id,
+        folderId: created.folder.id,
         upload: {
           uploadId: ticket,
           uploadUrl: presigned.url,
@@ -253,19 +251,19 @@ function registerUploadRoutes(app: AppInstance, ticketKey: Buffer): void {
   );
 
   app.post(
-    `${PREFIX}/revisions/:revisionId/files/upload/init`,
+    `${PREFIX}/folders/:folderId/files/upload/init`,
     {
       preHandler: uploadFiles,
       schema: {
-        params: revisionIdParamSchema,
+        params: folderIdParamSchema,
         body: uploadInitBodySchema,
         response: { 201: uploadInitResponseSchema },
       },
     },
     async (request, reply) => {
       const { scope, user } = currentAuth(request);
-      const revision = await requireEditableRevision(app.db, scope, request.params.revisionId);
-      updateContext({ revisionId: revision.id, objectId: revision.objectId });
+      const folder = await requireEditableFolder(app.db, scope, request.params.folderId);
+      updateContext({ folderId: folder.id, objectId: folder.objectId });
 
       const maxBytes = app.env.MAX_UPLOAD_BYTES;
       if (request.body.sizeBytes > maxBytes) throw tooLarge(maxBytes);
@@ -280,7 +278,7 @@ function registerUploadRoutes(app: AppInstance, ticketKey: Buffer): void {
 
       const ticket = signUploadTicket(ticketKey, {
         uploadId,
-        targetId: revision.id,
+        targetId: folder.id,
         userId: user.id,
         fileName: request.body.fileName,
         key,
@@ -299,11 +297,11 @@ function registerUploadRoutes(app: AppInstance, ticketKey: Buffer): void {
   );
 
   app.post(
-    `${PREFIX}/revisions/:revisionId/files/upload/complete`,
+    `${PREFIX}/folders/:folderId/files/upload/complete`,
     {
       preHandler: uploadFiles,
       schema: {
-        params: revisionIdParamSchema,
+        params: folderIdParamSchema,
         body: uploadCompleteBodySchema,
         response: { 201: sourceFileViewSchema },
       },
@@ -317,12 +315,12 @@ function registerUploadRoutes(app: AppInstance, ticketKey: Buffer): void {
       }
       // Талон привязан к ревизии и к пользователю: иначе перехваченный талон
       // работал бы в чужой сессии, а выданный на одну ревизию — в другой.
-      if (ticket.targetId !== request.params.revisionId || ticket.userId !== user.id) {
+      if (ticket.targetId !== request.params.folderId || ticket.userId !== user.id) {
         throw forbidden('Загрузка относится к другой ревизии или к другому пользователю.');
       }
 
-      const revision = await requireEditableRevision(app.db, scope, ticket.targetId);
-      updateContext({ revisionId: revision.id, objectId: revision.objectId });
+      const folder = await requireEditableFolder(app.db, scope, ticket.targetId);
+      updateContext({ folderId: folder.id, objectId: folder.objectId });
 
       const received = await receiveUploadedBytes(app, request, ticket.key);
 
@@ -330,7 +328,7 @@ function registerUploadRoutes(app: AppInstance, ticketKey: Buffer): void {
         app.db,
         scope,
         {
-          revisionId: revision.id,
+          folderId: folder.id,
           fileName: ticket.fileName,
           sha256: received.sha256,
           sizeBytes: received.sizeBytes,
@@ -345,9 +343,9 @@ function registerUploadRoutes(app: AppInstance, ticketKey: Buffer): void {
       );
 
       await discardStaged(app, request, ticket.key);
-      await startFilePipeline(app, request, revision.id, file.id);
+      await startFilePipeline(app, request, folder.id, file.id);
       if (ticket.startMarkup === true) {
-        await continueWithMarkup(app, request, revision.id, file.verifyState);
+        await continueWithMarkup(app, request, folder.id, file.verifyState);
       }
       return reply.code(201).send(file);
     },
@@ -410,12 +408,12 @@ async function receiveUploadedBytes(
  * Клиентская последовательность непригодна по построению: удаление первым же
  * шагом сносит файл вместе со всем производным по ревизии, и любой отказ
  * дальше оставляет комплект без файла; а поменять шаги местами нельзя —
- * `requireEditableRevision` отвергает приём файла, пока собран рабочий
+ * `requireEditableFolder` отвергает приём файла, пока собран рабочий
  * документ, то есть всегда после кнопки «Выделить блоки».
  *
  * ## Назначение талона, а не поле внутри него
  *
- * Талон замены подписан ДРУГИМ ключом (`UploadPurpose = 'revision-file-replacement'`),
+ * Талон замены подписан ДРУГИМ ключом (`UploadPurpose = 'folder-file-replacement'`),
  * поэтому предъявить его обычному `complete` невозможно вовсе — подпись не
  * сойдётся. Это тот же довод, по которому разведены приём файла ревизии и
  * импорт справочника: признак назначения, лежащий полем внутри подписанного
@@ -432,28 +430,28 @@ async function receiveUploadedBytes(
  */
 function registerReplacementRoutes(app: AppInstance, ticketKey: Buffer): void {
   app.post(
-    `${PREFIX}/revisions/:revisionId/files/:fileId/replacement/init`,
+    `${PREFIX}/folders/:folderId/files/:fileId/replacement/init`,
     {
       preHandler: uploadFiles,
       schema: {
-        params: revisionFileParamSchema,
+        params: folderFileParamSchema,
         body: uploadInitBodySchema,
         response: { 201: uploadInitResponseSchema },
       },
     },
     async (request, reply) => {
       const { scope, user } = currentAuth(request);
-      const { revisionId, fileId } = request.params;
+      const { folderId, fileId } = request.params;
 
       // Собранный рабочий документ не мешает замене — она сама его и снесёт.
-      const revision = await requireEditableRevision(app.db, scope, revisionId, {
+      const folder = await requireEditableFolder(app.db, scope, folderId, {
         allowBuiltBundle: true,
       });
-      updateContext({ revisionId: revision.id, objectId: revision.objectId });
+      updateContext({ folderId: folder.id, objectId: folder.objectId });
 
       // Проверка до заливки, а не после: узнать, что заменять нечего, после
       // двухсот мегабайт по плохому каналу — это отказ, выданный слишком поздно.
-      const files = await listSourceFiles(app.db, scope, revisionId);
+      const files = await listSourceFiles(app.db, scope, folderId);
       if (!files.some((file) => file.id === fileId)) {
         throw notFound('Заменяемый файл не найден в этой ревизии.');
       }
@@ -490,18 +488,18 @@ function registerReplacementRoutes(app: AppInstance, ticketKey: Buffer): void {
   );
 
   app.post(
-    `${PREFIX}/revisions/:revisionId/files/:fileId/replacement/complete`,
+    `${PREFIX}/folders/:folderId/files/:fileId/replacement/complete`,
     {
       preHandler: uploadFiles,
       schema: {
-        params: revisionFileParamSchema,
+        params: folderFileParamSchema,
         body: uploadCompleteBodySchema,
         response: { 200: sourceFileViewSchema },
       },
     },
     async (request, reply) => {
       const { scope, user } = currentAuth(request);
-      const { revisionId, fileId } = request.params;
+      const { folderId, fileId } = request.params;
 
       const ticket = verifyUploadTicket(ticketKey, request.body.uploadId);
       if (ticket === null) {
@@ -511,10 +509,10 @@ function registerReplacementRoutes(app: AppInstance, ticketKey: Buffer): void {
         throw forbidden('Загрузка относится к другому файлу или к другому пользователю.');
       }
 
-      const revision = await requireEditableRevision(app.db, scope, revisionId, {
+      const folder = await requireEditableFolder(app.db, scope, folderId, {
         allowBuiltBundle: true,
       });
-      updateContext({ revisionId: revision.id, objectId: revision.objectId });
+      updateContext({ folderId: folder.id, objectId: folder.objectId });
 
       const received = await receiveUploadedBytes(app, request, ticket.key);
 
@@ -534,7 +532,7 @@ function registerReplacementRoutes(app: AppInstance, ticketKey: Buffer): void {
         app.db,
         scope,
         {
-          revisionId,
+          folderId,
           replacedFileId: fileId,
           fileName: ticket.fileName,
           sha256: received.sha256,
@@ -551,7 +549,7 @@ function registerReplacementRoutes(app: AppInstance, ticketKey: Buffer): void {
       );
 
       await discardStaged(app, request, ticket.key);
-      await startFilePipeline(app, request, revisionId, file.id);
+      await startFilePipeline(app, request, folderId, file.id);
       return reply.code(200).send(file);
     },
   );
@@ -577,11 +575,11 @@ function registerReplacementRoutes(app: AppInstance, ticketKey: Buffer): void {
 async function startFilePipeline(
   app: AppInstance,
   request: FastifyRequest,
-  revisionId: string,
+  folderId: string,
   fileId: string,
 ): Promise<void> {
   const { scope } = currentAuth(request);
-  const payload = tracePayload({ revisionId, sourceFileId: fileId });
+  const payload = tracePayload({ folderId, sourceFileId: fileId });
 
   for (const type of ['file.verify', 'file.signature_probe'] as const) {
     try {
@@ -609,11 +607,11 @@ async function startFilePipeline(
  * ## Почему это привязано к талону, а не к событию «файл проверен»
  *
  * `startMarkupOnBundle` в мягком режиме (`core.enforce_immutability = false`)
- * зовёт `resetPipelineForRevision`, то есть сносит распознавание, документы и
+ * зовёт `resetPipelineForFolder`, то есть сносит распознавание, документы и
  * замечания. Автозапуск, срабатывающий на любую загрузку, однажды сделал бы это
  * с комплектом, который уже разобран. Признак талона выдаётся ТОЛЬКО вместе с
  * только что созданной ревизией (`POST /works/with-file`), а
- * `requireEditableRevision` не пускает файл в ревизию с собранным рабочим
+ * `requireEditableFolder` не пускает файл в ревизию с собранным рабочим
  * документом, — значит разметки в этот момент существовать не может, и сносить
  * нечего. Это условие и есть причина выбранной привязки.
  *
@@ -628,7 +626,7 @@ async function startFilePipeline(
 async function continueWithMarkup(
   app: AppInstance,
   request: FastifyRequest,
-  revisionId: string,
+  folderId: string,
   verifyState: 'pending' | 'ok' | 'quarantined',
 ): Promise<void> {
   const { scope } = currentAuth(request);
@@ -642,7 +640,7 @@ async function continueWithMarkup(
   }
 
   try {
-    const plan = await loadBundlePlan(app.db, scope, revisionId);
+    const plan = await loadBundlePlan(app.db, scope, folderId);
     if (plan === null) return;
     if (plan.blockers.length > 0) {
       request.log.info(
@@ -653,7 +651,7 @@ async function continueWithMarkup(
     }
 
     await enqueueMarkupBuild(app.db, scope, {
-      revisionId,
+      folderId,
       aggregateManifestHash: plan.aggregateManifestHash,
       logger: request.log as unknown as Logger,
     });
@@ -720,11 +718,11 @@ async function discardStaged(
 
 function registerOrderRoute(app: AppInstance): void {
   app.put(
-    `${PREFIX}/revisions/:revisionId/files/order`,
+    `${PREFIX}/folders/:folderId/files/order`,
     {
       preHandler: uploadFiles,
       schema: {
-        params: revisionIdParamSchema,
+        params: folderIdParamSchema,
         body: fileOrderBodySchema,
         response: { 200: sourceFileListSchema },
       },
@@ -734,7 +732,7 @@ function registerOrderRoute(app: AppInstance): void {
       const items = await reorderSourceFiles(
         app.db,
         scope,
-        request.params.revisionId,
+        request.params.folderId,
         request.body.fileIds,
         auditActor(app, request),
       );
@@ -757,19 +755,19 @@ function registerOrderRoute(app: AppInstance): void {
 function registerDeleteRoute(app: AppInstance): void {
   app.route({
     method: 'DELETE',
-    url: `${PREFIX}/revisions/:revisionId/files/:fileId`,
+    url: `${PREFIX}/folders/:folderId/files/:fileId`,
     preHandler: uploadFiles,
-    schema: { params: revisionFileParamSchema },
+    schema: { params: folderFileParamSchema },
     handler: async (request, reply) => {
       const { scope } = currentAuth(request);
       // Флаг читается ЗДЕСЬ, один раз на запрос: репозиторий вызывает
-      // `requireEditableRevision` внутри транзакции, и чтение настройки на
+      // `requireEditableFolder` внутри транзакции, и чтение настройки на
       // каждый вызов стоило бы лишнего запроса ради неменяющегося ответа.
       const enforceImmutability = await readImmutabilityEnforced(app.db);
       const removed = await deleteSourceFile(
         app.db,
         scope,
-        request.params.revisionId,
+        request.params.folderId,
         request.params.fileId,
         auditActor(app, request),
         { enforceImmutability },
@@ -802,7 +800,7 @@ function registerContentRoute(app: AppInstance): void {
       const { scope } = currentAuth(request);
       const file = await findFileContent(app.db, scope, request.params.fileId);
       if (file === null) throw notFound('Файл не найден.');
-      updateContext({ revisionId: file.revisionId, objectId: file.objectId });
+      updateContext({ folderId: file.folderId, objectId: file.objectId });
 
       if (file.verifyState !== 'ok') {
         // Карантин виден в списке вместе с причиной; байты не раздаются.
@@ -945,13 +943,13 @@ function limitStream(source: Readable, maxBytes: number): Readable {
 // Общее
 // =====================================================================
 
-async function requireVisibleRevision(
+async function requireVisibleFolder(
   app: AppInstance,
   request: FastifyRequest,
-  revisionId: string,
+  folderId: string,
 ): Promise<void> {
   const { scope } = currentAuth(request);
-  if ((await findRevisionForFiles(app.db, scope, revisionId)) === null) {
+  if ((await findFolderForFiles(app.db, scope, folderId)) === null) {
     throw notFound('Ревизия поставки не найдена.');
   }
 }

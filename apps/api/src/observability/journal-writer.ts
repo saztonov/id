@@ -250,7 +250,7 @@ const INSERT_SAMPLE = `
   INSERT INTO error_samples (
     issue_id, fingerprint, at, source, execution, domain, pipeline_stage, severity,
     release, request_id, client_event_id, user_id, route, status_code, error_code,
-    object_id, revision_id, job_id, job_type, attempt, repeat_count, context
+    object_id, folder_id, job_id, job_type, attempt, repeat_count, context
   )
   SELECT $1, $2, now(), $3, $4, $5, $6, $7,
          $8, $9, $10, $11::uuid, $12, $13, $14,
@@ -547,7 +547,7 @@ export class ErrorJournalWriter implements JournalEventSink {
       context.statusCode ?? null,
       errorCode ?? null,
       context.objectId ?? null,
-      context.revisionId ?? null,
+      context.folderId ?? null,
       context.jobId ?? null,
       context.jobType ?? null,
       context.attempt ?? null,

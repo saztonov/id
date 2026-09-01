@@ -48,7 +48,7 @@ const CORPUS: readonly ReferencePackage[] = loadReferenceCorpus();
 function toPageInputs(pkg: ReferencePackage): readonly PageInput[] {
   return pkg.pages.map((page) => ({
     sourcePageId: `${pkg.packageKey}#${page.pageNo}`,
-    revisionOrdinal: page.pageNo - 1,
+    folderOrdinal: page.pageNo - 1,
     // Эталон не хранит разбиение по исходным файлам: комплект пришёл одним
     // PDF. Смена файла — слабый приор (§8.2), решения он не принимает, и его
     // отсутствие результат не меняет.

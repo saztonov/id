@@ -58,7 +58,7 @@ export type SignatureFindings = PdfSignatureFindings;
 /** Строка файла в объёме, нужном проверке. Совпадает с `FileContentRef`. */
 export interface FileForVerification {
   readonly fileId: string;
-  readonly revisionId: string;
+  readonly folderId: string;
   readonly fileName: string;
   readonly verifyState: 'pending' | 'ok' | 'quarantined';
   readonly storageKey: string;
@@ -76,7 +76,7 @@ export interface FileForVerification {
  * принадлежности не выполнялась бы вовсе.
  */
 export interface FileJobTarget {
-  readonly revisionId: string;
+  readonly folderId: string;
   readonly sourceFileId: string;
 }
 
@@ -107,7 +107,7 @@ export interface FileVerifyDeps {
   readonly saveVerdict?:
     | ((input: {
         readonly fileId: string;
-        readonly revisionId: string;
+        readonly folderId: string;
         readonly verdict: FileVerdict;
       }) => Promise<{ readonly written: boolean; readonly reason?: string | undefined }>)
     | undefined;
@@ -125,8 +125,8 @@ export class FileVerificationError extends Error {
 
 export function createFileVerifyHandler(deps: FileVerifyDeps): JobHandler<'file.verify'> {
   return async (ctx: JobContext<'file.verify'>): Promise<void> => {
-    const { revisionId, sourceFileId } = ctx.payload;
-    const file = await deps.loadFile({ revisionId, sourceFileId });
+    const { folderId, sourceFileId } = ctx.payload;
+    const file = await deps.loadFile({ folderId, sourceFileId });
     if (file === null) {
       throw new FileVerificationError(
         `Файл ${sourceFileId} не найден или недоступен в области видимости задачи.`,
@@ -137,10 +137,10 @@ export function createFileVerifyHandler(deps: FileVerifyDeps): JobHandler<'file.
     // подрядчиком ревизии, но у подрядчика поставок много. Файл из ЧУЖОЙ
     // ревизии того же подрядчика прошёл бы область и получил бы вердикт,
     // записанный не туда, куда относится.
-    if (file.revisionId !== revisionId) {
+    if (file.folderId !== folderId) {
       throw new FileVerificationError(
-        `Файл ${sourceFileId} принадлежит ревизии ${file.revisionId}, а задача поставлена ` +
-          `для ревизии ${revisionId}.`,
+        `Файл ${sourceFileId} принадлежит ревизии ${file.folderId}, а задача поставлена ` +
+          `для ревизии ${folderId}.`,
         sourceFileId,
       );
     }
@@ -169,7 +169,7 @@ export function createFileVerifyHandler(deps: FileVerifyDeps): JobHandler<'file.
     const saved =
       deps.saveVerdict === undefined
         ? { written: false, reason: 'запись вердикта не подключена' }
-        : await deps.saveVerdict({ fileId: file.fileId, revisionId, verdict });
+        : await deps.saveVerdict({ fileId: file.fileId, folderId, verdict });
 
     if (!saved.written && verdict.state !== file.verifyState) {
       // Сверка вместо записи: см. `saveVerdict`. Молчаливое расхождение здесь

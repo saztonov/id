@@ -63,7 +63,7 @@ import {
   manualLabelResponseSchema,
   pageAccountingSchema,
   registryListSchema,
-  revisionIdParamSchema,
+  folderIdParamSchema,
   segmentRequestSchema,
   segmentResponseSchema,
 } from './schemas.js';
@@ -83,11 +83,11 @@ export function registerDocumentRoutes(app: AppInstance): void {
 function toView(document: LogicalDocumentView) {
   return {
     id: document.id,
-    revisionId: document.revisionId,
+    folderId: document.folderId,
     docTypeCode: document.docTypeCode,
     ordinal: document.ordinal,
     title: document.title,
-    folderGroup: document.folderGroup,
+    complectId: document.complectId,
     typeConfidence: document.typeConfidence,
     boundaryConfidence: document.boundaryConfidence,
     needsReview: document.needsReview,
@@ -119,30 +119,30 @@ function auditActor(app: AppInstance, request: FastifyRequest): AuditActor {
 
 function registerSegmentRoute(app: AppInstance): void {
   app.post(
-    `${PREFIX}/revisions/:revisionId/segment`,
+    `${PREFIX}/folders/:folderId/segment`,
     {
       preHandler: editDocuments,
       schema: {
-        params: revisionIdParamSchema,
+        params: folderIdParamSchema,
         body: segmentRequestSchema,
         response: { 202: segmentResponseSchema },
       },
     },
     async (request, reply) => {
       const { scope } = currentAuth(request);
-      const { revisionId } = request.params;
+      const { folderId } = request.params;
       const idempotencyKey = requireIdempotencyKey(request);
-      updateContext({ revisionId });
+      updateContext({ folderId });
 
-      // Область проверяет `enqueueJob`: он читает `revisionId` из payload и
+      // Область проверяет `enqueueJob`: он читает `folderId` из payload и
       // отказывает 422, если ревизия невидима. Это тот же рубеж, что закрыл на
       // S6 постановку задачи с чужой ревизией в теле запроса.
       const { jobId, created } = await enqueueJob(app.db, scope, {
         type: 'doc.classify_pages',
-        payload: tracePayload({ revisionId }),
+        payload: tracePayload({ folderId }),
         // Ключ включает и ревизию, и заголовок идемпотентности: первая часть
         // отвечает «чья это работа», вторая — «то же самое нажатие или новое».
-        dedupeKey: dedupeKeyFor('doc.classify_pages', revisionId, idempotencyKey),
+        dedupeKey: dedupeKeyFor('doc.classify_pages', folderId, idempotencyKey),
       });
 
       request.log.info(
@@ -151,12 +151,12 @@ function registerSegmentRoute(app: AppInstance): void {
           job_type: 'doc.classify_pages',
           job_id: jobId,
           created,
-          revision_id: revisionId,
+          folder_id: folderId,
         },
         'цепочка сегментации поставлена в очередь',
       );
 
-      return reply.code(202).send({ revisionId, jobId, jobCreated: created });
+      return reply.code(202).send({ folderId, jobId, jobCreated: created });
     },
   );
 }
@@ -167,14 +167,14 @@ function registerSegmentRoute(app: AppInstance): void {
 
 function registerReadRoutes(app: AppInstance): void {
   app.get(
-    `${PREFIX}/revisions/:revisionId/documents`,
+    `${PREFIX}/folders/:folderId/documents`,
     {
       preHandler: readDocuments,
-      schema: { params: revisionIdParamSchema, response: { 200: documentListSchema } },
+      schema: { params: folderIdParamSchema, response: { 200: documentListSchema } },
     },
     async (request, reply) => {
       const { scope } = currentAuth(request);
-      const items = await listLogicalDocuments(app.db, scope, request.params.revisionId);
+      const items = await listLogicalDocuments(app.db, scope, request.params.folderId);
       return reply.code(200).send({ items: items.map(toView) });
     },
   );
@@ -189,12 +189,12 @@ function registerReadRoutes(app: AppInstance): void {
       const { scope } = currentAuth(request);
       const document = await findLogicalDocument(app.db, scope, request.params.documentId);
       if (document === null) throw notFound('Логический документ не найден.');
-      updateContext({ revisionId: document.revisionId, objectId: document.objectId });
+      updateContext({ folderId: document.folderId, objectId: document.objectId });
 
       // Страницы и связи читаются теми же областными функциями: второй путь к
       // строкам документа не должен обходить `withScope()`.
-      const assignments = await listPageAssignments(app.db, scope, document.revisionId);
-      const relations = await listDocumentRelations(app.db, scope, document.revisionId);
+      const assignments = await listPageAssignments(app.db, scope, document.folderId);
+      const relations = await listDocumentRelations(app.db, scope, document.folderId);
 
       return withVersion(reply, document.version)
         .code(200)
@@ -204,7 +204,7 @@ function registerReadRoutes(app: AppInstance): void {
             .filter((page) => page.documentId === document.id)
             .map((page) => ({
               sourcePageId: page.sourcePageId,
-              revisionOrdinal: page.revisionOrdinal,
+              folderOrdinal: page.folderOrdinal,
               sortOrder: page.sortOrder,
               pageRoleCode: page.pageRoleCode,
               needsReview: page.needsReview,
@@ -233,16 +233,16 @@ function registerReadRoutes(app: AppInstance): void {
   );
 
   app.get(
-    `${PREFIX}/revisions/:revisionId/pages`,
+    `${PREFIX}/folders/:folderId/pages`,
     {
       preHandler: readDocuments,
-      schema: { params: revisionIdParamSchema, response: { 200: pageAccountingSchema } },
+      schema: { params: folderIdParamSchema, response: { 200: pageAccountingSchema } },
     },
     async (request, reply) => {
       const { scope } = currentAuth(request);
-      const { revisionId } = request.params;
-      const items = await listPageAssignments(app.db, scope, revisionId);
-      const unaccounted = await listUnaccountedPages(app.db, scope, revisionId);
+      const { folderId } = request.params;
+      const items = await listPageAssignments(app.db, scope, folderId);
+      const unaccounted = await listUnaccountedPages(app.db, scope, folderId);
 
       return reply.code(200).send({
         items: items.map((item) => ({ ...item })),
@@ -257,14 +257,14 @@ function registerReadRoutes(app: AppInstance): void {
   );
 
   app.get(
-    `${PREFIX}/revisions/:revisionId/registry`,
+    `${PREFIX}/folders/:folderId/registry`,
     {
       preHandler: readDocuments,
-      schema: { params: revisionIdParamSchema, response: { 200: registryListSchema } },
+      schema: { params: folderIdParamSchema, response: { 200: registryListSchema } },
     },
     async (request, reply) => {
       const { scope } = currentAuth(request);
-      const items = await listRegistryRows(app.db, scope, request.params.revisionId);
+      const items = await listRegistryRows(app.db, scope, request.params.folderId);
       return reply.code(200).send({
         items: items.map((row) => ({
           id: row.id,
@@ -288,14 +288,14 @@ function registerReadRoutes(app: AppInstance): void {
   );
 
   app.get(
-    `${PREFIX}/revisions/:revisionId/classifications`,
+    `${PREFIX}/folders/:folderId/classifications`,
     {
       preHandler: readDocuments,
-      schema: { params: revisionIdParamSchema, response: { 200: classificationListSchema } },
+      schema: { params: folderIdParamSchema, response: { 200: classificationListSchema } },
     },
     async (request, reply) => {
       const { scope } = currentAuth(request);
-      const items = await listPageClassifications(app.db, scope, request.params.revisionId);
+      const items = await listPageClassifications(app.db, scope, request.params.folderId);
       return reply.code(200).send({
         items: items.map((item) => ({ ...item, alternatives: [...item.alternatives] })),
       });
@@ -335,17 +335,17 @@ function registerConfirmRoute(app: AppInstance): void {
           : { needsReview: request.body.needsReview }),
         actor: auditActor(app, request),
       });
-      updateContext({ revisionId: document.revisionId, objectId: document.objectId });
+      updateContext({ folderId: document.folderId, objectId: document.objectId });
 
       // §12: нарезка идёт СРАЗУ после подтверждения границ, и ставит её именно
       // подтверждение. Иначе задача 22 осталась бы написанным и никем не
       // вызываемым обработчиком — отказ S5 в чистом виде. Отказ постановки не
       // отменяет подтверждение: решение человека уже записано, а пересобрать
-      // нарезку можно `POST /revisions/{id}/materialize`.
+      // нарезку можно `POST /folders/{id}/materialize`.
       try {
         const { jobId, created } = await enqueueJob(app.db, scope, {
           type: 'doc.materialize_pdf',
-          payload: tracePayload({ revisionId: document.revisionId, documentId }),
+          payload: tracePayload({ folderId: document.folderId, documentId }),
           dedupeKey: dedupeKeyFor('doc.materialize_pdf', documentId, String(document.version)),
         });
         request.log.info(
@@ -354,7 +354,7 @@ function registerConfirmRoute(app: AppInstance): void {
             job_type: 'doc.materialize_pdf',
             job_id: jobId,
             created,
-            revision_id: document.revisionId,
+            folder_id: document.folderId,
           },
           'нарезка подтверждённого документа поставлена в очередь',
         );
@@ -362,15 +362,15 @@ function registerConfirmRoute(app: AppInstance): void {
         request.log.error(
           {
             event: 'materialize_job_not_enqueued',
-            revision_id: document.revisionId,
+            folder_id: document.folderId,
             reason: (error as Error).name,
           },
           'нарезка подтверждённого документа не поставлена в очередь',
         );
       }
 
-      const assignments = await listPageAssignments(app.db, scope, document.revisionId);
-      const relations = await listDocumentRelations(app.db, scope, document.revisionId);
+      const assignments = await listPageAssignments(app.db, scope, document.folderId);
+      const relations = await listDocumentRelations(app.db, scope, document.folderId);
 
       return withVersion(reply, document.version)
         .code(200)
@@ -380,7 +380,7 @@ function registerConfirmRoute(app: AppInstance): void {
             .filter((page) => page.documentId === document.id)
             .map((page) => ({
               sourcePageId: page.sourcePageId,
-              revisionOrdinal: page.revisionOrdinal,
+              folderOrdinal: page.folderOrdinal,
               sortOrder: page.sortOrder,
               pageRoleCode: page.pageRoleCode,
               needsReview: page.needsReview,
@@ -426,10 +426,10 @@ function registerConfirmRoute(app: AppInstance): void {
         expectedVersion,
         actor: auditActor(app, request),
       });
-      updateContext({ revisionId: document.revisionId, objectId: document.objectId });
+      updateContext({ folderId: document.folderId, objectId: document.objectId });
 
-      const assignments = await listPageAssignments(app.db, scope, document.revisionId);
-      const relations = await listDocumentRelations(app.db, scope, document.revisionId);
+      const assignments = await listPageAssignments(app.db, scope, document.folderId);
+      const relations = await listDocumentRelations(app.db, scope, document.folderId);
 
       return withVersion(reply, document.version)
         .code(200)
@@ -439,7 +439,7 @@ function registerConfirmRoute(app: AppInstance): void {
             .filter((page) => page.documentId === document.id)
             .map((page) => ({
               sourcePageId: page.sourcePageId,
-              revisionOrdinal: page.revisionOrdinal,
+              folderOrdinal: page.folderOrdinal,
               sortOrder: page.sortOrder,
               pageRoleCode: page.pageRoleCode,
               needsReview: page.needsReview,
@@ -469,7 +469,7 @@ function registerConfirmRoute(app: AppInstance): void {
  */
 function registerManualLabelRoutes(app: AppInstance): void {
   app.put(
-    `${PREFIX}/revisions/:revisionId/pages/:sourcePageId/manual-label`,
+    `${PREFIX}/folders/:folderId/pages/:sourcePageId/manual-label`,
     {
       preHandler: editDocuments,
       schema: {
@@ -480,11 +480,11 @@ function registerManualLabelRoutes(app: AppInstance): void {
     },
     async (request, reply) => {
       const { scope } = currentAuth(request);
-      const { revisionId, sourcePageId } = request.params;
-      updateContext({ revisionId });
+      const { folderId, sourcePageId } = request.params;
+      updateContext({ folderId });
 
       const view = await saveManualPageLabel(app.db, scope, {
-        revisionId,
+        folderId,
         sourcePageId,
         label: request.body.label,
         docTypeCode: request.body.docTypeCode,
@@ -495,7 +495,7 @@ function registerManualLabelRoutes(app: AppInstance): void {
       request.log.info(
         {
           event: 'manual_page_label_set',
-          revision_id: revisionId,
+          folder_id: folderId,
           source_page_id: sourcePageId,
           label: view.label,
           doc_type_code: view.docTypeCode,
@@ -508,18 +508,18 @@ function registerManualLabelRoutes(app: AppInstance): void {
   );
 
   app.delete(
-    `${PREFIX}/revisions/:revisionId/pages/:sourcePageId/manual-label`,
+    `${PREFIX}/folders/:folderId/pages/:sourcePageId/manual-label`,
     {
       preHandler: editDocuments,
       schema: { params: manualLabelParamSchema },
     },
     async (request, reply) => {
       const { scope } = currentAuth(request);
-      const { revisionId, sourcePageId } = request.params;
-      updateContext({ revisionId });
+      const { folderId, sourcePageId } = request.params;
+      updateContext({ folderId });
 
       await deleteManualPageLabel(app.db, scope, {
-        revisionId,
+        folderId,
         sourcePageId,
         actor: auditActor(app, request),
       });
@@ -527,7 +527,7 @@ function registerManualLabelRoutes(app: AppInstance): void {
       request.log.info(
         {
           event: 'manual_page_label_cleared',
-          revision_id: revisionId,
+          folder_id: folderId,
           source_page_id: sourcePageId,
         },
         'ручная метка страницы снята',

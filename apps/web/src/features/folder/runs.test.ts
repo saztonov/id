@@ -12,7 +12,7 @@ import { isDryRun, newestRecognitionRun, runningRecognitionRun } from './runs.js
 
 function run(over: Partial<RecognitionRun> & { id: string; startedAt: string }): RecognitionRun {
   return {
-    revisionId: '00000000-0000-4000-8000-000000000001',
+    folderId: '00000000-0000-4000-8000-000000000001',
     layoutRevisionId: '00000000-0000-4000-8000-000000000002',
     rdJobId: null,
     localLayoutHash: 'hash',

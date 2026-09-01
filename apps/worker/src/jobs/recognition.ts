@@ -90,7 +90,7 @@ const RECONCILE_PASSES = 3;
 
 export interface RunTarget {
   readonly runId: string;
-  readonly revisionId: string;
+  readonly folderId: string;
   readonly layoutRevisionId: string;
   readonly status: string;
   readonly rdDocumentId: string;
@@ -127,7 +127,7 @@ export interface RecognitionDeps {
   readonly documentMode: boolean;
 
   loadRun(input: {
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly recognitionRunId: string;
   }): Promise<RunTarget | null>;
   loadFrozenBlocks(runId: string): Promise<readonly LocalBlock[]>;
@@ -231,7 +231,7 @@ const MAX_REASON_LENGTH = 400;
 /**
  * Причина отказа в терминальном состоянии прогона.
  *
- * Сообщение ошибки уходит и в `revision_events`, и в ответ API, поэтому оно
+ * Сообщение ошибки уходит и в `folder_events`, и в ответ API, поэтому оно
  * проходит через ту же обработку, что и текст страниц: абсолютные ссылки
  * обезвреживаются (§11), длина ограничена. Дословный дамп чужого ответа в поле,
  * которое читает подрядчик, — это утечка, а не диагностика; диагностика лежит в
@@ -325,7 +325,7 @@ function requirePort(deps: RecognitionDeps): RdWebPort {
 
 async function loadRunningRun(
   deps: RecognitionDeps,
-  payload: { readonly revisionId: string; readonly recognitionRunId: string },
+  payload: { readonly folderId: string; readonly recognitionRunId: string },
 ): Promise<RunTarget> {
   const run = await deps.loadRun(payload);
   if (run === null) throw new RecognitionStateError('Прогон распознавания не найден');
@@ -416,7 +416,7 @@ export function createReconcileHandler(deps: RecognitionDeps): JobHandler<'layou
       });
       await ctx.enqueue({
         type: 'rd.start_recognition',
-        payload: { revisionId: run.revisionId, recognitionRunId: run.runId, ...carry(ctx) },
+        payload: { folderId: run.folderId, recognitionRunId: run.runId, ...carry(ctx) },
         dedupeKey: `rd.start_recognition:${run.runId}`,
       });
       return;
@@ -527,7 +527,7 @@ export function createStartRecognitionHandler(
 async function enqueuePoll(ctx: JobContext<'rd.start_recognition'>, run: RunTarget): Promise<void> {
   await ctx.enqueue({
     type: 'rd.poll_recognition',
-    payload: { revisionId: run.revisionId, recognitionRunId: run.runId, ...carry(ctx) },
+    payload: { folderId: run.folderId, recognitionRunId: run.runId, ...carry(ctx) },
     dedupeKey: `rd.poll_recognition:${run.runId}`,
   });
 }
@@ -636,7 +636,7 @@ export function createPollRecognitionHandler(
       });
       await ctx.enqueue({
         type: 'rd.fetch_export_once',
-        payload: { revisionId: run.revisionId, recognitionRunId: run.runId, ...carry(ctx) },
+        payload: { folderId: run.folderId, recognitionRunId: run.runId, ...carry(ctx) },
         dedupeKey: `rd.fetch_export_once:${run.runId}`,
       });
       return;
@@ -934,8 +934,8 @@ export function createFetchExportHandler(
     if (ctx.payload.autoContinue === true) {
       await ctx.enqueue({
         type: 'doc.classify_pages',
-        payload: { revisionId: run.revisionId, autoContinue: true },
-        dedupeKey: `doc.classify_pages:${run.revisionId}`,
+        payload: { folderId: run.folderId, autoContinue: true },
+        dedupeKey: `doc.classify_pages:${run.folderId}`,
       });
     }
   });

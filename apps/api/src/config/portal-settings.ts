@@ -102,6 +102,19 @@ export function parseModelAllowlist(raw: string | undefined): readonly string[] 
   return entries.length === 0 ? null : entries;
 }
 
+/**
+ * Модель стадий анализа (`analysis.model`).
+ *
+ * Пустая строка — брать модель распознавания. Возвращается строкой, а не
+ * `null`: пусто здесь означает не «неизвестно», а «та же, что у
+ * распознавания», и вызывающий обязан подставить её сам — ровно как у зонда
+ * ориентации.
+ */
+export async function readAnalysisModel(db: Database): Promise<string> {
+  const value = await readEffectiveSetting(db, 'analysis.model');
+  return typeof value === 'string' ? value.trim() : '';
+}
+
 export interface OrientationProbeSettings {
   readonly enabled: boolean;
   /** Пустая строка — брать модель распознавания (`recognition.vlm_model`). */

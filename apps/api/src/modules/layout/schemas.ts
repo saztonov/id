@@ -21,7 +21,7 @@ import {
   shapeTypeSchema,
 } from '@id/contracts';
 
-export const revisionIdParamSchema = z.object({ revisionId: z.uuid() });
+export const folderIdParamSchema = z.object({ folderId: z.uuid() });
 export const layoutIdParamSchema = z.object({ layoutId: z.uuid() });
 export const blockParamSchema = z.object({ layoutId: z.uuid(), blockId: z.uuid() });
 export const pageParamSchema = z.object({
@@ -38,7 +38,7 @@ const pointSchema = z.object({ x: z.number().min(0).max(1), y: z.number().min(0)
 
 export const layoutRevisionViewSchema = z.object({
   id: z.uuid(),
-  revisionId: z.uuid(),
+  folderId: z.uuid(),
   bundleId: z.uuid(),
   revisionNo: z.int().positive(),
   state: layoutRevisionStateSchema,
@@ -160,7 +160,7 @@ export const fullPageTextResponseSchema = z.object({
 // =====================================================================
 
 export const orientationParamSchema = z.object({
-  revisionId: z.uuid(),
+  folderId: z.uuid(),
   sourcePageId: z.uuid(),
 });
 
@@ -176,7 +176,7 @@ export const orientationRequestSchema = z.object({
 });
 
 export const orientationResponseSchema = z.object({
-  revisionId: z.uuid(),
+  folderId: z.uuid(),
   sourcePageId: z.uuid(),
   contentRotation: contentRotationSchema,
   /** `null` — решения нет вовсе: строку разворота никто не заводил. */

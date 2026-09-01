@@ -10,7 +10,7 @@ import { describe, expect, it } from 'vitest';
 
 import { deriveTicketKey, signUploadTicket, verifyUploadTicket } from './upload-token.js';
 
-const KEY = deriveTicketKey('secret-for-tests', 'revision-file');
+const KEY = deriveTicketKey('secret-for-tests', 'folder-file');
 
 function ticket(startMarkup?: boolean): Parameters<typeof signUploadTicket>[1] {
   return {

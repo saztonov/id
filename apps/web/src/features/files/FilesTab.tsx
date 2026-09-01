@@ -35,7 +35,7 @@ import { useRef, useState, type ReactNode } from 'react';
 import { Alert, App as AntApp, Button, Space, Table, Tag, Typography } from 'antd';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { bundles, files, layout } from '../../api/endpoints.js';
-import { revisionKeys, layoutKeys } from '../../api/keys.js';
+import { folderKeys, layoutKeys } from '../../api/keys.js';
 import { describeError } from '../../api/problem.js';
 import type { SourceFile } from '../../api/types.js';
 import { useSession } from '../../app/session.js';
@@ -47,11 +47,11 @@ import { ReplaceFileAction } from './ReplaceFileAction.js';
 import { uploadFile, type UploadRetryListener } from './upload.js';
 
 export interface FilesTabProps {
-  readonly revisionId: string;
+  readonly folderId: string;
   readonly editable: boolean;
 }
 
-export function FilesTab({ revisionId, editable }: FilesTabProps): ReactNode {
+export function FilesTab({ folderId, editable }: FilesTabProps): ReactNode {
   const { can } = useSession();
   const { message } = AntApp.useApp();
   const queryClient = useQueryClient();
@@ -67,30 +67,30 @@ export function FilesTab({ revisionId, editable }: FilesTabProps): ReactNode {
   } | null>(null);
 
   const list = useQuery({
-    queryKey: revisionKeys.files(revisionId),
-    queryFn: () => files.list(revisionId),
+    queryKey: folderKeys.files(folderId),
+    queryFn: () => files.list(folderId),
   });
   const bundleList = useQuery({
-    queryKey: revisionKeys.bundles(revisionId),
-    queryFn: () => bundles.list(revisionId),
+    queryKey: folderKeys.bundles(folderId),
+    queryFn: () => bundles.list(folderId),
   });
   // Ревизии разметки читаются здесь ровно ради предупреждения об удалении: тот
   // же ключ уже держит экран разметки, поэтому второго запроса при переходе не
   // будет, а «удалить файл» без слов о том, что вместе с ним исчезнет разметка,
   // — это кнопка, о последствиях которой спрашивают уже постфактум.
   const layoutList = useQuery({
-    queryKey: layoutKeys.revisions(revisionId),
-    queryFn: () => layout.listRevisions(revisionId),
+    queryKey: layoutKeys.folders(folderId),
+    queryFn: () => layout.listFolders(folderId),
   });
 
   const refreshAll = async (): Promise<void> => {
-    await queryClient.invalidateQueries({ queryKey: revisionKeys.files(revisionId) });
-    await queryClient.invalidateQueries({ queryKey: revisionKeys.bundles(revisionId) });
+    await queryClient.invalidateQueries({ queryKey: folderKeys.files(folderId) });
+    await queryClient.invalidateQueries({ queryKey: folderKeys.bundles(folderId) });
   };
 
   /** Три шага приёма одного файла; сама последовательность — в `upload.ts`. */
   const uploadOne = async (file: File, onRetry: UploadRetryListener): Promise<void> => {
-    const stored = await uploadFile(revisionId, file, onRetry);
+    const stored = await uploadFile(folderId, file, onRetry);
     if (stored.verifyState === 'quarantined') {
       message.warning(
         `Файл «${stored.fileName}» помещён в карантин: ${stored.verifyError ?? 'причина не указана'}`,
@@ -135,7 +135,7 @@ export function FilesTab({ revisionId, editable }: FilesTabProps): ReactNode {
   };
 
   const buildBundle = useMutation({
-    mutationFn: () => bundles.build(revisionId),
+    mutationFn: () => bundles.build(folderId),
     onSuccess: async (result) => {
       message.success(
         result.bundle !== null && !result.created
@@ -148,20 +148,20 @@ export function FilesTab({ revisionId, editable }: FilesTabProps): ReactNode {
   });
 
   const startMarkup = useMutation({
-    mutationFn: () => layout.start(revisionId),
+    mutationFn: () => layout.start(folderId),
     onSuccess: async (result) => {
       message.success(
         result.jobCreated
           ? 'Разметка запущена: детекция пойдёт постраничными пачками'
           : 'Цепочка разметки уже стоит в очереди',
       );
-      await queryClient.invalidateQueries({ queryKey: layoutKeys.revisions(revisionId) });
+      await queryClient.invalidateQueries({ queryKey: layoutKeys.folders(folderId) });
     },
     onError: (error) => message.error(describeError(error)),
   });
 
   const remove = useMutation({
-    mutationFn: (fileId: string) => files.remove(revisionId, fileId),
+    mutationFn: (fileId: string) => files.remove(folderId, fileId),
     onSuccess: async () => {
       message.success('Файл удалён из ревизии');
       await refreshAll();
@@ -170,7 +170,7 @@ export function FilesTab({ revisionId, editable }: FilesTabProps): ReactNode {
   });
 
   const reorder = useMutation({
-    mutationFn: (fileIds: readonly string[]) => files.reorder(revisionId, fileIds),
+    mutationFn: (fileIds: readonly string[]) => files.reorder(folderId, fileIds),
     onSuccess: async () => {
       message.success('Порядок файлов сохранён');
       await refreshAll();
@@ -192,7 +192,7 @@ export function FilesTab({ revisionId, editable }: FilesTabProps): ReactNode {
   // дешёвым действием, а стоит оно всего конвейера по этому комплекту.
   //
   // Разобранные документы и найденные ошибки названы отдельно (S27): прежний
-  // текст молчал о них, хотя `purgeDerivedForRevision` сносит и то и другое, —
+  // текст молчал о них, хотя `purgeDerivedForFolder` сносит и то и другое, —
   // а именно за ними человек и приходит на вкладку «Проверка».
   const layoutCount = (layoutList.data ?? []).filter((item) => item.state !== 'superseded').length;
   const deletionWarning =
@@ -354,7 +354,7 @@ export function FilesTab({ revisionId, editable }: FilesTabProps): ReactNode {
                   href={files.contentUrl(row.id)}
                 />
                 <ReplaceFileAction
-                  revisionId={revisionId}
+                  folderId={folderId}
                   file={row}
                   disabled={!canUpload}
                   {...(canUpload

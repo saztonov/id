@@ -68,7 +68,7 @@ import {
   recognitionRunViewSchema,
   recognizeRequestSchema,
   recognizeResponseSchema,
-  revisionIdParamSchema,
+  folderIdParamSchema,
   runIdParamSchema,
 } from './schemas.js';
 
@@ -96,7 +96,7 @@ export function registerRecognitionRoutes(app: AppInstance): void {
 function toView(run: RecognitionRunView) {
   return {
     id: run.id,
-    revisionId: run.revisionId,
+    folderId: run.folderId,
     layoutRevisionId: run.layoutRevisionId,
     rdJobId: run.rdJobId,
     localLayoutHash: run.localLayoutHash,
@@ -119,26 +119,26 @@ function toView(run: RecognitionRunView) {
 
 function registerStartRoute(app: AppInstance): void {
   app.post(
-    `${PREFIX}/revisions/:revisionId/recognize`,
+    `${PREFIX}/folders/:folderId/recognize`,
     {
       preHandler: requireRecognitionStart,
       schema: {
-        params: revisionIdParamSchema,
+        params: folderIdParamSchema,
         body: recognizeRequestSchema,
         response: { 202: recognizeResponseSchema },
       },
     },
     async (request, reply) => {
       const { scope } = currentAuth(request);
-      const { revisionId } = request.params;
+      const { folderId } = request.params;
       const idempotencyKey = requireIdempotencyKey(request);
-      updateContext({ revisionId });
+      updateContext({ folderId });
 
       // Гранулярный маршрут ручного пути: он ставит РАСПОЗНАВАНИЕ и ничего
       // больше. Анализ дальше не идёт — его инженер запускает своей кнопкой,
-      // как и до S21. Сквозной прогон живёт в `POST /revisions/{id}/check`.
+      // как и до S21. Сквозной прогон живёт в `POST /folders/{id}/check`.
       const started = await startRecognition(app.db, app.env, scope, {
-        revisionId,
+        folderId,
         layoutId: request.body.layoutId,
         idempotencyKey,
         autoContinue: false,
@@ -166,14 +166,14 @@ function registerStartRoute(app: AppInstance): void {
 
 function registerReadRoutes(app: AppInstance): void {
   app.get(
-    `${PREFIX}/revisions/:revisionId/recognition-runs`,
+    `${PREFIX}/folders/:folderId/recognition-runs`,
     {
       preHandler: readRecognition,
-      schema: { params: revisionIdParamSchema, response: { 200: recognitionRunListSchema } },
+      schema: { params: folderIdParamSchema, response: { 200: recognitionRunListSchema } },
     },
     async (request, reply) => {
       const { scope } = currentAuth(request);
-      const items = await listRecognitionRuns(app.db, scope, request.params.revisionId);
+      const items = await listRecognitionRuns(app.db, scope, request.params.folderId);
       return reply.code(200).send({ items: items.map(toView) });
     },
   );
@@ -188,7 +188,7 @@ function registerReadRoutes(app: AppInstance): void {
       const { scope } = currentAuth(request);
       const run = await findRecognitionRun(app.db, scope, request.params.runId);
       if (run === null) throw notFound('Прогон распознавания не найден.');
-      updateContext({ revisionId: run.revisionId, objectId: run.objectId });
+      updateContext({ folderId: run.folderId, objectId: run.objectId });
       return reply.code(200).send(toView(run));
     },
   );

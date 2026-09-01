@@ -85,8 +85,7 @@ const ORG_CUSTOMER = id(1);
 const ORG_CONTRACTOR = id(2);
 const ORG_OTHER = id(3);
 const OBJECT = id(4);
-const SUBMISSION = id(10);
-const REVISION = id(11);
+const FOLDER = id(11);
 const USER_CONTRACTOR = id(20);
 const USER_OTHER = id(21);
 const FILE = id(30);
@@ -136,15 +135,13 @@ function fixtureStatements(sha256: string, sizeBytes: number): readonly string[]
     `INSERT INTO user_roles (user_id, role) VALUES ('${USER_OTHER}', 'contractor')`,
     `INSERT INTO object_contractors (object_id, contractor_id)
        VALUES ('${OBJECT}', '${ORG_CONTRACTOR}') ON CONFLICT DO NOTHING`,
-    `INSERT INTO works
+    `INSERT INTO folders
        (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-     VALUES ('${SUBMISSION}', '${OBJECT}', '${ORG_CONTRACTOR}', '${ORG_CONTRACTOR}', 'roofing', DATE '2026-01-01', 'Поставка 1', '${USER_CONTRACTOR}')`,
-    `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
-       VALUES ('${REVISION}', '${SUBMISSION}', '${OBJECT}', '${ORG_CONTRACTOR}', 1, 'draft')`,
+     VALUES ('${FOLDER}', '${OBJECT}', '${ORG_CONTRACTOR}', '${ORG_CONTRACTOR}', 'roofing', DATE '2026-01-01', 'Поставка 1', '${USER_CONTRACTOR}')`,
     `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
        VALUES ('${sha256}', 'blobs/${sha256.slice(0, 2)}/${sha256.slice(2, 4)}/${sha256}', ${sizeBytes}, 'application/pdf')`,
-    `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order)
-       VALUES ('${FILE}', '${REVISION}', '${sha256}', 'комплект.pdf', 0)`,
+    `INSERT INTO source_files (id, folder_id, blob_sha256, file_name, sort_order)
+       VALUES ('${FILE}', '${FOLDER}', '${sha256}', 'комплект.pdf', 0)`,
   ];
 }
 
@@ -249,19 +246,19 @@ beforeAll(async () => {
   for (const type of ['file.verify', 'file.signature_probe'] as const) {
     await enqueueSystemJob(db, {
       type,
-      payload: { revisionId: REVISION, sourceFileId: FILE },
+      payload: { folderId: FOLDER, sourceFileId: FILE },
       dedupeKey: dedupeKeyFor(type, FILE),
     });
   }
   await enqueueSystemJob(db, {
     type: 'bundle.build',
-    payload: { revisionId: REVISION },
-    dedupeKey: dedupeKeyFor('bundle.build', REVISION),
+    payload: { folderId: FOLDER },
+    dedupeKey: dedupeKeyFor('bundle.build', FOLDER),
   });
   await drainQueue();
 
   const bundles = await testDb.query<{ id: string }>(
-    `SELECT id FROM processing_bundles WHERE revision_id = '${REVISION}'`,
+    `SELECT id FROM processing_bundles WHERE folder_id = '${FOLDER}'`,
   );
   bundleId = bundles[0]?.id ?? '';
   expect(bundleId).not.toBe('');
@@ -303,7 +300,7 @@ async function drainQueue(maxRounds = 120): Promise<void> {
  * Прежняя разметка уступает место явно. До отмены заморозки (0048) её вытесняла
  * сама заморозка: `ensureDraftLayout` не находил черновика и заводил следующую
  * ревизию по номеру. Теперь разметка остаётся черновой, а черновик у поставки
- * один (`ux_layout_revisions_single_draft`), — и без этого шага все сценарии
+ * один (`ux_layout_folders_single_draft`), — и без этого шага все сценарии
  * работали бы с одной ревизией и одним закрытым RD-документом.
  */
 async function freshFrozenLayout(): Promise<string> {
@@ -311,12 +308,12 @@ async function freshFrozenLayout(): Promise<string> {
     `UPDATE layout_revisions
         SET state = 'superseded',
             blocks_hash = coalesce(blocks_hash, '${'c'.repeat(64)}')
-      WHERE revision_id = '${REVISION}' AND state = 'draft'`,
+      WHERE folder_id = '${FOLDER}' AND state = 'draft'`,
   );
-  const { layout } = await ensureDraftLayout(db, SCOPE, { revisionId: REVISION, bundleId });
+  const { layout } = await ensureDraftLayout(db, SCOPE, { folderId: FOLDER, bundleId });
   await enqueueSystemJob(db, {
     type: 'rd.create_run_document',
-    payload: { revisionId: REVISION, bundleId, layoutRevisionId: layout.id },
+    payload: { folderId: FOLDER, bundleId, layoutRevisionId: layout.id },
     dedupeKey: dedupeKeyFor('rd.create_run_document', layout.id),
   });
   await drainQueue();
@@ -337,7 +334,7 @@ async function startRun(layoutRevisionId: string): Promise<string> {
   });
   await enqueueSystemJob(db, {
     type: 'layout.reconcile',
-    payload: { revisionId: REVISION, recognitionRunId: run.id },
+    payload: { folderId: FOLDER, recognitionRunId: run.id },
     dedupeKey: dedupeKeyFor('layout.reconcile', run.id),
   });
   return run.id;
@@ -382,7 +379,7 @@ async function runOutcome(runId: string): Promise<{
        FROM recognition_runs WHERE id = '${runId}'`,
   );
   const events = await testDb.query<{ payload: string }>(
-    `SELECT payload::text AS payload FROM revision_events
+    `SELECT payload::text AS payload FROM folder_events
       WHERE payload->>'recognitionRunId' = '${runId}'
         AND event_type IN ('recognition.done', 'recognition.failed')
       ORDER BY seq DESC LIMIT 1`,
@@ -564,7 +561,7 @@ describe('цепочка распознавания доводит компле�
         settingsSnapshot: {},
       }),
     ).rejects.toThrow();
-    expect(await listRecognitionRuns(db, SCOPE, REVISION)).toHaveLength(1);
+    expect(await listRecognitionRuns(db, SCOPE, FOLDER)).toHaveLength(1);
   });
 
   /**
@@ -619,7 +616,7 @@ describe('цепочка распознавания доводит компле�
 
     await enqueueSystemJob(db, {
       type: 'rd.fetch_export_once',
-      payload: { revisionId: REVISION, recognitionRunId: runId },
+      payload: { folderId: FOLDER, recognitionRunId: runId },
       dedupeKey: dedupeKeyFor('rd.fetch_export_once', runId, 'repeat'),
     });
     await drainQueue();
@@ -645,7 +642,7 @@ describe('цепочка распознавания доводит компле�
 
     await enqueueSystemJob(db, {
       type: 'layout.reconcile',
-      payload: { revisionId: REVISION, recognitionRunId: runId },
+      payload: { folderId: FOLDER, recognitionRunId: runId },
       dedupeKey: dedupeKeyFor('layout.reconcile', runId, 'repeat'),
     });
     await drainQueue();
@@ -703,7 +700,7 @@ describe('цепочка распознавания доводит компле�
   /** Требование C: чужая область не видит ни прогона, ни артефактов, ни текста. */
   it('подрядчик из другой организации не видит прогон, артефакты и текст', async () => {
     expect(await findRecognitionRun(db, FOREIGN_SCOPE, runId)).toBeNull();
-    expect(await listRecognitionRuns(db, FOREIGN_SCOPE, REVISION)).toEqual([]);
+    expect(await listRecognitionRuns(db, FOREIGN_SCOPE, FOLDER)).toEqual([]);
     expect(await listArtifacts(db, FOREIGN_SCOPE, runId)).toEqual([]);
     expect(await listPageTexts(db, FOREIGN_SCOPE, runId)).toEqual([]);
     expect(await listBlockResults(db, FOREIGN_SCOPE, runId)).toEqual([]);
@@ -739,7 +736,7 @@ describe('цепочка распознавания доводит компле�
     }
 
     const events = await testDb.query<{ payload: string }>(
-      `SELECT payload::text AS payload FROM revision_events`,
+      `SELECT payload::text AS payload FROM folder_events`,
     );
     expect(events.length).toBeGreaterThan(0);
     for (const row of events) {
@@ -774,7 +771,7 @@ describe('OCR не стартует при расхождении хэшей р�
 
     await enqueueSystemJob(db, {
       type: 'rd.start_recognition',
-      payload: { revisionId: REVISION, recognitionRunId: runId },
+      payload: { folderId: FOLDER, recognitionRunId: runId },
       dedupeKey: dedupeKeyFor('rd.start_recognition', runId, 'tampered'),
     });
     await drainQueue();
@@ -796,7 +793,7 @@ describe('OCR не стартует при расхождении хэшей р�
     // Цикл сверки пропускается: `remote_layout_hash_before` остаётся NULL.
     await enqueueSystemJob(db, {
       type: 'rd.start_recognition',
-      payload: { revisionId: REVISION, recognitionRunId: run.id },
+      payload: { folderId: FOLDER, recognitionRunId: run.id },
       dedupeKey: dedupeKeyFor('rd.start_recognition', run.id, 'no-reconcile'),
     });
     await drainQueue();

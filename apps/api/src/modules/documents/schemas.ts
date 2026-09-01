@@ -12,9 +12,9 @@
  * разборе экспорта (`recognition/export.ts`).
  */
 import { z } from 'zod';
-import { documentRelationSchema, matchStateSchema } from '@id/contracts';
+import { documentRelationSchema, matchStateSchema, uuidSchema } from '@id/contracts';
 
-export const revisionIdParamSchema = z.object({ revisionId: z.uuid() });
+export const folderIdParamSchema = z.object({ folderId: z.uuid() });
 export const documentIdParamSchema = z.object({ documentId: z.uuid() });
 
 /**
@@ -32,7 +32,7 @@ export const documentIdParamSchema = z.object({ documentId: z.uuid() });
 export const segmentRequestSchema = z.object({}).optional();
 
 export const segmentResponseSchema = z.object({
-  revisionId: z.uuid(),
+  folderId: z.uuid(),
   jobId: z.string(),
   /** `false` — задача уже стояла в очереди: повтор нажатия безопасен (§12). */
   jobCreated: z.boolean(),
@@ -44,11 +44,11 @@ const charSpanSchema = z
 
 const documentViewSchema = z.object({
   id: z.uuid(),
-  revisionId: z.uuid(),
+  folderId: z.uuid(),
   docTypeCode: z.string().nullable(),
   ordinal: z.int().nonnegative(),
   title: z.string().nullable(),
-  folderGroup: z.string().nullable(),
+  complectId: uuidSchema.nullable(),
   typeConfidence: z.number().nullable(),
   boundaryConfidence: z.number().nullable(),
   needsReview: z.boolean(),
@@ -64,7 +64,7 @@ export const documentListSchema = z.object({ items: z.array(documentViewSchema) 
 
 const documentPageSchema = z.object({
   sourcePageId: z.uuid(),
-  revisionOrdinal: z.int().nonnegative(),
+  folderOrdinal: z.int().nonnegative(),
   sortOrder: z.int().nonnegative().nullable(),
   pageRoleCode: z.string().nullable(),
   needsReview: z.boolean(),
@@ -103,7 +103,7 @@ export const fieldValueListSchema = z.object({ items: z.array(fieldValueViewSche
 
 const pageAccountingItemSchema = z.object({
   sourcePageId: z.uuid(),
-  revisionOrdinal: z.int().nonnegative(),
+  folderOrdinal: z.int().nonnegative(),
   documentId: z.uuid().nullable(),
   sortOrder: z.int().nonnegative().nullable(),
   pageRoleCode: z.string().nullable(),
@@ -125,7 +125,7 @@ export const pageAccountingSchema = z.object({
     z.object({
       sourcePageId: z.uuid(),
       sourceFileId: z.uuid(),
-      revisionOrdinal: z.int().nonnegative(),
+      folderOrdinal: z.int().nonnegative(),
     }),
   ),
   counts: z.object({
@@ -164,7 +164,7 @@ export const registryListSchema = z.object({ items: z.array(registryRowViewSchem
  */
 const classificationViewSchema = z.object({
   sourcePageId: z.uuid(),
-  revisionOrdinal: z.int().nonnegative(),
+  folderOrdinal: z.int().nonnegative(),
   label: z.string(),
   docTypeCode: z.string().nullable(),
   typeOutcome: z.string(),
@@ -204,7 +204,7 @@ export const confirmRequestSchema = z.object({
 // =====================================================================
 
 export const manualLabelParamSchema = z.object({
-  revisionId: z.uuid(),
+  folderId: z.uuid(),
   sourcePageId: z.uuid(),
 });
 
@@ -221,7 +221,7 @@ export const manualLabelRequestSchema = z.object({
 });
 
 export const manualLabelResponseSchema = z.object({
-  revisionId: z.uuid(),
+  folderId: z.uuid(),
   sourcePageId: z.uuid(),
   label: z.string(),
   docTypeCode: z.string().nullable(),

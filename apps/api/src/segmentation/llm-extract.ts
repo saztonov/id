@@ -60,27 +60,46 @@ export interface ExtractPage {
  */
 export const EXTRACT_SCHEMA_VERSION = 'segmentation.field_extract.v1';
 
-/** Потолок значений в одном ответе: защита от «модель перечислила всё подряд». */
-const MAX_VALUES = 32;
+/**
+ * Сколько лишних значений сверх заказанных разбор ещё готов просмотреть.
+ *
+ * Защита от «модель перечислила всё подряд» осталась, но считается от числа
+ * запрошенных полей: константа 32 при тридцати одном заказанном поле не
+ * оставляла запаса и превращала любую болтливость в потерю всего ответа.
+ */
+const MAX_EXTRA_VALUES = 8;
 
 /** Потолок длины одного значения: наименование продукции — не абзац. */
 const MAX_VALUE_LENGTH = 500;
 
-const responseSchema = z.object({
-  values: z
-    .array(
-      z.object({
-        code: z.string().min(1),
-        /** `null` — модель прочитала страницу и значения не нашла. */
-        value: z.string().max(MAX_VALUE_LENGTH).nullable(),
-        /** Список для полей типа `list`; пусто — значение не список. */
-        items: z.array(z.string().max(MAX_VALUE_LENGTH)).nullish(),
-        confidence: z.number().min(0).max(1),
-        /** Цитата обязательна и непуста даже при `value: null`: см. шапку. */
-        quote: z.string().min(1),
-      }),
-    )
-    .max(MAX_VALUES),
+/**
+ * Оболочка ответа и ОТДЕЛЬНО — форма одного значения.
+ *
+ * Разделение принципиальное, и вот почему. Прежде схема была одна: массив
+ * значений внутри объекта проверялся целиком, и `safeParse` над ним отвечал
+ * «да» или «нет» на весь документ сразу. На боевой папке из 220 страниц это
+ * дало 306 отброшенных ответов из 402 — три четверти работы модели в мусор, —
+ * и у десяти актов из двенадцати не осталось НИ ОДНОГО реквизита. Причина
+ * каждый раз была одна: единственный элемент из тридцати одного не проходил
+ * проверку (цитата пустая, значение длиннее потолка), а вместе с ним падали
+ * тридцать годных.
+ *
+ * Инварианты при этом не ослаблены ни на йоту: годным элемент считается по тем
+ * же условиям, что и раньше, — цитата непуста, значение в пределах потолка,
+ * уверенность в [0,1]. Изменилась ЕДИНИЦА проверки: негодное значение теперь
+ * отбрасывается со своей причиной, а не уносит с собой документ.
+ */
+const envelopeSchema = z.object({ values: z.array(z.unknown()) });
+
+const valueSchema = z.object({
+  code: z.string().min(1),
+  /** `null` — модель прочитала страницу и значения не нашла. */
+  value: z.string().max(MAX_VALUE_LENGTH).nullable(),
+  /** Список для полей типа `list`; пусто — значение не список. */
+  items: z.array(z.string().max(MAX_VALUE_LENGTH)).nullish(),
+  confidence: z.number().min(0).max(1),
+  /** Цитата обязательна и непуста даже при `value: null`: см. шапку. */
+  quote: z.string().min(1),
 });
 
 export interface LlmExtractDeps {
@@ -100,6 +119,9 @@ export interface LlmExtractOutcome {
 
 /** Дословная формулировка отказа по цитате: на неё опираются тест и журнал. */
 export const EXTRACT_QUOTE_NOT_MAPPED = 'цитата не отображается на текст документа';
+
+/** Отказ по ОБОЛОЧКЕ ответа: это единственное, что обнуляет документ целиком. */
+export const EXTRACT_ENVELOPE_BROKEN = 'ответ модели не является объектом со списком values';
 
 /**
  * Поля документа, которые обязана дать модель.
@@ -208,9 +230,9 @@ export async function extractFieldsWithLlm(
     return { fields: [], problems: ['ответ модели не является JSON'] };
   }
 
-  const checked = responseSchema.safeParse(parsed);
-  if (!checked.success) {
-    return { fields: [], problems: ['ответ модели не соответствует схеме'] };
+  const envelope = envelopeSchema.safeParse(parsed);
+  if (!envelope.success) {
+    return { fields: [], problems: [EXTRACT_ENVELOPE_BROKEN] };
   }
 
   const byCode = new Map(wanted.map((field) => [field.code, field]));
@@ -218,7 +240,31 @@ export async function extractFieldsWithLlm(
   const problems: string[] = [];
   const taken = new Set<string>();
 
-  for (const value of checked.data.values) {
+  // Потолок считается от числа ЗАКАЗАННЫХ полей, а не константой: у акта их
+  // тридцать один, и прежний общий потолок в 32 не оставлял запаса ни на один
+  // лишний элемент. Запас нужен не модели, а разбору: он отделяет «модель
+  // назвала пару лишних кодов» от «модель перечислила всё подряд».
+  const limit = wanted.length + MAX_EXTRA_VALUES;
+  if (envelope.data.values.length > limit) {
+    problems.push(`ответ длиннее ожидаемого: значений ${String(envelope.data.values.length)}`);
+  }
+
+  for (const raw of envelope.data.values.slice(0, limit)) {
+    const element = valueSchema.safeParse(raw);
+    if (!element.success) {
+      // Причина называется поимённо и по КОНКРЕТНОМУ полю: «ответ не
+      // соответствует схеме» без адреса не позволял отличить длинное значение
+      // от пустой цитаты, и разбор боевого прогона упирался в эту фразу.
+      const code =
+        typeof (raw as { code?: unknown })?.code === 'string'
+          ? (raw as { code: string }).code
+          : 'без кода';
+      const issue = element.error.issues[0];
+      const where = issue === undefined ? '' : ` (${issue.path.join('.')}: ${issue.message})`;
+      problems.push(`${code}: значение не соответствует форме ответа${where}`);
+      continue;
+    }
+    const value = element.data;
     const definition = byCode.get(value.code);
     if (definition === undefined) {
       // Поле не заказывали. Молча пропустить нельзя: это сигнал о расхождении

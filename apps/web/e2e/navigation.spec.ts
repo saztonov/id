@@ -13,8 +13,8 @@
  *
  * ## Что доказывается
  *
- * 1. Дерево навигации проходится целиком настоящими маршрутами (`/works`,
- *    `/registries`), а не вложенными путями, которых в API нет.
+ * 1. Дерево навигации проходится целиком настоящими маршрутами (`/folders`),
+ *    а не вложенными путями, которых в API нет.
  * 2. Подрядчик заводит комплект сам, ОДНИМ ФАЙЛОМ: раздел берётся из узла
  *    дерева, наименование — из имени файла, и вместе с комплектом открывается
  *    первая ревизия. Отдельно проверено, что отказ на заливке байтов комплект
@@ -71,7 +71,7 @@ test('дерево навигации проходится настоящими 
   // До раскрытия раздела комплекты НЕ запрашиваются: содержимое узла грузится
   // лениво, и проверяется это по сети, а не по виду экрана.
   await expect(page.getByRole('button', { name: /Кровля/u })).toBeVisible();
-  expect(calls.some((call) => call.startsWith('/api/v1/works?'))).toBe(false);
+  expect(calls.some((call) => call.startsWith('/api/v1/folders?'))).toBe(false);
 
   // Счётчик в заголовке приходит своим маршрутом, а не выкачиванием комплектов.
   expect(calls.some((call) => call.includes(`/objects/${IDS.object}/sections/counts`))).toBe(true);
@@ -84,23 +84,22 @@ test('дерево навигации проходится настоящими 
 
   // Фильтр объекта ушёл в строку запроса плоской коллекции, а не во вложенный
   // путь: ровно то расхождение, из-за которого экран показывал «недоступно».
-  expect(calls.some((call) => call.startsWith('/api/v1/works?'))).toBe(true);
+  expect(calls.some((call) => call.startsWith('/api/v1/folders?'))).toBe(true);
   expect(calls.some((call) => call.includes(`objectId=${IDS.object}`))).toBe(true);
   expect(calls.some((call) => call.includes(`sectionCode=${IDS.sectionCode}`))).toBe(true);
   // Проверяется отсутствие вложенного СПИСКА комплектов — того самого пути,
-  // которого в API нет и который экран когда-то угадал. `/works/pipeline` под
+  // которого в API нет и который экран когда-то угадал. `/folders/pipeline` под
   // тем же префиксом существует и законен: это сводка конвейера по уже
   // отрисованным строкам (S37), а не второй способ получить комплекты.
   expect(
-    calls.some((call) => new RegExp(`/objects/${IDS.object}/works(?:[?]|$)`, 'u').test(call)),
+    calls.some((call) => new RegExp(`/objects/${IDS.object}/folders(?:[?]|$)`, 'u').test(call)),
   ).toBe(false);
 
   // Реестры объекта читаются той же плоской коллекцией.
-  expect(calls.some((call) => call.startsWith('/api/v1/registries?'))).toBe(true);
 
-  // Из комплекта открывается рабочее место ревизии — конец пути.
+  // Из списка раздела открывается рабочее место папки — конец пути.
   await page.getByRole('link', { name: 'Комплект с разметкой' }).click();
-  await expect(page).toHaveURL(/\/ids\/revisions\//u);
+  await expect(page).toHaveURL(/\/ids\/folders\//u);
 
   // Наименование печатается ОДИН раз: заголовком. Подзаголовок его больше не
   // повторяет, но и не исчезает — третье утверждение сторожит именно это,
@@ -111,7 +110,7 @@ test('дерево навигации проходится настоящими 
   await expect(page.getByText(/^Комплект работы · /u)).toBeVisible();
 });
 
-test('подрядчик заводит комплект одним файлом, и открывается первая ревизия', async ({ page }) => {
+test('подрядчик заводит папку одним файлом, и она открывается', async ({ page }) => {
   await signIn(page, KC.contractor, `/ids/objects/${IDS.object}`);
 
   // Раздел берётся из узла дерева, а не из селекта: форма живёт внутри него.
@@ -130,41 +129,32 @@ test('подрядчик заводит комплект одним файлом
 
   await page.getByTestId('create-work').click();
 
-  // Экран уходит на рабочее место новой ревизии: комплект без ревизии — это
-  // карточка, в которую некуда загружать файлы.
-  await expect(page).toHaveURL(/\/ids\/revisions\/[0-9a-f-]{36}/u, { timeout: 30_000 });
+  // Экран уходит на рабочее место новой папки: загружать файлы больше некуда,
+  // кроме неё самой.
+  await expect(page).toHaveURL(/\/ids\/folders\/[0-9a-f-]{36}/u, { timeout: 30_000 });
 
-  // Последствие в базе, а не надпись: комплект в списке объекта и ровно одна
-  // ревизия — первая, черновик, без родителя.
-  const list = await page.request.get(`/api/v1/works?objectId=${IDS.object}&limit=50`);
+  // Последствие в базе, а не надпись: папка в списке объекта и открывается по
+  // своему же идентификатору.
+  const list = await page.request.get(`/api/v1/folders?objectId=${IDS.object}&limit=50`);
   expect(list.status()).toBe(200);
-  const works = (await list.json()) as {
+  const folders = (await list.json()) as {
     items: {
       id: string;
       title: string;
       contractorId: string;
       managedByContractorId: string;
-      currentRevisionId: string | null;
-      registryId: string | null;
     }[];
   };
-  const created = works.items.find((item) => item.title === 'Комплект из интерфейса');
-  expect(created, 'заведённый комплект обязан быть в списке объекта').toBeDefined();
+  const created = folders.items.find((item) => item.title === 'Комплект из интерфейса');
+  expect(created, 'заведённая папка обязана быть в списке объекта').toBeDefined();
   // Организация взята из области видимости, а не из формы: поля исполнителя у
   // подрядчика нет вовсе.
   expect(created?.contractorId).toBe(IDS.orgContractor);
   expect(created?.managedByContractorId).toBe(IDS.orgContractor);
-  expect(created?.registryId).toBeNull();
-  expect(created?.currentRevisionId).not.toBeNull();
 
-  const revisions = await page.request.get(`/api/v1/works/${created?.id ?? ''}/revisions`);
-  const body = (await revisions.json()) as {
-    items: { revisionNo: number; status: string; parentRevisionId: string | null }[];
-  };
-  expect(body.items).toHaveLength(1);
-  expect(body.items[0]?.revisionNo).toBe(1);
-  expect(body.items[0]?.status).toBe('draft');
-  expect(body.items[0]?.parentRevisionId).toBeNull();
+  const opened = await page.request.get(`/api/v1/folders/${created?.id ?? ''}`);
+  expect(opened.status()).toBe(200);
+  expect(((await opened.json()) as { id: string }).id).toBe(created?.id);
 });
 
 test('поля исполнителя нет ни у одной роли: его выводит сервер', async ({ page }) => {
@@ -206,162 +196,13 @@ test('файл, отвергнутый хранилищем, оставляет 
   await expect(orphan).toContainText('открыть ревизию');
 
   // Последствие в базе: комплект существует и у него есть черновая ревизия.
-  const list = await page.request.get(`/api/v1/works?objectId=${IDS.object}&limit=50`);
+  const list = await page.request.get(`/api/v1/folders?objectId=${IDS.object}&limit=50`);
   const works = (await list.json()) as {
-    items: { title: string; currentRevisionId: string | null }[];
+    items: { title: string; currentFolderId: string | null }[];
   };
   const created = works.items.find((item) => item.title === 'Комплект с оборванной загрузкой');
   expect(created, 'комплект не должен удаляться из-за отказа на заливке').toBeDefined();
-  expect(created?.currentRevisionId).not.toBeNull();
-});
-
-test('генподрядчик собирает реестр: номер, состав, файл описи', async ({ page }) => {
-  await signIn(page, KC.general, `/ids/registries/${IDS.registry}`);
-
-  // Пока нет ни номера, ни состава, ни файла — препятствия названы списком, а
-  // не по одному за попытку.
-  const blockers = page.getByTestId('issue-blockers');
-  await expect(blockers).toBeVisible();
-  await expect(blockers).toContainText('Не присвоен номер реестра.');
-  await expect(blockers).toContainText('В реестр не включён ни один комплект.');
-  await expect(blockers).toContainText('Не загружен подписанный файл реестра.');
-  await expect(page.getByTestId('issue-registry')).toBeDisabled();
-
-  await page.getByTestId('header-number').fill('8');
-  await page.getByTestId('save-header').click();
-  await expect(page.getByText('Реквизиты сохранены')).toBeVisible();
-
-  // Комплект на проверке подан — он и войдёт в опись.
-  await page.getByTestId('add-work').click();
-  await page.locator('.ant-select-dropdown:visible').getByTitle('Комплект на проверке').click();
-  await page.getByRole('button', { name: 'Включить' }).click();
-  await expect(page.getByRole('link', { name: 'Комплект на проверке' })).toBeVisible();
-
-  // Файл описи — обычный комплект того же конвейера: заводится здесь, грузится
-  // на своей ревизии.
-  await page.getByTestId('attach-file').click();
-  await expect(page.getByText('Открыть ревизию файла')).toBeVisible();
-
-  // Препятствие сменилось, а не исчезло: файл заведён, но не подан. Разница
-  // существенна — «нет файла» чинит ПТО, «файл не подан» чинит тот же ПТО, но
-  // другим действием.
-  await expect(blockers).not.toContainText('Не присвоен номер реестра.');
-  await expect(blockers).toContainText('Файл реестра загружен, но не подан');
-  await expect(page.getByTestId('issue-registry')).toBeDisabled();
-
-  // Состав записан в базу, а не только отрисован.
-  const view = await page.request.get(`/api/v1/registries/${IDS.registry}`);
-  const body = (await view.json()) as {
-    registry: { number: string | null };
-    works: { id: string }[];
-    file: { kind: string; autoRunEnabled: boolean } | null;
-  };
-  expect(body.registry.number).toBe('8');
-  expect(body.works.map((work) => work.id)).toContain(IDS.workReview);
-  expect(body.file?.kind).toBe('registry');
-  // Разметку описи человек не ведёт: она нужна целиком и сразу для сверки.
-  expect(body.file?.autoRunEnabled).toBe(true);
-});
-
-test('передача фиксирует опись, приёмку делает инженер', async ({ page }) => {
-  // Реестр готов заранее: подача ревизии описи требует собранного рабочего
-  // документа, а стенд поднимается без воркера.
-  await signIn(page, KC.general, `/ids/registries/${IDS.registryReady}`);
-
-  await expect(page.getByTestId('issue-blockers')).toHaveCount(0);
-  await page.getByTestId('issue-registry').click();
-
-  await expect(page.getByText('Папка передана')).toBeVisible();
-  await expect(page.getByText('Опись на момент передачи')).toBeVisible();
-  await expect(page.getByTestId('issue-registry')).toHaveCount(0);
-
-  // Снимок записан: строка описи ссылается на ту ревизию, что была подана.
-  const items = await page.request.get(`/api/v1/registries/${IDS.registryReady}/items`);
-  const snapshot = (await items.json()) as { workId: string; revisionId: string }[];
-  expect(snapshot).toHaveLength(1);
-  expect(snapshot[0]?.workId).toBe(IDS.workIssued);
-  expect(snapshot[0]?.revisionId).toBe(IDS.revisionIssued);
-
-  // Форма шапки после передачи не показывается вовсе: заполненные поля с
-  // отказом при сохранении читались бы как поломка, а не как свойство.
-  await expect(page.getByTestId('header-number')).toHaveCount(0);
-  await expect(page.getByTestId('add-work')).toHaveCount(0);
-
-  // Принимает сторона заказчика: тот, кто передал, не принимает сам у себя.
-  await signIn(page, KC.engineer, `/ids/registries/${IDS.registryReady}`);
-  await page.getByTestId('accept-registry').click();
-  await expect(page.getByText('Папка принята')).toBeVisible();
-});
-
-test('черновик реестра удаляется, а комплекты остаются на объекте', async ({ page }) => {
-  // Сценарий идёт ПОСЛЕ сборки: к этому моменту в реестре есть комплект и файл
-  // описи, и предпросмотр обязан назвать оба — разными глаголами.
-  await signIn(page, KC.general, `/ids/registries/${IDS.registry}`);
-
-  await page.getByTestId(`delete-registry-${IDS.registry}`).click();
-  const dialog = page.getByRole('dialog');
-  await expect(dialog).toContainText('Комплектов будет отвязано: 1');
-  await expect(dialog).toContainText('файл описи');
-  await dialog.getByRole('button', { name: 'Удалить безвозвратно' }).click();
-
-  // Экран уходит на объект: показывать удалённую папку нечего.
-  await expect(page).toHaveURL(new RegExp(`/ids/objects/${IDS.object}`, 'u'));
-
-  // Последствие в базе, а не надпись: реестра нет, комплект жив и отвязан.
-  const registry = await page.request.get(`/api/v1/registries/${IDS.registry}`);
-  expect(registry.status()).toBe(404);
-
-  const work = await page.request.get(`/api/v1/works/${IDS.workReview}`);
-  expect(work.status()).toBe(200);
-  expect(((await work.json()) as { registryId: string | null }).registryId).toBeNull();
-});
-
-test('у переданной папки кнопки удаления нет вовсе', async ({ page }) => {
-  // Скрыта, а не заблокирована: заблокированная кнопка на подписанном документе
-  // читается как поломка, а не как свойство документа.
-  await signIn(page, KC.general, `/ids/registries/${IDS.registryReady}`);
-  await expect(page.getByTestId(`delete-registry-${IDS.registryReady}`)).toHaveCount(0);
-});
-
-test('подрядчик видит реестр, но не состав чужой папки', async ({ page }) => {
-  await signIn(page, KC.contractor, `/ids/registries/${IDS.registryReady}`);
-
-  await expect(page.getByTestId('registry-hidden')).toBeVisible();
-  await expect(page.getByText('Состав', { exact: true })).toHaveCount(0);
-
-  // Снимок ему отдаётся, но только собственными строками.
-  const items = await page.request.get(`/api/v1/registries/${IDS.registryReady}/items`);
-  expect(items.status()).toBe(200);
-  const snapshot = (await items.json()) as { contractorId: string }[];
-  for (const row of snapshot) expect(row.contractorId).toBe(IDS.orgContractor);
-});
-
-/**
- * Сверка описи: карточка папки принадлежит ведущему её, и только ему.
- *
- * Проверяются обе стороны разделения выдач: генподрядчик видит карточку и
- * запускает сверку, подрядчик не видит её вовсе и получает 403 на маршруте
- * сводки по папке. Свои расхождения он читает на экране своего комплекта — там
- * в ответе сервера нет ни одного поля о папке.
- */
-test('сверка описи: карточка папки — только ведущему её', async ({ page }) => {
-  await signIn(page, KC.general, `/ids/registries/${IDS.registryReady}`);
-
-  const run = page.getByTestId('reconcile-run');
-  await expect(run).toBeVisible();
-  // Сверки ещё не было: вместо чисел — объяснение, что скан надо провести по
-  // конвейеру. Пустая карточка читалась бы как «всё сошлось».
-  await expect(page.getByTestId('reconciliation-empty')).toBeVisible();
-
-  await run.click();
-  await expect(page.getByText(/Сверка (поставлена|этой папки уже идёт)/u)).toBeVisible();
-
-  // У подрядчика карточки нет вовсе, а не пустая.
-  await signIn(page, KC.contractor, `/ids/registries/${IDS.registryReady}`);
-  await expect(page.getByTestId('reconcile-run')).toHaveCount(0);
-
-  const summary = await page.request.get(`/api/v1/registries/${IDS.registryReady}/reconciliation`);
-  expect(summary.status()).toBe(403);
+  expect(created?.currentFolderId).not.toBeNull();
 });
 
 test('роли подрядчика и инженера вместе: организация берётся не из второй роли', async ({
@@ -373,7 +214,7 @@ test('роли подрядчика и инженера вместе: орган
   // тот же человек числится второй ролью. Это и проверяется.
   await signIn(page, KC.mixed, `/ids/objects/${IDS.object}`);
 
-  const created = await apiPost(page, '/api/v1/works', {
+  const created = await apiPost(page, '/api/v1/folders', {
     data: {
       objectId: IDS.object,
       sectionCode: IDS.sectionCode,
@@ -390,19 +231,4 @@ test('роли подрядчика и инженера вместе: орган
   expect(work.contractorId).not.toBe(IDS.orgContractor);
   // Признак поднят: назвал не человек, и на экране будет надпись, а не имя.
   expect(work.contractorAssumed).toBe(true);
-});
-
-test('несуществующий реестр неотличим от чужого и не выглядит пустой таблицей', async ({
-  page,
-}) => {
-  const absent = '00000000-0000-4000-8000-0000000009ff';
-  await signIn(page, KC.contractor, `/ids/registries/${absent}`);
-
-  // Экран говорит об отказе. Пустая таблица состава здесь была бы худшим из
-  // возможных ответов: она выглядит рабочей.
-  await expect(page.getByText('Реестр недоступен')).toBeVisible();
-
-  const direct = await page.request.get(`/api/v1/registries/${absent}`);
-  expect(direct.status()).toBe(404);
-  expect(direct.headers()['content-type']).toContain('application/problem+json');
 });

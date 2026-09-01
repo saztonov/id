@@ -24,7 +24,7 @@
  *
  * У `layout_revisions` есть собственный денормализованный `object_id`, но
  * `contractor_id` — только у ревизии поставки, поэтому область применяется
- * соединением с `submission_revisions` (как в `bundles.ts`). Ни один запрос
+ * соединением с `folders` (как в `bundles.ts`). Ни один запрос
  * этого файла не выполняется без `withScope()`: подрядчик не видит чужую
  * разметку ни списком, ни по прямому идентификатору (§16).
  */
@@ -39,7 +39,7 @@ import {
   processingBundles,
   rdRunDocuments,
   sourcePages,
-  submissionRevisions,
+  folders,
 } from '@id/db';
 import {
   attentionFlagSchema,
@@ -56,12 +56,12 @@ import type { AuthScope } from '../../auth/scope.js';
 import { unionArea } from '../../layout/attention.js';
 import { conflict, internal, notFound, preconditionFailed } from '../../lib/problem.js';
 import { withScope, type ScopeTarget } from '../scoped.js';
-import { appendRevisionEvent, type JobExecutor } from './jobs.js';
+import { appendFolderEvent, type JobExecutor } from './jobs.js';
 import type { Database } from './users.js';
 
-const REVISION_SCOPE: ScopeTarget = {
-  objectId: submissionRevisions.objectId,
-  contractorId: submissionRevisions.contractorId,
+const FOLDER_SCOPE: ScopeTarget = {
+  objectId: folders.objectId,
+  contractorId: folders.contractorId,
 };
 
 /**
@@ -73,7 +73,6 @@ const REVISION_SCOPE: ScopeTarget = {
  * приходить понятным текстом до дорогой работы, а не исключением триггера
  * после неё.
  */
-const LAYOUT_MUTABLE_STATUSES = new Set(['draft', 'submitted', 'in_review']);
 
 /** Код профиля разметки по умолчанию (миграция 0012). */
 export const DEFAULT_LAYOUT_PROFILE_CODE = 'default';
@@ -372,7 +371,7 @@ export async function loadProfileForLayout(
 
 export interface LayoutRevisionView {
   readonly id: string;
-  readonly revisionId: string;
+  readonly folderId: string;
   readonly objectId: string;
   readonly bundleId: string;
   readonly revisionNo: number;
@@ -385,8 +384,6 @@ export interface LayoutRevisionView {
   readonly frozenAt: string | null;
   readonly frozenBy: string | null;
   readonly createdAt: string;
-  /** Статус ревизии поставки: от него зависит, можно ли вообще править. */
-  readonly submissionStatus: string;
   /**
    * Правило разметки, ЗАПИНЕННОЕ при создании черновика (S42).
    *
@@ -400,7 +397,7 @@ export interface LayoutRevisionView {
 
 const LAYOUT_SELECTION = {
   id: layoutRevisions.id,
-  revisionId: layoutRevisions.revisionId,
+  folderId: layoutRevisions.folderId,
   objectId: layoutRevisions.objectId,
   bundleId: layoutRevisions.bundleId,
   revisionNo: layoutRevisions.revisionNo,
@@ -424,7 +421,6 @@ const LAYOUT_SELECTION = {
     sql<string>`to_char(${layoutRevisions.createdAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`.as(
       'created_at_iso',
     ),
-  submissionStatus: submissionRevisions.status,
   markupPolicy: layoutRevisions.markupPolicy,
 };
 
@@ -449,8 +445,8 @@ export async function findLayoutRevision(
   const rows = await db
     .select(LAYOUT_SELECTION)
     .from(layoutRevisions)
-    .innerJoin(submissionRevisions, eq(layoutRevisions.revisionId, submissionRevisions.id))
-    .where(withScope(scope, REVISION_SCOPE, eq(layoutRevisions.id, layoutRevisionId)))
+    .innerJoin(folders, eq(layoutRevisions.folderId, folders.id))
+    .where(withScope(scope, FOLDER_SCOPE, eq(layoutRevisions.id, layoutRevisionId)))
     .limit(1);
   const row = rows[0];
   return row === undefined ? null : toLayoutView(row);
@@ -459,13 +455,13 @@ export async function findLayoutRevision(
 export async function listLayoutRevisions(
   db: Database,
   scope: AuthScope,
-  revisionId: string,
+  folderId: string,
 ): Promise<readonly LayoutRevisionView[]> {
   const rows = await db
     .select(LAYOUT_SELECTION)
     .from(layoutRevisions)
-    .innerJoin(submissionRevisions, eq(layoutRevisions.revisionId, submissionRevisions.id))
-    .where(withScope(scope, REVISION_SCOPE, eq(layoutRevisions.revisionId, revisionId)))
+    .innerJoin(folders, eq(layoutRevisions.folderId, folders.id))
+    .where(withScope(scope, FOLDER_SCOPE, eq(layoutRevisions.folderId, folderId)))
     .orderBy(asc(layoutRevisions.revisionNo));
   return rows.map(toLayoutView);
 }
@@ -474,17 +470,17 @@ export async function listLayoutRevisions(
 export async function findDraftLayout(
   db: Database,
   scope: AuthScope,
-  revisionId: string,
+  folderId: string,
 ): Promise<LayoutRevisionView | null> {
   const rows = await db
     .select(LAYOUT_SELECTION)
     .from(layoutRevisions)
-    .innerJoin(submissionRevisions, eq(layoutRevisions.revisionId, submissionRevisions.id))
+    .innerJoin(folders, eq(layoutRevisions.folderId, folders.id))
     .where(
       withScope(
         scope,
-        REVISION_SCOPE,
-        eq(layoutRevisions.revisionId, revisionId),
+        FOLDER_SCOPE,
+        eq(layoutRevisions.folderId, folderId),
         eq(layoutRevisions.state, 'draft'),
       ),
     )
@@ -515,8 +511,8 @@ async function thawLatestLayout(
   const rows = await db
     .select({ id: layoutRevisions.id })
     .from(layoutRevisions)
-    .innerJoin(submissionRevisions, eq(layoutRevisions.revisionId, submissionRevisions.id))
-    .where(withScope(scope, REVISION_SCOPE, eq(layoutRevisions.revisionId, input.revisionId)))
+    .innerJoin(folders, eq(layoutRevisions.folderId, folders.id))
+    .where(withScope(scope, FOLDER_SCOPE, eq(layoutRevisions.folderId, input.folderId)))
     .orderBy(desc(layoutRevisions.revisionNo))
     .limit(1);
 
@@ -536,8 +532,8 @@ async function thawLatestLayout(
     })
     .where(eq(layoutRevisions.id, found.id));
 
-  await appendRevisionEvent(db, {
-    revisionId: input.revisionId,
+  await appendFolderEvent(db, {
+    folderId: input.folderId,
     eventType: 'layout.thawed',
     payload: { layoutRevisionId: found.id, bundleId: input.bundleId },
   });
@@ -550,7 +546,7 @@ async function thawLatestLayout(
 // =====================================================================
 
 export interface EnsureDraftLayoutInput {
-  readonly revisionId: string;
+  readonly folderId: string;
   readonly bundleId: string;
   /** §5.3: `full_page` допустим только на однородных текстовых комплектах. */
   readonly detectorProfile?: 'rf_detr' | 'full_page';
@@ -604,7 +600,7 @@ export async function ensureDraftLayout(
   scope: AuthScope,
   input: EnsureDraftLayoutInput,
 ): Promise<EnsureDraftLayoutResult> {
-  const existing = await findDraftLayout(db, scope, input.revisionId);
+  const existing = await findDraftLayout(db, scope, input.folderId);
   if (existing !== null) {
     if (existing.bundleId !== input.bundleId) {
       throw conflict(
@@ -628,39 +624,33 @@ export async function ensureDraftLayout(
     const bundles = await tx
       .select({
         bundleId: processingBundles.id,
-        revisionId: processingBundles.revisionId,
-        objectId: submissionRevisions.objectId,
-        status: submissionRevisions.status,
+        folderId: processingBundles.folderId,
+        objectId: folders.objectId,
       })
       .from(processingBundles)
-      .innerJoin(submissionRevisions, eq(processingBundles.revisionId, submissionRevisions.id))
+      .innerJoin(folders, eq(processingBundles.folderId, folders.id))
       .where(
         withScope(
           scope,
-          REVISION_SCOPE,
+          FOLDER_SCOPE,
           eq(processingBundles.id, input.bundleId),
-          eq(processingBundles.revisionId, input.revisionId),
+          eq(processingBundles.folderId, input.folderId),
         ),
       )
       .limit(1);
 
     const bundle = bundles[0];
     if (bundle === undefined) throw notFound('Рабочий документ не найден.');
-    if (!LAYOUT_MUTABLE_STATUSES.has(bundle.status)) {
-      throw conflict(
-        `Разметку нельзя начать для ревизии в статусе «${bundle.status}»: она уже закрыта.`,
-      );
-    }
 
     const maxRows = await tx
       .select({ maxNo: sql<number>`coalesce(max(${layoutRevisions.revisionNo}), 0)::int` })
       .from(layoutRevisions)
-      .where(eq(layoutRevisions.revisionId, input.revisionId));
+      .where(eq(layoutRevisions.folderId, input.folderId));
 
     const inserted = await tx
       .insert(layoutRevisions)
       .values({
-        revisionId: bundle.revisionId,
+        folderId: bundle.folderId,
         objectId: bundle.objectId,
         bundleId: bundle.bundleId,
         revisionNo: (maxRows[0]?.maxNo ?? 0) + 1,
@@ -676,8 +666,8 @@ export async function ensureDraftLayout(
       throw internal({ logDetail: 'INSERT ревизии разметки не вернул строку' });
     }
 
-    await appendRevisionEvent(tx, {
-      revisionId: bundle.revisionId,
+    await appendFolderEvent(tx, {
+      folderId: bundle.folderId,
       eventType: 'layout.draft_created',
       payload: {
         layoutRevisionId: row.id,
@@ -739,8 +729,8 @@ export async function pinMarkupPolicy(
       .set({ markupPolicy: input.policy, updatedAt: sql`now()` })
       .where(eq(layoutRevisions.id, layout.id));
 
-    await appendRevisionEvent(tx, {
-      revisionId: layout.revisionId,
+    await appendFolderEvent(tx, {
+      folderId: layout.folderId,
       eventType: 'layout.policy_pinned',
       payload: { layoutRevisionId: layout.id, from: before, to: input.policy },
     });
@@ -816,8 +806,8 @@ export async function listLayoutBlocks(
   const rows = await db
     .select(BLOCK_SELECTION)
     .from(layoutBlocks)
-    .innerJoin(submissionRevisions, eq(layoutBlocks.revisionId, submissionRevisions.id))
-    .where(withScope(scope, REVISION_SCOPE, ...conditions))
+    .innerJoin(folders, eq(layoutBlocks.folderId, folders.id))
+    .where(withScope(scope, FOLDER_SCOPE, ...conditions))
     .orderBy(asc(layoutBlocks.workingPageIndex), asc(layoutBlocks.sortOrder), asc(layoutBlocks.id));
 
   if (rows.length === 0) return [];
@@ -872,8 +862,8 @@ export async function findLayoutBlock(
     .select({ ...BLOCK_SELECTION, ...LAYOUT_SELECTION, blockId: layoutBlocks.id })
     .from(layoutBlocks)
     .innerJoin(layoutRevisions, eq(layoutBlocks.layoutRevisionId, layoutRevisions.id))
-    .innerJoin(submissionRevisions, eq(layoutBlocks.revisionId, submissionRevisions.id))
-    .where(withScope(scope, REVISION_SCOPE, eq(layoutBlocks.id, blockId)))
+    .innerJoin(folders, eq(layoutBlocks.folderId, folders.id))
+    .where(withScope(scope, FOLDER_SCOPE, eq(layoutBlocks.id, blockId)))
     .limit(1);
 
   const row = rows[0];
@@ -887,7 +877,7 @@ export async function findLayoutBlock(
     block,
     layout: {
       id: row.id,
-      revisionId: row.revisionId,
+      folderId: row.folderId,
       objectId: row.objectId,
       bundleId: row.bundleId,
       revisionNo: row.revisionNo,
@@ -901,7 +891,6 @@ export async function findLayoutBlock(
       frozenAt: row.frozenAt,
       frozenBy: row.frozenBy,
       createdAt: row.createdAt,
-      submissionStatus: row.submissionStatus,
     },
   };
 }
@@ -945,15 +934,13 @@ async function requireEditableLayout(
  * комплекта. Заморозки не существует, а `superseded` — история уже работавших
  * баз: её нет ни у одной разметки, которую портал сейчас отдаёт на правку.
  *
- * Остаётся один запрет, и он про поставку, а не про разметку: в терминальном
- * статусе ревизии её содержимое заперто целиком (класс `derived`, 0008).
+ * Последний запрет — «терминальный статус поставки» — снят вместе со статусами
+ * (S44): запирать разметку больше нечем и незачем. Функция сохранена пустой
+ * намеренно, чтобы точка решения осталась названной: если запрет вернётся, он
+ * вернётся сюда, а не расползётся по вызывающим.
  */
-export function assertEditableLayout(layout: LayoutRevisionView): void {
-  if (!LAYOUT_MUTABLE_STATUSES.has(layout.submissionStatus)) {
-    throw conflict(
-      `Ревизия поставки в статусе «${layout.submissionStatus}»: её разметка больше не правится.`,
-    );
-  }
+export function assertEditableLayout(_layout: LayoutRevisionView): void {
+  // Условий больше нет.
 }
 
 /**
@@ -1081,7 +1068,7 @@ export async function importDetectedBlocks(
       }
       await insertBlock(tx, {
         layoutRevisionId: layout.id,
-        revisionId: layout.revisionId,
+        folderId: layout.folderId,
         bundleId: layout.bundleId,
         objectId: layout.objectId,
         sourcePageId: page,
@@ -1093,8 +1080,8 @@ export async function importDetectedBlocks(
 
     const version = await bumpVersion(tx, layout.id, null, false);
 
-    await appendRevisionEvent(tx, {
-      revisionId: layout.revisionId,
+    await appendFolderEvent(tx, {
+      folderId: layout.folderId,
       eventType: 'layout.detected',
       payload: {
         layoutRevisionId: layout.id,
@@ -1164,9 +1151,9 @@ async function loadPageSizes(
     })
     .from(processingBundlePages)
     .innerJoin(processingBundles, eq(processingBundlePages.bundleId, processingBundles.id))
-    .innerJoin(submissionRevisions, eq(processingBundles.revisionId, submissionRevisions.id))
+    .innerJoin(folders, eq(processingBundles.folderId, folders.id))
     .innerJoin(sourcePages, eq(processingBundlePages.sourcePageId, sourcePages.id))
-    .where(withScope(scope, REVISION_SCOPE, eq(processingBundlePages.bundleId, bundleId)));
+    .where(withScope(scope, FOLDER_SCOPE, eq(processingBundlePages.bundleId, bundleId)));
 
   return new Map(
     rows.map((row) => [row.workingPageIndex, { widthPt: row.widthPt, heightPt: row.heightPt }]),
@@ -1190,15 +1177,15 @@ async function loadPageMap(
     })
     .from(processingBundlePages)
     .innerJoin(processingBundles, eq(processingBundlePages.bundleId, processingBundles.id))
-    .innerJoin(submissionRevisions, eq(processingBundles.revisionId, submissionRevisions.id))
-    .where(withScope(scope, REVISION_SCOPE, ...conditions));
+    .innerJoin(folders, eq(processingBundles.folderId, folders.id))
+    .where(withScope(scope, FOLDER_SCOPE, ...conditions));
 
   return new Map(rows.map((row) => [row.workingPageIndex, row.sourcePageId]));
 }
 
 interface InsertBlockInput {
   readonly layoutRevisionId: string;
-  readonly revisionId: string;
+  readonly folderId: string;
   readonly bundleId: string;
   readonly objectId: string;
   readonly sourcePageId: string;
@@ -1219,10 +1206,10 @@ async function insertBlock(tx: JobExecutor, input: InsertBlockInput): Promise<st
   }
   const inserted = await tx.execute<{ id: string }>(sql`
     insert into ${layoutBlocks}
-      (layout_revision_id, revision_id, bundle_id, source_page_id, working_page_index,
+      (layout_revision_id, folder_id, bundle_id, source_page_id, working_page_index,
        object_id, block_type, shape_type, x0, y0, x1, y1, sort_order, source,
        detector_provenance, detection_score, detection_model_version)
-    values (${input.layoutRevisionId}::uuid, ${input.revisionId}::uuid, ${input.bundleId}::uuid,
+    values (${input.layoutRevisionId}::uuid, ${input.folderId}::uuid, ${input.bundleId}::uuid,
             ${input.sourcePageId}::uuid, ${b.workingPageIndex}, ${input.objectId}::uuid,
             ${b.blockType}, ${b.shapeType}, ${b.x0}, ${b.y0}, ${b.x1}, ${b.y1},
             ${b.sortOrder}, ${input.source}, ${input.provenance},
@@ -1291,7 +1278,7 @@ export async function createLayoutBlock(
   return db.transaction(async (tx) => {
     const blockId = await insertBlock(tx, {
       layoutRevisionId: layout.id,
-      revisionId: layout.revisionId,
+      folderId: layout.folderId,
       bundleId: layout.bundleId,
       objectId: layout.objectId,
       sourcePageId,
@@ -1302,8 +1289,8 @@ export async function createLayoutBlock(
       provenance: 'user',
     });
     const version = await bumpVersion(tx, layout.id, input.actorUserId, true);
-    await appendRevisionEvent(tx, {
-      revisionId: layout.revisionId,
+    await appendFolderEvent(tx, {
+      folderId: layout.folderId,
       eventType: 'layout.block_created',
       payload: { layoutRevisionId: layout.id, blockId, page: input.workingPageIndex },
     });
@@ -1418,8 +1405,8 @@ export async function updateLayoutBlock(
     }
 
     const version = await bumpVersion(tx, found.layout.id, input.actorUserId, true);
-    await appendRevisionEvent(tx, {
-      revisionId: found.layout.revisionId,
+    await appendFolderEvent(tx, {
+      folderId: found.layout.folderId,
       eventType: 'layout.block_updated',
       payload: {
         layoutRevisionId: found.layout.id,
@@ -1458,8 +1445,8 @@ export async function deleteLayoutBlock(
       delete from ${layoutBlocks} where ${layoutBlocks.id} = ${input.blockId}::uuid
     `);
     const version = await bumpVersion(tx, found.layout.id, input.actorUserId, true);
-    await appendRevisionEvent(tx, {
-      revisionId: found.layout.revisionId,
+    await appendFolderEvent(tx, {
+      folderId: found.layout.folderId,
       eventType: 'layout.block_deleted',
       payload: {
         layoutRevisionId: found.layout.id,
@@ -1509,7 +1496,7 @@ export async function replacePageWithFullPageBlock(
     `);
     const blockId = await insertBlock(tx, {
       layoutRevisionId: layout.id,
-      revisionId: layout.revisionId,
+      folderId: layout.folderId,
       bundleId: layout.bundleId,
       objectId: layout.objectId,
       sourcePageId,
@@ -1530,8 +1517,8 @@ export async function replacePageWithFullPageBlock(
       provenance: 'full_page',
     });
     const version = await bumpVersion(tx, layout.id, input.actorUserId, true);
-    await appendRevisionEvent(tx, {
-      revisionId: layout.revisionId,
+    await appendFolderEvent(tx, {
+      folderId: layout.folderId,
       eventType: 'layout.page_replaced',
       payload: { layoutRevisionId: layout.id, page: input.workingPageIndex, blockId },
     });
@@ -1585,7 +1572,7 @@ export async function applyFullPageTextProfile(
     for (const [workingPageIndex, sourcePageId] of pages) {
       await insertBlock(tx, {
         layoutRevisionId: layout.id,
-        revisionId: layout.revisionId,
+        folderId: layout.folderId,
         bundleId: layout.bundleId,
         objectId: layout.objectId,
         sourcePageId,
@@ -1613,8 +1600,8 @@ export async function applyFullPageTextProfile(
     // блоков ручной правкой не является: иначе повторный вызов режима стал бы
     // невозможен сразу после первого.
     const version = await bumpVersion(tx, layout.id, null, false);
-    await appendRevisionEvent(tx, {
-      revisionId: layout.revisionId,
+    await appendFolderEvent(tx, {
+      folderId: layout.folderId,
       eventType: 'layout.full_page_text_applied',
       payload: { layoutRevisionId: layout.id, pages: pages.size },
     });
@@ -1756,7 +1743,7 @@ export async function applyTextCoverageFallback(
       if (sourcePageId === undefined) continue;
       await insertBlock(tx, {
         layoutRevisionId: layout.id,
-        revisionId: layout.revisionId,
+        folderId: layout.folderId,
         bundleId: layout.bundleId,
         objectId: layout.objectId,
         sourcePageId,
@@ -1806,8 +1793,8 @@ export async function applyTextCoverageFallback(
     // как работу человека, портал запретил бы сам себе режим `full-page-text` и
     // соврал бы в поле `first_manual_edit_by`.
     const next = await bumpVersion(tx, layout.id, null, false);
-    await appendRevisionEvent(tx, {
-      revisionId: layout.revisionId,
+    await appendFolderEvent(tx, {
+      folderId: layout.folderId,
       eventType: 'layout.text_fallback_applied',
       payload: {
         layoutRevisionId: layout.id,
@@ -1826,7 +1813,7 @@ export async function applyTextCoverageFallback(
 // =====================================================================
 
 export interface SaveAttentionFlagsInput {
-  readonly revisionId: string;
+  readonly folderId: string;
   readonly flags: ReadonlyMap<string, readonly AttentionFlag[]>;
 }
 
@@ -1861,20 +1848,13 @@ export async function savePageAttentionFlags(
   scope: AuthScope,
   input: SaveAttentionFlagsInput,
 ): Promise<SaveFlagsOutcome> {
-  const revisions = await db
-    .select({ status: submissionRevisions.status })
-    .from(submissionRevisions)
-    .where(withScope(scope, REVISION_SCOPE, eq(submissionRevisions.id, input.revisionId)))
+  const visible = await db
+    .select({ id: folders.id })
+    .from(folders)
+    .where(withScope(scope, FOLDER_SCOPE, eq(folders.id, input.folderId)))
     .limit(1);
 
-  const status = revisions[0]?.status;
-  if (status === undefined) return { kind: 'skipped', reason: 'ревизия недоступна' };
-  if (!LAYOUT_MUTABLE_STATUSES.has(status)) {
-    return {
-      kind: 'skipped',
-      reason: `ревизия в статусе «${status}» закрыта, флаги страниц не записаны`,
-    };
-  }
+  if (visible[0] === undefined) return { kind: 'skipped', reason: 'папка недоступна' };
 
   let written = 0;
   for (const [sourcePageId, flags] of input.flags) {
@@ -1892,7 +1872,7 @@ export async function savePageAttentionFlags(
       update ${sourcePages}
          set attention_flags = ${sql.raw(flags.length === 0 ? `'{}'::text[]` : literal)}
        where ${sourcePages.id} = ${sourcePageId}::uuid
-         and ${sourcePages.revisionId} = ${input.revisionId}::uuid
+         and ${sourcePages.folderId} = ${input.folderId}::uuid
       returning id
     `);
     written += updated.rows.length;
@@ -1913,9 +1893,9 @@ export async function listPageAttentionFlags(
     })
     .from(processingBundlePages)
     .innerJoin(processingBundles, eq(processingBundlePages.bundleId, processingBundles.id))
-    .innerJoin(submissionRevisions, eq(processingBundles.revisionId, submissionRevisions.id))
+    .innerJoin(folders, eq(processingBundles.folderId, folders.id))
     .innerJoin(sourcePages, eq(processingBundlePages.sourcePageId, sourcePages.id))
-    .where(withScope(scope, REVISION_SCOPE, eq(processingBundlePages.bundleId, bundleId)))
+    .where(withScope(scope, FOLDER_SCOPE, eq(processingBundlePages.bundleId, bundleId)))
     .orderBy(asc(processingBundlePages.workingPageIndex));
 
   return rows.map((row) => ({
@@ -1957,8 +1937,8 @@ export async function findRunDocument(
     .select(RUN_DOCUMENT_SELECTION)
     .from(rdRunDocuments)
     .innerJoin(layoutRevisions, eq(rdRunDocuments.layoutRevisionId, layoutRevisions.id))
-    .innerJoin(submissionRevisions, eq(layoutRevisions.revisionId, submissionRevisions.id))
-    .where(withScope(scope, REVISION_SCOPE, eq(rdRunDocuments.layoutRevisionId, layoutRevisionId)))
+    .innerJoin(folders, eq(layoutRevisions.folderId, folders.id))
+    .where(withScope(scope, FOLDER_SCOPE, eq(rdRunDocuments.layoutRevisionId, layoutRevisionId)))
     .limit(1);
   return rows[0] ?? null;
 }
@@ -1996,8 +1976,8 @@ export async function createRunDocument(
         rdProjectId: input.rdProjectId,
       })
       .onConflictDoNothing();
-    await appendRevisionEvent(tx, {
-      revisionId: layout.revisionId,
+    await appendFolderEvent(tx, {
+      folderId: layout.folderId,
       eventType: 'layout.run_document_created',
       payload: { layoutRevisionId: layout.id, rdProjectId: input.rdProjectId },
     });
@@ -2055,8 +2035,8 @@ export async function replaceRunDocument(
       throw conflict('RD-документ прогона изменился или закрыт: замена не выполнена.');
     }
 
-    await appendRevisionEvent(tx, {
-      revisionId: layout.revisionId,
+    await appendFolderEvent(tx, {
+      folderId: layout.folderId,
       eventType: 'layout.run_document_replaced',
       payload: {
         layoutRevisionId: layout.id,

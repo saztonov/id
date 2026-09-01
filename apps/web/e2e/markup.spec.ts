@@ -13,7 +13,7 @@
 import { expect, test } from '@playwright/test';
 import { IDS, KC, apiPost, csrfToken, signIn } from './support/session.js';
 
-const MARKUP_URL = `/ids/revisions/${IDS.revisionMarkup}?tab=markup`;
+const MARKUP_URL = `/ids/folders/${IDS.folderMarkup}?tab=markup`;
 
 test.describe.configure({ mode: 'serial' });
 
@@ -150,7 +150,7 @@ test.describe('экран разметки', () => {
     // разворот тем же запросом, которым отдаёт геометрию.
     const bundleId = await page.evaluate(async () => {
       const response = await fetch(
-        '/api/v1/revisions/' + window.location.pathname.split('/')[3] + '/bundles',
+        '/api/v1/folders/' + window.location.pathname.split('/')[3] + '/bundles',
       );
       const body = (await response.json()) as { items: { id: string }[] };
       return body.items[body.items.length - 1]?.id ?? '';
@@ -311,7 +311,7 @@ test.describe('экран разметки', () => {
     await expect
       .poll(async () => {
         const response = await page.request.get(
-          `/api/v1/revisions/${IDS.revisionMarkup}/classifications`,
+          `/api/v1/folders/${IDS.folderMarkup}/classifications`,
         );
         const body = (await response.json()) as {
           items: {
@@ -338,7 +338,7 @@ test.describe('экран разметки', () => {
     await expect
       .poll(async () => {
         const response = await page.request.get(
-          `/api/v1/revisions/${IDS.revisionMarkup}/classifications`,
+          `/api/v1/folders/${IDS.folderMarkup}/classifications`,
         );
         const body = (await response.json()) as {
           items: {
@@ -359,7 +359,7 @@ test.describe('экран разметки', () => {
     await expect
       .poll(async () => {
         const response = await page.request.get(
-          `/api/v1/revisions/${IDS.revisionMarkup}/classifications`,
+          `/api/v1/folders/${IDS.folderMarkup}/classifications`,
         );
         const body = (await response.json()) as {
           items: { sourcePageId: string; source: string }[];
@@ -395,7 +395,7 @@ test.describe('экран разметки', () => {
     await expect
       .poll(async () => {
         const response = await page.request.get(
-          `/api/v1/revisions/${IDS.revisionMarkup}/recognition-runs`,
+          `/api/v1/folders/${IDS.folderMarkup}/recognition-runs`,
         );
         const body = (await response.json()) as {
           items: { layoutRevisionId: string; localLayoutHash: string; status: string }[];
@@ -410,7 +410,7 @@ test.describe('экран разметки', () => {
   test('подрядчик не видит разметку чужой поставки', async ({ page }) => {
     // Изоляция §1.6 проверена в API-тестах; здесь — что интерфейс не обходит её
     // собственным путём и не показывает данные, которых сервер не отдал.
-    await signIn(page, KC.contractor, `/ids/revisions/${IDS.revisionReview}?tab=markup`);
+    await signIn(page, KC.contractor, `/ids/folders/${IDS.folderReview}?tab=markup`);
     const direct = await page.request.get(`/api/v1/layouts/${IDS.layoutMarkup}/blocks`);
     // Своя поставка того же подрядчика — видна; проверка тут в том, что маршрут
     // отвечает содержимым, а не что интерфейс что-то нарисовал сам.

@@ -8,7 +8,7 @@
  */
 import { z } from 'zod';
 
-export const revisionIdParamSchema = z.object({ revisionId: z.uuid() });
+export const folderIdParamSchema = z.object({ folderId: z.uuid() });
 export const runIdParamSchema = z.object({ runId: z.uuid() });
 
 /**

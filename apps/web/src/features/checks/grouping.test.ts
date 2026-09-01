@@ -17,7 +17,7 @@ import {
   summaryText,
 } from './grouping.js';
 
-const REVISION = '00000000-0000-4000-8000-000000000001';
+const FOLDER = '00000000-0000-4000-8000-000000000001';
 
 function finding(over: Partial<Finding> & { id: string }): Finding {
   return {
@@ -137,21 +137,21 @@ describe('pageLabel', () => {
 describe('markupHref', () => {
   it('ведёт на страницу разметки и выделяет блок', () => {
     const href = markupHref(
-      REVISION,
+      FOLDER,
       finding({
         id: 'a',
         blockId: 'blk',
         page: { number: 5, workingPageIndex: 4, basis: 'finding' },
       }),
     );
-    expect(href).toBe(`/ids/revisions/${REVISION}?tab=markup&page=4&block=blk`);
+    expect(href).toBe(`/ids/folders/${FOLDER}?tab=markup&page=4&block=blk`);
   });
 
   it('не рисует ссылку, когда рабочий документ не собран', () => {
     // Неработающая ссылка хуже её отсутствия: по ней нажмут.
     expect(
       markupHref(
-        REVISION,
+        FOLDER,
         finding({ id: 'a', page: { number: 5, workingPageIndex: null, basis: 'document' } }),
       ),
     ).toBeNull();

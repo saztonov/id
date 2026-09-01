@@ -213,8 +213,8 @@ describe('redaction не съедает диагностику', () => {
     const { record } = capture({
       event: 'block_result_stored',
       object_id: '7f000000-0000-4000-8000-000000000001',
-      revision_id: '7f000000-0000-4000-8000-000000000002',
-      route: '/api/revisions/:revisionId/blocks',
+      folder_id: '7f000000-0000-4000-8000-000000000002',
+      route: '/api/folders/:folderId/blocks',
       status_code: 200,
       duration_ms: 137,
       page_number: 42,
@@ -227,8 +227,8 @@ describe('redaction не съедает диагностику', () => {
     expect(record).toMatchObject({
       event: 'block_result_stored',
       object_id: '7f000000-0000-4000-8000-000000000001',
-      revision_id: '7f000000-0000-4000-8000-000000000002',
-      route: '/api/revisions/:revisionId/blocks',
+      folder_id: '7f000000-0000-4000-8000-000000000002',
+      route: '/api/folders/:folderId/blocks',
       status_code: 200,
       duration_ms: 137,
       page_number: 42,

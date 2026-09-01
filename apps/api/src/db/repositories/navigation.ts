@@ -56,8 +56,8 @@
  *
  * ## Ручное создание ревизии не спорит с возвратом (§3, S10)
  *
- * Возврат (`returnRevision`) закрывает ревизию и ТОЙ ЖЕ транзакцией открывает
- * следующую с `parent_revision_id`. Второго пути с другой семантикой здесь нет:
+ * Возврат (`returnFolder`) закрывает ревизию и ТОЙ ЖЕ транзакцией открывает
+ * следующую с `parent_folder_id`. Второго пути с другой семантикой здесь нет:
  * ручное создание разрешено ровно в тех состояниях, в которых возврат уже
  * отработал или не мог отработать вовсе, — когда у комплекта нет незакрытой
  * ревизии.
@@ -70,7 +70,7 @@
  * | `approved`, `superseded` | создаёт следующую draft с родителем |
  * | ревизий нет вовсе | создаёт первую (`revision_no = 1`) |
  *
- * Строку с `draft` защищает ещё и `ux_submission_revisions_single_draft`:
+ * Строку с `draft` защищает ещё и `ux_submission_folders_single_draft`:
  * проверка состояния здесь нужна ради внятного отказа, а инвариант держит БД.
  */
 import {
@@ -81,26 +81,15 @@ import {
   gte,
   ilike,
   inArray,
-  isNotNull,
   isNull,
   lte,
-  ne,
   or,
   sql,
   type SQL,
 } from 'drizzle-orm';
 import { z } from 'zod';
-import { counterparties, registries, registryItems, submissionRevisions, works } from '@id/db';
-import type {
-  ProcessingStage,
-  Registry,
-  RegistryItem,
-  RegistryStatus,
-  SubmissionRevision,
-  Work,
-  WorkKind,
-  WorkflowStatus,
-} from '@id/contracts';
+import { counterparties, folders } from '@id/db';
+import type { Folder, ProcessingStage } from '@id/contracts';
 import type { AuthScope } from '../../auth/scope.js';
 import {
   badRequest,
@@ -108,45 +97,22 @@ import {
   forbidden,
   isHttpProblem,
   notFound,
-  preconditionFailed,
   unprocessable,
 } from '../../lib/problem.js';
 import { withScope, type ScopeTarget } from '../scoped.js';
 import { appendAudit, type AuditActor } from './audit.js';
-import { findConstructionObject, objectVisibility, visibleWhere } from './catalog.js';
-import { appendRevisionEvent, summarizeRevisionStages } from './jobs.js';
-import { purgeRegistryTail, purgeRevisionEntirely } from './purge.js';
+import { findConstructionObject } from './catalog.js';
+import { appendFolderEvent, summarizeFolderStages } from './jobs.js';
+import { purgeFolderEntirely } from './purge.js';
 import type { Database } from './users.js';
 
-const WORK_SCOPE: ScopeTarget = {
-  objectId: works.objectId,
-  contractorId: works.contractorId,
+const FOLDER_SCOPE: ScopeTarget = {
+  objectId: folders.objectId,
+  contractorId: folders.contractorId,
 };
-
-const REVISION_SCOPE: ScopeTarget = {
-  objectId: submissionRevisions.objectId,
-  contractorId: submissionRevisions.contractorId,
-};
-
-/** Статусы, при которых ревизия ждёт решения проверяющего. */
-const PENDING: readonly WorkflowStatus[] = ['submitted', 'in_review'];
-
-/** Статусы, при которых комплект считается поданным в составе реестра. */
-const SUBMITTED_OR_LATER: readonly WorkflowStatus[] = [
-  'submitted',
-  'in_review',
-  'returned',
-  'approved',
-  'superseded',
-];
 
 const iso = (column: unknown, alias: string) =>
   sql<string>`to_char(${column} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`.as(alias);
-
-const isoNullable = (column: unknown, alias: string) =>
-  sql<string | null>`to_char(${column} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`.as(
-    alias,
-  );
 
 /**
  * Дата без времени: месяц передаётся строкой `ГГГГ-ММ-01`, а не меткой времени.
@@ -157,17 +123,6 @@ const isoNullable = (column: unknown, alias: string) =>
  */
 const date = (column: unknown, alias: string) =>
   sql<string | null>`to_char(${column}, 'YYYY-MM-DD')`.as(alias);
-
-/**
- * То же для колонки, объявленной `NOT NULL`.
- *
- * Отдельным именем, а не приведением по месту: месяц реестра обязателен по
- * построению (свойство подписываемой бумаги, ADR-0011), и разница между ним и
- * месяцем комплекта — предметная, а не техническая. Приведение по месту стёрло
- * бы её ровно там, где она и важна.
- */
-const requiredDate = (column: unknown, alias: string) =>
-  sql<string>`to_char(${column}, 'YYYY-MM-DD')`.as(alias);
 
 export interface Page<TItem> {
   readonly items: readonly TItem[];
@@ -182,13 +137,12 @@ export interface Page<TItem> {
  * Курсоров два, и оба соответствуют реальному порядку выдачи.
  *
  * Текстового курсора здесь больше нет: он существовал ради тома, который
- * сортировался по коду. Комплекты и реестры отдаются по времени заведения, а
- * ревизии — по номеру.
+ * сортировался по коду. Папки отдаются по времени заведения, а числового
+ * курсора не осталось вместе с рядом ревизий.
  */
 const timeCursorSchema = z.object({ at: z.string().min(1), id: z.uuid() });
-const numberCursorSchema = z.object({ n: z.int() });
 
-type AnyCursor = z.infer<typeof timeCursorSchema> | z.infer<typeof numberCursorSchema>;
+type AnyCursor = z.infer<typeof timeCursorSchema>;
 
 function encodeCursor(cursor: AnyCursor): string {
   return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url');
@@ -412,13 +366,13 @@ async function deriveObjectContractor(db: Database, objectId: string): Promise<s
 /**
  * Объект, на котором актор вправе что-либо заводить.
  *
- * Составной ключ `works_section_fk` держит ЦЕЛОСТНОСТЬ (раздел включён на
+ * Составной ключ `folders_section_fk` держит ЦЕЛОСТНОСТЬ (раздел включён на
  * объекте), но не область видимости: назвать можно было и чужой объект, где
  * нужный раздел включён, — запись прошла бы. 404, а не 403: «нет такого» и «не
  * ваше» здесь неразличимы по §1.6.
  *
  * Парный ему `works_contractor_fk` снят в S39 — закрепление подрядчика больше
- * не является условием заведения комплекта (0055).
+ * не является условием заведения папки (0055).
  */
 async function requireVisibleObject(
   db: Database,
@@ -472,43 +426,29 @@ export function requireManagedByActor(
 // Комплекты работ
 // =====================================================================
 
-const WORK_SELECTION = {
-  id: works.id,
-  objectId: works.objectId,
-  sectionCode: works.sectionCode,
-  period: date(works.period, 'period_date'),
-  contractorAssumed: works.contractorAssumed,
-  contractorRaw: works.contractorRaw,
-  // Подзапросом, а не соединением: `WORK_SELECTION` используется в
-  // `.returning(...)` на вставке комплекта, куда join не поставить, а вторая
+const FOLDER_SELECTION = {
+  id: folders.id,
+  objectId: folders.objectId,
+  sectionCode: folders.sectionCode,
+  period: date(folders.period, 'period_date'),
+  contractorAssumed: folders.contractorAssumed,
+  contractorRaw: folders.contractorRaw,
+  // Подзапросом, а не соединением: `FOLDER_SELECTION` используется в
+  // `.returning(...)` на вставке папки, куда join не поставить, а вторая
   // выборка ради одного поля разошлась бы с первой при первой же правке.
   contractorName: sql<string>`(
-    select c.name from ${counterparties} c where c.id = ${works.contractorId}
+    select c.name from ${counterparties} c where c.id = ${folders.contractorId}
   )`.as('contractor_name'),
-  contractorId: works.contractorId,
-  managedByContractorId: works.managedByContractorId,
-  kind: works.kind,
-  title: works.title,
-  registryId: works.registryId,
-  ordinal: works.ordinal,
-  autoRunEnabled: works.autoRunEnabled,
-  currentRevisionId: works.currentRevisionId,
-  createdBy: works.createdBy,
-  createdAt: iso(works.createdAt, 'created_at_iso'),
+  contractorId: folders.contractorId,
+  managedByContractorId: folders.managedByContractorId,
+  title: folders.title,
+  ordinal: folders.ordinal,
+  autoRunEnabled: folders.autoRunEnabled,
+  aggregateManifestHash: folders.aggregateManifestHash,
+  version: folders.version,
+  createdBy: folders.createdBy,
+  createdAt: iso(folders.createdAt, 'created_at_iso'),
 };
-
-type WorkRow = { readonly kind: string } & Omit<Work, 'kind'>;
-
-/**
- * Вид комплекта приводится, а не разбирается схемой.
- *
- * Его множество держит `works_kind_chk` (0028), а форму ответа дополнительно
- * проверяет схема сериализации маршрута. Третья проверка того же инварианта
- * дала бы 500 на строке, которую БД считает корректной.
- */
-function toWork(row: WorkRow): Work {
-  return { ...row, kind: row.kind as WorkKind };
-}
 
 /**
  * Отбор комплектов — без страницы: то же множество, что считает и `sectionCounts`.
@@ -518,7 +458,7 @@ function toWork(row: WorkRow): Work {
  * таблицей, показывающей два, — это не косметический дефект: он утверждает
  * существование пяти работ, которых спрашивающий не видит.
  */
-export interface WorkFilterParams {
+export interface FolderFilterParams {
   readonly objectId?: string | undefined;
   readonly sectionCode?: string | undefined;
   /** Точный месяц. С границами не спорит: они независимы и складываются. */
@@ -544,7 +484,7 @@ export interface WorkFilterParams {
   readonly search?: string | undefined;
 }
 
-export interface WorkListParams extends WorkFilterParams {
+export interface FolderListParams extends FolderFilterParams {
   readonly limit: number;
   readonly cursor?: string | null | undefined;
 }
@@ -556,29 +496,19 @@ export interface WorkListParams extends WorkFilterParams {
  * и разделение намеренное — забыть обёртку заметнее, чем забыть строку внутри
  * длинного `allOf`.
  */
-function workFilters(params: WorkFilterParams): SQL {
+function folderFilters(params: FolderFilterParams): SQL {
   const term = params.search === undefined ? null : `%${escapeLike(params.search)}%`;
   return allOf(
-    eq(works.kind, 'complect'),
-    params.objectId === undefined ? undefined : eq(works.objectId, params.objectId),
-    params.sectionCode === undefined ? undefined : eq(works.sectionCode, params.sectionCode),
+    params.objectId === undefined ? undefined : eq(folders.objectId, params.objectId),
+    params.sectionCode === undefined ? undefined : eq(folders.sectionCode, params.sectionCode),
     params.period === undefined
       ? undefined
       : params.includeUndatedPeriod === true
-        ? or(eq(works.period, params.period), isNull(works.period))
-        : eq(works.period, params.period),
-    params.periodFrom === undefined ? undefined : gte(works.period, params.periodFrom),
-    params.periodTo === undefined ? undefined : lte(works.period, params.periodTo),
-    params.registryId === undefined ? undefined : eq(works.registryId, params.registryId),
-    // Признак трёхзначен: не задан — «любые», `true` — свободные,
-    // `false` — уже включённые. Молчаливо приравнивать `false` к «любые»
-    // значило бы отвечать на другой вопрос.
-    params.unassigned === undefined
-      ? undefined
-      : params.unassigned
-        ? isNull(works.registryId)
-        : isNotNull(works.registryId),
-    term === null ? undefined : ilike(works.title, term),
+        ? or(eq(folders.period, params.period), isNull(folders.period))
+        : eq(folders.period, params.period),
+    params.periodFrom === undefined ? undefined : gte(folders.period, params.periodFrom),
+    params.periodTo === undefined ? undefined : lte(folders.period, params.periodTo),
+    term === null ? undefined : ilike(folders.title, term),
   );
 }
 
@@ -589,38 +519,38 @@ function workFilters(params: WorkFilterParams): SQL {
  * единица, у которой нет исполнителя работ, и в перечне работ она выглядела бы
  * работой. Читается она отдельно — вместе с реестром, которому принадлежит.
  */
-export async function listWorks(
+export async function listFolders(
   db: Database,
   scope: AuthScope,
-  params: WorkListParams,
-): Promise<Page<Work>> {
+  params: FolderListParams,
+): Promise<Page<Folder>> {
   const after = decodeCursor(params.cursor, timeCursorSchema);
 
   const rows = await db
-    .select(WORK_SELECTION)
-    .from(works)
+    .select(FOLDER_SELECTION)
+    .from(folders)
     .where(
       withScope(
         scope,
-        WORK_SCOPE,
+        FOLDER_SCOPE,
         allOf(
-          workFilters(params),
+          folderFilters(params),
           after === null
             ? undefined
-            : sql`(${works.createdAt}, ${works.id}) < (${after.at}::timestamptz, ${after.id}::uuid)`,
+            : sql`(${folders.createdAt}, ${folders.id}) < (${after.at}::timestamptz, ${after.id}::uuid)`,
         ),
       ),
     )
-    .orderBy(desc(works.createdAt), desc(works.id))
+    .orderBy(desc(folders.createdAt), desc(folders.id))
     .limit(params.limit + 1);
 
   const page = paginate(rows, params.limit, (row) => ({ at: row.createdAt, id: row.id }));
-  return { items: page.items.map(toWork), nextCursor: page.nextCursor };
+  return { items: page.items, nextCursor: page.nextCursor };
 }
 
-export interface SectionWorkCount {
+export interface SectionFolderCount {
   readonly sectionCode: string;
-  readonly works: number;
+  readonly folders: number;
 }
 
 /**
@@ -630,39 +560,39 @@ export interface SectionWorkCount {
  * названием раздела пришлось бы получать выкачиванием всех комплектов, то есть
  * ровно тем, чего ленивое дерево и избегает.
  *
- * Область и фильтры — те же, что у `listWorks`: см. `workFilters`. Разделы, в
+ * Область и фильтры — те же, что у `listFolders`: см. `workFilters`. Разделы, в
  * которых спрашивающему не видно ни одного комплекта, в выдаче отсутствуют, а
  * не приходят нулями — «включён, но пуст» и «включён, но не ваш» портал
  * различать не обязан, а вот путать их числом не вправе.
  */
-export async function countWorksBySection(
+export async function countFoldersBySection(
   db: Database,
   scope: AuthScope,
   objectId: string,
-  params: Omit<WorkFilterParams, 'objectId'> = {},
-): Promise<readonly SectionWorkCount[]> {
+  params: Omit<FolderFilterParams, 'objectId'> = {},
+): Promise<readonly SectionFolderCount[]> {
   await requireVisibleObject(db, scope, objectId);
 
   return db
     .select({
-      sectionCode: works.sectionCode,
-      works: sql<number>`count(*)::int`,
+      sectionCode: folders.sectionCode,
+      folders: sql<number>`count(*)::int`,
     })
-    .from(works)
-    .where(withScope(scope, WORK_SCOPE, workFilters({ ...params, objectId })))
-    .groupBy(works.sectionCode)
-    .orderBy(asc(works.sectionCode));
+    .from(folders)
+    .where(withScope(scope, FOLDER_SCOPE, folderFilters({ ...params, objectId })))
+    .groupBy(folders.sectionCode)
+    .orderBy(asc(folders.sectionCode));
 }
 
 /**
  * Состояние конвейера по комплектам ОДНОЙ страницы списка.
  *
- * ## Почему отдельный маршрут, а не поле `Work`
+ * ## Почему отдельный маршрут, а не поле `Folder`
  *
- * `WORK_SELECTION` используется в `.returning(...)` на вставке комплекта, куда
+ * `FOLDER_SELECTION` используется в `.returning(...)` на вставке комплекта, куда
  * соединение не поставить, — пришлось бы разделить выборку надвое и завести ту
  * самую вторую копию отбора, против которой написан докстринг
- * `WorkFilterParams`. Плюс сводка меняется каждые секунды, а список — раз в
+ * `FolderFilterParams`. Плюс сводка меняется каждые секунды, а список — раз в
  * заведение: сложив их, опрос тянул бы весь keyset-список с курсорами.
  *
  * ## Почему идентификаторы приходят от клиента
@@ -676,53 +606,44 @@ export async function countWorksBySection(
  * останется без данных — это честнее, чем «не запускалось», потому что о
  * чужом комплекте портал не утверждает ничего.
  */
-export interface WorkPipelineSummary {
-  readonly workId: string;
-  readonly revisionId: string;
+export interface FolderPipelineSummary {
+  readonly folderId: string;
   readonly stage: ProcessingStage;
   readonly queued: number;
   readonly running: number;
   readonly dead: number;
 }
 
-export async function summarizeWorkPipeline(
+export async function summarizeFolderPipeline(
   db: Database,
   scope: AuthScope,
   objectId: string,
-  workIds: readonly string[],
-): Promise<readonly WorkPipelineSummary[]> {
+  folderIds: readonly string[],
+): Promise<readonly FolderPipelineSummary[]> {
   await requireVisibleObject(db, scope, objectId);
-  if (workIds.length === 0) return [];
+  if (folderIds.length === 0) return [];
 
   const rows = await db
-    .select({ id: works.id, currentRevisionId: works.currentRevisionId })
-    .from(works)
+    .select({ id: folders.id })
+    .from(folders)
     .where(
       withScope(
         scope,
-        WORK_SCOPE,
-        allOf(eq(works.objectId, objectId), inArray(works.id, [...workIds])),
+        FOLDER_SCOPE,
+        allOf(eq(folders.objectId, objectId), inArray(folders.id, [...folderIds])),
       ),
     );
 
-  // Комплект без ревизии в ответ не попадает: конвейер адресуется ревизией, и
-  // «стадия комплекта, которого некому обрабатывать» — величина без предмета.
-  const byRevision = new Map<string, string>();
-  for (const row of rows) {
-    if (row.currentRevisionId !== null) byRevision.set(row.currentRevisionId, row.id);
-  }
-
-  const summaries = await summarizeRevisionStages(db, [...byRevision.keys()]);
-  return summaries.flatMap((summary) => {
-    const workId = byRevision.get(summary.revisionId);
-    return workId === undefined ? [] : [{ workId, ...summary }];
-  });
+  return summarizeFolderStages(
+    db,
+    rows.map((row) => row.id),
+  );
 }
 
 /**
  * Записать исполнителя, прочитанного из акта (S37).
  *
- * Пара к `fillWorkPeriodIfEmpty`: тот же вызывающий (конвейер, задача
+ * Пара к `fillFolderPeriodIfEmpty`: тот же вызывающий (конвейер, задача
  * `doc.extract_fields`), та же область — без неё, потому что пишет не человек,
  * — и та же идемпотентность условием В САМОМ операторе, а не договорённостью с
  * вызывающим.
@@ -734,80 +655,51 @@ export async function summarizeWorkPipeline(
  * если акт говорит другое, — расхождение в этом случае выносит замечанием
  * `AOSR.HDR.023`, и решает человек.
  *
- * `registry_id IS NULL` и «все ревизии черновые» повторяют то, что и так держит
- * БД: `registry_items` — снимок момента передачи, а
- * `submission_revisions_content_immutable` (0008) запирает `contractor_id`
- * ревизии вне черновика. Проверка здесь нужна не вместо них, а чтобы отказ
- * пришёл понятным «нечего менять», а не отказом триггера посреди задачи.
- *
  * ## Почему нужна отсрочка ключей
  *
- * `contractor_id` денормализован вниз по дереву четырьмя составными ключами, и
- * все они `NOT DEFERRABLE` до миграции 0054. Порядка, в котором `UPDATE`
- * проходит, не существует: `works` первым — отказ от ревизий, ревизии первыми —
- * отказ от `works`. `SET CONSTRAINTS ... DEFERRED` переносит проверку на
- * коммит, НЕ отменяя её: оборванная ссылка внутри транзакции всё равно не
- * доживёт до конца. Ключи перечислены поимённо, а не `ALL`: отсрочить то, о чём
- * никто не думал, — это уже другое решение.
+ * `contractor_id` денормализован вниз по дереву составными ключами, и все они
+ * `NOT DEFERRABLE` до миграции 0054. Порядка, в котором `UPDATE` проходит, не
+ * существует: папка первой — отказ от документов, документы первыми — отказ от
+ * папки. `SET CONSTRAINTS ... DEFERRED` переносит проверку на коммит, НЕ отменяя
+ * её: оборванная ссылка внутри транзакции всё равно не доживёт до конца. Ключи
+ * перечислены поимённо, а не `ALL`: отсрочить то, о чём никто не думал, — это
+ * уже другое решение.
  *
  * Возвращает `true`, если исполнитель был записан именно этим вызовом.
  */
 export async function replaceAssumedContractor(
   db: Database,
-  revisionId: string,
+  folderId: string,
   contractorId: string,
 ): Promise<boolean> {
   return db.transaction(async (tx) => {
     await tx.execute(sql`
-      set constraints
-        submission_revisions_scope_fk,
-        logical_documents_scope_fk,
-        findings_scope_fk,
-        submission_archives_scope_fk
-        deferred
+      set constraints logical_documents_scope_fk, findings_scope_fk deferred
     `);
 
-    // Комплект находится подзапросом, а не вторым чтением: между чтением и
-    // записью ревизию можно удалить, и исполнитель уехал бы в строку, которой
-    // больше нет предмета.
     const updated = await tx.execute<{ id: string }>(sql`
-      update works w
+      update folders f
          set contractor_id = ${contractorId}::uuid,
              contractor_assumed = false,
              contractor_raw = null,
              updated_at = now()
-       where w.contractor_assumed
-         and w.kind = 'complect'
-         and w.registry_id is null
-         and w.id = (select r.work_id from submission_revisions r where r.id = ${revisionId}::uuid)
-         and not exists (
-           select 1 from submission_revisions r
-            where r.work_id = w.id and r.status <> 'draft'
-         )
-      returning w.id
+       where f.contractor_assumed
+         and f.id = ${folderId}::uuid
+      returning f.id
     `);
 
-    const workId = updated.rows[0]?.id;
-    if (workId === undefined) return false;
+    if (updated.rows[0] === undefined) return false;
 
     // Денормализованные копии — тем же значением и в той же транзакции. Каждая
     // из них закрыта своим составным ключом, и вне отсрочки ни один порядок
-    // этих трёх операторов не прошёл бы.
-    await tx.execute(sql`
-      update submission_revisions set contractor_id = ${contractorId}::uuid
-       where work_id = ${workId}::uuid
-    `);
+    // этих операторов не прошёл бы.
     await tx.execute(sql`
       update logical_documents set contractor_id = ${contractorId}::uuid
-       where revision_id in (select id from submission_revisions where work_id = ${workId}::uuid)
+       where folder_id = ${folderId}::uuid
     `);
     await tx.execute(sql`
       update findings set contractor_id = ${contractorId}::uuid
-       where revision_id in (select id from submission_revisions where work_id = ${workId}::uuid)
-    `);
-    await tx.execute(sql`
-      update submission_archives set contractor_id = ${contractorId}::uuid
-       where revision_id in (select id from submission_revisions where work_id = ${workId}::uuid)
+       where folder_id = ${folderId}::uuid
     `);
 
     return true;
@@ -826,36 +718,35 @@ export async function replaceAssumedContractor(
  */
 export async function rememberContractorRaw(
   db: Database,
-  revisionId: string,
+  folderId: string,
   raw: string,
 ): Promise<boolean> {
   const updated = await db.execute<{ id: string }>(sql`
-    update works w
+    update folders f
        set contractor_raw = ${raw}, updated_at = now()
-     where w.contractor_assumed
-       and w.kind = 'complect'
-       and w.id = (select r.work_id from submission_revisions r where r.id = ${revisionId}::uuid)
-       and w.contractor_raw is distinct from ${raw}
-    returning w.id
+     where f.contractor_assumed
+       and f.id = ${folderId}::uuid
+       and f.contractor_raw is distinct from ${raw}
+    returning f.id
   `);
   return updated.rows.length > 0;
 }
 
-export async function findWork(
+export async function findFolder(
   db: Database,
   scope: AuthScope,
   workId: string,
-): Promise<Work | null> {
+): Promise<Folder | null> {
   const rows = await db
-    .select(WORK_SELECTION)
-    .from(works)
-    .where(withScope(scope, WORK_SCOPE, eq(works.id, workId)))
+    .select(FOLDER_SELECTION)
+    .from(folders)
+    .where(withScope(scope, FOLDER_SCOPE, eq(folders.id, workId)))
     .limit(1);
   const row = rows[0];
-  return row === undefined ? null : toWork(row);
+  return row === undefined ? null : row;
 }
 
-export interface CreateWorkInput {
+export interface CreateFolderInput {
   readonly objectId: string;
   readonly sectionCode: string;
   /**
@@ -869,33 +760,31 @@ export interface CreateWorkInput {
   readonly contractorId?: string | null | undefined;
 }
 
-export interface CreatedWork {
-  readonly work: Work;
-  readonly revision: SubmissionRevision;
+export interface CreatedFolder {
+  readonly folder: Folder;
 }
 
 /**
- * Заведение комплекта вместе с его первой ревизией.
+ * Заведение ПАПКИ — одной записью (S44).
  *
- * Одной транзакцией. Комплект без единой ревизии — это карточка, в которую
- * некуда загружать файлы: весь конвейер (`/revisions/{id}/files`, разметка,
- * распознавание, проверки) адресуется ревизией. А завести её вторым действием
- * мешает `submission_revisions_parent_chk`: ревизия старше первой обязана иметь
- * родителя, и «первую забыли» уже не отличить от «первую удалили».
+ * До S44 здесь заводилась пара «комплект + первая ревизия» одной транзакцией:
+ * комплект без ревизии был карточкой, в которую некуда загружать файлы. Теперь
+ * уровня ревизии нет вовсе, папка сама держит файлы, страницы и разметку, и
+ * заводить рядом с ней нечего.
  *
  * Включённость раздела здесь не проверяется чтением: её держит составной ключ
- * `works_section_fk`, а `guardNavigation` переводит его отказ в 422 с
+ * `folders_section_fk`, а `guardNavigation` переводит его отказ в 422 с
  * указателем на поле. Проверка чтением была бы второй копией правила и
  * разошлась бы с ключом при первой же гонке.
  *
  * Закрепление подрядчика не проверяется вовсе: ключа больше нет (0055).
  */
-export async function createWork(
+export async function createFolder(
   db: Database,
   scope: AuthScope,
-  input: CreateWorkInput,
+  input: CreateFolderInput,
   actor: AuditActor,
-): Promise<CreatedWork> {
+): Promise<CreatedFolder> {
   // Объект проверяется ПЕРВЫМ, и порядок значим: «такого объекта нет» — ответ
   // сильнее, чем «исполнителя не из чего вывести». Иначе несуществующий объект
   // получал бы 422 про закрепление подрядчиков, то есть подтверждал бы, что
@@ -915,8 +804,8 @@ export async function createWork(
 
   return guardNavigation(() =>
     db.transaction(async (tx) => {
-      const insertedWork = await tx
-        .insert(works)
+      const inserted = await tx
+        .insert(folders)
         .values({
           objectId: input.objectId,
           sectionCode: input.sectionCode,
@@ -924,51 +813,39 @@ export async function createWork(
           contractorId: acting.contractorId,
           contractorAssumed: acting.assumed,
           managedByContractorId: acting.managedByContractorId,
-          kind: 'complect',
           title: input.title,
           createdBy: scope.userId,
         })
-        .returning(WORK_SELECTION);
+        .returning(FOLDER_SELECTION);
 
-      const work = insertedWork[0];
-      if (work === undefined) throw conflict('Комплект не создан: повторите действие.');
+      const folder = inserted[0];
+      if (folder === undefined) throw conflict('Папка не создана: повторите действие.');
 
-      const revision = await insertDraftRevision(tx, {
-        workId: work.id,
-        objectId: work.objectId,
-        contractorId: work.contractorId,
-        revisionNo: 1,
-        parentRevisionId: null,
-      });
-
-      await tx.update(works).set({ currentRevisionId: revision.id }).where(eq(works.id, work.id));
-
-      await appendRevisionEvent(tx, {
-        revisionId: revision.id,
-        eventType: 'work.created',
-        payload: { workId: work.id, revisionNo: revision.revisionNo },
+      await appendFolderEvent(tx, {
+        folderId: folder.id,
+        eventType: 'folder.created',
+        payload: { title: folder.title },
       });
 
       await appendAudit(tx, scope, {
         ...actor,
-        action: 'work.created',
-        entityType: 'work',
-        entityId: work.id,
-        objectId: work.objectId,
+        action: 'folder.created',
+        entityType: 'folder',
+        entityId: folder.id,
+        objectId: folder.objectId,
         payload: {
-          sectionCode: work.sectionCode,
-          period: work.period,
-          title: work.title,
-          contractorId: work.contractorId,
+          sectionCode: folder.sectionCode,
+          period: folder.period,
+          title: folder.title,
+          contractorId: folder.contractorId,
           // Заведение за другую организацию обязано быть видно в журнале: это
           // единственный путь, которым в портале появляется работа, поданная не
           // тем, кто её выполнил.
           onBehalfOf: acting.onBehalfOf,
-          revisionId: revision.id,
         },
       });
 
-      return { work: toWork({ ...work, currentRevisionId: revision.id }), revision };
+      return { folder };
     }),
   );
 }
@@ -979,7 +856,7 @@ export async function createWork(
  * Зовёт конвейер после извлечения реквизитов: месяц выводится по самому раннему
  * распознанному акту (`periodOfEarliestAct`), а не называется человеком.
  *
- * ## Почему отдельно от `updateWork`
+ * ## Почему отдельно от `updateFolder`
  *
  * Та правит КАРТОЧКУ и требует `requireManagedByActor` — правку состава ведёт
  * организация-владелец. Здесь пишет конвейер, у которого организации нет, и
@@ -995,44 +872,33 @@ export async function createWork(
  *
  * Возвращает `true`, если месяц был записан именно этим вызовом.
  */
-export async function fillWorkPeriodIfEmpty(
+export async function fillFolderPeriodIfEmpty(
   db: Database,
-  revisionId: string,
+  folderId: string,
   period: string,
 ): Promise<boolean> {
-  // Комплект находится подзапросом, а не вторым чтением: между чтением и
-  // записью ревизию можно удалить, и тогда месяц уехал бы в строку, которой
-  // больше нет предмета.
   const updated = await db
-    .update(works)
+    .update(folders)
     .set({ period, updatedAt: sql`now()` })
-    .where(
-      and(
-        isNull(works.period),
-        eq(
-          works.id,
-          sql`(select r.work_id from ${submissionRevisions} r where r.id = ${revisionId})`,
-        ),
-      ),
-    )
-    .returning({ id: works.id });
+    .where(and(isNull(folders.period), eq(folders.id, folderId)))
+    .returning({ id: folders.id });
   return updated.length > 0;
 }
 
-export interface UpdateWorkPatch {
+export interface UpdateFolderPatch {
   readonly title?: string | undefined;
   readonly autoRunEnabled?: boolean | undefined;
 }
 
 /** Правка карточки комплекта. Состав, раздел и месяц здесь не меняются. */
-export async function updateWork(
+export async function updateFolder(
   db: Database,
   scope: AuthScope,
   workId: string,
-  patch: UpdateWorkPatch,
+  patch: UpdateFolderPatch,
   actor: AuditActor,
-): Promise<Work | null> {
-  const work = await findWork(db, scope, workId);
+): Promise<Folder | null> {
+  const work = await findFolder(db, scope, workId);
   if (work === null) return null;
   const { onBehalfOf } = requireManagedByActor(scope, work);
 
@@ -1047,9 +913,9 @@ export async function updateWork(
   await guardNavigation(() =>
     db.transaction(async (tx) => {
       await tx
-        .update(works)
+        .update(folders)
         .set({ ...fields, updatedAt: sql`now()` })
-        .where(eq(works.id, workId));
+        .where(eq(folders.id, workId));
 
       await appendAudit(tx, scope, {
         ...actor,
@@ -1062,7 +928,7 @@ export async function updateWork(
     }),
   );
 
-  return findWork(db, scope, workId);
+  return findFolder(db, scope, workId);
 }
 
 // =====================================================================
@@ -1077,10 +943,9 @@ export async function updateWork(
  * который нельзя ответить осознанно: за безобидным названием может стоять
  * ревизия с сотней страниц и суточной работой распознавания.
  */
-export interface WorkDeletionPreview {
-  readonly workId: string;
+export interface FolderDeletionPreview {
+  readonly folderId: string;
   readonly title: string;
-  readonly revisions: number;
   readonly files: number;
   readonly pages: number;
   readonly layoutBlocks: number;
@@ -1096,1560 +961,99 @@ export interface WorkDeletionPreview {
   readonly blockers: readonly string[];
 }
 
-/**
- * Помехи удалению комплекта.
- *
- * Все три — про то, что уже ушло наружу и перестало быть внутренним делом
- * портала. Согласованная ревизия — это принятое решение с архивом и хэшем
- * состава; переданный реестр — подписанная папка, список работ в которой
- * доказывает, что именно передавали; юридический запрет прямо требует хранить.
- * Удалить комплект в этих случаях значит переписать чужой документ, и режим
- * тестирования тут ничего не меняет: он ослабляет запреты СВОЕЙ базы, а не
- * обязательства перед второй стороной.
- */
-async function workDeletionBlockers(
-  db: Database,
-  workId: string,
-  enforceImmutability: boolean,
-): Promise<readonly string[]> {
-  const result = await db.execute<{
-    approved: number;
-    issued: number;
-    holds: number;
-    submitted: number;
-  }>(sql`
-    select
-      (select count(*) from submission_revisions
-        where work_id = ${workId}::uuid and status = 'approved')::int as approved,
-      (select count(*) from submission_revisions
-        where work_id = ${workId}::uuid
-          and status in ('submitted', 'in_review', 'returned'))::int as submitted,
-      (select count(*) from registries r
-         join registry_items ri on ri.registry_id = r.id
-        where ri.work_id = ${workId}::uuid and r.status <> 'draft')::int as issued,
-      (select count(*) from legal_holds lh
-         join submission_revisions sr on sr.id = lh.revision_id
-        where sr.work_id = ${workId}::uuid and lh.released_at is null)::int as holds
-  `);
-
-  const row = result.rows[0];
-  const blockers: string[] = [];
-  if (row === undefined) return blockers;
-
-  if (row.approved > 0) {
-    blockers.push(
-      `в комплекте есть согласованные ревизии: ${String(row.approved)} — согласование отменяется решением, а не удалением`,
-    );
-  }
-  if (row.issued > 0) {
-    blockers.push(
-      `комплект включён в переданный реестр (записей: ${String(row.issued)}) — список переданных работ неизменяем`,
-    );
-  }
-  if (row.holds > 0) {
-    blockers.push(`на ревизии наложен неснятый юридический запрет: ${String(row.holds)}`);
-  }
-  // Поданная ревизия — помеха ТОЛЬКО в строгом режиме, и названа она явно, а не
-  // оставлена триггерам. Без этой строки удаление доходило бы до БД и падало
-  // `restrict_violation` из драйвера — то есть пятисотым кодом без объяснения,
-  // хотя запрет ожидаемый и объяснимый: состав поданного комплекта покрыт хэшем,
-  // и всё выведенное из него доказывает, что именно проверяли.
-  if (enforceImmutability && row.submitted > 0) {
-    blockers.push(
-      `в комплекте есть поданные ревизии: ${String(row.submitted)} — состав поданного ` +
-        'комплекта неизменяем (§3.9). Удаление доступно в режиме тестирования',
-    );
-  }
-  return blockers;
-}
-
-export async function previewWorkDeletion(
+export async function previewFolderDeletion(
   db: Database,
   scope: AuthScope,
-  workId: string,
-  enforceImmutability: boolean,
-): Promise<WorkDeletionPreview | null> {
-  const work = await findWork(db, scope, workId);
-  if (work === null) return null;
+  folderId: string,
+): Promise<FolderDeletionPreview | null> {
+  const folder = await findFolder(db, scope, folderId);
+  if (folder === null) return null;
 
   const counts = await db.execute<{
-    revisions: number;
     files: number;
     pages: number;
     blocks: number;
     documents: number;
     findings: number;
   }>(sql`
-    with rev as (select id from submission_revisions where work_id = ${workId}::uuid)
     select
-      (select count(*) from rev)::int as revisions,
-      (select count(*) from source_files where revision_id in (select id from rev))::int as files,
-      (select count(*) from source_pages where revision_id in (select id from rev))::int as pages,
-      (select count(*) from layout_blocks where revision_id in (select id from rev))::int as blocks,
+      (select count(*) from source_files where folder_id = ${folderId}::uuid)::int as files,
+      (select count(*) from source_pages where folder_id = ${folderId}::uuid)::int as pages,
+      (select count(*) from layout_blocks where folder_id = ${folderId}::uuid)::int as blocks,
       (select count(*) from logical_documents
-        where revision_id in (select id from rev))::int as documents,
-      (select count(*) from findings where revision_id in (select id from rev))::int as findings
+        where folder_id = ${folderId}::uuid)::int as documents,
+      (select count(*) from findings where folder_id = ${folderId}::uuid)::int as findings
   `);
 
   const row = counts.rows[0];
   return {
-    workId,
-    title: work.title,
-    revisions: row?.revisions ?? 0,
+    folderId,
+    title: folder.title,
     files: row?.files ?? 0,
     pages: row?.pages ?? 0,
     layoutBlocks: row?.blocks ?? 0,
     documents: row?.documents ?? 0,
     findings: row?.findings ?? 0,
-    blockers: await workDeletionBlockers(db, workId, enforceImmutability),
+    // Помех удалению больше нет: все четыре держались на согласовании и
+    // неизменяемости, снятых в S44.
+    blockers: [],
   };
 }
 
 /**
- * Удалить ОДНУ ревизию комплекта со всем производным.
+ * Удалить папку со всем её содержимым.
  *
- * Отдельно от `deleteWork`, потому что вопрос другой: не «этого комплекта не
- * должно быть», а «эта попытка не удалась, начнём заново». Механика удаления при
- * этом общая — `purgeRevisionEntirely`, тот же топологический порядок.
- *
- * Помехи берутся те же, что у комплекта, но считаются по ОДНОЙ ревизии: режим
- * тестирования ослабляет запреты своей базы, а не обязательства перед второй
- * стороной — согласованную ревизию, переданный реестр и юридический запрет он не
- * отменяет (ADR-0015).
- *
- * Последняя ревизия комплекта не удаляется: вход в комплект на экране — это
- * `works.current_revision_id`, и комплект без единой ревизии стал бы недостижим,
- * а `DELETE /works/{id}` — ровно то действие, которое здесь и требуется. Отказ
- * называет его прямо, а не оставляет искать.
- */
-export async function deleteRevision(
-  db: Database,
-  scope: AuthScope,
-  revisionId: string,
-  actor: AuditActor,
-  enforceImmutability: boolean,
-): Promise<{ readonly deleted: boolean; readonly blockers: readonly string[] } | null> {
-  const rows = await db
-    .select({
-      id: submissionRevisions.id,
-      workId: submissionRevisions.workId,
-      objectId: submissionRevisions.objectId,
-      revisionNo: submissionRevisions.revisionNo,
-      status: submissionRevisions.status,
-    })
-    .from(submissionRevisions)
-    .where(withScope(scope, REVISION_SCOPE, eq(submissionRevisions.id, revisionId)))
-    .limit(1);
-
-  const revision = rows[0];
-  if (revision === undefined) return null;
-
-  const blockers = await revisionDeletionBlockers(db, revision, enforceImmutability);
-  if (blockers.length > 0) return { deleted: false, blockers };
-
-  await guardNavigation(() =>
-    db.transaction(async (tx) => {
-      /**
-       * Указатель комплекта переводится на соседнюю ревизию ПЕРВЫМ.
-       *
-       * `works.current_revision_id` ссылается на строку, которую мы сейчас
-       * удалим, и внешний ключ отверг бы удаление раньше, чем дело дойдёт до
-       * него. Берётся ревизия с наибольшим номером из оставшихся — то есть та,
-       * на которую и указывал бы комплект, если бы удаляемой не было.
-       */
-      const previous = await tx
-        .select({ id: submissionRevisions.id })
-        .from(submissionRevisions)
-        .where(
-          and(
-            eq(submissionRevisions.workId, revision.workId),
-            ne(submissionRevisions.id, revisionId),
-          ),
-        )
-        .orderBy(desc(submissionRevisions.revisionNo))
-        .limit(1);
-
-      await tx
-        .update(works)
-        .set({ currentRevisionId: previous[0]?.id ?? null })
-        .where(eq(works.id, revision.workId));
-
-      // Дети удаляемой ревизии по `parent_revision_id`: ссылка без каскада, и
-      // осиротить её нельзя. Родителем становится тот же сосед.
-      await tx
-        .update(submissionRevisions)
-        .set({ parentRevisionId: previous[0]?.id ?? null })
-        .where(eq(submissionRevisions.parentRevisionId, revisionId));
-
-      await purgeRevisionEntirely(tx, revisionId);
-
-      await appendAudit(tx, scope, {
-        ...actor,
-        action: 'revision.deleted',
-        entityType: 'submission_revision',
-        entityId: revisionId,
-        objectId: revision.objectId,
-        payload: {
-          workId: revision.workId,
-          revisionNo: revision.revisionNo,
-          status: revision.status,
-        },
-      });
-    }),
-  );
-
-  return { deleted: true, blockers: [] };
-}
-
-/** Помехи удалению одной ревизии — те же четыре, что у комплекта. */
-async function revisionDeletionBlockers(
-  db: Database,
-  revision: { readonly id: string; readonly workId: string; readonly status: string },
-  enforceImmutability: boolean,
-): Promise<readonly string[]> {
-  const result = await db.execute<{ siblings: number; issued: number; holds: number }>(sql`
-    select
-      (select count(*) from submission_revisions
-        where work_id = ${revision.workId}::uuid)::int as siblings,
-      (select count(*) from registries r
-         join registry_items ri on ri.registry_id = r.id
-        where ri.revision_id = ${revision.id}::uuid and r.status <> 'draft')::int as issued,
-      (select count(*) from legal_holds
-        where revision_id = ${revision.id}::uuid and released_at is null)::int as holds
-  `);
-
-  const row = result.rows[0];
-  const blockers: string[] = [];
-  if (row === undefined) return blockers;
-
-  if (row.siblings <= 1) {
-    blockers.push(
-      'это единственная ревизия комплекта — комплект без ревизий недостижим с экрана; ' +
-        'удалите комплект целиком',
-    );
-  }
-  if (revision.status === 'approved') {
-    blockers.push('ревизия согласована — согласование отменяется решением, а не удалением');
-  }
-  if (row.issued > 0) {
-    blockers.push(
-      `ревизия включена в переданный реестр (записей: ${String(row.issued)}) — ` +
-        'список переданных работ неизменяем',
-    );
-  }
-  if (row.holds > 0) {
-    blockers.push(`на ревизию наложен неснятый юридический запрет: ${String(row.holds)}`);
-  }
-  if (enforceImmutability && revision.status !== 'draft') {
-    blockers.push(
-      `ревизия в статусе «${revision.status}» — состав поданного комплекта неизменяем (§3.9). ` +
-        'Удаление доступно в режиме тестирования',
-    );
-  }
-  return blockers;
-}
-
-/**
- * Удалить комплект со всем содержимым.
- *
- * `null` — комплекта нет или он вне области видимости; различать их снаружи
- * нельзя (§1.6), и маршрут отвечает на оба случая одинаково.
+ * `null` — папки нет или она вне области видимости; различать их снаружи нельзя
+ * (§1.6), и маршрут отвечает на оба случая одинаково.
  *
  * Право на это действие — `settings.manage`, то есть администратор, а не
- * `submission.upload`: загрузить свой комплект и стереть чужую работу вместе с
+ * `submission.upload`: загрузить свою папку и стереть чужую работу вместе с
  * историей проверок — разные по весу действия, и первое не должно давать
  * второго.
  *
- * Удаление идёт ОДНОЙ транзакцией по всем ревизиям: комплект, у которого
- * половина ревизий исчезла, а половина осталась, — это состояние, которого в
- * модели нет и восстанавливать которое нечем.
+ * Помех удалению больше нет ни одной. Прежние четыре держались на согласовании
+ * (согласованная ревизия, переданный реестр, юридический запрет) и на
+ * неизменяемости §3.9 — всё это снято в S44. Осталась одна честная проверка:
+ * папка должна быть видна вызывающему.
  */
-export async function deleteWork(
+export async function deleteFolder(
   db: Database,
   scope: AuthScope,
-  workId: string,
+  folderId: string,
   actor: AuditActor,
-  enforceImmutability: boolean,
 ): Promise<{ readonly deleted: boolean; readonly blockers: readonly string[] } | null> {
-  const preview = await previewWorkDeletion(db, scope, workId, enforceImmutability);
-  if (preview === null) return null;
-  if (preview.blockers.length > 0) return { deleted: false, blockers: preview.blockers };
+  const rows = await db
+    .select({
+      id: folders.id,
+      objectId: folders.objectId,
+      title: folders.title,
+      period: folders.period,
+    })
+    .from(folders)
+    .where(withScope(scope, FOLDER_SCOPE, eq(folders.id, folderId)))
+    .limit(1);
 
-  const work = await findWork(db, scope, workId);
-  if (work === null) return null;
+  const folder = rows[0];
+  if (folder === undefined) return null;
 
   await guardNavigation(() =>
     db.transaction(async (tx) => {
-      const revisions = await tx
-        .select({ id: submissionRevisions.id })
-        .from(submissionRevisions)
-        .where(eq(submissionRevisions.workId, workId));
+      await purgeFolderEntirely(tx, folderId);
 
-      // Указатель обнуляется ПЕРВЫМ: `works.current_revision_id` ссылается на
-      // строку, которую мы сейчас удалим, и внешний ключ иначе отверг бы
-      // удаление ревизии раньше, чем дело дойдёт до самого комплекта.
-      await tx.update(works).set({ currentRevisionId: null }).where(eq(works.id, workId));
-
-      for (const revision of revisions) {
-        await purgeRevisionEntirely(tx, revision.id);
-      }
-
-      // Сверка с описью и членство в папке привязаны к работе, а не к ревизии, и
-      // своих строк в `purgeRevisionEntirely` не имеют.
-      await tx.execute(
-        sql`delete from registry_reconciliation_works where work_id = ${workId}::uuid`,
-      );
-      await tx.execute(sql`delete from registry_items where work_id = ${workId}::uuid`);
-      await tx.delete(works).where(eq(works.id, workId));
-
-      // Название и период попадают в след: после удаления карточки узнать, что
+      // Название и месяц попадают в след: после удаления карточки узнать, что
       // именно исчезло, будет неоткуда.
       await appendAudit(tx, scope, {
         ...actor,
-        action: 'work.deleted',
-        entityType: 'work',
-        entityId: workId,
-        objectId: work.objectId,
-        payload: {
-          title: work.title,
-          period: work.period,
-          revisions: preview.revisions,
-          files: preview.files,
-          pages: preview.pages,
-        },
+        action: 'folder.deleted',
+        entityType: 'folder',
+        entityId: folderId,
+        objectId: folder.objectId,
+        payload: { title: folder.title, period: folder.period },
       });
     }),
   );
 
   return { deleted: true, blockers: [] };
-}
-
-// =====================================================================
-// Ревизии комплекта
-// =====================================================================
-
-const REVISION_SELECTION = {
-  id: submissionRevisions.id,
-  workId: submissionRevisions.workId,
-  revisionNo: submissionRevisions.revisionNo,
-  parentRevisionId: submissionRevisions.parentRevisionId,
-  status: submissionRevisions.status,
-  aggregateManifestHash: submissionRevisions.aggregateManifestHash,
-  version: submissionRevisions.version,
-  createdAt: iso(submissionRevisions.createdAt, 'created_at_iso'),
-  submittedAt: isoNullable(submissionRevisions.submittedAt, 'submitted_at_iso'),
-  submittedBy: submissionRevisions.submittedBy,
-  decidedAt: isoNullable(submissionRevisions.decidedAt, 'decided_at_iso'),
-  decidedBy: submissionRevisions.decidedBy,
-  returnReason: submissionRevisions.returnReason,
-};
-
-type RevisionRow = {
-  readonly status: string;
-} & Omit<SubmissionRevision, 'status'>;
-
-/**
- * Статус приводится, а не разбирается схемой.
- *
- * Его множество держит `submission_revisions_status_chk` (0003), а форму ответа
- * дополнительно проверяет схема сериализации маршрута. Третья проверка того же
- * инварианта дала бы 500 на строке, которую БД считает корректной.
- */
-function toRevision(row: RevisionRow): SubmissionRevision {
-  return { ...row, status: row.status as WorkflowStatus };
-}
-
-export interface RevisionListParams {
-  readonly limit: number;
-  readonly cursor?: string | null | undefined;
-}
-
-/**
- * Ревизии комплекта, последняя первой.
- *
- * Курсор — один `revision_no`: он уникален внутри комплекта
- * (`submission_revisions_work_no_uq`), а список всегда ограничен одним
- * комплектом. Пары с идентификатором тут не нужно, и лишний компонент лишь
- * создал бы впечатление, что порядок неоднозначен.
- */
-export async function listWorkRevisions(
-  db: Database,
-  scope: AuthScope,
-  workId: string,
-  params: RevisionListParams,
-): Promise<Page<SubmissionRevision>> {
-  // Сначала сам комплект: невидимый обязан отвечать 404, а не пустым списком.
-  // Пустой список означал бы «комплект есть, ревизий нет» — это уже сведение о
-  // чужой работе.
-  if ((await findWork(db, scope, workId)) === null) {
-    throw notFound('Комплект не найден.');
-  }
-
-  const after = decodeCursor(params.cursor, numberCursorSchema);
-
-  const rows = await db
-    .select(REVISION_SELECTION)
-    .from(submissionRevisions)
-    .where(
-      withScope(
-        scope,
-        REVISION_SCOPE,
-        allOf(
-          eq(submissionRevisions.workId, workId),
-          after === null ? undefined : sql`${submissionRevisions.revisionNo} < ${after.n}::integer`,
-        ),
-      ),
-    )
-    .orderBy(desc(submissionRevisions.revisionNo))
-    .limit(params.limit + 1);
-
-  const page = paginate(rows, params.limit, (row) => ({ n: row.revisionNo }));
-  return { items: page.items.map(toRevision), nextCursor: page.nextCursor };
-}
-
-interface InsertRevisionInput {
-  readonly workId: string;
-  readonly objectId: string;
-  readonly contractorId: string;
-  readonly revisionNo: number;
-  readonly parentRevisionId: string | null;
-}
-
-/** Одна форма строки для обоих путей создания: первая ревизия и следующая. */
-async function insertDraftRevision(
-  tx: Pick<Database, 'insert'>,
-  input: InsertRevisionInput,
-): Promise<SubmissionRevision> {
-  const inserted = await tx
-    .insert(submissionRevisions)
-    .values({
-      workId: input.workId,
-      objectId: input.objectId,
-      contractorId: input.contractorId,
-      revisionNo: input.revisionNo,
-      parentRevisionId: input.parentRevisionId,
-      status: 'draft',
-    })
-    .returning(REVISION_SELECTION);
-
-  const row = inserted[0];
-  if (row === undefined) throw conflict('Ревизия комплекта не создана: повторите действие.');
-  return toRevision(row);
-}
-
-/**
- * Черновая ревизия комплекта вручную.
- *
- * Разрешена только там, где не спорит с возвратом: у комплекта нет незакрытой
- * ревизии. Таблица состояний — в заголовке файла; отказ называет статус, потому
- * что подрядчику нужно понять, ждать ли решения или продолжать в открытом
- * черновике.
- */
-export async function createDraftRevision(
-  db: Database,
-  scope: AuthScope,
-  workId: string,
-  actor: AuditActor,
-): Promise<SubmissionRevision> {
-  const work = await findWork(db, scope, workId);
-  if (work === null) throw notFound('Комплект не найден.');
-  const { onBehalfOf } = requireManagedByActor(scope, work);
-
-  const latest = await db
-    .select({
-      id: submissionRevisions.id,
-      revisionNo: submissionRevisions.revisionNo,
-      status: submissionRevisions.status,
-    })
-    .from(submissionRevisions)
-    .where(withScope(scope, REVISION_SCOPE, eq(submissionRevisions.workId, workId)))
-    .orderBy(desc(submissionRevisions.revisionNo))
-    .limit(1);
-
-  const previous = latest[0] ?? null;
-
-  if (previous !== null) {
-    if (previous.status === 'draft') {
-      throw conflict(
-        'У комплекта уже открыта черновая ревизия: файлы добавляются в неё, а не в новую.',
-      );
-    }
-    if (PENDING.includes(previous.status as WorkflowStatus)) {
-      throw conflict(
-        `Ревизия №${previous.revisionNo} ждёт решения проверяющего (статус «${previous.status}»). ` +
-          'Новая ревизия появится сама, если комплект вернут.',
-      );
-    }
-    if (previous.status === 'returned') {
-      throw conflict(
-        `Ревизия №${previous.revisionNo} возвращена, и следующая уже создана возвратом.`,
-      );
-    }
-  }
-
-  return guardNavigation(() =>
-    db.transaction(async (tx) => {
-      const revision = await insertDraftRevision(tx, {
-        workId: work.id,
-        objectId: work.objectId,
-        contractorId: work.contractorId,
-        revisionNo: previous === null ? 1 : previous.revisionNo + 1,
-        parentRevisionId: previous === null ? null : previous.id,
-      });
-
-      await tx.update(works).set({ currentRevisionId: revision.id }).where(eq(works.id, work.id));
-
-      await appendRevisionEvent(tx, {
-        revisionId: revision.id,
-        eventType: 'revision.opened',
-        payload: {
-          workId: work.id,
-          revisionNo: revision.revisionNo,
-          parentRevisionId: revision.parentRevisionId,
-        },
-      });
-
-      await appendAudit(tx, scope, {
-        ...actor,
-        action: 'revision.create',
-        entityType: 'submission_revision',
-        entityId: revision.id,
-        objectId: work.objectId,
-        payload: {
-          workId: work.id,
-          revisionNo: revision.revisionNo,
-          parentRevisionId: revision.parentRevisionId,
-          onBehalfOf,
-        },
-      });
-
-      return revision;
-    }),
-  );
-}
-
-// =====================================================================
-// Реестры
-// =====================================================================
-
-const REGISTRY_SELECTION = {
-  id: registries.id,
-  objectId: registries.objectId,
-  sectionCode: registries.sectionCode,
-  period: requiredDate(registries.period, 'period_date'),
-  number: registries.number,
-  folderNo: registries.folderNo,
-  building: registries.building,
-  floor: registries.floor,
-  structure: registries.structure,
-  status: registries.status,
-  version: registries.version,
-  issuedBy: registries.issuedBy,
-  issuedAt: isoNullable(registries.issuedAt, 'issued_at_iso'),
-  issuedFileRevisionId: registries.issuedFileRevisionId,
-  acceptedBy: registries.acceptedBy,
-  acceptedAt: isoNullable(registries.acceptedAt, 'accepted_at_iso'),
-  createdBy: registries.createdBy,
-  createdAt: iso(registries.createdAt, 'created_at_iso'),
-};
-
-type RegistryRow = { readonly status: string } & Omit<Registry, 'status'>;
-
-function toRegistry(row: RegistryRow): Registry {
-  return { ...row, status: row.status as RegistryStatus };
-}
-
-/**
- * Видимость реестра — это видимость его ОБЪЕКТА.
- *
- * У `registries` нет колонки `contractor_id`, и придумать её нельзя: в одной
- * папке работы нескольких организаций. Поэтому область выражена
- * `objectVisibility()` из `catalog.ts` — тем же правилом, которым решается
- * видимость самого объекта. Второй экземпляр правила здесь был бы вторым
- * источником правды о доступе, и разойтись они могли бы молча.
- */
-function registryVisibility(scope: AuthScope): SQL {
-  return objectVisibility(scope, registries.objectId);
-}
-
-export interface RegistryListParams {
-  readonly limit: number;
-  readonly cursor?: string | null | undefined;
-  readonly objectId?: string | undefined;
-  readonly sectionCode?: string | undefined;
-  readonly period?: string | undefined;
-  readonly status?: RegistryStatus | undefined;
-}
-
-export async function listRegistries(
-  db: Database,
-  scope: AuthScope,
-  params: RegistryListParams,
-): Promise<Page<Registry>> {
-  const after = decodeCursor(params.cursor, timeCursorSchema);
-
-  const rows = await db
-    .select(REGISTRY_SELECTION)
-    .from(registries)
-    .where(
-      visibleWhere(
-        registryVisibility(scope),
-        allOf(
-          params.objectId === undefined ? undefined : eq(registries.objectId, params.objectId),
-          params.sectionCode === undefined
-            ? undefined
-            : eq(registries.sectionCode, params.sectionCode),
-          params.period === undefined ? undefined : eq(registries.period, params.period),
-          params.status === undefined ? undefined : eq(registries.status, params.status),
-          after === null
-            ? undefined
-            : sql`(${registries.createdAt}, ${registries.id}) < (${after.at}::timestamptz, ${after.id}::uuid)`,
-        ),
-      ),
-    )
-    .orderBy(desc(registries.createdAt), desc(registries.id))
-    .limit(params.limit + 1);
-
-  const page = paginate(rows, params.limit, (row) => ({ at: row.createdAt, id: row.id }));
-  return { items: page.items.map(toRegistry), nextCursor: page.nextCursor };
-}
-
-export async function findRegistry(
-  db: Database,
-  scope: AuthScope,
-  registryId: string,
-): Promise<Registry | null> {
-  const rows = await db
-    .select(REGISTRY_SELECTION)
-    .from(registries)
-    .where(visibleWhere(registryVisibility(scope), eq(registries.id, registryId)))
-    .limit(1);
-  const row = rows[0];
-  return row === undefined ? null : toRegistry(row);
-}
-
-/** Комплект папки вместе с его текущей ревизией — вход сверки описи (S20). */
-export interface RegistryComplectRevision {
-  readonly workId: string;
-  readonly revisionId: string;
-  readonly objectId: string;
-  readonly contractorId: string;
-  readonly managedByContractorId: string;
-  readonly title: string;
-}
-
-/**
- * Комплекты папки с текущими ревизиями — БЕЗ области видимости, намеренно.
- *
- * Множество здесь закрывается КЛЮЧОМ, а не областью: `works.registry_id = ?`
- * плюс `kind = 'complect'`. Область была бы не защитой, а дефектом: сверка
- * описи сравнивает бумагу со ВСЕЙ папкой, а в одной папке комплекты разных
- * субподрядчиков. Отфильтруй их областью — и сверка ответила бы «сошлась» в
- * смысле «сошлась по той части, что мне видна», то есть соврала бы ровно там,
- * где её и спрашивают.
- *
- * **Результат нельзя отдавать наружу HTTP-маршрутом.** Он предназначен задаче
- * `registry.reconcile`, которая работает под областью, закреплённой объектом
- * реестра, и записывает итог в замороженные таблицы; выдачу из этих таблиц
- * режут по правам уже маршруты. Прямая отдача отсюда была бы обходом §4.1.
- */
-export async function listRegistryComplectRevisions(
-  db: Database,
-  registryId: string,
-): Promise<readonly RegistryComplectRevision[]> {
-  const rows = await db
-    .select({
-      workId: works.id,
-      revisionId: works.currentRevisionId,
-      objectId: works.objectId,
-      contractorId: works.contractorId,
-      managedByContractorId: works.managedByContractorId,
-      title: works.title,
-    })
-    .from(works)
-    .where(
-      and(
-        eq(works.registryId, registryId),
-        eq(works.kind, 'complect'),
-        isNotNull(works.currentRevisionId),
-      ),
-    )
-    .orderBy(asc(works.ordinal), asc(works.createdAt));
-
-  return rows.map((row) => ({ ...row, revisionId: row.revisionId as string }));
-}
-
-/** Файл-скан описи: комплект особого вида, принадлежащий реестру. */
-export async function findRegistryFile(
-  db: Database,
-  scope: AuthScope,
-  registryId: string,
-): Promise<Work | null> {
-  const rows = await db
-    .select(WORK_SELECTION)
-    .from(works)
-    .where(
-      withScope(
-        scope,
-        WORK_SCOPE,
-        allOf(eq(works.registryId, registryId), eq(works.kind, 'registry')),
-      ),
-    )
-    .limit(1);
-  const row = rows[0];
-  return row === undefined ? null : toWork(row);
-}
-
-export interface CreateRegistryInput {
-  readonly objectId: string;
-  readonly sectionCode: string;
-  readonly period: string;
-  readonly number?: string | null | undefined;
-  readonly folderNo?: string | null | undefined;
-  readonly building?: string | null | undefined;
-  readonly floor?: string | null | undefined;
-  readonly structure?: string | null | undefined;
-}
-
-export async function createRegistry(
-  db: Database,
-  scope: AuthScope,
-  input: CreateRegistryInput,
-  actor: AuditActor,
-): Promise<Registry> {
-  await requireVisibleObject(db, scope, input.objectId);
-
-  const registryId = await guardNavigation(() =>
-    db.transaction(async (tx) => {
-      const inserted = await tx
-        .insert(registries)
-        .values({
-          objectId: input.objectId,
-          sectionCode: input.sectionCode,
-          period: input.period,
-          number: input.number ?? null,
-          folderNo: input.folderNo ?? null,
-          building: input.building ?? null,
-          floor: input.floor ?? null,
-          structure: input.structure ?? null,
-          createdBy: scope.userId,
-        })
-        .returning({ id: registries.id });
-
-      const id = inserted[0]?.id;
-      if (id === undefined) throw conflict('Реестр не создан: повторите действие.');
-
-      await appendAudit(tx, scope, {
-        ...actor,
-        action: 'registry.created',
-        entityType: 'registry',
-        entityId: id,
-        objectId: input.objectId,
-        payload: { sectionCode: input.sectionCode, period: input.period, number: input.number },
-      });
-      return id;
-    }),
-  );
-
-  const created = await findRegistry(db, scope, registryId);
-  if (created === null) throw conflict('Реестр создан, но недоступен текущей области видимости.');
-  return created;
-}
-
-export interface UpdateRegistryPatch {
-  readonly number?: string | null | undefined;
-  readonly folderNo?: string | null | undefined;
-  readonly building?: string | null | undefined;
-  readonly floor?: string | null | undefined;
-  readonly structure?: string | null | undefined;
-}
-
-/**
- * Сравнение-с-обменом по версии.
- *
- * Возвращает новую версию или бросает 412. Без него «последний записавший
- * победил» становится поведением по умолчанию, а здесь это значит, что один
- * сотрудник ПТО молча затрёт состав, собранный другим.
- */
-async function bumpRegistryVersion(
-  tx: Pick<Database, 'update'>,
-  registryId: string,
-  expectedVersion: number,
-  fields: Record<string, unknown> = {},
-): Promise<number> {
-  const updated = await tx
-    .update(registries)
-    .set({ ...fields, version: sql`${registries.version} + 1`, updatedAt: sql`now()` })
-    .where(and(eq(registries.id, registryId), eq(registries.version, expectedVersion)))
-    .returning({ version: registries.version });
-
-  const version = updated[0]?.version;
-  if (version === undefined) {
-    throw preconditionFailed(
-      'Реестр изменён другим пользователем: перечитайте его и повторите действие.',
-    );
-  }
-  return version;
-}
-
-/** Реестр в состоянии, в котором его ещё можно править. */
-async function requireDraftRegistry(
-  db: Database,
-  scope: AuthScope,
-  registryId: string,
-): Promise<Registry> {
-  const registry = await findRegistry(db, scope, registryId);
-  if (registry === null) throw notFound('Реестр не найден.');
-  if (registry.status !== 'draft') {
-    throw conflict(
-      registry.status === 'issued'
-        ? 'Реестр передан: его состав и шапка неизменяемы.'
-        : 'Реестр принят: его состав и шапка неизменяемы.',
-    );
-  }
-  return registry;
-}
-
-export async function updateRegistry(
-  db: Database,
-  scope: AuthScope,
-  registryId: string,
-  expectedVersion: number,
-  patch: UpdateRegistryPatch,
-  actor: AuditActor,
-): Promise<Registry> {
-  const registry = await requireDraftRegistry(db, scope, registryId);
-
-  const fields = {
-    ...(patch.number === undefined ? {} : { number: patch.number }),
-    ...(patch.folderNo === undefined ? {} : { folderNo: patch.folderNo }),
-    ...(patch.building === undefined ? {} : { building: patch.building }),
-    ...(patch.floor === undefined ? {} : { floor: patch.floor }),
-    ...(patch.structure === undefined ? {} : { structure: patch.structure }),
-  };
-  if (Object.keys(fields).length === 0) {
-    throw badRequest('Запрос не содержит ни одного изменяемого поля.');
-  }
-
-  await guardNavigation(() =>
-    db.transaction(async (tx) => {
-      await bumpRegistryVersion(tx, registryId, expectedVersion, fields);
-      await appendAudit(tx, scope, {
-        ...actor,
-        action: 'registry.updated',
-        entityType: 'registry',
-        entityId: registryId,
-        objectId: registry.objectId,
-        payload: fields,
-      });
-    }),
-  );
-
-  const updated = await findRegistry(db, scope, registryId);
-  if (updated === null) throw notFound('Реестр не найден.');
-  return updated;
-}
-
-/**
- * Включение комплекта в реестр.
- *
- * Комплект обязан принадлежать тому же объекту, разделу и месяцу: реестр —
- * опись работ за период по одному разделу, и работа другого месяца в ней
- * означала бы, что подпись стоит под чужим периодом. Проверка здесь, а не
- * ключом, потому что это правило предметной области, а не целостности ссылок:
- * база не знает, что «месяц реестра» и «месяц работы» обязаны совпадать.
- */
-export async function includeWork(
-  db: Database,
-  scope: AuthScope,
-  registryId: string,
-  workId: string,
-  expectedVersion: number,
-  ordinal: number | null,
-  actor: AuditActor,
-): Promise<Registry> {
-  const registry = await requireDraftRegistry(db, scope, registryId);
-  const work = await findWork(db, scope, workId);
-  if (work === null) throw notFound('Комплект не найден.');
-
-  if (work.kind !== 'complect') {
-    throw conflict('Файл реестра включается в него отдельным действием, а не как комплект.');
-  }
-  /**
-   * Месяц сверяется, только когда он ИЗВЕСТЕН (S30).
-   *
-   * `null` означает «портал ещё не прочитал акт», а не «месяц другой». Сверять
-   * с ним значило бы запретить включение любого комплекта до распознавания —
-   * то есть сделать папку недоступной ровно тогда, когда её и собирают.
-   * Расхождение известных месяцев по-прежнему отказ: реестр описывает работы
-   * одного раздела за один период.
-   */
-  if (
-    work.objectId !== registry.objectId ||
-    work.sectionCode !== registry.sectionCode ||
-    (work.period !== null && work.period !== registry.period)
-  ) {
-    throw unprocessable(
-      [
-        {
-          pointer: '/workId',
-          code: 'mismatch',
-          message:
-            'Комплект относится к другому объекту, разделу или месяцу: реестр описывает ' +
-            'работы одного раздела за один период.',
-        },
-      ],
-      'Комплект не подходит этому реестру.',
-    );
-  }
-  if (work.registryId !== null && work.registryId !== registryId) {
-    throw conflict('Комплект уже включён в другой реестр. Сначала исключите его оттуда.');
-  }
-
-  const nextOrdinal =
-    ordinal ??
-    (await db
-      .select({ next: sql<number>`coalesce(max(${works.ordinal}), 0) + 1` })
-      .from(works)
-      .where(eq(works.registryId, registryId))
-      .then((rows) => rows[0]?.next ?? 1));
-
-  await guardNavigation(() =>
-    db.transaction(async (tx) => {
-      await tx
-        .update(works)
-        .set({ registryId, ordinal: nextOrdinal, updatedAt: sql`now()` })
-        .where(eq(works.id, workId));
-
-      await bumpRegistryVersion(tx, registryId, expectedVersion);
-
-      await appendAudit(tx, scope, {
-        ...actor,
-        action: 'registry.work_included',
-        entityType: 'registry',
-        entityId: registryId,
-        objectId: registry.objectId,
-        payload: { workId, ordinal: nextOrdinal },
-      });
-    }),
-  );
-
-  const updated = await findRegistry(db, scope, registryId);
-  if (updated === null) throw notFound('Реестр не найден.');
-  return updated;
-}
-
-export async function excludeWork(
-  db: Database,
-  scope: AuthScope,
-  registryId: string,
-  workId: string,
-  expectedVersion: number,
-  actor: AuditActor,
-): Promise<Registry> {
-  const registry = await requireDraftRegistry(db, scope, registryId);
-  const work = await findWork(db, scope, workId);
-  if (work === null || work.registryId !== registryId) {
-    throw notFound('Комплект не входит в этот реестр.');
-  }
-  if (work.kind === 'registry') {
-    throw conflict('Файл реестра исключается заменой, а не исключением из состава.');
-  }
-
-  await guardNavigation(() =>
-    db.transaction(async (tx) => {
-      await tx
-        .update(works)
-        .set({ registryId: null, ordinal: null, updatedAt: sql`now()` })
-        .where(eq(works.id, workId));
-
-      await bumpRegistryVersion(tx, registryId, expectedVersion);
-
-      await appendAudit(tx, scope, {
-        ...actor,
-        action: 'registry.work_excluded',
-        entityType: 'registry',
-        entityId: registryId,
-        objectId: registry.objectId,
-        payload: { workId },
-      });
-    }),
-  );
-
-  const updated = await findRegistry(db, scope, registryId);
-  if (updated === null) throw notFound('Реестр не найден.');
-  return updated;
-}
-
-// =====================================================================
-// Файл реестра
-// =====================================================================
-
-/**
- * Заведение комплекта-файла для реестра.
- *
- * Файл описи проходит тот же конвейер, что и любой комплект, поэтому он и есть
- * комплект — особого вида. Организация берётся из области генподрядчика: описи
- * подписывает он, и заведение её от чужого имени лишено смысла.
- *
- * Второй файл у одного реестра запрещён `ux_works_registry_file`: две описи на
- * одну папку оставили бы вопрос «какая из них подписана» без ответа.
- */
-export async function attachRegistryFile(
-  db: Database,
-  scope: AuthScope,
-  registryId: string,
-  actor: AuditActor,
-): Promise<CreatedWork> {
-  const registry = await requireDraftRegistry(db, scope, registryId);
-  // Администратору, ведущему папку за ПТО, исполнителя тоже выводит карточка
-  // объекта: своей организации у него нет, а описи без исполнителя не бывает.
-  // Признак `assumed` при этом НЕ ставится — файл описи не акт, и заменять по
-  // распознаванию его исполнителя нечему (`works_contractor_assumed_chk`).
-  const acting = resolveActingContractor(
-    scope,
-    null,
-    await deriveObjectContractor(db, registry.objectId),
-  );
-
-  return guardNavigation(() =>
-    db.transaction(async (tx) => {
-      const insertedWork = await tx
-        .insert(works)
-        .values({
-          objectId: registry.objectId,
-          sectionCode: registry.sectionCode,
-          period: registry.period,
-          contractorId: acting.contractorId,
-          managedByContractorId: acting.managedByContractorId,
-          kind: 'registry',
-          registryId,
-          title: `Файл реестра${registry.number === null ? '' : ` №${registry.number}`}`,
-          createdBy: scope.userId,
-          // Файл описи — единственный комплект, у которого автопрохождение
-          // остановок конвейера осмысленно по умолчанию: человек его не
-          // размечает, он нужен целиком и сразу для сверки (S20).
-          autoRunEnabled: true,
-        })
-        .returning(WORK_SELECTION);
-
-      const work = insertedWork[0];
-      if (work === undefined) throw conflict('Файл реестра не заведён: повторите действие.');
-
-      const revision = await insertDraftRevision(tx, {
-        workId: work.id,
-        objectId: work.objectId,
-        contractorId: work.contractorId,
-        revisionNo: 1,
-        parentRevisionId: null,
-      });
-
-      await tx.update(works).set({ currentRevisionId: revision.id }).where(eq(works.id, work.id));
-
-      await appendRevisionEvent(tx, {
-        revisionId: revision.id,
-        eventType: 'registry_file.created',
-        payload: { registryId, workId: work.id },
-      });
-
-      await appendAudit(tx, scope, {
-        ...actor,
-        action: 'registry_file.created',
-        entityType: 'registry',
-        entityId: registryId,
-        objectId: registry.objectId,
-        payload: { workId: work.id, revisionId: revision.id },
-      });
-
-      return { work: toWork({ ...work, currentRevisionId: revision.id }), revision };
-    }),
-  );
-}
-
-// =====================================================================
-// Передача и приёмка
-// =====================================================================
-
-export interface RegistryBlocker {
-  readonly code: string;
-  readonly message: string;
-}
-
-interface RegistryComposition {
-  readonly works: readonly (Work & { readonly revisionStatus: WorkflowStatus | null })[];
-  readonly file: (Work & { readonly revisionStatus: WorkflowStatus | null }) | null;
-}
-
-/** Состав реестра вместе со статусом текущей ревизии каждого комплекта. */
-async function loadComposition(
-  db: Database,
-  scope: AuthScope,
-  registryId: string,
-): Promise<RegistryComposition> {
-  const rows = await db
-    .select({ ...WORK_SELECTION, revisionStatus: submissionRevisions.status })
-    .from(works)
-    .leftJoin(submissionRevisions, eq(submissionRevisions.id, works.currentRevisionId))
-    .where(withScope(scope, WORK_SCOPE, eq(works.registryId, registryId)))
-    .orderBy(asc(works.ordinal), asc(works.createdAt));
-
-  const mapped = rows.map((row) => ({
-    ...toWork(row),
-    revisionStatus: row.revisionStatus === null ? null : (row.revisionStatus as WorkflowStatus),
-  }));
-
-  return {
-    works: mapped.filter((row) => row.kind === 'complect'),
-    file: mapped.find((row) => row.kind === 'registry') ?? null,
-  };
-}
-
-/**
- * Предусловия передачи — списком, а не первым отказом.
- *
- * Тот же принцип, что у `submitBlockers` в `workflow.ts`: инженер ПТО обязан
- * увидеть все причины сразу, а не получать их по одной за попытку.
- */
-export async function issueBlockers(
-  db: Database,
-  scope: AuthScope,
-  registryId: string,
-): Promise<readonly RegistryBlocker[]> {
-  const registry = await findRegistry(db, scope, registryId);
-  if (registry === null) throw notFound('Реестр не найден.');
-
-  const blockers: RegistryBlocker[] = [];
-  if (registry.status !== 'draft') {
-    blockers.push({
-      code: 'not_draft',
-      message: registry.status === 'issued' ? 'Реестр уже передан.' : 'Реестр уже принят.',
-    });
-    return blockers;
-  }
-  if (registry.number === null || registry.number.trim() === '') {
-    blockers.push({ code: 'number_missing', message: 'Не присвоен номер реестра.' });
-  }
-
-  const composition = await loadComposition(db, scope, registryId);
-
-  if (composition.works.length === 0) {
-    blockers.push({ code: 'no_works', message: 'В реестр не включён ни один комплект.' });
-  }
-
-  const unsubmitted = composition.works.filter(
-    (work) => work.revisionStatus === null || !SUBMITTED_OR_LATER.includes(work.revisionStatus),
-  );
-  if (unsubmitted.length > 0) {
-    blockers.push({
-      code: 'works_not_submitted',
-      message:
-        `Не поданы комплекты: ${unsubmitted.map((work) => work.title).join(', ')}. ` +
-        'Передать можно только то, что подрядчик уже сдал.',
-    });
-  }
-
-  if (composition.file === null) {
-    blockers.push({
-      code: 'file_missing',
-      message: 'Не загружен подписанный файл реестра.',
-    });
-  } else if (
-    composition.file.revisionStatus === null ||
-    !SUBMITTED_OR_LATER.includes(composition.file.revisionStatus)
-  ) {
-    blockers.push({
-      code: 'file_not_submitted',
-      message: 'Файл реестра загружен, но не подан: подайте его ревизию.',
-    });
-  }
-
-  return blockers;
-}
-
-/**
- * Передача реестра: снимок состава и смена статуса одной транзакцией.
- *
- * Порядок внутри транзакции значим. Снимок пишется, пока реестр ещё черновик:
- * триггер `registry_items_locked` смотрит на статус РОДИТЕЛЯ, и после смены
- * статуса вставка была бы отвергнута собственным замком.
- */
-export async function issueRegistry(
-  db: Database,
-  scope: AuthScope,
-  registryId: string,
-  expectedVersion: number,
-  actor: AuditActor,
-): Promise<Registry> {
-  const registry = await findRegistry(db, scope, registryId);
-  if (registry === null) throw notFound('Реестр не найден.');
-
-  const blockers = await issueBlockers(db, scope, registryId);
-  if (blockers.length > 0) {
-    throw unprocessable(
-      blockers.map((blocker) => ({
-        pointer: null,
-        code: blocker.code,
-        message: blocker.message,
-      })),
-      'Реестр не готов к передаче.',
-    );
-  }
-
-  const composition = await loadComposition(db, scope, registryId);
-
-  await guardNavigation(() =>
-    db.transaction(async (tx) => {
-      await tx.insert(registryItems).values(
-        composition.works.map((work, index) => ({
-          registryId,
-          ordinal: work.ordinal ?? index + 1,
-          workId: work.id,
-          // `currentRevisionId` не может быть пуст: комплект без ревизии попал бы
-          // в блокеры выше как неподанный.
-          revisionId: work.currentRevisionId ?? '',
-          contractorId: work.contractorId,
-          title: work.title,
-        })),
-      );
-
-      await bumpRegistryVersion(tx, registryId, expectedVersion, {
-        status: 'issued',
-        issuedBy: scope.userId,
-        issuedAt: sql`now()`,
-        issuedFileRevisionId: composition.file?.currentRevisionId ?? null,
-      });
-
-      await appendAudit(tx, scope, {
-        ...actor,
-        action: 'registry.issued',
-        entityType: 'registry',
-        entityId: registryId,
-        objectId: registry.objectId,
-        payload: { number: registry.number, works: composition.works.length },
-      });
-    }),
-  );
-
-  const issued = await findRegistry(db, scope, registryId);
-  if (issued === null) throw notFound('Реестр не найден.');
-  return issued;
-}
-
-/** Приёмка: подпись «Принял» в подвале описи. */
-export async function acceptRegistry(
-  db: Database,
-  scope: AuthScope,
-  registryId: string,
-  expectedVersion: number,
-  actor: AuditActor,
-): Promise<Registry> {
-  const registry = await findRegistry(db, scope, registryId);
-  if (registry === null) throw notFound('Реестр не найден.');
-  if (registry.status === 'draft') {
-    throw conflict('Реестр ещё не передан: принимать нечего.');
-  }
-  if (registry.status === 'accepted') {
-    throw conflict('Реестр уже принят.');
-  }
-
-  await guardNavigation(() =>
-    db.transaction(async (tx) => {
-      await bumpRegistryVersion(tx, registryId, expectedVersion, {
-        status: 'accepted',
-        acceptedBy: scope.userId,
-        acceptedAt: sql`now()`,
-      });
-
-      await appendAudit(tx, scope, {
-        ...actor,
-        action: 'registry.accepted',
-        entityType: 'registry',
-        entityId: registryId,
-        objectId: registry.objectId,
-        payload: { number: registry.number },
-      });
-    }),
-  );
-
-  const accepted = await findRegistry(db, scope, registryId);
-  if (accepted === null) throw notFound('Реестр не найден.');
-  return accepted;
-}
-
-/**
- * Что исчезнет вместе с реестром.
- *
- * Числа названы двумя РАЗНЫМИ глаголами, и это не стилистика. Комплекты состава
- * только ОТВЯЗЫВАЮТСЯ: ни одна их ревизия, страница или проверка не трогается,
- * и после удаления папки они остаются на объекте как «в реестр не включён».
- * Удаляется лишь то, что без реестра существовать не может, — файл описи со
- * своими ревизиями и прогоны сверки этого скана.
- */
-export interface RegistryDeletionPreview {
-  readonly registryId: string;
-  readonly number: string | null;
-  readonly status: Registry['status'];
-  /** Комплектов будет отвязано (не удалено). */
-  readonly worksDetached: number;
-  /** Строк снимка состава. У черновика их нет по построению. */
-  readonly registryItems: number;
-  /** Прогонов сверки описи будет снесено. */
-  readonly reconciliations: number;
-  /**
-   * Файл описи и его содержимое, либо `null`, если файл не заводили.
-   *
-   * Вложенным объектом, а не пятью нулями рядом: «файла нет» и «файл есть, но
-   * пустой» — разные ответы, и нули их не различают.
-   */
-  readonly file: {
-    readonly workId: string;
-    readonly title: string;
-    readonly revisions: number;
-    readonly files: number;
-    readonly pages: number;
-  } | null;
-  readonly blockers: readonly string[];
-}
-
-/**
- * Помехи удалению реестра.
- *
- * ## Почему «не черновик» проверяется в КОДЕ, а не оставлено триггеру
- *
- * Триггер `registries_no_delete` (0028) исполняет `deny_modification`, а та с
- * миграции 0035 начинается с раннего выхода при выключенном
- * `immutability_enforced()`. То есть в режиме тестирования база переданный
- * реестр снести РАЗРЕШИТ. Здесь помеха безусловна и от выключателя не зависит —
- * по той же доктрине, что и у `workDeletionBlockers`: режим тестирования
- * ослабляет запреты СВОЕЙ базы, а не обязательства перед второй стороной.
- * Переданная опись подписана обеими сторонами.
- *
- * ## Почему помехи файла описи приходят целиком
- *
- * Файл описи — обычный комплект вида `registry`, и удаляется он теми же
- * правилами. Его поданная ревизия — частый случай: опись подают прямо перед
- * передачей. Без явной помехи удаление дошло бы до триггеров 0008 и упало бы
- * `restrict_violation` из драйвера, то есть пятисотым кодом без объяснения.
- *
- * ## Чего в помехах НЕТ
- *
- * Ни «в реестре есть комплекты», ни «есть прогоны сверки». Разобрать собранную
- * не из тех комплектов папку — штатная работа ПТО, а сверка описывает КОНКРЕТНЫЙ
- * скан, который исчезает вместе с реестром. Оба числа уходят в предпросмотр,
- * чтобы решение принималось осознанно, но запретом не являются.
- */
-async function registryDeletionBlockers(
-  db: Database,
-  scope: AuthScope,
-  registry: Registry,
-  enforceImmutability: boolean,
-): Promise<readonly string[]> {
-  if (registry.status !== 'draft') {
-    return [
-      registry.status === 'issued'
-        ? 'реестр передан — подписанная опись и её состав неизменяемы'
-        : 'реестр принят — подписанная опись и её состав неизменяемы',
-    ];
-  }
-
-  const file = await findRegistryFile(db, scope, registry.id);
-  if (file === null) return [];
-
-  const own = await workDeletionBlockers(db, file.id, enforceImmutability);
-  return own.map((blocker) => `файл описи: ${blocker}`);
-}
-
-export async function previewRegistryDeletion(
-  db: Database,
-  scope: AuthScope,
-  registryId: string,
-  enforceImmutability: boolean,
-): Promise<RegistryDeletionPreview | null> {
-  const registry = await findRegistry(db, scope, registryId);
-  if (registry === null) return null;
-
-  const counts = await db.execute<{
-    works: number;
-    items: number;
-    reconciliations: number;
-  }>(sql`
-    select
-      (select count(*) from works
-        where registry_id = ${registryId}::uuid and kind = 'complect')::int as works,
-      (select count(*) from registry_items
-        where registry_id = ${registryId}::uuid)::int as items,
-      (select count(*) from registry_reconciliations
-        where registry_id = ${registryId}::uuid)::int as reconciliations
-  `);
-  const row = counts.rows[0];
-
-  // Числа файла описи считает существующий предпросмотр комплекта: второй
-  // счётчик тех же величин разошёлся бы с первым при первой же новой таблице.
-  const file = await findRegistryFile(db, scope, registryId);
-  const filePreview =
-    file === null ? null : await previewWorkDeletion(db, scope, file.id, enforceImmutability);
-
-  return {
-    registryId,
-    number: registry.number,
-    status: registry.status,
-    worksDetached: row?.works ?? 0,
-    registryItems: row?.items ?? 0,
-    reconciliations: row?.reconciliations ?? 0,
-    file:
-      file === null || filePreview === null
-        ? null
-        : {
-            workId: file.id,
-            title: file.title,
-            revisions: filePreview.revisions,
-            files: filePreview.files,
-            pages: filePreview.pages,
-          },
-    blockers: await registryDeletionBlockers(db, scope, registry, enforceImmutability),
-  };
-}
-
-/**
- * Удалить реестр: отвязать комплекты, снести файл описи и сверки.
- *
- * `null` — реестра нет или он вне области видимости; различать их снаружи
- * нельзя (§1.6).
- *
- * Порядок в транзакции значим целиком:
- *
- * 1. `bumpRegistryVersion` — сравнение с обменом по версии и блокировка строки.
- *    Статус меняется ТОЛЬКО через неё, поэтому проверка версии закрывает и
- *    гонку со статусом: соперник, успевший передать папку, уже поднял версию, и
- *    мы получим 412 вместо удаления подписанной описи.
- * 2. Комплекты отвязываются. Составной ключ `works_registry_fk` при `NULL` не
- *    проверяется, а `ux_works_registry_ordinal` освобождается вместе с
- *    `ordinal`.
- * 3. Файл описи удаляется ЦЕЛИКОМ, а не отвязывается: `works_registry_kind_chk`
- *    запрещает `kind = 'registry'` без `registry_id`, и обнулить ссылку у него
- *    нельзя по построению.
- * 4. `purgeRegistryTail` — снимок состава и прогоны сверки, которые ссылаются
- *    на сам реестр, а не на ревизию.
- * 5. Строка реестра.
- *
- * Всё одной транзакцией: реестр, у которого комплекты отвязаны, а строка
- * осталась, — состояние, которого в модели нет.
- */
-export async function deleteRegistry(
-  db: Database,
-  scope: AuthScope,
-  registryId: string,
-  expectedVersion: number,
-  actor: AuditActor,
-  enforceImmutability: boolean,
-): Promise<{ readonly deleted: boolean; readonly blockers: readonly string[] } | null> {
-  const preview = await previewRegistryDeletion(db, scope, registryId, enforceImmutability);
-  if (preview === null) return null;
-  if (preview.blockers.length > 0) return { deleted: false, blockers: preview.blockers };
-
-  const registry = await findRegistry(db, scope, registryId);
-  if (registry === null) return null;
-
-  await guardNavigation(() =>
-    db.transaction(async (tx) => {
-      await bumpRegistryVersion(tx, registryId, expectedVersion, {});
-
-      await tx
-        .update(works)
-        .set({ registryId: null, ordinal: null, updatedAt: sql`now()` })
-        .where(allOf(eq(works.registryId, registryId), eq(works.kind, 'complect')));
-
-      const fileWorkId = preview.file?.workId ?? null;
-      if (fileWorkId !== null) {
-        const revisions = await tx
-          .select({ id: submissionRevisions.id })
-          .from(submissionRevisions)
-          .where(eq(submissionRevisions.workId, fileWorkId));
-
-        // Указатель обнуляется ПЕРВЫМ по той же причине, что и у комплекта:
-        // `works.current_revision_id` ссылается на строку, которую сейчас
-        // удалим.
-        await tx.update(works).set({ currentRevisionId: null }).where(eq(works.id, fileWorkId));
-        for (const revision of revisions) {
-          await purgeRevisionEntirely(tx, revision.id);
-        }
-        await tx.execute(
-          sql`delete from registry_reconciliation_works where work_id = ${fileWorkId}::uuid`,
-        );
-        await tx.delete(works).where(eq(works.id, fileWorkId));
-      }
-
-      await purgeRegistryTail(tx, registryId);
-      await tx.delete(registries).where(eq(registries.id, registryId));
-
-      // Одна запись, а не N штук `registry.work_excluded`: отвязка здесь — часть
-      // одного действия, а не N решений человека. Номер и месяц попадают в след:
-      // после удаления узнать, что именно исчезло, будет неоткуда.
-      await appendAudit(tx, scope, {
-        ...actor,
-        action: 'registry.deleted',
-        entityType: 'registry',
-        entityId: registryId,
-        objectId: registry.objectId,
-        payload: {
-          number: registry.number,
-          sectionCode: registry.sectionCode,
-          period: registry.period,
-          worksDetached: preview.worksDetached,
-          fileWorkId,
-          reconciliations: preview.reconciliations,
-        },
-      });
-    }),
-  );
-
-  return { deleted: true, blockers: [] };
-}
-
-/**
- * Снимок состава переданного реестра.
- *
- * Подрядчику отдаются только его строки: «в папке 7 работ, из них ваша одна» —
- * сведение о работе конкурентов, полученное арифметикой.
- */
-export async function listRegistryItems(
-  db: Database,
-  scope: AuthScope,
-  registryId: string,
-): Promise<readonly RegistryItem[]> {
-  if ((await findRegistry(db, scope, registryId)) === null) {
-    throw notFound('Реестр не найден.');
-  }
-
-  return db
-    .select({
-      registryId: registryItems.registryId,
-      ordinal: registryItems.ordinal,
-      workId: registryItems.workId,
-      revisionId: registryItems.revisionId,
-      contractorId: registryItems.contractorId,
-      title: registryItems.title,
-    })
-    .from(registryItems)
-    .where(
-      allOf(
-        eq(registryItems.registryId, registryId),
-        scope.kind === 'contractor'
-          ? eq(registryItems.contractorId, scope.contractorId)
-          : undefined,
-      ),
-    )
-    .orderBy(asc(registryItems.ordinal));
-}
-
-/** Комплекты реестра, видимые актору: для карточки реестра и для сверки. */
-export async function listRegistryWorks(
-  db: Database,
-  scope: AuthScope,
-  registryId: string,
-): Promise<readonly Work[]> {
-  const composition = await loadComposition(db, scope, registryId);
-  return composition.works.map((work) => toWork(work));
 }
 
 // =====================================================================
@@ -2659,17 +1063,17 @@ export async function listRegistryWorks(
 /**
  * Отказ ограничения БД → внятный ответ вместо 500.
  *
- * Тот же приём, что у `guardWorkflow()` в `workflow.ts`: список инвариантов, за
- * которые отвечает БД, короток и назван поимённо, всё остальное поднимается как
- * есть — молчаливое проглатывание неизвестного кода скрыло бы настоящий дефект.
+ * Список инвариантов, за которые отвечает БД, короток и назван поимённо, всё
+ * остальное поднимается как есть — молчаливое проглатывание неизвестного кода
+ * скрыло бы настоящий дефект.
  *
- * Составной ключ `works_section_fk` переводится в 422 с указателем на поле, а не
- * в общий 409: «раздел не включён на объекте» — это ответ администратору о том,
- * что настроить, и выразить его обязан текст, а не код состояния.
+ * Составной ключ `folders_section_fk` переводится в 422 с указателем на поле, а
+ * не в общий 409: «раздел не включён на объекте» — это ответ администратору о
+ * том, что настроить, и выразить его обязан текст, а не код состояния.
  *
- * Ветки `works_contractor_fk` здесь больше нет: ключ снят (0055), и перевод
- * несуществующего ограничения однажды объяснил бы отказ причиной, которой в
- * схеме не существует.
+ * Веток `works_contractor_fk` и реестров здесь больше нет: первый ключ снят
+ * (0055), реестры — вместе с согласованием (S44). Перевод несуществующего
+ * ограничения однажды объяснил бы отказ причиной, которой в схеме нет.
  */
 async function guardNavigation<TResult>(operation: () => Promise<TResult>): Promise<TResult> {
   try {
@@ -2694,7 +1098,7 @@ async function guardNavigation<TResult>(operation: () => Promise<TResult>): Prom
           ? driver.cause.constraint
           : undefined;
 
-    if (constraint === 'works_section_fk') {
+    if (constraint === 'folders_section_fk') {
       throw unprocessable(
         [
           {
@@ -2706,26 +1110,8 @@ async function guardNavigation<TResult>(operation: () => Promise<TResult>): Prom
         'Раздел работ недоступен на объекте.',
       );
     }
-    if (constraint === 'ux_works_registry_file') {
-      throw conflict('У реестра уже есть файл описи. Замените его, а не добавляйте второй.');
-    }
-    if (constraint === 'ux_registries_object_number') {
-      throw conflict('Реестр с таким номером на объекте уже есть.');
-    }
-    if (constraint === 'registries_section_fk') {
-      throw unprocessable(
-        [
-          {
-            pointer: '/sectionCode',
-            code: 'section_not_enabled',
-            message: 'Раздел не включён на этом объекте. Включите его в карточке объекта.',
-          },
-        ],
-        'Раздел работ недоступен на объекте.',
-      );
-    }
-    if (constraint === 'ux_submission_revisions_single_draft' || sqlState === '23505') {
-      throw conflict('У комплекта уже есть незакрытая черновая ревизия.', {
+    if (sqlState === '23505') {
+      throw conflict('Такая запись в портале уже есть.', {
         logDetail: `нарушено ограничение ${constraint ?? 'уникальности'}`,
       });
     }

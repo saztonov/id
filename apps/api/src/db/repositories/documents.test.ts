@@ -83,14 +83,10 @@ const ORG_A = id(3);
 const ORG_B = id(4);
 const USER = id(5);
 
-const SUBMISSION_A = id(20);
-const REVISION_A = id(21);
-const SUBMISSION_B = id(22);
-const REVISION_B = id(23);
-const SUBMISSION_REVIEW = id(24);
-const REVISION_REVIEW = id(25);
-const SUBMISSION_APPROVED = id(26);
-const REVISION_APPROVED = id(27);
+const FOLDER_A = id(21);
+const FOLDER_B = id(23);
+const FOLDER_REVIEW = id(25);
+const FOLDER_APPROVED = id(27);
 
 const FILE_A = id(30);
 const FILE_B = id(31);
@@ -158,125 +154,114 @@ const FIXTURE: readonly string[] = [
   // --- Ревизия А (draft, подрядчик А) --------------------------------------
   `INSERT INTO object_contractors (object_id, contractor_id)
        VALUES ('${OBJECT}', '${ORG_A}') ON CONFLICT DO NOTHING`,
-  `INSERT INTO works
+  `INSERT INTO folders
        (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-     VALUES ('${SUBMISSION_A}', '${OBJECT}', '${ORG_A}', '${ORG_A}', 'roofing', DATE '2026-01-01', 'Поставка А', '${USER}')`,
-  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
-     VALUES ('${REVISION_A}', '${SUBMISSION_A}', '${OBJECT}', '${ORG_A}', 1, 'draft')`,
-  `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order, verify_state)
-     VALUES ('${FILE_A}', '${REVISION_A}', '${SHA('a')}', 'akt.pdf', 0, 'ok')`,
-  `INSERT INTO source_pages (id, revision_id, source_file_id, file_page_index, revision_ordinal, width_px, height_px, rotation)
-     VALUES ('${PAGE_A0}', '${REVISION_A}', '${FILE_A}', 0, 0, 1654, 2339, 0)`,
-  `INSERT INTO source_pages (id, revision_id, source_file_id, file_page_index, revision_ordinal, width_px, height_px, rotation)
-     VALUES ('${PAGE_A1}', '${REVISION_A}', '${FILE_A}', 1, 1, 1654, 2339, 0)`,
-  `INSERT INTO source_pages (id, revision_id, source_file_id, file_page_index, revision_ordinal, width_px, height_px, rotation)
-     VALUES ('${PAGE_A2}', '${REVISION_A}', '${FILE_A}', 2, 2, 1654, 2339, 0)`,
-  `INSERT INTO source_pages (id, revision_id, source_file_id, file_page_index, revision_ordinal, width_px, height_px, rotation)
-     VALUES ('${PAGE_A3}', '${REVISION_A}', '${FILE_A}', 3, 3, 2339, 1654, 90)`,
-  `INSERT INTO processing_bundles (id, revision_id, aggregate_manifest_hash, working_pdf_blob_sha256, builder_version)
-     VALUES ('${BUNDLE_A}', '${REVISION_A}', '${SHA('e')}', '${SHA('b')}', 'bundle/1+pdf-lib')`,
-  `INSERT INTO processing_bundle_pages (bundle_id, revision_id, working_page_index, source_page_id)
-     VALUES ('${BUNDLE_A}', '${REVISION_A}', 0, '${PAGE_A0}')`,
-  `INSERT INTO processing_bundle_pages (bundle_id, revision_id, working_page_index, source_page_id)
-     VALUES ('${BUNDLE_A}', '${REVISION_A}', 1, '${PAGE_A1}')`,
-  `INSERT INTO processing_bundle_pages (bundle_id, revision_id, working_page_index, source_page_id)
-     VALUES ('${BUNDLE_A}', '${REVISION_A}', 2, '${PAGE_A2}')`,
-  `INSERT INTO processing_bundle_pages (bundle_id, revision_id, working_page_index, source_page_id)
-     VALUES ('${BUNDLE_A}', '${REVISION_A}', 3, '${PAGE_A3}')`,
-  `INSERT INTO layout_revisions (id, revision_id, object_id, bundle_id, revision_no, state)
-     VALUES ('${LAYOUT_A}', '${REVISION_A}', '${OBJECT}', '${BUNDLE_A}', 1, 'draft')`,
+     VALUES ('${FOLDER_A}', '${OBJECT}', '${ORG_A}', '${ORG_A}', 'roofing', DATE '2026-01-01', 'Поставка А', '${USER}')`,
+  `INSERT INTO source_files (id, folder_id, blob_sha256, file_name, sort_order, verify_state)
+     VALUES ('${FILE_A}', '${FOLDER_A}', '${SHA('a')}', 'akt.pdf', 0, 'ok')`,
+  `INSERT INTO source_pages (id, folder_id, source_file_id, file_page_index, folder_ordinal, width_px, height_px, rotation)
+     VALUES ('${PAGE_A0}', '${FOLDER_A}', '${FILE_A}', 0, 0, 1654, 2339, 0)`,
+  `INSERT INTO source_pages (id, folder_id, source_file_id, file_page_index, folder_ordinal, width_px, height_px, rotation)
+     VALUES ('${PAGE_A1}', '${FOLDER_A}', '${FILE_A}', 1, 1, 1654, 2339, 0)`,
+  `INSERT INTO source_pages (id, folder_id, source_file_id, file_page_index, folder_ordinal, width_px, height_px, rotation)
+     VALUES ('${PAGE_A2}', '${FOLDER_A}', '${FILE_A}', 2, 2, 1654, 2339, 0)`,
+  `INSERT INTO source_pages (id, folder_id, source_file_id, file_page_index, folder_ordinal, width_px, height_px, rotation)
+     VALUES ('${PAGE_A3}', '${FOLDER_A}', '${FILE_A}', 3, 3, 2339, 1654, 90)`,
+  `INSERT INTO processing_bundles (id, folder_id, aggregate_manifest_hash, working_pdf_blob_sha256, builder_version)
+     VALUES ('${BUNDLE_A}', '${FOLDER_A}', '${SHA('e')}', '${SHA('b')}', 'bundle/1+pdf-lib')`,
+  `INSERT INTO processing_bundle_pages (bundle_id, folder_id, working_page_index, source_page_id)
+     VALUES ('${BUNDLE_A}', '${FOLDER_A}', 0, '${PAGE_A0}')`,
+  `INSERT INTO processing_bundle_pages (bundle_id, folder_id, working_page_index, source_page_id)
+     VALUES ('${BUNDLE_A}', '${FOLDER_A}', 1, '${PAGE_A1}')`,
+  `INSERT INTO processing_bundle_pages (bundle_id, folder_id, working_page_index, source_page_id)
+     VALUES ('${BUNDLE_A}', '${FOLDER_A}', 2, '${PAGE_A2}')`,
+  `INSERT INTO processing_bundle_pages (bundle_id, folder_id, working_page_index, source_page_id)
+     VALUES ('${BUNDLE_A}', '${FOLDER_A}', 3, '${PAGE_A3}')`,
+  `INSERT INTO layout_revisions (id, folder_id, object_id, bundle_id, revision_no, state)
+     VALUES ('${LAYOUT_A}', '${FOLDER_A}', '${OBJECT}', '${BUNDLE_A}', 1, 'draft')`,
   // Блоки: у первой страницы текст и штамп, у третьей — только текст, у
   // четвёртой блоков нет вовсе (A3-схема, которую детектор не разобрал).
-  `INSERT INTO layout_blocks (id, layout_revision_id, revision_id, bundle_id, source_page_id,
+  `INSERT INTO layout_blocks (id, layout_revision_id, folder_id, bundle_id, source_page_id,
                               working_page_index, object_id, block_type, shape_type,
                               x0, y0, x1, y1, sort_order, source, detector_provenance)
-     VALUES ('${BLOCK_A0}', '${LAYOUT_A}', '${REVISION_A}', '${BUNDLE_A}', '${PAGE_A0}',
+     VALUES ('${BLOCK_A0}', '${LAYOUT_A}', '${FOLDER_A}', '${BUNDLE_A}', '${PAGE_A0}',
              0, '${OBJECT}', 'text', 'rectangle', 0.1, 0.1, 0.9, 0.4, 0, 'auto', 'rf_detr')`,
-  `INSERT INTO layout_blocks (id, layout_revision_id, revision_id, bundle_id, source_page_id,
+  `INSERT INTO layout_blocks (id, layout_revision_id, folder_id, bundle_id, source_page_id,
                               working_page_index, object_id, block_type, shape_type,
                               x0, y0, x1, y1, sort_order, source, detector_provenance)
-     VALUES ('${BLOCK_A0_STAMP}', '${LAYOUT_A}', '${REVISION_A}', '${BUNDLE_A}', '${PAGE_A0}',
+     VALUES ('${BLOCK_A0_STAMP}', '${LAYOUT_A}', '${FOLDER_A}', '${BUNDLE_A}', '${PAGE_A0}',
              0, '${OBJECT}', 'stamp', 'rectangle', 0.1, 0.5, 0.4, 0.7, 1, 'auto', 'rf_detr')`,
-  `INSERT INTO layout_blocks (id, layout_revision_id, revision_id, bundle_id, source_page_id,
+  `INSERT INTO layout_blocks (id, layout_revision_id, folder_id, bundle_id, source_page_id,
                               working_page_index, object_id, block_type, shape_type,
                               x0, y0, x1, y1, sort_order, source, detector_provenance)
-     VALUES ('${BLOCK_A2}', '${LAYOUT_A}', '${REVISION_A}', '${BUNDLE_A}', '${PAGE_A2}',
+     VALUES ('${BLOCK_A2}', '${LAYOUT_A}', '${FOLDER_A}', '${BUNDLE_A}', '${PAGE_A2}',
              2, '${OBJECT}', 'text', 'rectangle', 0.1, 0.1, 0.9, 0.4, 0, 'auto', 'rf_detr')`,
   `UPDATE layout_revisions SET blocks_hash = '${SHA('7')}'
      WHERE id = '${LAYOUT_A}'`,
   `INSERT INTO rd_run_documents (id, layout_revision_id, rd_document_id, rd_project_id)
      VALUES ('${RUN_DOC_A}', '${LAYOUT_A}', 'doc_a', 'prj-portal')`,
   // Прошлый прогон — завершён раньше; его текст брать нельзя.
-  `INSERT INTO recognition_runs (id, revision_id, layout_revision_id, rd_run_document_id,
+  `INSERT INTO recognition_runs (id, folder_id, layout_revision_id, rd_run_document_id,
                                  local_layout_hash, working_pdf_sha256, status, started_at, finished_at)
-     VALUES ('${RUN_A_OLD}', '${REVISION_A}', '${LAYOUT_A}', '${RUN_DOC_A}',
+     VALUES ('${RUN_A_OLD}', '${FOLDER_A}', '${LAYOUT_A}', '${RUN_DOC_A}',
              '${SHA('7')}', '${SHA('b')}', 'done', now() - interval '2 hours', now() - interval '2 hours')`,
-  `INSERT INTO recognition_runs (id, revision_id, layout_revision_id, rd_run_document_id,
+  `INSERT INTO recognition_runs (id, folder_id, layout_revision_id, rd_run_document_id,
                                  local_layout_hash, working_pdf_sha256, status, started_at, finished_at)
-     VALUES ('${RUN_A}', '${REVISION_A}', '${LAYOUT_A}', '${RUN_DOC_A}',
+     VALUES ('${RUN_A}', '${FOLDER_A}', '${LAYOUT_A}', '${RUN_DOC_A}',
              '${SHA('7')}', '${SHA('b')}', 'done', now() - interval '1 hour', now())`,
   `INSERT INTO artifact_versions (id, recognition_run_id, kind, s3_key, artifact_sha256, byte_size)
      VALUES ('${ARTIFACT_A_OLD}', '${RUN_A_OLD}', 'md', 'artifacts/old.md', '${SHA('3')}', 10)`,
   `INSERT INTO artifact_versions (id, recognition_run_id, kind, s3_key, artifact_sha256, byte_size)
      VALUES ('${ARTIFACT_A}', '${RUN_A}', 'md', 'artifacts/new.md', '${SHA('4')}', 20)`,
-  `INSERT INTO page_text_versions (id, revision_id, source_page_id, recognition_run_id,
+  `INSERT INTO page_text_versions (id, folder_id, source_page_id, recognition_run_id,
                                    artifact_version_id, text_md, text_sha256)
-     VALUES ('${TEXT_A0_OLD}', '${REVISION_A}', '${PAGE_A0}', '${RUN_A_OLD}', '${ARTIFACT_A_OLD}',
+     VALUES ('${TEXT_A0_OLD}', '${FOLDER_A}', '${PAGE_A0}', '${RUN_A_OLD}', '${ARTIFACT_A_OLD}',
              'ТЕКСТ ПРОШЛОГО ПРОГОНА', '${SHA('5')}')`,
-  `INSERT INTO page_text_versions (id, revision_id, source_page_id, recognition_run_id,
+  `INSERT INTO page_text_versions (id, folder_id, source_page_id, recognition_run_id,
                                    artifact_version_id, text_md, text_sha256)
-     VALUES ('${TEXT_A0}', '${REVISION_A}', '${PAGE_A0}', '${RUN_A}', '${ARTIFACT_A}',
+     VALUES ('${TEXT_A0}', '${FOLDER_A}', '${PAGE_A0}', '${RUN_A}', '${ARTIFACT_A}',
              '${TEXT_ACT}', '${SHA('6')}')`,
-  `INSERT INTO page_text_versions (id, revision_id, source_page_id, recognition_run_id,
+  `INSERT INTO page_text_versions (id, folder_id, source_page_id, recognition_run_id,
                                    artifact_version_id, text_md, text_sha256)
-     VALUES ('${TEXT_A1}', '${REVISION_A}', '${PAGE_A1}', '${RUN_A}', '${ARTIFACT_A}',
+     VALUES ('${TEXT_A1}', '${FOLDER_A}', '${PAGE_A1}', '${RUN_A}', '${ARTIFACT_A}',
              'Продолжение акта', '${SHA('8')}')`,
-  `INSERT INTO page_text_versions (id, revision_id, source_page_id, recognition_run_id,
+  `INSERT INTO page_text_versions (id, folder_id, source_page_id, recognition_run_id,
                                    artifact_version_id, text_md, text_sha256)
-     VALUES ('${TEXT_A2}', '${REVISION_A}', '${PAGE_A2}', '${RUN_A}', '${ARTIFACT_A}',
+     VALUES ('${TEXT_A2}', '${FOLDER_A}', '${PAGE_A2}', '${RUN_A}', '${ARTIFACT_A}',
              '${TEXT_CERT}', '${SHA('9')}')`,
 
   // --- Ревизия Б (чужая) ----------------------------------------------------
   `INSERT INTO object_contractors (object_id, contractor_id)
        VALUES ('${OBJECT}', '${ORG_B}') ON CONFLICT DO NOTHING`,
-  `INSERT INTO works
+  `INSERT INTO folders
        (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-     VALUES ('${SUBMISSION_B}', '${OBJECT}', '${ORG_B}', '${ORG_B}', 'roofing', DATE '2026-01-01', 'Поставка Б', '${USER}')`,
-  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
-     VALUES ('${REVISION_B}', '${SUBMISSION_B}', '${OBJECT}', '${ORG_B}', 1, 'draft')`,
-  `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order, verify_state)
-     VALUES ('${FILE_B}', '${REVISION_B}', '${SHA('c')}', 'chuzhoy.pdf', 0, 'ok')`,
-  `INSERT INTO source_pages (id, revision_id, source_file_id, file_page_index, revision_ordinal, width_px, height_px, rotation)
-     VALUES ('${PAGE_B0}', '${REVISION_B}', '${FILE_B}', 0, 0, 1654, 2339, 0)`,
+     VALUES ('${FOLDER_B}', '${OBJECT}', '${ORG_B}', '${ORG_B}', 'roofing', DATE '2026-01-01', 'Поставка Б', '${USER}')`,
+  `INSERT INTO source_files (id, folder_id, blob_sha256, file_name, sort_order, verify_state)
+     VALUES ('${FILE_B}', '${FOLDER_B}', '${SHA('c')}', 'chuzhoy.pdf', 0, 'ok')`,
+  `INSERT INTO source_pages (id, folder_id, source_file_id, file_page_index, folder_ordinal, width_px, height_px, rotation)
+     VALUES ('${PAGE_B0}', '${FOLDER_B}', '${FILE_B}', 0, 0, 1654, 2339, 0)`,
 
   // --- Ревизия на проверке (in_review): класс derived писать РАЗРЕШЕНО -------
   `INSERT INTO object_contractors (object_id, contractor_id)
        VALUES ('${OBJECT}', '${ORG_A}') ON CONFLICT DO NOTHING`,
-  `INSERT INTO works
+  `INSERT INTO folders
        (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-     VALUES ('${SUBMISSION_REVIEW}', '${OBJECT}', '${ORG_A}', '${ORG_A}', 'roofing', DATE '2026-01-01', 'Поставка на проверке', '${USER}')`,
-  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
-     VALUES ('${REVISION_REVIEW}', '${SUBMISSION_REVIEW}', '${OBJECT}', '${ORG_A}', 1, 'draft')`,
-  `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order, verify_state)
-     VALUES ('${FILE_REVIEW}', '${REVISION_REVIEW}', '${SHA('d')}', 'review.pdf', 0, 'ok')`,
-  `INSERT INTO source_pages (id, revision_id, source_file_id, file_page_index, revision_ordinal, width_px, height_px, rotation)
-     VALUES ('${PAGE_REVIEW0}', '${REVISION_REVIEW}', '${FILE_REVIEW}', 0, 0, 1654, 2339, 0)`,
-  `UPDATE submission_revisions SET status = 'in_review' WHERE id = '${REVISION_REVIEW}'`,
+     VALUES ('${FOLDER_REVIEW}', '${OBJECT}', '${ORG_A}', '${ORG_A}', 'roofing', DATE '2026-01-01', 'Поставка на проверке', '${USER}')`,
+  `INSERT INTO source_files (id, folder_id, blob_sha256, file_name, sort_order, verify_state)
+     VALUES ('${FILE_REVIEW}', '${FOLDER_REVIEW}', '${SHA('d')}', 'review.pdf', 0, 'ok')`,
+  `INSERT INTO source_pages (id, folder_id, source_file_id, file_page_index, folder_ordinal, width_px, height_px, rotation)
+     VALUES ('${PAGE_REVIEW0}', '${FOLDER_REVIEW}', '${FILE_REVIEW}', 0, 0, 1654, 2339, 0)`,
 
   // --- Согласованная ревизия: класс derived писать ЗАПРЕЩЕНО -----------------
   `INSERT INTO object_contractors (object_id, contractor_id)
        VALUES ('${OBJECT}', '${ORG_A}') ON CONFLICT DO NOTHING`,
-  `INSERT INTO works
+  `INSERT INTO folders
        (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-     VALUES ('${SUBMISSION_APPROVED}', '${OBJECT}', '${ORG_A}', '${ORG_A}', 'roofing', DATE '2026-01-01', 'Поставка согласованная', '${USER}')`,
-  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
-     VALUES ('${REVISION_APPROVED}', '${SUBMISSION_APPROVED}', '${OBJECT}', '${ORG_A}', 1, 'draft')`,
-  `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order, verify_state)
-     VALUES ('${FILE_APPROVED}', '${REVISION_APPROVED}', '${SHA('d')}', 'approved.pdf', 0, 'ok')`,
-  `INSERT INTO source_pages (id, revision_id, source_file_id, file_page_index, revision_ordinal, width_px, height_px, rotation)
-     VALUES ('${PAGE_APPROVED0}', '${REVISION_APPROVED}', '${FILE_APPROVED}', 0, 0, 1654, 2339, 0)`,
-  `UPDATE submission_revisions SET status = 'approved', decided_at = now(), decided_by = '${USER}'
-     WHERE id = '${REVISION_APPROVED}'`,
+     VALUES ('${FOLDER_APPROVED}', '${OBJECT}', '${ORG_A}', '${ORG_A}', 'roofing', DATE '2026-01-01', 'Поставка согласованная', '${USER}')`,
+  `INSERT INTO source_files (id, folder_id, blob_sha256, file_name, sort_order, verify_state)
+     VALUES ('${FILE_APPROVED}', '${FOLDER_APPROVED}', '${SHA('d')}', 'approved.pdf', 0, 'ok')`,
+  `INSERT INTO source_pages (id, folder_id, source_file_id, file_page_index, folder_ordinal, width_px, height_px, rotation)
+     VALUES ('${PAGE_APPROVED0}', '${FOLDER_APPROVED}', '${FILE_APPROVED}', 0, 0, 1654, 2339, 0)`,
 ];
 
 let testDb: TestDatabase;
@@ -349,7 +334,7 @@ function unassigned(sourcePageId: string, reason = 'пустая страниц�
 
 /** Полная сегментация ревизии А: все четыре страницы учтены. */
 const FULL_SEGMENTATION = {
-  revisionId: REVISION_A,
+  folderId: FOLDER_A,
   documents: [
     decoded(0, [PAGE_A0, PAGE_A1]),
     decoded(1, [PAGE_A2], { docTypeCode: 'cert_conformity' }),
@@ -370,13 +355,13 @@ async function countRows(sql: string): Promise<number> {
 describe('savePageClassifications', () => {
   it('заменяет набор целиком и сохраняет доказательство', async () => {
     const first = await savePageClassifications(db, ADMIN, {
-      revisionId: REVISION_A,
+      folderId: FOLDER_A,
       classifications: [classification(PAGE_A0), classification(PAGE_A1, { label: 'I-DOC' })],
     });
     expect(first).toEqual({ removed: 0, written: 2 });
 
     const second = await savePageClassifications(db, ADMIN, {
-      revisionId: REVISION_A,
+      folderId: FOLDER_A,
       classifications: [
         classification(PAGE_A0, {
           evidence: {
@@ -402,7 +387,7 @@ describe('savePageClassifications', () => {
     // означали бы, что задача 15 выбирает из них молча.
     expect(second).toEqual({ removed: 2, written: 4 });
 
-    const items = await listPageClassifications(db, ADMIN, REVISION_A);
+    const items = await listPageClassifications(db, ADMIN, FOLDER_A);
     expect(items.map((item) => item.sourcePageId)).toEqual([PAGE_A0, PAGE_A1, PAGE_A2, PAGE_A3]);
     expect(items[0]?.charSpan).toEqual({ start: 0, end: 3 });
     expect(items[0]?.quote).toBe('АКТ');
@@ -418,7 +403,7 @@ describe('savePageClassifications', () => {
   it('исход «other» без наблюдённого заголовка отвергается базой', async () => {
     await expect(
       savePageClassifications(db, ADMIN, {
-        revisionId: REVISION_A,
+        folderId: FOLDER_A,
         classifications: [
           classification(PAGE_A0, {
             typeOutcome: 'other',
@@ -430,13 +415,13 @@ describe('savePageClassifications', () => {
     ).rejects.toMatchObject({ status: 409 });
 
     // Транзакция откатилась целиком: прежний набор на месте.
-    expect(await listPageClassifications(db, ADMIN, REVISION_A)).toHaveLength(4);
+    expect(await listPageClassifications(db, ADMIN, FOLDER_A)).toHaveLength(4);
   });
 
   it('заголовок из одних пробелов тоже отвергается', async () => {
     await expect(
       savePageClassifications(db, ADMIN, {
-        revisionId: REVISION_A,
+        folderId: FOLDER_A,
         classifications: [
           classification(PAGE_A0, {
             typeOutcome: 'other',
@@ -453,30 +438,6 @@ describe('savePageClassifications', () => {
    * заметил бы перерасширения: на S2 инженер из-за него не мог подтвердить тип
    * документа на поданной ревизии.
    */
-  it('на ревизии in_review классификация пишется, на approved — нет', async () => {
-    const written = await savePageClassifications(db, ADMIN, {
-      revisionId: REVISION_REVIEW,
-      classifications: [classification(PAGE_REVIEW0)],
-    });
-    expect(written).toEqual({ removed: 0, written: 1 });
-
-    await expect(
-      savePageClassifications(db, ADMIN, {
-        revisionId: REVISION_APPROVED,
-        classifications: [classification(PAGE_APPROVED0)],
-      }),
-    ).rejects.toMatchObject({ status: 409 });
-    expect(await listPageClassifications(db, ADMIN, REVISION_APPROVED)).toEqual([]);
-  });
-
-  it('прямой SQL в согласованную ревизию тоже отвергается триггером', async () => {
-    await expect(
-      testDb.query(
-        `INSERT INTO page_classifications (revision_id, source_page_id, label, type_outcome, source)
-           VALUES ('${REVISION_APPROVED}', '${PAGE_APPROVED0}', 'B-DOC', 'none', 'manual')`,
-      ),
-    ).rejects.toThrow(/approved/u);
-  });
 });
 
 // =====================================================================
@@ -496,14 +457,14 @@ describe('applySegmentation', () => {
     expect(outcome.pagesUnassigned).toBe(1);
     expect(outcome.registryRowsUnlinked).toBe(0);
 
-    const documents = await listLogicalDocuments(db, ADMIN, REVISION_A);
+    const documents = await listLogicalDocuments(db, ADMIN, FOLDER_A);
     expect(documents.map((d) => d.ordinal)).toEqual([0, 1]);
     expect(documents[0]?.pageCount).toBe(2);
     expect(documents[1]?.docTypeCode).toBe('cert_conformity');
     // Версия для `If-Match` начинается с нуля, а не с «неизвестно».
     expect(documents[0]?.version).toBe(0);
 
-    const assignments = await listPageAssignments(db, ADMIN, REVISION_A);
+    const assignments = await listPageAssignments(db, ADMIN, FOLDER_A);
     expect(assignments).toHaveLength(4);
     // Непривязанная страница существует ЯВНОЙ строкой с причиной: отсутствие
     // строки не отличить от потерянной страницы.
@@ -511,7 +472,7 @@ describe('applySegmentation', () => {
     expect(blank?.documentId).toBeNull();
     expect(blank?.reason).toBe('пустая страница');
 
-    expect(await listUnaccountedPages(db, ADMIN, REVISION_A)).toEqual([]);
+    expect(await listUnaccountedPages(db, ADMIN, FOLDER_A)).toEqual([]);
   });
 
   /**
@@ -522,22 +483,22 @@ describe('applySegmentation', () => {
    * потому что выглядит выполненной.
    */
   it('потерянная страница отменяет всю транзакцию', async () => {
-    const before = await listLogicalDocuments(db, ADMIN, REVISION_A);
+    const before = await listLogicalDocuments(db, ADMIN, FOLDER_A);
 
     await expect(
       applySegmentation(db, ADMIN, {
-        revisionId: REVISION_A,
+        folderId: FOLDER_A,
         documents: [decoded(0, [PAGE_A0, PAGE_A1]), decoded(1, [PAGE_A2])],
         unassigned: [],
         extractorVersion: 'seg/1',
       }),
     ).rejects.toMatchObject({ status: 409 });
 
-    const after = await listLogicalDocuments(db, ADMIN, REVISION_A);
+    const after = await listLogicalDocuments(db, ADMIN, FOLDER_A);
     // Прежняя сборка на месте — ни одного документа не потеряно и не создано.
     expect(after.map((d) => d.id).sort()).toEqual(before.map((d) => d.id).sort());
-    expect(await listPageAssignments(db, ADMIN, REVISION_A)).toHaveLength(4);
-    expect(await listUnaccountedPages(db, ADMIN, REVISION_A)).toEqual([]);
+    expect(await listPageAssignments(db, ADMIN, FOLDER_A)).toHaveLength(4);
+    expect(await listUnaccountedPages(db, ADMIN, FOLDER_A)).toEqual([]);
   });
 
   /**
@@ -547,20 +508,20 @@ describe('applySegmentation', () => {
   it('страница в двух документах отвергается уникальным индексом', async () => {
     await expect(
       applySegmentation(db, ADMIN, {
-        revisionId: REVISION_A,
+        folderId: FOLDER_A,
         documents: [decoded(0, [PAGE_A0, PAGE_A1]), decoded(1, [PAGE_A1, PAGE_A2])],
         unassigned: [unassigned(PAGE_A3)],
         extractorVersion: 'seg/1',
       }),
     ).rejects.toMatchObject({ status: 409 });
 
-    expect(await listPageAssignments(db, ADMIN, REVISION_A)).toHaveLength(4);
+    expect(await listPageAssignments(db, ADMIN, FOLDER_A)).toHaveLength(4);
   });
 
   it('страница, привязанная и непривязанная одновременно, отвергается тем же индексом', async () => {
     await expect(
       applySegmentation(db, ADMIN, {
-        revisionId: REVISION_A,
+        folderId: FOLDER_A,
         documents: [decoded(0, [PAGE_A0, PAGE_A1, PAGE_A2, PAGE_A3])],
         unassigned: [unassigned(PAGE_A3)],
         extractorVersion: 'seg/1',
@@ -571,25 +532,13 @@ describe('applySegmentation', () => {
   it('страница чужой ревизии в сборку не попадает', async () => {
     await expect(
       applySegmentation(db, ADMIN, {
-        revisionId: REVISION_A,
+        folderId: FOLDER_A,
         documents: [decoded(0, [PAGE_A0, PAGE_A1, PAGE_B0])],
         unassigned: [unassigned(PAGE_A2), unassigned(PAGE_A3)],
         extractorVersion: 'seg/1',
       }),
     ).rejects.toThrow();
-    expect(await listPageAssignments(db, ADMIN, REVISION_A)).toHaveLength(4);
-  });
-
-  it('на согласованной ревизии сегментация не применяется', async () => {
-    await expect(
-      applySegmentation(db, ADMIN, {
-        revisionId: REVISION_APPROVED,
-        documents: [decoded(0, [PAGE_APPROVED0])],
-        unassigned: [],
-        extractorVersion: 'seg/1',
-      }),
-    ).rejects.toMatchObject({ status: 409 });
-    expect(await listLogicalDocuments(db, ADMIN, REVISION_APPROVED)).toEqual([]);
+    expect(await listPageAssignments(db, ADMIN, FOLDER_A)).toHaveLength(4);
   });
 });
 
@@ -599,7 +548,7 @@ describe('applySegmentation', () => {
 
 describe('реестр приложений', () => {
   it('строки реестра пишутся, сверяются и читаются', async () => {
-    const documents = await listLogicalDocuments(db, ADMIN, REVISION_A);
+    const documents = await listLogicalDocuments(db, ADMIN, FOLDER_A);
     const registryDocument = documents[0];
     const matchedDocument = documents[1];
     expect(registryDocument).toBeDefined();
@@ -634,13 +583,13 @@ describe('реестр приложений', () => {
     ];
 
     const saved = await saveRegistryRows(db, ADMIN, {
-      revisionId: REVISION_A,
+      folderId: FOLDER_A,
       documentId: registryDocument.id,
       rows,
     });
     expect(saved).toEqual({ removed: 0, written: 2 });
 
-    const listed = await listRegistryRows(db, ADMIN, REVISION_A);
+    const listed = await listRegistryRows(db, ADMIN, FOLDER_A);
     expect(listed).toHaveLength(2);
     expect(listed.every((row) => row.matchState === 'missing')).toBe(true);
 
@@ -649,7 +598,7 @@ describe('реестр приложений', () => {
     if (target === undefined) return;
 
     const matched = await saveRegistryMatches(db, ADMIN, {
-      revisionId: REVISION_A,
+      folderId: FOLDER_A,
       matches: [
         {
           registryRowId: target.id,
@@ -670,7 +619,7 @@ describe('реестр приложений', () => {
     });
     expect(matched).toEqual({ updated: 1, skipped: 1 });
 
-    const afterMatch = await listRegistryRows(db, ADMIN, REVISION_A);
+    const afterMatch = await listRegistryRows(db, ADMIN, FOLDER_A);
     expect(afterMatch.find((row) => row.rowNo === 1)?.matchState).toBe('matched');
   });
 
@@ -692,8 +641,8 @@ describe('реестр приложений', () => {
 
     // Строки реестра принадлежали удалённому документу-реестру и ушли каскадом
     // вместе с ним: это тот же документ, разобранный заново.
-    expect(await listRegistryRows(db, ADMIN, REVISION_A)).toEqual([]);
-    expect(await listUnaccountedPages(db, ADMIN, REVISION_A)).toEqual([]);
+    expect(await listRegistryRows(db, ADMIN, FOLDER_A)).toEqual([]);
+    expect(await listUnaccountedPages(db, ADMIN, FOLDER_A)).toEqual([]);
   });
 });
 
@@ -717,13 +666,13 @@ describe('saveFieldValues', () => {
   }
 
   it('заменяет значения версии экстрактора и НЕ трогает проверенное ручное', async () => {
-    const documents = await listLogicalDocuments(db, ADMIN, REVISION_A);
+    const documents = await listLogicalDocuments(db, ADMIN, FOLDER_A);
     const document = documents[0];
     expect(document).toBeDefined();
     if (document === undefined) return;
 
     await saveFieldValues(db, ADMIN, {
-      revisionId: REVISION_A,
+      folderId: FOLDER_A,
       documentId: document.id,
       extractorVersion: 'ext/1',
       fields: [
@@ -734,13 +683,13 @@ describe('saveFieldValues', () => {
 
     // Инженер исправил номер руками и подтвердил значение.
     await testDb.query(
-      `INSERT INTO field_values (revision_id, document_id, field_code, value_text, extractor_version,
+      `INSERT INTO field_values (folder_id, document_id, field_code, value_text, extractor_version,
                                  extracted_by, is_verified)
-         VALUES ('${REVISION_A}', '${document.id}', 'number', 'ГИ-77/исправлено', 'ext/1', 'manual', true)`,
+         VALUES ('${FOLDER_A}', '${document.id}', 'number', 'ГИ-77/исправлено', 'ext/1', 'manual', true)`,
     );
 
     const again = await saveFieldValues(db, ADMIN, {
-      revisionId: REVISION_A,
+      folderId: FOLDER_A,
       documentId: document.id,
       extractorVersion: 'ext/1',
       fields: [field('number', { valueText: 'ГИ-78' })],
@@ -758,13 +707,13 @@ describe('saveFieldValues', () => {
   });
 
   it('доказательство пишется тройкой: версия текста, диапазон и цитата', async () => {
-    const documents = await listLogicalDocuments(db, ADMIN, REVISION_A);
+    const documents = await listLogicalDocuments(db, ADMIN, FOLDER_A);
     const document = documents.find((d) => d.pageCount > 0);
     expect(document).toBeDefined();
     if (document === undefined) return;
 
     await saveFieldValues(db, ADMIN, {
-      revisionId: REVISION_A,
+      folderId: FOLDER_A,
       documentId: document.id,
       extractorVersion: 'ext/2',
       fields: [
@@ -793,7 +742,7 @@ describe('saveFieldValues', () => {
 
 describe('граф и подтверждение', () => {
   it('связи пересобираются целиком, чужие документы отбрасываются со счётчиком', async () => {
-    const documents = await listLogicalDocuments(db, ADMIN, REVISION_A);
+    const documents = await listLogicalDocuments(db, ADMIN, FOLDER_A);
     const parent = documents[0];
     const child = documents[1];
     expect(parent).toBeDefined();
@@ -801,7 +750,7 @@ describe('граф и подтверждение', () => {
     if (parent === undefined || child === undefined) return;
 
     const saved = await saveDocumentRelations(db, ADMIN, {
-      revisionId: REVISION_A,
+      folderId: FOLDER_A,
       relations: [
         { parentDocumentId: parent.id, childDocumentId: child.id, relation: 'quality_doc' },
         // Ссылка на несуществующий документ и петля: отбрасываются явно.
@@ -811,19 +760,19 @@ describe('граф и подтверждение', () => {
     });
     expect(saved).toEqual({ removed: 0, written: 1, skipped: 2 });
 
-    expect(await listDocumentRelations(db, ADMIN, REVISION_A)).toEqual([
+    expect(await listDocumentRelations(db, ADMIN, FOLDER_A)).toEqual([
       { parentDocumentId: parent.id, childDocumentId: child.id, relation: 'quality_doc' },
     ]);
 
     const replaced = await saveDocumentRelations(db, ADMIN, {
-      revisionId: REVISION_A,
+      folderId: FOLDER_A,
       relations: [],
     });
     expect(replaced).toEqual({ removed: 1, written: 0, skipped: 0 });
   });
 
   it('подтверждение поднимает версию и пишет audit_log ТОЙ ЖЕ транзакцией', async () => {
-    const documents = await listLogicalDocuments(db, ADMIN, REVISION_A);
+    const documents = await listLogicalDocuments(db, ADMIN, FOLDER_A);
     const document = documents[0];
     expect(document).toBeDefined();
     if (document === undefined) return;
@@ -852,7 +801,7 @@ describe('граф и подтверждение', () => {
   });
 
   it('устаревшая версия в If-Match даёт 412 и ничего не меняет', async () => {
-    const documents = await listLogicalDocuments(db, ADMIN, REVISION_A);
+    const documents = await listLogicalDocuments(db, ADMIN, FOLDER_A);
     const document = documents[0];
     expect(document).toBeDefined();
     if (document === undefined) return;
@@ -889,17 +838,17 @@ describe('граф и подтверждение', () => {
  */
 describe('пересегментация не переписывает подтверждённое', () => {
   async function confirmedIds(): Promise<readonly string[]> {
-    const documents = await listLogicalDocuments(db, ADMIN, REVISION_A);
+    const documents = await listLogicalDocuments(db, ADMIN, FOLDER_A);
     return documents.filter((document) => document.isConfirmed).map((document) => document.id);
   }
 
   it('репозиторий отказывает и подтверждение уцелевает', async () => {
     const confirmed = await confirmedIds();
     expect(confirmed.length).toBeGreaterThan(0);
-    const before = await listLogicalDocuments(db, ADMIN, REVISION_A);
+    const before = await listLogicalDocuments(db, ADMIN, FOLDER_A);
 
     const rejection = applySegmentation(db, ADMIN, {
-      revisionId: REVISION_A,
+      folderId: FOLDER_A,
       documents: [decoded(0, [PAGE_A0, PAGE_A1, PAGE_A2])],
       unassigned: [unassigned(PAGE_A3)],
       extractorVersion: 'seg/1',
@@ -914,7 +863,7 @@ describe('пересегментация не переписывает подт�
       ) as unknown as string,
     });
 
-    const after = await listLogicalDocuments(db, ADMIN, REVISION_A);
+    const after = await listLogicalDocuments(db, ADMIN, FOLDER_A);
     expect(after.map((document) => document.id).sort()).toEqual(
       before.map((document) => document.id).sort(),
     );
@@ -924,7 +873,7 @@ describe('пересегментация не переписывает подт�
     expect(after.find((document) => document.id === confirmed[0])?.docTypeCode).toBe(
       'mill_certificate',
     );
-    expect(await listUnaccountedPages(db, ADMIN, REVISION_A)).toEqual([]);
+    expect(await listUnaccountedPages(db, ADMIN, FOLDER_A)).toEqual([]);
   });
 
   it('триггер БД отвергает удаление подтверждённого документа и прямым SQL', async () => {
@@ -956,7 +905,7 @@ describe('пересегментация не переписывает подт�
     const outcome = await applySegmentation(db, ADMIN, FULL_SEGMENTATION);
     expect(outcome.documentsCreated).toBe(2);
     expect(outcome.documentsReplaced).toBeGreaterThan(0);
-    expect(await listUnaccountedPages(db, ADMIN, REVISION_A)).toEqual([]);
+    expect(await listUnaccountedPages(db, ADMIN, FOLDER_A)).toEqual([]);
   });
 
   it('свои, машинные подтверждения пересегментацию не запирают', async () => {
@@ -966,7 +915,7 @@ describe('пересегментация не переписывает подт�
     // собственную работу после первого же прогона, и повторное распознавание
     // стало бы невозможным. Ровно это заказчик увидел как «непонятные ошибки
     // после пересборки».
-    const documents = await listLogicalDocuments(db, ADMIN, REVISION_A);
+    const documents = await listLogicalDocuments(db, ADMIN, FOLDER_A);
     expect(documents.length).toBeGreaterThan(0);
     expect(documents.every((document) => document.isConfirmed)).toBe(true);
     expect(documents.every((document) => document.confirmationSource === 'machine')).toBe(true);
@@ -980,18 +929,18 @@ describe('пересегментация не переписывает подт�
     // Иначе автоподтверждение заперло бы удаление и замену файла:
     // `logical_documents` входит в `DERIVED_DELETES`, и purge падал бы на
     // каждом разобранном комплекте.
-    const documents = await listLogicalDocuments(db, ADMIN, REVISION_A);
+    const documents = await listLogicalDocuments(db, ADMIN, FOLDER_A);
     const victim = documents.at(-1)?.id ?? '';
     await testDb.query(`DELETE FROM page_assignments WHERE document_id = '${victim}'`);
     await testDb.query(`DELETE FROM logical_documents WHERE id = '${victim}'`);
 
-    const rest = await listLogicalDocuments(db, ADMIN, REVISION_A);
+    const rest = await listLogicalDocuments(db, ADMIN, FOLDER_A);
     expect(rest.map((document) => document.id)).not.toContain(victim);
 
     // Учёт страниц восстанавливается пересегментацией: тест не оставляет за
     // собой ревизию с потерянными страницами.
     await applySegmentation(db, ADMIN, FULL_SEGMENTATION);
-    expect(await listUnaccountedPages(db, ADMIN, REVISION_A)).toEqual([]);
+    expect(await listUnaccountedPages(db, ADMIN, FOLDER_A)).toEqual([]);
   });
 
   it('снятие подтверждения обнуляет нарезку вместе с ним', async () => {
@@ -1000,7 +949,7 @@ describe('пересегментация не переписывает подт�
     // `..._derived_provenance_chk` требует, чтобы провенанс был полон или пуст
     // целиком. Смысл тот же: границы снова под вопросом, и прежний PDF
     // описывает уже не тот документ.
-    const [target] = await listLogicalDocuments(db, ADMIN, REVISION_A);
+    const [target] = await listLogicalDocuments(db, ADMIN, FOLDER_A);
     if (target === undefined) throw new Error('фикстура пуста');
 
     await testDb.query(
@@ -1027,7 +976,7 @@ describe('пересегментация не переписывает подт�
 
     // И пересегментация снова возможна — ровно то, что обещает текст отказа.
     await applySegmentation(db, ADMIN, FULL_SEGMENTATION);
-    expect(await listUnaccountedPages(db, ADMIN, REVISION_A)).toEqual([]);
+    expect(await listUnaccountedPages(db, ADMIN, FOLDER_A)).toEqual([]);
   });
 });
 
@@ -1037,11 +986,11 @@ describe('пересегментация не переписывает подт�
 
 describe('loadSegmentationPages', () => {
   it('берёт текст ОДНОГО последнего прогона и отдаёт все страницы ревизии', async () => {
-    const input = await loadSegmentationPages(db, ADMIN, REVISION_A);
+    const input = await loadSegmentationPages(db, ADMIN, FOLDER_A);
 
     expect(input.recognitionRunId).toBe(RUN_A);
     expect(input.pages).toHaveLength(4);
-    expect(input.pages.map((page) => page.revisionOrdinal)).toEqual([0, 1, 2, 3]);
+    expect(input.pages.map((page) => page.folderOrdinal)).toEqual([0, 1, 2, 3]);
 
     // Текст прошлого прогона не подмешивается: `char_span` доказательств
     // измеряется в конкретной версии текста.
@@ -1063,12 +1012,12 @@ describe('loadSegmentationPages', () => {
   });
 
   it('без завершённого прогона отдаёт null и пустой список, а не исключение', async () => {
-    const input = await loadSegmentationPages(db, ADMIN, REVISION_REVIEW);
+    const input = await loadSegmentationPages(db, ADMIN, FOLDER_REVIEW);
     expect(input).toEqual({ recognitionRunId: null, pages: [] });
   });
 
   it('чужая ревизия не читается', async () => {
-    await expect(loadSegmentationPages(db, CONTRACTOR_B, REVISION_A)).rejects.toMatchObject({
+    await expect(loadSegmentationPages(db, CONTRACTOR_B, FOLDER_A)).rejects.toMatchObject({
       status: 404,
     });
   });
@@ -1080,31 +1029,31 @@ describe('loadSegmentationPages', () => {
 
 describe('изоляция подрядчиков', () => {
   it('чужие документы не видны ни списком, ни по прямому идентификатору', async () => {
-    const documents = await listLogicalDocuments(db, ADMIN, REVISION_A);
+    const documents = await listLogicalDocuments(db, ADMIN, FOLDER_A);
     const document = documents[0];
     expect(document).toBeDefined();
     if (document === undefined) return;
 
-    expect(await listLogicalDocuments(db, CONTRACTOR_B, REVISION_A)).toEqual([]);
+    expect(await listLogicalDocuments(db, CONTRACTOR_B, FOLDER_A)).toEqual([]);
     expect(await findLogicalDocument(db, CONTRACTOR_B, document.id)).toBeNull();
     // Владелец те же данные получает — иначе тест доказывал бы лишь пустую БД.
     expect(await findLogicalDocument(db, CONTRACTOR_A, document.id)).not.toBeNull();
   });
 
   it('чужие страницы, реквизиты, реестр и классификации не читаются', async () => {
-    const documents = await listLogicalDocuments(db, ADMIN, REVISION_A);
+    const documents = await listLogicalDocuments(db, ADMIN, FOLDER_A);
     const document = documents[0];
     expect(document).toBeDefined();
     if (document === undefined) return;
 
-    expect(await listPageAssignments(db, CONTRACTOR_B, REVISION_A)).toEqual([]);
+    expect(await listPageAssignments(db, CONTRACTOR_B, FOLDER_A)).toEqual([]);
     expect(await listFieldValues(db, CONTRACTOR_B, document.id)).toEqual([]);
-    expect(await listRegistryRows(db, CONTRACTOR_B, REVISION_A)).toEqual([]);
-    expect(await listPageClassifications(db, CONTRACTOR_B, REVISION_A)).toEqual([]);
-    expect(await listUnaccountedPages(db, CONTRACTOR_B, REVISION_A)).toEqual([]);
-    expect(await listDocumentRelations(db, CONTRACTOR_B, REVISION_A)).toEqual([]);
+    expect(await listRegistryRows(db, CONTRACTOR_B, FOLDER_A)).toEqual([]);
+    expect(await listPageClassifications(db, CONTRACTOR_B, FOLDER_A)).toEqual([]);
+    expect(await listUnaccountedPages(db, CONTRACTOR_B, FOLDER_A)).toEqual([]);
+    expect(await listDocumentRelations(db, CONTRACTOR_B, FOLDER_A)).toEqual([]);
 
-    expect(await listPageAssignments(db, CONTRACTOR_A, REVISION_A)).toHaveLength(4);
+    expect(await listPageAssignments(db, CONTRACTOR_A, FOLDER_A)).toHaveLength(4);
   });
 
   it('инженеру видны документы любого объекта', async () => {
@@ -1112,22 +1061,22 @@ describe('изоляция подрядчиков', () => {
     // объектов не видел ничего. Назначений больше нет (S37), и проверяющий
     // видит стройку целиком — иначе он не мог бы проверить комплект, который
     // ему принесли.
-    expect(await listLogicalDocuments(db, ENGINEER, REVISION_A)).not.toEqual([]);
-    expect(await listPageAssignments(db, ENGINEER, REVISION_A)).not.toEqual([]);
-    expect(await listPageClassifications(db, ENGINEER, REVISION_A)).not.toEqual([]);
+    expect(await listLogicalDocuments(db, ENGINEER, FOLDER_A)).not.toEqual([]);
+    expect(await listPageAssignments(db, ENGINEER, FOLDER_A)).not.toEqual([]);
+    expect(await listPageClassifications(db, ENGINEER, FOLDER_A)).not.toEqual([]);
   });
 
   it('в чужую ревизию нельзя ни записать классификацию, ни применить сегментацию', async () => {
     await expect(
       savePageClassifications(db, CONTRACTOR_B, {
-        revisionId: REVISION_A,
+        folderId: FOLDER_A,
         classifications: [classification(PAGE_A0)],
       }),
     ).rejects.toMatchObject({ status: 404 });
 
     await expect(
       applySegmentation(db, CONTRACTOR_B, {
-        revisionId: REVISION_A,
+        folderId: FOLDER_A,
         documents: [decoded(0, [PAGE_A0, PAGE_A1, PAGE_A2, PAGE_A3])],
         unassigned: [],
         extractorVersion: 'seg/1',
@@ -1136,7 +1085,7 @@ describe('изоляция подрядчиков', () => {
 
     await expect(
       confirmDocument(db, CONTRACTOR_B, {
-        documentId: (await listLogicalDocuments(db, ADMIN, REVISION_A))[0]?.id ?? id(997),
+        documentId: (await listLogicalDocuments(db, ADMIN, FOLDER_A))[0]?.id ?? id(997),
         actorUserId: USER,
         expectedVersion: 0,
         actor: ACTOR,
@@ -1144,7 +1093,7 @@ describe('изоляция подрядчиков', () => {
     ).rejects.toMatchObject({ status: 404 });
 
     // Прежнее состояние не тронуто ни одной из трёх попыток.
-    expect(await listPageAssignments(db, ADMIN, REVISION_A)).toHaveLength(4);
+    expect(await listPageAssignments(db, ADMIN, FOLDER_A)).toHaveLength(4);
   });
 });
 
@@ -1179,7 +1128,7 @@ describe('observeDocTypeCandidate', () => {
   it('кластеризует один вид документа по всем поставкам', async () => {
     const first = await observeDocTypeCandidate(db, ADMIN, {
       observedTitle: 'АКТ ГИДРАВЛИЧЕСКОГО ИСПЫТАНИЯ ТРУБОПРОВОДОВ № ГИ-77 от 12.05.2026',
-      revisionId: REVISION_A,
+      folderId: FOLDER_A,
       sourcePageId: PAGE_A0,
     });
     expect(first).toMatchObject({ created: true, occurrences: 1, status: 'new' });
@@ -1187,7 +1136,7 @@ describe('observeDocTypeCandidate', () => {
     const second = await observeDocTypeCandidate(db, ADMIN, {
       // Другой номер, другая дата, другой регистр и markdown-обвязка — тот же вид.
       observedTitle: '## Акт гидравлического испытания трубопроводов № ГИ-91 от 03.06.2026',
-      revisionId: REVISION_B,
+      folderId: FOLDER_B,
       sourcePageId: PAGE_B0,
     });
     expect(second).toMatchObject({ created: false, occurrences: 2 });
@@ -1201,11 +1150,11 @@ describe('observeDocTypeCandidate', () => {
     ).toBe(1);
 
     // Пример остаётся первым: администратор возвращается к тому же документу.
-    const sample = await testDb.query<{ sample_revision_id: string }>(
-      `SELECT sample_revision_id FROM doc_type_candidates
+    const sample = await testDb.query<{ sample_folder_id: string }>(
+      `SELECT sample_folder_id FROM doc_type_candidates
         WHERE observed_title_norm = 'АКТ ГИДРАВЛИЧЕСКОГО ИСПЫТАНИЯ ТРУБОПРОВОДОВ'`,
     );
-    expect(sample[0]?.sample_revision_id).toBe(REVISION_A);
+    expect(sample[0]?.sample_folder_id).toBe(FOLDER_A);
   });
 
   /**
@@ -1216,7 +1165,7 @@ describe('observeDocTypeCandidate', () => {
   it('кандидат в статусе ignored не возвращается в new, но счётчик растёт', async () => {
     await observeDocTypeCandidate(db, ADMIN, {
       observedTitle: 'ВЕДОМОСТЬ СМОНТИРОВАННОГО ОБОРУДОВАНИЯ № 4',
-      revisionId: REVISION_A,
+      folderId: FOLDER_A,
       sourcePageId: PAGE_A0,
     });
     await testDb.query(
@@ -1226,7 +1175,7 @@ describe('observeDocTypeCandidate', () => {
 
     const again = await observeDocTypeCandidate(db, ADMIN, {
       observedTitle: 'Ведомость смонтированного оборудования № 7',
-      revisionId: REVISION_A,
+      folderId: FOLDER_A,
       sourcePageId: PAGE_A1,
     });
     expect(again.status).toBe('ignored');
@@ -1236,7 +1185,7 @@ describe('observeDocTypeCandidate', () => {
   it('кандидат в статусе mapped тоже сохраняет решение', async () => {
     await observeDocTypeCandidate(db, ADMIN, {
       observedTitle: 'ПРОТОКОЛ ИЗМЕРЕНИЯ СОПРОТИВЛЕНИЯ ИЗОЛЯЦИИ № 12',
-      revisionId: REVISION_A,
+      folderId: FOLDER_A,
       sourcePageId: PAGE_A0,
     });
     await testDb.query(
@@ -1247,7 +1196,7 @@ describe('observeDocTypeCandidate', () => {
 
     const again = await observeDocTypeCandidate(db, ADMIN, {
       observedTitle: 'Протокол измерения сопротивления изоляции № 13 от 01.07.2026',
-      revisionId: REVISION_A,
+      folderId: FOLDER_A,
       sourcePageId: PAGE_A0,
     });
     expect(again.status).toBe('mapped');
@@ -1258,7 +1207,7 @@ describe('observeDocTypeCandidate', () => {
     await expect(
       observeDocTypeCandidate(db, CONTRACTOR_B, {
         observedTitle: 'АКТ ПРОМЫВКИ И ДЕЗИНФЕКЦИИ № 1',
-        revisionId: REVISION_A,
+        folderId: FOLDER_A,
         sourcePageId: PAGE_A0,
       }),
     ).rejects.toMatchObject({ status: 404 });
@@ -1274,7 +1223,7 @@ describe('observeDocTypeCandidate', () => {
   it('пустой заголовок отвергается: кластеризовать нечего', async () => {
     const rejected = await observeDocTypeCandidate(db, ADMIN, {
       observedTitle: '   ',
-      revisionId: REVISION_A,
+      folderId: FOLDER_A,
       sourcePageId: PAGE_A0,
     }).catch((error: unknown) => error);
     expect(isHttpProblem(rejected)).toBe(true);

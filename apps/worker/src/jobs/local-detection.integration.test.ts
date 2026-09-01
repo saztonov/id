@@ -91,8 +91,7 @@ function id(n: number): string {
 const ORG_CUSTOMER = id(1);
 const ORG_CONTRACTOR = id(2);
 const OBJECT = id(4);
-const SUBMISSION = id(10);
-const REVISION = id(11);
+const FOLDER = id(11);
 const USER_CONTRACTOR = id(20);
 const FILE = id(30);
 
@@ -131,15 +130,13 @@ async function fixtureStatements(sha256: string, sizeBytes: number): Promise<rea
     `INSERT INTO user_roles (user_id, role) VALUES ('${USER_CONTRACTOR}', 'contractor')`,
     `INSERT INTO object_contractors (object_id, contractor_id)
        VALUES ('${OBJECT}', '${ORG_CONTRACTOR}') ON CONFLICT DO NOTHING`,
-    `INSERT INTO works
+    `INSERT INTO folders
        (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-     VALUES ('${SUBMISSION}', '${OBJECT}', '${ORG_CONTRACTOR}', '${ORG_CONTRACTOR}', 'roofing2', DATE '2026-01-01', 'Поставка 1', '${USER_CONTRACTOR}')`,
-    `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
-       VALUES ('${REVISION}', '${SUBMISSION}', '${OBJECT}', '${ORG_CONTRACTOR}', 1, 'draft')`,
+     VALUES ('${FOLDER}', '${OBJECT}', '${ORG_CONTRACTOR}', '${ORG_CONTRACTOR}', 'roofing2', DATE '2026-01-01', 'Поставка 1', '${USER_CONTRACTOR}')`,
     `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
        VALUES ('${sha256}', 'blobs/${sha256.slice(0, 2)}/${sha256.slice(2, 4)}/${sha256}', ${sizeBytes}, 'application/pdf')`,
-    `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order)
-       VALUES ('${FILE}', '${REVISION}', '${sha256}', 'комплект.pdf', 0)`,
+    `INSERT INTO source_files (id, folder_id, blob_sha256, file_name, sort_order)
+       VALUES ('${FILE}', '${FOLDER}', '${sha256}', 'комплект.pdf', 0)`,
   ];
 }
 
@@ -308,11 +305,11 @@ function manifestJson(): Record<string, unknown> {
  * и тем же способом, иначе расхождение осталось бы незамеченным до прода.
  */
 async function buildTestMarkupTarget(
-  revisionId: string,
+  folderId: string,
   lrId: string,
 ): Promise<{
   readonly layoutRevisionId: string;
-  readonly revisionId: string;
+  readonly folderId: string;
   readonly bundleId: string;
   readonly objectId: string;
   readonly state: string;
@@ -326,10 +323,10 @@ async function buildTestMarkupTarget(
   readonly markupPolicy: MarkupPolicy;
 } | null> {
   const layout = await findLayoutRevision(db, ADMIN_SCOPE, lrId);
-  if (layout === null || layout.revisionId !== revisionId) return null;
+  if (layout === null || layout.folderId !== folderId) return null;
   return {
     layoutRevisionId: layout.id,
-    revisionId: layout.revisionId,
+    folderId: layout.folderId,
     bundleId: layout.bundleId,
     objectId: layout.objectId,
     state: layout.state,
@@ -372,8 +369,8 @@ function localDetectionDeps(session: OnnxSessionPort): LocalDetectionDeps {
       logger: createLogger({ service: 'detect-local-e2e', level: 'silent', env: 'test' }),
     }),
 
-    loadTargetByLayout: async ({ revisionId, layoutRevisionId: lrId }) =>
-      buildTestMarkupTarget(revisionId, lrId),
+    loadTargetByLayout: async ({ folderId, layoutRevisionId: lrId }) =>
+      buildTestMarkupTarget(folderId, lrId),
 
     // Настройки читаются целиком, как в боевой сборке зависимостей
     // (`pipeline.ts`): иначе тест на переопределения проверял бы двойник, а не
@@ -474,7 +471,7 @@ async function runJob(
 
   await enqueueSystemJob(db, {
     type: 'layout.detect_local',
-    payload: { revisionId: REVISION, layoutRevisionId, ...payload },
+    payload: { folderId: FOLDER, layoutRevisionId, ...payload },
     dedupeKey: `layout.detect_local:test:${Date.now()}:${Math.random()}`,
   });
 
@@ -554,25 +551,25 @@ beforeAll(async () => {
   for (const type of ['file.verify', 'file.signature_probe'] as const) {
     await enqueueSystemJob(db, {
       type,
-      payload: { revisionId: REVISION, sourceFileId: FILE },
+      payload: { folderId: FOLDER, sourceFileId: FILE },
       dedupeKey: dedupeKeyFor(type, FILE),
     });
   }
   await enqueueSystemJob(db, {
     type: 'bundle.build',
-    payload: { revisionId: REVISION },
-    dedupeKey: dedupeKeyFor('bundle.build', REVISION),
+    payload: { folderId: FOLDER },
+    dedupeKey: dedupeKeyFor('bundle.build', FOLDER),
   });
   await drainQueue(bootstrapRunner);
   await bootstrapRunner.stop();
 
   const bundles = await testDb.query<{ id: string }>(
-    `SELECT id FROM processing_bundles WHERE revision_id = '${REVISION}'`,
+    `SELECT id FROM processing_bundles WHERE folder_id = '${FOLDER}'`,
   );
   bundleId = bundles[0]?.id ?? '';
   expect(bundleId).not.toBe('');
 
-  const { layout } = await ensureDraftLayout(db, ADMIN_SCOPE, { revisionId: REVISION, bundleId });
+  const { layout } = await ensureDraftLayout(db, ADMIN_SCOPE, { folderId: FOLDER, bundleId });
   layoutRevisionId = layout.id;
 }, 300_000);
 
@@ -614,7 +611,7 @@ async function feedbackRows(): Promise<
     `SELECT reason_code, feedback_type, pipeline_stage, working_page_index,
             detector_model_version, score
        FROM processing_feedback
-      WHERE revision_id = '${REVISION}'
+      WHERE folder_id = '${FOLDER}'
       ORDER BY at DESC`,
   );
 }
@@ -643,7 +640,7 @@ describe('layout.detect_local без сконфигурированной мод
 
     await enqueueSystemJob(db, {
       type: 'layout.detect_local',
-      payload: { revisionId: REVISION, layoutRevisionId, pageIndices: [0] },
+      payload: { folderId: FOLDER, layoutRevisionId, pageIndices: [0] },
       dedupeKey: 'layout.detect_local:test:no-model',
     });
     await drainQueue(runner);
@@ -761,7 +758,7 @@ describe('layout.detect_local с моделью', () => {
       rdweb: null,
       rdProjectId: null,
       previewCached: false,
-      loadTargetByLayout: async () => buildTestMarkupTarget(REVISION, layoutRevisionId),
+      loadTargetByLayout: async () => buildTestMarkupTarget(FOLDER, layoutRevisionId),
       findRunDocument: async () => null,
       saveRunDocument: async () => {},
       replaceRunDocument: async () => {},
@@ -793,12 +790,12 @@ describe('layout.detect_local с моделью', () => {
         }));
       },
       saveFlags: async (input: {
-        readonly revisionId: string;
+        readonly folderId: string;
         readonly flags: ReadonlyMap<string, readonly string[]>;
       }) => {
         const { savePageAttentionFlags } = await import('@id/api');
         const outcome = await savePageAttentionFlags(db, ADMIN_SCOPE, {
-          revisionId: input.revisionId,
+          folderId: input.folderId,
           flags: input.flags as never,
         });
         return outcome.kind === 'written'
@@ -830,7 +827,7 @@ describe('layout.detect_local с моделью', () => {
       `SELECT bp.working_page_index, sp.attention_flags
          FROM processing_bundle_pages bp
          JOIN source_pages sp ON sp.id = bp.source_page_id
-        WHERE bp.revision_id = '${REVISION}' AND bp.working_page_index = 1`,
+        WHERE bp.folder_id = '${FOLDER}' AND bp.working_page_index = 1`,
     );
     expect(flagged[0]?.attention_flags ?? []).toContain('no_blocks');
   });
@@ -993,11 +990,11 @@ describe('разворот содержимого страницы перед и
 
   it('на развёрнутой странице та же детекция ложится в базу повёрнутой обратно', async () => {
     await testDb.query(
-      `INSERT INTO page_orientations (revision_id, source_page_id, content_rotation, source)
-       SELECT '${REVISION}', source_page_id, 90, 'user'
+      `INSERT INTO page_orientations (folder_id, source_page_id, content_rotation, source)
+       SELECT '${FOLDER}', source_page_id, 90, 'user'
          FROM processing_bundle_pages
         WHERE bundle_id = '${bundleId}' AND working_page_index = 1
-       ON CONFLICT (revision_id, source_page_id) DO UPDATE
+       ON CONFLICT (folder_id, source_page_id) DO UPDATE
          SET content_rotation = 90, source = 'user'`,
     );
 
@@ -1010,7 +1007,7 @@ describe('разворот содержимого страницы перед и
     // Широкая детекция на развёрнутом листе — это ВЫСОКИЙ блок страницы.
     expect(box?.height ?? 0).toBeGreaterThan(box?.width ?? 1);
 
-    await testDb.query(`DELETE FROM page_orientations WHERE revision_id = '${REVISION}'`);
+    await testDb.query(`DELETE FROM page_orientations WHERE folder_id = '${FOLDER}'`);
   });
 });
 
@@ -1042,7 +1039,7 @@ describe('разметка по формату листа (S42)', () => {
                       WHERE bundle_id = '${bundleId}' AND working_page_index = ${String(LARGE_PAGE)})`,
     );
     OVERSIZED_PAGES.set(LARGE_PAGE, LARGE_SHEET);
-    await testDb.query(`DELETE FROM processing_feedback WHERE revision_id = '${REVISION}'`);
+    await testDb.query(`DELETE FROM processing_feedback WHERE folder_id = '${FOLDER}'`);
     /**
      * Инференс одним кадром: крупный лист иначе режется на дюжину плиток, и
      * очередь фикстур пришлось бы набивать ими вместо предмета проверки.
@@ -1111,7 +1108,7 @@ describe('разметка по формату листа (S42)', () => {
     expect(await blocksOfPage(LARGE_PAGE)).toEqual([]);
     const feedback = await testDb.query<{ reason_code: string }>(
       `SELECT reason_code FROM processing_feedback
-        WHERE revision_id = '${REVISION}' AND working_page_index = ${String(LARGE_PAGE)}
+        WHERE folder_id = '${FOLDER}' AND working_page_index = ${String(LARGE_PAGE)}
         ORDER BY at DESC LIMIT 1`,
     );
     expect(feedback[0]?.reason_code).toBe('detect.no_stamp');

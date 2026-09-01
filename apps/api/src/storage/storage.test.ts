@@ -47,7 +47,7 @@ import {
 
 const SHA256 = createHash('sha256').update('содержимое одной поставки').digest('hex');
 const SECRET = createHmac('sha256', 'unit-test-secret').update('storage-tests').digest();
-const REVISION = '00000000-0000-4000-8000-0000000000c1';
+const FOLDER = '00000000-0000-4000-8000-0000000000c1';
 
 const ROOTS: string[] = [];
 
@@ -511,7 +511,7 @@ describe('измерение операций хранилища', () => {
     const { lines, logger, metrics } = harness(5000);
     const storage = instrumentStorage(slowProvider(0), { metrics, logger, slowExternalMs: 5000 });
 
-    await runWithContext({ requestId: 'req-storage-test', revisionId: REVISION }, async () => {
+    await runWithContext({ requestId: 'req-storage-test', folderId: FOLDER }, async () => {
       await storage.headObject(blobKey(SHA256));
     });
 
@@ -519,7 +519,7 @@ describe('измерение операций хранилища', () => {
       .map((line) => JSON.parse(line) as Record<string, unknown>)
       .find((row) => row['event'] === 'external_call');
     expect(entry?.['request_id']).toBe('req-storage-test');
-    expect(entry?.['revision_id']).toBe(REVISION);
+    expect(entry?.['folder_id']).toBe(FOLDER);
     expect(entry?.['component']).toBe('storage');
   });
 

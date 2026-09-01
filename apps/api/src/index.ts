@@ -84,7 +84,7 @@ export type { JobPayload, JobQueue, JobType } from './jobs/types.js';
 
 export {
   appendOutbox,
-  appendRevisionEvent,
+  appendFolderEvent,
   computeProcessingStatus,
   enqueueSystemJob,
   listLiveRecognizePageJobs,
@@ -303,6 +303,7 @@ export {
   parseModelAllowlist,
   readAiDryRunOnly,
   readImmutabilityEnforced,
+  readAnalysisModel,
   readOrientationProbeSettings,
   readRecognitionSettings,
 } from './config/portal-settings.js';
@@ -371,40 +372,33 @@ export type { ArtifactKind } from './storage/keys.js';
  * Экспортируется в воркер по той же причине, что и остальные репозитории: обе
  * задачи живут там, где остальные стадии конвейера, а второй реализации
  * репозитория быть не должно. В списке — ровно то, что воркер вызывает: выдача
- * нарезки и архива наружу (`findDerivedDocument`, `requireReadyArchive`) живёт
- * в HTTP-слое и импортируется им напрямую, а реэкспорт «на всякий случай»
- * превращает публичную границу пакета в свалку.
+ * нарезки наружу (`findDerivedDocument`) живёт в HTTP-слое и импортируется им
+ * напрямую, а реэкспорт «на всякий случай» превращает публичную границу пакета
+ * в свалку.
  */
 export {
-  findArchive,
-  findReusableBundle,
   isContiguous,
-  loadArchivePlan,
   loadMaterializationPlan,
   overlappingTargets,
-  recordArchive,
-  requireVisibleRevisionOfDocument,
+  requireVisibleFolderOfDocument,
   saveDerivedPdf,
 } from './db/repositories/delivery.js';
 export type {
-  ArchivePlan,
-  ArchiveView,
   MaterializationPlan,
   MaterializationTarget,
-  RecordArchiveOutcome,
   SaveDerivedOutcome,
 } from './db/repositories/delivery.js';
 
 export {
   findFileContent,
-  findRevisionForFiles,
+  findFolderForFiles,
   listSourceFiles,
   saveFileVerdict,
   saveSignatureProbe,
 } from './db/repositories/files.js';
 export type {
   FileContentRef,
-  RevisionForFiles,
+  FolderForFiles,
   SaveVerdictInput,
   SaveVerdictOutcome,
 } from './db/repositories/files.js';
@@ -576,7 +570,7 @@ export type {
 export {
   applySegmentation,
   confirmDocument,
-  filterDocumentsOfRevision,
+  filterDocumentsOfFolder,
   findLogicalDocument,
   listDocumentRelations,
   listFieldValues,
@@ -606,10 +600,7 @@ export type {
   SegmentationInput,
   SegmentationPageRow,
 } from './db/repositories/documents.js';
-export {
-  listDocumentsOfRevisions,
-  listFieldValuesOfRevisions,
-} from './db/repositories/documents.js';
+export { listDocumentsOfFolders, listFieldValuesOfFolders } from './db/repositories/documents.js';
 
 /**
  * Навигация и сверка описи: то, что нужно задаче `registry.reconcile` (S20).
@@ -620,27 +611,10 @@ export {
  */
 export { listMatchableContractors } from './db/repositories/catalog.js';
 export {
-  fillWorkPeriodIfEmpty,
-  findRegistry,
-  findRegistryFile,
-  findWork,
-  listRegistryComplectRevisions,
+  fillFolderPeriodIfEmpty,
   rememberContractorRaw,
   replaceAssumedContractor,
 } from './db/repositories/navigation.js';
-export type { RegistryComplectRevision } from './db/repositories/navigation.js';
-export {
-  findRegistryReconciliation,
-  findWorkReconciliation,
-  reviewReconciliation,
-  saveReconciliation,
-} from './db/repositories/reconciliation.js';
-export type {
-  RegistryReconciliationView,
-  SaveReconciliationInput,
-  WorkReconciliationView,
-} from './db/repositories/reconciliation.js';
-
 export { observeDocTypeCandidate, normalizeObservedTitle } from './db/repositories/catalog.js';
 /** Наименование организации нужно сверке описи: опись печатает его в графе. */
 export { findCounterparty } from './db/repositories/catalog.js';

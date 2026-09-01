@@ -708,7 +708,7 @@ describe('разделы объекта и реестр рабочей доку�
   it('документ РД создаётся, неизвестный проектировщик даёт 422', async () => {
     const created = await asAdmin('POST', `${P}/objects/${OBJECT}/rd-documents`, {
       cipher: '2.5.1-АР',
-      revision: 'изм. 2',
+      folder: 'изм. 2',
       name: 'Кровля. Планы и узлы',
       designerId: ORG_DEVELOPER,
     });

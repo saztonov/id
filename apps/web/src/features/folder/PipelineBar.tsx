@@ -59,11 +59,11 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   pipeline,
   recognition,
-  revisionEvents,
+  folderEvents,
   type CheckPipelineResult,
   type RecheckMode,
 } from '../../api/endpoints.js';
-import { pipelineKeys, revisionKeys } from '../../api/keys.js';
+import { pipelineKeys, folderKeys } from '../../api/keys.js';
 import { describeError } from '../../api/problem.js';
 import { useSession } from '../../app/session.js';
 import { Link } from '../../app/router.js';
@@ -83,12 +83,12 @@ const STAGE_STARTED_LABEL: Readonly<Record<string, string>> = {
 const PROGRESS_POLL_MS = 5_000;
 
 export interface PipelineBarProps {
-  readonly revisionId: string;
+  readonly folderId: string;
   /** Производное правится, пока ревизия не в терминальном состоянии. */
   readonly editable: boolean;
 }
 
-export function PipelineBar({ revisionId, editable }: PipelineBarProps): ReactNode {
+export function PipelineBar({ folderId, editable }: PipelineBarProps): ReactNode {
   const { can } = useSession();
   const { message } = AntApp.useApp();
   const queryClient = useQueryClient();
@@ -96,10 +96,10 @@ export function PipelineBar({ revisionId, editable }: PipelineBarProps): ReactNo
   const [lastRunId, setLastRunId] = useState<string | null>(null);
 
   const status = useQuery({
-    queryKey: revisionKeys.processingStatus(revisionId),
+    queryKey: folderKeys.processingStatus(folderId),
     // Сигнал пробрасывается до `fetch`: `invalidateQueries` отменяет идущий
     // рефетч, и без сигнала «отменённый» запрос всё равно уезжал на сервер.
-    queryFn: ({ signal }) => revisionEvents.processingStatus(revisionId, signal),
+    queryFn: ({ signal }) => folderEvents.processingStatus(folderId, signal),
     // Функция, а не число: опрос обязан замолкать, когда опрашивать нечего.
     // Прежний фиксированный интервал тикал и в простое, и — что хуже — после
     // отказа, добивая уже исчерпанный лимит запросов.
@@ -112,8 +112,8 @@ export function PipelineBar({ revisionId, editable }: PipelineBarProps): ReactNo
   });
 
   const runs = useQuery({
-    queryKey: revisionKeys.recognitionRuns(revisionId),
-    queryFn: () => recognition.runs(revisionId),
+    queryKey: folderKeys.recognitionRuns(folderId),
+    queryFn: () => recognition.runs(folderId),
   });
 
   // Выбор прогона — в `runs.ts`, а не здесь: список приходит отсортированным по
@@ -149,12 +149,12 @@ export function PipelineBar({ revisionId, editable }: PipelineBarProps): ReactNo
   });
 
   const refresh = async (): Promise<void> => {
-    await queryClient.invalidateQueries({ queryKey: revisionKeys.processingStatus(revisionId) });
-    await queryClient.invalidateQueries({ queryKey: revisionKeys.recognitionRuns(revisionId) });
+    await queryClient.invalidateQueries({ queryKey: folderKeys.processingStatus(folderId) });
+    await queryClient.invalidateQueries({ queryKey: folderKeys.recognitionRuns(folderId) });
   };
 
   const startMarkup = useMutation({
-    mutationFn: () => pipeline.markup(revisionId),
+    mutationFn: () => pipeline.markup(folderId),
     onSuccess: async (result) => {
       // Пропуск детекции — предупреждение, а не успех и не отказ: черновик
       // разметки создан, размечать можно руками, но обещать «идёт детекция»
@@ -174,14 +174,14 @@ export function PipelineBar({ revisionId, editable }: PipelineBarProps): ReactNo
             : 'Собирается рабочий документ, выделение блоков пойдёт сразу за ним',
         );
       }
-      await queryClient.invalidateQueries({ queryKey: revisionKeys.bundles(revisionId) });
+      await queryClient.invalidateQueries({ queryKey: folderKeys.bundles(folderId) });
       await refresh();
     },
     onError: (error) => message.error(describeError(error)),
   });
 
   const check = useMutation({
-    mutationFn: (mode: RecheckMode = 'auto') => pipeline.check(revisionId, mode),
+    mutationFn: (mode: RecheckMode = 'auto') => pipeline.check(folderId, mode),
     onSuccess: async (result) => {
       setLastRunId(result.recognitionRunId);
       message.success(startedLabel(result));
@@ -417,7 +417,7 @@ export function PipelineBar({ revisionId, editable }: PipelineBarProps): ReactNo
                 которого спрашивают «а почему», и спросить было не у кого.
               */}
               <Typography.Text>{failure.reason}</Typography.Text>
-              <Link to={`/ids/revisions/${revisionId}?tab=history`}>
+              <Link to={`/ids/folders/${folderId}?tab=history`}>
                 Подробности прогона в «Истории»
               </Link>
             </Space>

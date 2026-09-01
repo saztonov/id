@@ -53,10 +53,8 @@ const ORG_A = id(2);
 const ORG_B = id(3);
 const OBJECT = id(4);
 
-const SUBMISSION_A = id(10);
-const REVISION_A = id(11);
-const SUBMISSION_B = id(12);
-const REVISION_B = id(13);
+const FOLDER_A = id(11);
+const FOLDER_B = id(13);
 
 const USER_A = id(20);
 const USER_B = id(21);
@@ -170,40 +168,38 @@ const FIXTURE: readonly string[] = [
   // --- Подрядчик А: разметка с блоками и прогонами --------------------------
   `INSERT INTO object_contractors (object_id, contractor_id)
        VALUES ('${OBJECT}', '${ORG_A}') ON CONFLICT DO NOTHING`,
-  `INSERT INTO works
+  `INSERT INTO folders
        (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-     VALUES ('${SUBMISSION_A}', '${OBJECT}', '${ORG_A}', '${ORG_A}', 'roofing', DATE '2026-01-01', 'Поставка А', '${USER_A}')`,
-  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
-     VALUES ('${REVISION_A}', '${SUBMISSION_A}', '${OBJECT}', '${ORG_A}', 1, 'draft')`,
+     VALUES ('${FOLDER_A}', '${OBJECT}', '${ORG_A}', '${ORG_A}', 'roofing', DATE '2026-01-01', 'Поставка А', '${USER_A}')`,
   `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
      VALUES ('${SHA('a')}', 'blobs/${SHA('a')}', 2048, 'application/pdf')`,
   `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
      VALUES ('${SHA('b')}', 'blobs/${SHA('b')}', 4096, 'application/pdf')`,
-  `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order, verify_state)
-     VALUES ('${FILE_A}', '${REVISION_A}', '${SHA('a')}', 'АОСР.pdf', 0, 'ok')`,
-  `INSERT INTO source_pages (id, revision_id, source_file_id, file_page_index, revision_ordinal, width_px, height_px, rotation)
-     VALUES ('${PAGE_A0}', '${REVISION_A}', '${FILE_A}', 0, 0, 1654, 2339, 0)`,
-  `INSERT INTO source_pages (id, revision_id, source_file_id, file_page_index, revision_ordinal, width_px, height_px, rotation)
-     VALUES ('${PAGE_A1}', '${REVISION_A}', '${FILE_A}', 1, 1, 1654, 2339, 0)`,
-  `INSERT INTO processing_bundles (id, revision_id, aggregate_manifest_hash, working_pdf_blob_sha256, builder_version)
-     VALUES ('${BUNDLE_A}', '${REVISION_A}', '${SHA('e')}', '${SHA('b')}', 'bundle/1+pdf-lib')`,
-  `INSERT INTO processing_bundle_pages (bundle_id, revision_id, working_page_index, source_page_id)
-     VALUES ('${BUNDLE_A}', '${REVISION_A}', 0, '${PAGE_A0}')`,
-  `INSERT INTO processing_bundle_pages (bundle_id, revision_id, working_page_index, source_page_id)
-     VALUES ('${BUNDLE_A}', '${REVISION_A}', 1, '${PAGE_A1}')`,
+  `INSERT INTO source_files (id, folder_id, blob_sha256, file_name, sort_order, verify_state)
+     VALUES ('${FILE_A}', '${FOLDER_A}', '${SHA('a')}', 'АОСР.pdf', 0, 'ok')`,
+  `INSERT INTO source_pages (id, folder_id, source_file_id, file_page_index, folder_ordinal, width_px, height_px, rotation)
+     VALUES ('${PAGE_A0}', '${FOLDER_A}', '${FILE_A}', 0, 0, 1654, 2339, 0)`,
+  `INSERT INTO source_pages (id, folder_id, source_file_id, file_page_index, folder_ordinal, width_px, height_px, rotation)
+     VALUES ('${PAGE_A1}', '${FOLDER_A}', '${FILE_A}', 1, 1, 1654, 2339, 0)`,
+  `INSERT INTO processing_bundles (id, folder_id, aggregate_manifest_hash, working_pdf_blob_sha256, builder_version)
+     VALUES ('${BUNDLE_A}', '${FOLDER_A}', '${SHA('e')}', '${SHA('b')}', 'bundle/1+pdf-lib')`,
+  `INSERT INTO processing_bundle_pages (bundle_id, folder_id, working_page_index, source_page_id)
+     VALUES ('${BUNDLE_A}', '${FOLDER_A}', 0, '${PAGE_A0}')`,
+  `INSERT INTO processing_bundle_pages (bundle_id, folder_id, working_page_index, source_page_id)
+     VALUES ('${BUNDLE_A}', '${FOLDER_A}', 1, '${PAGE_A1}')`,
 
   // Блоки нужны прогону: снимок набора считается по ним на старте.
-  `INSERT INTO layout_revisions (id, revision_id, object_id, bundle_id, revision_no, state)
-     VALUES ('${LAYOUT_WITH_BLOCKS}', '${REVISION_A}', '${OBJECT}', '${BUNDLE_A}', 1, 'draft')`,
-  `INSERT INTO layout_blocks (id, layout_revision_id, revision_id, bundle_id, source_page_id,
+  `INSERT INTO layout_revisions (id, folder_id, object_id, bundle_id, revision_no, state)
+     VALUES ('${LAYOUT_WITH_BLOCKS}', '${FOLDER_A}', '${OBJECT}', '${BUNDLE_A}', 1, 'draft')`,
+  `INSERT INTO layout_blocks (id, layout_revision_id, folder_id, bundle_id, source_page_id,
                               working_page_index, object_id, block_type, shape_type,
                               x0, y0, x1, y1, sort_order, source, detector_provenance)
-     VALUES ('${BLOCK_A0}', '${LAYOUT_WITH_BLOCKS}', '${REVISION_A}', '${BUNDLE_A}', '${PAGE_A0}',
+     VALUES ('${BLOCK_A0}', '${LAYOUT_WITH_BLOCKS}', '${FOLDER_A}', '${BUNDLE_A}', '${PAGE_A0}',
              0, '${OBJECT}', 'text', 'rectangle', 0.1, 0.1, 0.9, 0.4, 0, 'auto', 'rf_detr')`,
-  `INSERT INTO layout_blocks (id, layout_revision_id, revision_id, bundle_id, source_page_id,
+  `INSERT INTO layout_blocks (id, layout_revision_id, folder_id, bundle_id, source_page_id,
                               working_page_index, object_id, block_type, shape_type,
                               x0, y0, x1, y1, sort_order, source, detector_provenance)
-     VALUES ('${BLOCK_A1}', '${LAYOUT_WITH_BLOCKS}', '${REVISION_A}', '${BUNDLE_A}', '${PAGE_A1}',
+     VALUES ('${BLOCK_A1}', '${LAYOUT_WITH_BLOCKS}', '${FOLDER_A}', '${BUNDLE_A}', '${PAGE_A1}',
              1, '${OBJECT}', 'text', 'rectangle', 0.1, 0.5, 0.9, 0.8, 0, 'auto', 'rf_detr')`,
   `UPDATE layout_revisions SET blocks_hash = '${SHA('7')}'
      WHERE id = '${LAYOUT_WITH_BLOCKS}'`,
@@ -213,38 +209,36 @@ const FIXTURE: readonly string[] = [
   // --- Подрядчик Б: готовый чужой прогон с артефактом и текстом -------------
   `INSERT INTO object_contractors (object_id, contractor_id)
        VALUES ('${OBJECT}', '${ORG_B}') ON CONFLICT DO NOTHING`,
-  `INSERT INTO works
+  `INSERT INTO folders
        (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-     VALUES ('${SUBMISSION_B}', '${OBJECT}', '${ORG_B}', '${ORG_B}', 'roofing', DATE '2026-01-01', 'Поставка Б', '${USER_B}')`,
-  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
-     VALUES ('${REVISION_B}', '${SUBMISSION_B}', '${OBJECT}', '${ORG_B}', 1, 'draft')`,
+     VALUES ('${FOLDER_B}', '${OBJECT}', '${ORG_B}', '${ORG_B}', 'roofing', DATE '2026-01-01', 'Поставка Б', '${USER_B}')`,
   `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
      VALUES ('${SHA('c')}', 'blobs/${SHA('c')}', 700, 'application/pdf')`,
   `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
      VALUES ('${SHA('d')}', 'blobs/${SHA('d')}', 700, 'application/pdf')`,
-  `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order, verify_state)
-     VALUES ('${FILE_B}', '${REVISION_B}', '${SHA('c')}', 'Чужой.pdf', 0, 'ok')`,
-  `INSERT INTO source_pages (id, revision_id, source_file_id, file_page_index, revision_ordinal, width_px, height_px, rotation)
-     VALUES ('${PAGE_B0}', '${REVISION_B}', '${FILE_B}', 0, 0, 1654, 2339, 0)`,
-  `INSERT INTO processing_bundles (id, revision_id, aggregate_manifest_hash, working_pdf_blob_sha256, builder_version)
-     VALUES ('${BUNDLE_B}', '${REVISION_B}', '${SHA('f')}', '${SHA('d')}', 'bundle/1+pdf-lib')`,
-  `INSERT INTO processing_bundle_pages (bundle_id, revision_id, working_page_index, source_page_id)
-     VALUES ('${BUNDLE_B}', '${REVISION_B}', 0, '${PAGE_B0}')`,
-  `INSERT INTO layout_revisions (id, revision_id, object_id, bundle_id, revision_no, state)
-     VALUES ('${LAYOUT_B}', '${REVISION_B}', '${OBJECT}', '${BUNDLE_B}', 1, 'draft')`,
-  `INSERT INTO layout_blocks (id, layout_revision_id, revision_id, bundle_id, source_page_id,
+  `INSERT INTO source_files (id, folder_id, blob_sha256, file_name, sort_order, verify_state)
+     VALUES ('${FILE_B}', '${FOLDER_B}', '${SHA('c')}', 'Чужой.pdf', 0, 'ok')`,
+  `INSERT INTO source_pages (id, folder_id, source_file_id, file_page_index, folder_ordinal, width_px, height_px, rotation)
+     VALUES ('${PAGE_B0}', '${FOLDER_B}', '${FILE_B}', 0, 0, 1654, 2339, 0)`,
+  `INSERT INTO processing_bundles (id, folder_id, aggregate_manifest_hash, working_pdf_blob_sha256, builder_version)
+     VALUES ('${BUNDLE_B}', '${FOLDER_B}', '${SHA('f')}', '${SHA('d')}', 'bundle/1+pdf-lib')`,
+  `INSERT INTO processing_bundle_pages (bundle_id, folder_id, working_page_index, source_page_id)
+     VALUES ('${BUNDLE_B}', '${FOLDER_B}', 0, '${PAGE_B0}')`,
+  `INSERT INTO layout_revisions (id, folder_id, object_id, bundle_id, revision_no, state)
+     VALUES ('${LAYOUT_B}', '${FOLDER_B}', '${OBJECT}', '${BUNDLE_B}', 1, 'draft')`,
+  `INSERT INTO layout_blocks (id, layout_revision_id, folder_id, bundle_id, source_page_id,
                               working_page_index, object_id, block_type, shape_type,
                               x0, y0, x1, y1, sort_order, source, detector_provenance)
-     VALUES ('${BLOCK_B0}', '${LAYOUT_B}', '${REVISION_B}', '${BUNDLE_B}', '${PAGE_B0}',
+     VALUES ('${BLOCK_B0}', '${LAYOUT_B}', '${FOLDER_B}', '${BUNDLE_B}', '${PAGE_B0}',
              0, '${OBJECT}', 'text', 'rectangle', 0.1, 0.1, 0.9, 0.4, 0, 'auto', 'rf_detr')`,
   `UPDATE layout_revisions SET blocks_hash = '${LOCAL_HASH_B}'
      WHERE id = '${LAYOUT_B}'`,
   `INSERT INTO rd_run_documents (id, layout_revision_id, rd_document_id, rd_project_id)
      VALUES ('${RUN_DOC_B}', '${LAYOUT_B}', 'doc_b', 'prj-portal')`,
-  `INSERT INTO recognition_runs (id, revision_id, layout_revision_id, rd_run_document_id,
+  `INSERT INTO recognition_runs (id, folder_id, layout_revision_id, rd_run_document_id,
                                  local_layout_hash, remote_layout_hash_before,
                                  remote_layout_hash_after, working_pdf_sha256, status, finished_at)
-     VALUES ('${RUN_B}', '${REVISION_B}', '${LAYOUT_B}', '${RUN_DOC_B}',
+     VALUES ('${RUN_B}', '${FOLDER_B}', '${LAYOUT_B}', '${RUN_DOC_B}',
              '${LOCAL_HASH_B}', '${LOCAL_HASH_B}', '${LOCAL_HASH_B}', '${SHA('d')}', 'done', now())`,
   `INSERT INTO artifact_versions (id, recognition_run_id, kind, s3_key, artifact_sha256, byte_size)
      VALUES ('${ARTIFACT_B}', '${RUN_B}', 'md', '${artifactKey(RUN_B, 'md')}',
@@ -258,9 +252,9 @@ const FIXTURE: readonly string[] = [
   `INSERT INTO artifact_versions (id, recognition_run_id, kind, s3_key, artifact_sha256, byte_size)
      VALUES ('${ARTIFACT_B_ZIP}', '${RUN_B}', 'zip', '${artifactKey(RUN_B, 'zip')}',
              '${sha256Of(ARTIFACT_ZIP_BODY)}', ${Buffer.byteLength(ARTIFACT_ZIP_BODY)})`,
-  `INSERT INTO page_text_versions (id, revision_id, source_page_id, recognition_run_id,
+  `INSERT INTO page_text_versions (id, folder_id, source_page_id, recognition_run_id,
                                    artifact_version_id, text_md, text_sha256)
-     VALUES ('${PAGE_TEXT_B}', '${REVISION_B}', '${PAGE_B0}', '${RUN_B}', '${ARTIFACT_B}',
+     VALUES ('${PAGE_TEXT_B}', '${FOLDER_B}', '${PAGE_B0}', '${RUN_B}', '${ARTIFACT_B}',
              'Секретный текст чужой поставки', '${SHA('8')}')`,
 ];
 
@@ -391,14 +385,14 @@ async function jobRows(type: string): Promise<readonly { payload: string }[]> {
 
 async function runRows(): Promise<readonly { id: string; status: string }[]> {
   return db.query<{ id: string; status: string }>(
-    `SELECT id, status FROM recognition_runs WHERE revision_id = '${REVISION_A}'`,
+    `SELECT id, status FROM recognition_runs WHERE folder_id = '${FOLDER_A}'`,
   );
 }
 
-describe('POST /revisions/{id}/recognize', () => {
+describe('POST /folders/{id}/recognize', () => {
   it('без Idempotency-Key отвечает 400 и НИЧЕГО не ставит в очередь', async () => {
     const before = await jobRows('layout.reconcile');
-    const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_A}/recognize`, {
+    const response = await as(KC.a, 'POST', `/api/v1/folders/${FOLDER_A}/recognize`, {
       body: { layoutId: LAYOUT_WITH_BLOCKS },
     });
     expect(response.statusCode).toBe(400);
@@ -407,7 +401,7 @@ describe('POST /revisions/{id}/recognize', () => {
   });
 
   it('чужая ревизия разметки не распознаётся даже по прямому идентификатору', async () => {
-    const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_A}/recognize`, {
+    const response = await as(KC.a, 'POST', `/api/v1/folders/${FOLDER_A}/recognize`, {
       body: { layoutId: LAYOUT_B },
       idempotencyKey: 'foreign-layout',
     });
@@ -416,7 +410,7 @@ describe('POST /revisions/{id}/recognize', () => {
   });
 
   it('руководителю запуск распознавания не разрешён', async () => {
-    const response = await as(KC.manager, 'POST', `/api/v1/revisions/${REVISION_A}/recognize`, {
+    const response = await as(KC.manager, 'POST', `/api/v1/folders/${FOLDER_A}/recognize`, {
       body: { layoutId: LAYOUT_WITH_BLOCKS },
       idempotencyKey: 'manager-attempt',
     });
@@ -429,7 +423,7 @@ describe('POST /revisions/{id}/recognize', () => {
    * Проверяется таблица, а не код ответа — ровно то, чего не хватило на S5.
    */
   it('создаёт прогон и кладёт задачу цикла сверки в jobs', async () => {
-    const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_A}/recognize`, {
+    const response = await as(KC.a, 'POST', `/api/v1/folders/${FOLDER_A}/recognize`, {
       body: { layoutId: LAYOUT_WITH_BLOCKS },
       idempotencyKey: 'run-1',
     });
@@ -450,11 +444,11 @@ describe('POST /revisions/{id}/recognize', () => {
     expect(jobs).toHaveLength(1);
     const payload = JSON.parse(jobs[0]?.payload ?? '{}') as Record<string, unknown>;
     expect(payload.recognitionRunId).toBe(body.recognitionRunId);
-    expect(payload.revisionId).toBe(REVISION_A);
+    expect(payload.folderId).toBe(FOLDER_A);
   });
 
   it('повторный запрос не заводит второй прогон и второй job', async () => {
-    const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_A}/recognize`, {
+    const response = await as(KC.a, 'POST', `/api/v1/folders/${FOLDER_A}/recognize`, {
       body: { layoutId: LAYOUT_WITH_BLOCKS },
       idempotencyKey: 'run-1',
     });
@@ -467,7 +461,7 @@ describe('POST /revisions/{id}/recognize', () => {
 
   it('снимок настроек прогона не содержит ни пароля, ни адреса RD WEB', async () => {
     const rows = await db.query<{ snapshot: string }>(
-      `SELECT settings_snapshot::text AS snapshot FROM recognition_runs WHERE revision_id = '${REVISION_A}'`,
+      `SELECT settings_snapshot::text AS snapshot FROM recognition_runs WHERE folder_id = '${FOLDER_A}'`,
     );
     const snapshot = rows[0]?.snapshot ?? '';
     expect(snapshot).toContain('qwen2.5-vl-7b');
@@ -479,7 +473,7 @@ describe('POST /revisions/{id}/recognize', () => {
 
 describe('изоляция прогонов, артефактов и текста страниц', () => {
   it('чужой прогон не виден ни списком, ни по прямому идентификатору', async () => {
-    const list = await as(KC.a, 'GET', `/api/v1/revisions/${REVISION_B}/recognition-runs`);
+    const list = await as(KC.a, 'GET', `/api/v1/folders/${FOLDER_B}/recognition-runs`);
     expect(list.statusCode).toBe(200);
     expect(list.json<{ items: unknown[] }>().items).toEqual([]);
 
@@ -539,7 +533,7 @@ describe('изоляция прогонов, артефактов и текст�
     const list = await as(
       KC.engineerNoScope,
       'GET',
-      `/api/v1/revisions/${REVISION_B}/recognition-runs`,
+      `/api/v1/folders/${FOLDER_B}/recognition-runs`,
     );
     expect(list.statusCode).toBe(200);
     expect(list.json<{ items: unknown[] }>().items).not.toEqual([]);

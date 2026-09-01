@@ -122,7 +122,7 @@ export function Link({ to, children, ...rest }: LinkProps): ReactNode {
 export type RouteParams = Readonly<Record<string, string>>;
 
 /**
- * Сопоставление `/revisions/:revisionId/markup` с фактическим путём.
+ * Сопоставление `/folders/:folderId/markup` с фактическим путём.
  *
  * Возвращает параметры либо `null`. Регулярное выражение не строится:
  * посегментное сравнение короче, читается без экранирования и не даёт

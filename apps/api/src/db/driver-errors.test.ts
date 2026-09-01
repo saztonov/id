@@ -29,9 +29,9 @@ function wrapped(cause: unknown, depth = 1): Error {
 
 describe('driverField', () => {
   it('находит поля на самой ошибке', () => {
-    const error = pgError('23505', 'revision_events_pkey');
+    const error = pgError('23505', 'folder_events_pkey');
     expect(driverField(error, 'code')).toBe('23505');
-    expect(driverField(error, 'constraint')).toBe('revision_events_pkey');
+    expect(driverField(error, 'constraint')).toBe('folder_events_pkey');
   });
 
   it('находит поля сквозь одну обёртку Drizzle — ровно тот случай, что был сломан', () => {

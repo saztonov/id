@@ -103,7 +103,7 @@ export interface LocalDetectionDeps {
    * приходит УЖЕ ВНУТРИ `MarkupTarget`).
    */
   loadTargetByLayout(input: {
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly layoutRevisionId: string;
   }): Promise<MarkupTarget | null>;
 
@@ -126,7 +126,7 @@ export interface LocalDetectionDeps {
 
   /** Карта страниц рабочего документа с размерами и поворотом (`sourcePages`). */
   pageGeometry(input: {
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly bundleId: string;
   }): Promise<readonly BundlePageView[]>;
 
@@ -136,7 +136,7 @@ export interface LocalDetectionDeps {
    * Ручных блоков это НЕ заменяет: та защита — безусловно в `importBlocks`.
    */
   existingBlockPages(input: {
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly layoutRevisionId: string;
   }): Promise<ReadonlySet<number>>;
 
@@ -152,7 +152,7 @@ export interface LocalDetectionDeps {
   ): Promise<{ readonly path: string; readonly release: () => Promise<void> }>;
 
   importBlocks(input: {
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly layoutRevisionId: string;
     readonly workingPageIndices: readonly number[];
     readonly blocks: readonly DetectedBlockInput[];
@@ -210,7 +210,7 @@ function bestRejected(stats: DetectPageStats): number | null {
 async function recordEmptyPageFeedback(
   deps: LocalDetectionDeps,
   input: {
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly sourcePageId: string;
     readonly workingPageIndex: number;
     readonly modelVersion: string;
@@ -248,7 +248,7 @@ async function recordEmptyPageFeedback(
     feedbackType: 'recognition_failure',
     reasonCode,
     severity: 'warn',
-    revisionId: input.revisionId,
+    folderId: input.folderId,
     sourcePageId: input.sourcePageId,
     workingPageIndex: input.workingPageIndex,
     pipelineStage: 'detect',
@@ -597,7 +597,7 @@ export function createLocalDetectionHandler(
 ): JobHandler<'layout.detect_local'> {
   return async (ctx: JobContext<'layout.detect_local'>) => {
     const target = await deps.loadTargetByLayout({
-      revisionId: ctx.payload.revisionId,
+      folderId: ctx.payload.folderId,
       layoutRevisionId: ctx.payload.layoutRevisionId,
     });
     if (target === null) {
@@ -646,11 +646,11 @@ export function createLocalDetectionHandler(
 
     const overwriteExisting = ctx.payload.overwriteExisting === true;
     const [geometry, alreadyHasBlocks] = await Promise.all([
-      deps.pageGeometry({ revisionId: target.revisionId, bundleId: target.bundleId }),
+      deps.pageGeometry({ folderId: target.folderId, bundleId: target.bundleId }),
       overwriteExisting
         ? Promise.resolve<ReadonlySet<number>>(new Set())
         : deps.existingBlockPages({
-            revisionId: target.revisionId,
+            folderId: target.folderId,
             layoutRevisionId: target.layoutRevisionId,
           }),
     ]);
@@ -939,7 +939,7 @@ export function createLocalDetectionHandler(
         if (blocks.length === 0) {
           emptyPages += 1;
           await recordEmptyPageFeedback(deps, {
-            revisionId: target.revisionId,
+            folderId: target.folderId,
             sourcePageId: page.sourcePageId,
             workingPageIndex: pageIndex,
             modelVersion: settings.modelVersion,
@@ -976,7 +976,7 @@ export function createLocalDetectionHandler(
     ]) {
       if (group.pages.length === 0) continue;
       const imported = await deps.importBlocks({
-        revisionId: target.revisionId,
+        folderId: target.folderId,
         layoutRevisionId: target.layoutRevisionId,
         workingPageIndices: group.pages,
         blocks: group.pages.flatMap((page) => perPageBlocks.get(page) ?? []),
@@ -1014,7 +1014,7 @@ export function createLocalDetectionHandler(
     // считает флаги по всему комплекту и идемпотентен, лишний запуск безвреден.
     await ctx.enqueue({
       type: 'layout.analyze_coverage',
-      payload: { revisionId: target.revisionId, layoutRevisionId: target.layoutRevisionId },
+      payload: { folderId: target.folderId, layoutRevisionId: target.layoutRevisionId },
       dedupeKey: `layout.analyze_coverage:${target.layoutRevisionId}`,
       runAfterMs: 1_000,
     });

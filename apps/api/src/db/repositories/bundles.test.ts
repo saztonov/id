@@ -60,13 +60,10 @@ const ORG_CONTRACTOR_A = id(4);
 const ORG_CONTRACTOR_B = id(5);
 const USER = id(6);
 
-const SUBMISSION_A = id(14);
-const SUBMISSION_B = id(15);
-const REVISION_A = id(16);
-const REVISION_B = id(17);
+const FOLDER_A = id(16);
+const FOLDER_B = id(17);
 /** Ревизия в статусе submitted: её состав неизменяем (0008). */
-const SUBMISSION_LOCKED = id(18);
-const REVISION_LOCKED = id(19);
+const FOLDER_LOCKED = id(19);
 
 const FILE_1 = id(20);
 const FILE_2 = id(21);
@@ -115,26 +112,20 @@ const FIXTURE: readonly string[] = [
 
   `INSERT INTO object_contractors (object_id, contractor_id)
        VALUES ('${OBJECT_A}', '${ORG_CONTRACTOR_A}') ON CONFLICT DO NOTHING`,
-  `INSERT INTO works
-       (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-     VALUES ('${SUBMISSION_A}', '${OBJECT_A}', '${ORG_CONTRACTOR_A}', '${ORG_CONTRACTOR_A}', 'roofing', DATE '2026-01-01', 'Поставка А', '${USER}')`,
   `INSERT INTO object_contractors (object_id, contractor_id)
        VALUES ('${OBJECT_B}', '${ORG_CONTRACTOR_B}') ON CONFLICT DO NOTHING`,
-  `INSERT INTO works
-       (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-     VALUES ('${SUBMISSION_B}', '${OBJECT_B}', '${ORG_CONTRACTOR_B}', '${ORG_CONTRACTOR_B}', 'roofing', DATE '2026-01-01', 'Поставка Б', '${USER}')`,
   `INSERT INTO object_contractors (object_id, contractor_id)
        VALUES ('${OBJECT_A}', '${ORG_CONTRACTOR_A}') ON CONFLICT DO NOTHING`,
-  `INSERT INTO works
-       (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-     VALUES ('${SUBMISSION_LOCKED}', '${OBJECT_A}', '${ORG_CONTRACTOR_A}', '${ORG_CONTRACTOR_A}', 'roofing', DATE '2026-01-01', 'Поставка А-2', '${USER}')`,
 
-  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
-     VALUES ('${REVISION_A}', '${SUBMISSION_A}', '${OBJECT_A}', '${ORG_CONTRACTOR_A}', 1, 'draft')`,
-  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
-     VALUES ('${REVISION_B}', '${SUBMISSION_B}', '${OBJECT_B}', '${ORG_CONTRACTOR_B}', 1, 'draft')`,
-  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
-     VALUES ('${REVISION_LOCKED}', '${SUBMISSION_LOCKED}', '${OBJECT_A}', '${ORG_CONTRACTOR_A}', 1, 'draft')`,
+  `INSERT INTO folders
+       (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
+     VALUES ('${FOLDER_A}', '${OBJECT_A}', '${ORG_CONTRACTOR_A}', '${ORG_CONTRACTOR_A}', 'roofing', DATE '2026-01-01', 'Поставка А', '${USER}')`,
+  `INSERT INTO folders
+       (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
+     VALUES ('${FOLDER_B}', '${OBJECT_B}', '${ORG_CONTRACTOR_B}', '${ORG_CONTRACTOR_B}', 'roofing', DATE '2026-01-01', 'Поставка Б', '${USER}')`,
+  `INSERT INTO folders
+       (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
+     VALUES ('${FOLDER_LOCKED}', '${OBJECT_A}', '${ORG_CONTRACTOR_A}', '${ORG_CONTRACTOR_A}', 'roofing', DATE '2026-01-01', 'Поставка А-2', '${USER}')`,
 
   `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
      VALUES ('${SHA_1}', 'blobs/${SHA_1}', 2048, 'application/pdf')`,
@@ -145,23 +136,23 @@ const FIXTURE: readonly string[] = [
   `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
      VALUES ('${SHA_LOCKED}', 'blobs/${SHA_LOCKED}', 512, 'application/pdf')`,
 
-  `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order, verify_state)
-     VALUES ('${FILE_1}', '${REVISION_A}', '${SHA_1}', 'akt.pdf', 0, 'ok')`,
-  `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order, verify_state)
-     VALUES ('${FILE_2}', '${REVISION_A}', '${SHA_2}', 'sertifikat.pdf', 1, 'ok')`,
-  `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order, verify_state)
-     VALUES ('${FILE_B}', '${REVISION_B}', '${SHA_B}', 'chuzhoy.pdf', 0, 'ok')`,
-  `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order, verify_state)
-     VALUES ('${FILE_LOCKED}', '${REVISION_LOCKED}', '${SHA_LOCKED}', 'podano.pdf', 0, 'ok')`,
+  `INSERT INTO source_files (id, folder_id, blob_sha256, file_name, sort_order, verify_state)
+     VALUES ('${FILE_1}', '${FOLDER_A}', '${SHA_1}', 'akt.pdf', 0, 'ok')`,
+  `INSERT INTO source_files (id, folder_id, blob_sha256, file_name, sort_order, verify_state)
+     VALUES ('${FILE_2}', '${FOLDER_A}', '${SHA_2}', 'sertifikat.pdf', 1, 'ok')`,
+  `INSERT INTO source_files (id, folder_id, blob_sha256, file_name, sort_order, verify_state)
+     VALUES ('${FILE_B}', '${FOLDER_B}', '${SHA_B}', 'chuzhoy.pdf', 0, 'ok')`,
+  `INSERT INTO source_files (id, folder_id, blob_sha256, file_name, sort_order, verify_state)
+     VALUES ('${FILE_LOCKED}', '${FOLDER_LOCKED}', '${SHA_LOCKED}', 'podano.pdf', 0, 'ok')`,
 
-  `INSERT INTO source_pages (id, revision_id, source_file_id, file_page_index, revision_ordinal, width_px, height_px, rotation)
-     VALUES ('${PAGE_1_0}', '${REVISION_A}', '${FILE_1}', 0, 0, 595, 842, 0)`,
-  `INSERT INTO source_pages (id, revision_id, source_file_id, file_page_index, revision_ordinal, width_px, height_px, rotation)
-     VALUES ('${PAGE_1_1}', '${REVISION_A}', '${FILE_1}', 1, 1, 842, 595, 90)`,
-  `INSERT INTO source_pages (id, revision_id, source_file_id, file_page_index, revision_ordinal, width_px, height_px, rotation)
-     VALUES ('${PAGE_2_0}', '${REVISION_A}', '${FILE_2}', 0, 2, 595, 842, 0)`,
-  `INSERT INTO source_pages (id, revision_id, source_file_id, file_page_index, revision_ordinal, width_px, height_px, rotation)
-     VALUES ('${PAGE_B_0}', '${REVISION_B}', '${FILE_B}', 0, 0, 595, 842, 0)`,
+  `INSERT INTO source_pages (id, folder_id, source_file_id, file_page_index, folder_ordinal, width_px, height_px, rotation)
+     VALUES ('${PAGE_1_0}', '${FOLDER_A}', '${FILE_1}', 0, 0, 595, 842, 0)`,
+  `INSERT INTO source_pages (id, folder_id, source_file_id, file_page_index, folder_ordinal, width_px, height_px, rotation)
+     VALUES ('${PAGE_1_1}', '${FOLDER_A}', '${FILE_1}', 1, 1, 842, 595, 90)`,
+  `INSERT INTO source_pages (id, folder_id, source_file_id, file_page_index, folder_ordinal, width_px, height_px, rotation)
+     VALUES ('${PAGE_2_0}', '${FOLDER_A}', '${FILE_2}', 0, 2, 595, 842, 0)`,
+  `INSERT INTO source_pages (id, folder_id, source_file_id, file_page_index, folder_ordinal, width_px, height_px, rotation)
+     VALUES ('${PAGE_B_0}', '${FOLDER_B}', '${FILE_B}', 0, 0, 595, 842, 0)`,
 ];
 
 let testDb: TestDatabase;
@@ -216,7 +207,7 @@ describe('computeAggregateManifestHash', () => {
 
 describe('loadBundlePlan', () => {
   it('отдаёт файлы в порядке пользователя вместе со страницами и хэшем', async () => {
-    const plan = await loadBundlePlan(db, ADMIN, REVISION_A);
+    const plan = await loadBundlePlan(db, ADMIN, FOLDER_A);
 
     expect(plan).not.toBeNull();
     if (plan === null) return;
@@ -234,12 +225,12 @@ describe('loadBundlePlan', () => {
   });
 
   it('чужая ревизия не читается подрядчиком, но читается инженером', async () => {
-    expect(await loadBundlePlan(db, CONTRACTOR_B, REVISION_A)).toBeNull();
-    expect(await loadBundlePlan(db, CONTRACTOR_A, REVISION_A)).not.toBeNull();
+    expect(await loadBundlePlan(db, CONTRACTOR_B, FOLDER_A)).toBeNull();
+    expect(await loadBundlePlan(db, CONTRACTOR_A, FOLDER_A)).not.toBeNull();
     // Инженер видит оба объекта: деления стройки на назначенные и прочие
     // объекты больше нет (S37), и это утверждение — его гарантия.
-    expect(await loadBundlePlan(db, ENGINEER, REVISION_A)).not.toBeNull();
-    expect(await loadBundlePlan(db, ENGINEER, REVISION_B)).not.toBeNull();
+    expect(await loadBundlePlan(db, ENGINEER, FOLDER_A)).not.toBeNull();
+    expect(await loadBundlePlan(db, ENGINEER, FOLDER_B)).not.toBeNull();
   });
 
   it('файл в карантине и файл без страниц становятся препятствиями', async () => {
@@ -251,15 +242,15 @@ describe('loadBundlePlan', () => {
          VALUES ('${sha}', 'blobs/${sha}', 10, 'application/pdf')`,
     );
     await testDb.query(
-      `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order, verify_state, verify_error)
-         VALUES ('${quarantined}', '${REVISION_LOCKED}', '${sha}', 'bitiy.pdf', 1, 'quarantined', 'структура PDF не разобрана')`,
+      `INSERT INTO source_files (id, folder_id, blob_sha256, file_name, sort_order, verify_state, verify_error)
+         VALUES ('${quarantined}', '${FOLDER_LOCKED}', '${sha}', 'bitiy.pdf', 1, 'quarantined', 'структура PDF не разобрана')`,
     );
     await testDb.query(
-      `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order, verify_state)
-         VALUES ('${emptyFile}', '${REVISION_LOCKED}', '${sha}', 'pustoy.pdf', 2, 'ok')`,
+      `INSERT INTO source_files (id, folder_id, blob_sha256, file_name, sort_order, verify_state)
+         VALUES ('${emptyFile}', '${FOLDER_LOCKED}', '${sha}', 'pustoy.pdf', 2, 'ok')`,
     );
 
-    const plan = await loadBundlePlan(db, ADMIN, REVISION_LOCKED);
+    const plan = await loadBundlePlan(db, ADMIN, FOLDER_LOCKED);
 
     // Причины собираются ВСЕ сразу: подрядчику нужно увидеть весь список, а не
     // получать его по одной за попытку сборки.
@@ -283,7 +274,7 @@ describe('createBundle', () => {
   const BUILDER = 'bundle/1+pdf-lib';
 
   const INPUT = {
-    revisionId: REVISION_A,
+    folderId: FOLDER_A,
     aggregateManifestHash: MANIFEST,
     builderVersion: BUILDER,
     workingPdf: { sha256: SHA_WORKING, sizeBytes: 3072, s3Key: `bundle/${SHA_WORKING}.pdf` },
@@ -302,7 +293,7 @@ describe('createBundle', () => {
     expect(bundle.workingPdfBlobSha256).toBe(SHA_WORKING);
 
     const events = await testDb.query<{ event_type: string; seq: string }>(
-      `SELECT event_type, seq FROM revision_events WHERE revision_id = '${REVISION_A}'`,
+      `SELECT event_type, seq FROM folder_events WHERE folder_id = '${FOLDER_A}'`,
     );
     expect(events.map((row) => row.event_type)).toEqual(['bundle.created']);
   });
@@ -311,11 +302,11 @@ describe('createBundle', () => {
     const again = await createBundle(db, CONTRACTOR_A, INPUT);
 
     expect(again.created).toBe(false);
-    expect(await listBundles(db, ADMIN, REVISION_A)).toHaveLength(1);
+    expect(await listBundles(db, ADMIN, FOLDER_A)).toHaveLength(1);
   });
 
   it('карта отображает страницу рабочего PDF на файл и его страницу', async () => {
-    const [bundle] = await listBundles(db, ADMIN, REVISION_A);
+    const [bundle] = await listBundles(db, ADMIN, FOLDER_A);
     expect(bundle).toBeDefined();
     if (bundle === undefined) return;
 
@@ -335,14 +326,14 @@ describe('createBundle', () => {
   });
 
   it('чужой подрядчик не видит ни документ, ни карту, ни отдельную страницу', async () => {
-    const [bundle] = await listBundles(db, ADMIN, REVISION_A);
+    const [bundle] = await listBundles(db, ADMIN, FOLDER_A);
     expect(bundle).toBeDefined();
     if (bundle === undefined) return;
 
     expect(await findBundle(db, CONTRACTOR_B, bundle.id)).toBeNull();
     expect(await listBundlePages(db, CONTRACTOR_B, bundle.id)).toEqual([]);
     expect(await findSourceOfWorkingPage(db, CONTRACTOR_B, bundle.id, 0)).toBeNull();
-    expect(await listBundles(db, CONTRACTOR_B, REVISION_A)).toEqual([]);
+    expect(await listBundles(db, CONTRACTOR_B, FOLDER_A)).toEqual([]);
     // Инженер рабочий документ видит: изоляция режет подрядчика, не его.
     expect(await findBundle(db, ENGINEER, bundle.id)).not.toBeNull();
   });
@@ -368,22 +359,6 @@ describe('createBundle', () => {
         pages: [{ workingPageIndex: 0, sourcePageId: PAGE_B_0 }],
       }),
     ).rejects.toThrow();
-  });
-
-  it('в поданную ревизию рабочий документ не добавляется', async () => {
-    await testDb.query(
-      `UPDATE submission_revisions SET status = 'submitted' WHERE id = '${REVISION_LOCKED}'`,
-    );
-
-    await expect(
-      createBundle(db, ADMIN, {
-        revisionId: REVISION_LOCKED,
-        aggregateManifestHash: '3'.repeat(64),
-        builderVersion: BUILDER,
-        workingPdf: { sha256: '4'.repeat(64), sizeBytes: 10, s3Key: 'bundle/4.pdf' },
-        pages: [],
-      }),
-    ).rejects.toThrow(/неизменяем|submitted/);
   });
 
   it('ревизия вне области видимости — отказ, а не запись', async () => {

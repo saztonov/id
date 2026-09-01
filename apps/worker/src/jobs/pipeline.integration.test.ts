@@ -79,8 +79,7 @@ function id(n: number): string {
 const ORG_CUSTOMER = id(1);
 const ORG_CONTRACTOR = id(2);
 const OBJECT = id(4);
-const SUBMISSION = id(10);
-const REVISION = id(11);
+const FOLDER = id(11);
 const USER_CONTRACTOR = id(20);
 const FILE_A = id(30);
 const FILE_B = id(31);
@@ -128,11 +127,9 @@ const FIXTURE: readonly string[] = [
   `INSERT INTO user_roles (user_id, role) VALUES ('${USER_CONTRACTOR}', 'contractor')`,
   `INSERT INTO object_contractors (object_id, contractor_id)
        VALUES ('${OBJECT}', '${ORG_CONTRACTOR}') ON CONFLICT DO NOTHING`,
-  `INSERT INTO works
+  `INSERT INTO folders
        (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-     VALUES ('${SUBMISSION}', '${OBJECT}', '${ORG_CONTRACTOR}', '${ORG_CONTRACTOR}', 'roofing', DATE '2026-01-01', 'Поставка 1', '${USER_CONTRACTOR}')`,
-  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
-     VALUES ('${REVISION}', '${SUBMISSION}', '${OBJECT}', '${ORG_CONTRACTOR}', 1, 'draft')`,
+     VALUES ('${FOLDER}', '${OBJECT}', '${ORG_CONTRACTOR}', '${ORG_CONTRACTOR}', 'roofing', DATE '2026-01-01', 'Поставка 1', '${USER_CONTRACTOR}')`,
 
   // Оба файла записаны БЕЗ состояния проверки: колонка `verify_state` имеет
   // значение по умолчанию `pending`, и именно из него задача обязана вывести
@@ -141,10 +138,10 @@ const FIXTURE: readonly string[] = [
      VALUES ('${SHA_A}', 'blobs/${SHA_A}', ${CONTENT_A.byteLength}, 'application/pdf')`,
   `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
      VALUES ('${SHA_B}', 'blobs/${SHA_B}', ${CONTENT_B.byteLength}, 'application/pdf')`,
-  `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order)
-     VALUES ('${FILE_A}', '${REVISION}', '${SHA_A}', 'АОСР.pdf', 0)`,
-  `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order)
-     VALUES ('${FILE_B}', '${REVISION}', '${SHA_B}', 'Сертификат.pdf', 1)`,
+  `INSERT INTO source_files (id, folder_id, blob_sha256, file_name, sort_order)
+     VALUES ('${FILE_A}', '${FOLDER}', '${SHA_A}', 'АОСР.pdf', 0)`,
+  `INSERT INTO source_files (id, folder_id, blob_sha256, file_name, sort_order)
+     VALUES ('${FILE_B}', '${FOLDER}', '${SHA_B}', 'Сертификат.pdf', 1)`,
 
   // А вот СТРАНИЦЫ у двух файлов в разном состоянии, и это не прихоть фикстуры,
   // а два разных входа задачи. `FILE_A` страниц не имеет — задача записывает
@@ -157,8 +154,8 @@ const FIXTURE: readonly string[] = [
   ...PAGES_B.map(
     (page, index) =>
       `INSERT INTO source_pages
-         (id, revision_id, source_file_id, file_page_index, revision_ordinal, width_px, height_px, rotation)
-       VALUES ('${id(32 + index)}', '${REVISION}', '${FILE_B}', ${index}, ${index},
+         (id, folder_id, source_file_id, file_page_index, folder_ordinal, width_px, height_px, rotation)
+       VALUES ('${id(32 + index)}', '${FOLDER}', '${FILE_B}', ${index}, ${index},
                ${page.widthPx}, ${page.heightPx}, ${page.rotation})`,
   ),
 ];
@@ -248,7 +245,7 @@ describe('file.verify и file.signature_probe пишут состояние, а 
       for (const type of ['file.verify', 'file.signature_probe'] as const) {
         await enqueueSystemJob(db, {
           type,
-          payload: { revisionId: REVISION, sourceFileId: fileId },
+          payload: { folderId: FOLDER, sourceFileId: fileId },
           dedupeKey: dedupeKeyFor(type, fileId),
         });
       }
@@ -290,16 +287,16 @@ describe('file.verify и file.signature_probe пишут состояние, а 
     const pages = await testDb.query<{
       source_file_id: string;
       file_page_index: number;
-      revision_ordinal: number;
+      folder_ordinal: number;
       width_px: number;
       height_px: number;
     }>(
-      `SELECT source_file_id, file_page_index, revision_ordinal, width_px, height_px
-         FROM source_pages WHERE revision_id = '${REVISION}' ORDER BY revision_ordinal`,
+      `SELECT source_file_id, file_page_index, folder_ordinal, width_px, height_px
+         FROM source_pages WHERE folder_id = '${FOLDER}' ORDER BY folder_ordinal`,
     );
 
     expect(pages.length).toBeGreaterThan(0);
-    expect(pages.map((page) => Number(page.revision_ordinal))).toEqual(
+    expect(pages.map((page) => Number(page.folder_ordinal))).toEqual(
       pages.map((_, index) => index),
     );
     expect(pages.every((page) => Number(page.width_px) > 0 && Number(page.height_px) > 0)).toBe(
@@ -320,7 +317,7 @@ describe('file.verify и file.signature_probe пишут состояние, а 
 
   it('событие ревизии о проверке дошло до ленты', async () => {
     const events = await testDb.query<{ event_type: string }>(
-      `SELECT event_type FROM revision_events WHERE revision_id = '${REVISION}' ORDER BY seq`,
+      `SELECT event_type FROM folder_events WHERE folder_id = '${FOLDER}' ORDER BY seq`,
     );
     expect(events.map((event) => event.event_type)).toContain('file.verified');
   });
@@ -334,8 +331,8 @@ describe('bundle.build собирает рабочий документ и ег�
   beforeAll(async () => {
     await enqueueSystemJob(db, {
       type: 'bundle.build',
-      payload: { revisionId: REVISION },
-      dedupeKey: dedupeKeyFor('bundle.build', REVISION),
+      payload: { folderId: FOLDER },
+      dedupeKey: dedupeKeyFor('bundle.build', FOLDER),
     });
     await drainQueue();
   }, 120_000);
@@ -385,7 +382,7 @@ describe('bundle.build собирает рабочий документ и ег�
     );
 
     const pageCount = await testDb.query<{ count: string | number }>(
-      `SELECT count(*) AS count FROM source_pages WHERE revision_id = '${REVISION}'`,
+      `SELECT count(*) AS count FROM source_pages WHERE folder_id = '${FOLDER}'`,
     );
 
     expect(map).toHaveLength(Number(pageCount[0]?.count ?? 0));
@@ -395,8 +392,8 @@ describe('bundle.build собирает рабочий документ и ег�
   it('повторный прогон не собирает второй документ', async () => {
     await enqueueSystemJob(db, {
       type: 'bundle.build',
-      payload: { revisionId: REVISION },
-      dedupeKey: dedupeKeyFor('bundle.build', REVISION, 'retry'),
+      payload: { folderId: FOLDER },
+      dedupeKey: dedupeKeyFor('bundle.build', FOLDER, 'retry'),
     });
     await drainQueue();
 

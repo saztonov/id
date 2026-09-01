@@ -663,7 +663,7 @@ export function parseTransferRegistry(input: {
 /** Комплект папки в том виде, в каком он участвует в сопоставлении групп. */
 export interface TransferGroupCandidate {
   readonly workId: string;
-  readonly revisionId: string;
+  readonly folderId: string;
   readonly contractorId: string;
   readonly contractorName: string | null;
   readonly title: string;
@@ -675,7 +675,7 @@ export interface TransferGroupMatch {
   readonly groupOrdinal: number;
   readonly state: 'matched' | 'missing' | 'ambiguous';
   readonly workId: string | null;
-  readonly revisionId: string | null;
+  readonly folderId: string | null;
   readonly contractorId: string | null;
   readonly score: number | null;
   readonly reason: string;
@@ -778,7 +778,7 @@ export function matchTransferGroups(
         groupOrdinal: group.ordinal,
         state: 'ambiguous',
         workId: null,
-        revisionId: null,
+        folderId: null,
         contractorId: null,
         score: null,
         reason: `${reason}: подходят ${narrowed.length} комплектов, различить их сверка не может`,
@@ -789,7 +789,7 @@ export function matchTransferGroups(
       groupOrdinal: group.ordinal,
       state: 'matched',
       workId: single.workId,
-      revisionId: single.revisionId,
+      folderId: single.folderId,
       contractorId: single.contractorId,
       score: found.length === 1 ? score : CONTRACTOR_SCORE,
       reason: found.length === 1 ? reason : `${reason}, коллизия различена исполнителем`,
@@ -842,7 +842,7 @@ export function matchTransferGroups(
         groupOrdinal: group.ordinal,
         state: 'missing',
         workId: null,
-        revisionId: null,
+        folderId: null,
         contractorId: null,
         score: null,
         reason:

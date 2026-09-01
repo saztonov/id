@@ -369,7 +369,7 @@ describe('parseTransferRegistry, открытый мир', () => {
 
 const candidate = (over: Partial<TransferGroupCandidate>): TransferGroupCandidate => ({
   workId: 'work-1',
-  revisionId: 'rev-1',
+  folderId: 'rev-1',
   contractorId: 'org-1',
   contractorName: 'ООО "Баутранс-Тест"',
   title: 'Устройство шпунтового ограждения котлована',

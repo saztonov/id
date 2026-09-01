@@ -22,7 +22,7 @@ function spec(patch: Partial<RuleSpec> & { readonly code: string }): RuleSpec {
   return {
     title: `Правило ${patch.code}`,
     docTypeCode: null,
-    level: 'revision',
+    level: 'folder',
     kind: 'crosscheck',
     defaultSeverity: 'error',
     defaultBlocking: false,
@@ -37,7 +37,7 @@ function spec(patch: Partial<RuleSpec> & { readonly code: string }): RuleSpec {
 
 const finding = (patch: Partial<RuleFinding> = {}): Omit<RuleFinding, 'state'> => ({
   origin: 'deterministic',
-  targetType: 'revision',
+  targetType: 'folder',
   targetId: null,
   message: 'дефект',
   ...patch,

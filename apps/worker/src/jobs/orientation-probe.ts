@@ -119,7 +119,7 @@ export interface OrientationProbeDeps {
    * пользователь эти минуты видит как «разметка стоит на нуле».
    */
   readonly existingSource: (input: {
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly sourcePageId: string;
   }) => Promise<{ readonly source: 'probe' | 'user'; readonly answered: boolean } | null>;
   /** Рабочий PDF во временный файл; `cleanup` зовётся в `finally`. */
@@ -150,7 +150,7 @@ export interface OrientationProbeDeps {
     readonly timeoutMs?: number | undefined;
   }) => Promise<OrientationProbeCall>;
   readonly saveOrientation: (input: {
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly sourcePageId: string;
     readonly rotation: ContentRotation | null;
     readonly confidence: number | null;
@@ -162,7 +162,7 @@ export interface OrientationProbeDeps {
     readonly error: string | null;
   }) => Promise<boolean>;
   readonly recordAiRun: (input: {
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly stage: 'orientation';
     readonly provider: LlmProviderName;
     readonly model: string;
@@ -186,14 +186,14 @@ export interface OrientationProbeDeps {
    * ответил», и связать их будет нечем.
    */
   readonly enqueueDetection: (input: {
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly layoutRevisionId: string;
     readonly workingPageIndex: number;
     readonly logger: JobContext<'page.orientation_probe'>['logger'];
   }) => Promise<void>;
   /** Отчёт о качестве: «зонд не отработал» и «зонд не уверен» — разные коды. */
   readonly reportFeedback: (input: {
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly sourcePageId: string;
     readonly workingPageIndex: number;
     readonly reasonCode: 'orientation.probe_failed' | 'orientation.low_confidence';
@@ -213,7 +213,7 @@ export function createOrientationProbeHandler(
   deps: OrientationProbeDeps,
 ): JobHandler<'page.orientation_probe'> {
   return async (ctx: JobContext<'page.orientation_probe'>): Promise<void> => {
-    const { revisionId, layoutRevisionId, bundleId, sourcePageId, workingPageIndex } = ctx.payload;
+    const { folderId, layoutRevisionId, bundleId, sourcePageId, workingPageIndex } = ctx.payload;
 
     /**
      * Детекция ставится в `finally`-стиле: одним вызовом на выходе из любой
@@ -222,7 +222,7 @@ export function createOrientationProbeHandler(
      */
     const continueWithDetection = async (): Promise<void> => {
       await deps.enqueueDetection({
-        revisionId,
+        folderId,
         layoutRevisionId,
         workingPageIndex,
         logger: ctx.logger,
@@ -241,7 +241,7 @@ export function createOrientationProbeHandler(
     // Человек уже развернул страницу руками — его значение сильнее зонда по
     // построению, и платить за вызов, результат которого ON CONFLICT не
     // запишет, незачем.
-    const existing = await deps.existingSource({ revisionId, sourcePageId });
+    const existing = await deps.existingSource({ folderId, sourcePageId });
     if (existing?.source === 'user') {
       ctx.logger.info(
         { event: 'orientation_probe_skipped_manual', working_page_index: workingPageIndex },
@@ -271,7 +271,7 @@ export function createOrientationProbeHandler(
 
     if (await deps.dryRun()) {
       await deps.saveOrientation({
-        revisionId,
+        folderId,
         sourcePageId,
         rotation: null,
         confidence: null,
@@ -288,7 +288,7 @@ export function createOrientationProbeHandler(
 
     const outPath = join(
       deps.workDirBase ?? tmpdir(),
-      `orientation-${revisionId}-${String(workingPageIndex)}-${randomUUID()}.png`,
+      `orientation-${folderId}-${String(workingPageIndex)}-${randomUUID()}.png`,
     );
 
     let failure: string | null = null;
@@ -352,7 +352,7 @@ export function createOrientationProbeHandler(
     if (call === null) {
       const detail = failure ?? 'зонд не дал ответа';
       await deps.saveOrientation({
-        revisionId,
+        folderId,
         sourcePageId,
         rotation: null,
         confidence: null,
@@ -364,7 +364,7 @@ export function createOrientationProbeHandler(
         error: detail,
       });
       await deps.reportFeedback({
-        revisionId,
+        folderId,
         sourcePageId,
         workingPageIndex,
         reasonCode: 'orientation.probe_failed',
@@ -383,7 +383,7 @@ export function createOrientationProbeHandler(
     const effective: ContentRotation = confident ? answer.rotation : 0;
 
     const written = await deps.saveOrientation({
-      revisionId,
+      folderId,
       sourcePageId,
       rotation: answer.rotation,
       confidence: answer.confidence,
@@ -396,7 +396,7 @@ export function createOrientationProbeHandler(
     });
 
     await deps.recordAiRun({
-      revisionId,
+      folderId,
       stage: 'orientation',
       provider: call.provider,
       model: call.model,
@@ -422,7 +422,7 @@ export function createOrientationProbeHandler(
 
     if (!confident && answer.rotation !== 0) {
       await deps.reportFeedback({
-        revisionId,
+        folderId,
         sourcePageId,
         workingPageIndex,
         reasonCode: 'orientation.low_confidence',

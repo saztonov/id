@@ -79,7 +79,7 @@ test('формы справочника проходят axe', async ({ page }) 
 });
 
 test('экран разметки проходит проверку axe', async ({ page }) => {
-  await signIn(page, KC.engineer, `/ids/revisions/${IDS.revisionMarkup}?tab=markup`);
+  await signIn(page, KC.engineer, `/ids/folders/${IDS.folderMarkup}?tab=markup`);
   await expect(page.getByRole('application')).toBeVisible();
   // Комбобокс типа страницы обязан иметь доступное имя с номером страницы:
   // панель стоит над канвой Konva, и это единственный путь к действию для
@@ -91,7 +91,7 @@ test('экран разметки проходит проверку axe', async 
 });
 
 test('экран проверки и согласования проходит axe', async ({ page }) => {
-  await signIn(page, KC.engineer, `/ids/revisions/${IDS.revisionReview}?tab=checks`);
+  await signIn(page, KC.engineer, `/ids/folders/${IDS.folderReview}?tab=checks`);
   await expect(page.getByTestId('checks-report')).toBeVisible();
   await analyze(page);
 });
@@ -104,23 +104,15 @@ test('экран проверки и согласования проходит a
  * нет вовсе.
  */
 test('пустая проверка проходит axe и объясняет себя', async ({ page }) => {
-  await signIn(page, KC.contractor, `/ids/revisions/${IDS.revisionEmpty}?tab=checks`);
+  await signIn(page, KC.contractor, `/ids/folders/${IDS.folderEmpty}?tab=checks`);
   await expect(page.getByTestId('checks-run-state')).toContainText('Проверка ещё не выполнялась');
   await analyze(page);
 });
 
 test('модалка замены файла проходит axe', async ({ page }) => {
-  await signIn(page, KC.contractor, `/ids/revisions/${IDS.revisionMarkup}?tab=files`);
+  await signIn(page, KC.contractor, `/ids/folders/${IDS.folderMarkup}?tab=files`);
   await page.getByTestId(`replace-file-${IDS.fileMarkup}`).click();
   await expect(page.getByRole('dialog')).toBeVisible();
-  await analyze(page);
-});
-
-test('карточка реестра со сверкой описи проходит axe', async ({ page }) => {
-  // Именно новый UI даёт настоящие дефекты доступности: на S16 и S18 axe ловил
-  // их ровно там, а не в давно написанных экранах.
-  await signIn(page, KC.general, `/ids/registries/${IDS.registryReady}`);
-  await expect(page.getByTestId('reconcile-run')).toBeVisible();
   await analyze(page);
 });
 
@@ -216,7 +208,7 @@ test('ориентиры страницы и ссылка «к содержим�
 });
 
 test('редактор блоков управляется с клавиатуры, а не только мышью по канве', async ({ page }) => {
-  await signIn(page, KC.engineer, `/ids/revisions/${IDS.revisionMarkup}?tab=markup`);
+  await signIn(page, KC.engineer, `/ids/folders/${IDS.folderMarkup}?tab=markup`);
 
   // Канва объявлена приложением и несёт описание: скринридер получает хотя бы
   // сведения о странице и числе блоков.

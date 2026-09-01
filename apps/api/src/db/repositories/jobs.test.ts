@@ -9,13 +9,13 @@
  *
  * # Назначение `seq` события ревизии
  *
- * Это регрессия на прод-инцидент. `appendRevisionEvent` ловил нарушение первичного
+ * Это регрессия на прод-инцидент. `appendFolderEvent` ловил нарушение первичного
  * ключа и повторял, но повтор не срабатывал никогда: распознаватель читал `code` с
  * верхнего уровня, а Drizzle прячет его в `cause`, — и даже сработай он, повторять
  * было бы нечего, потому что 23505 абортирует ВСЮ транзакцию вызывающего, а
  * SAVEPOINT в проекте не берётся нигде. В журнале задачи `vlm.start_recognition`
  * из-за этого осталось «duplicate key value violates unique constraint
- * revision_events_pkey» ВМЕСТО настоящей причины отказа распознавания: событие
+ * folder_events_pkey» ВМЕСТО настоящей причины отказа распознавания: событие
  * `recognition.failed` пишется внутри транзакции `finishRecognitionRun`, и запись
  * отчёта об ошибке подменила собой саму ошибку.
  *
@@ -39,7 +39,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   createPgliteDatabase,
   createTestPool,
-  revisionTreeSql,
+  folderTreeSql,
   type TestDatabase,
 } from '@id/db-harness';
 import { loadMigrations } from '@id/migrator';
@@ -47,14 +47,14 @@ import { loadMigrations } from '@id/migrator';
 import type { AuthScope } from '../../auth/scope.js';
 import { HttpProblem } from '../../lib/problem.js';
 import {
-  appendRevisionEvent,
+  appendFolderEvent,
   cancelJobsOfRecognitionRun,
-  cancelJobsOfRevision,
+  cancelJobsOfFolder,
   computeProcessingStatus,
   enqueueSystemJob,
   readJobAutoContinue,
 } from './jobs.js';
-import { resetPipelineForRevision } from './purge.js';
+import { resetPipelineForFolder } from './purge.js';
 import type { Database } from './users.js';
 
 const MIGRATIONS_DIR = join(
@@ -74,8 +74,7 @@ function id(n: number): string {
 const ORG = id(1);
 const OBJECT = id(2);
 const USER = id(3);
-const WORK = id(4);
-const REVISION = id(5);
+const FOLDER = id(5);
 
 let testDb: TestDatabase;
 let db: Database;
@@ -92,12 +91,11 @@ beforeAll(async () => {
        VALUES ('${OBJECT}', 'EVT01', 'Объект', 'ЖК «События», корпус 1')`,
     `INSERT INTO users (id, kc_sub, full_name, contractor_id)
        VALUES ('${USER}', 'kc-events', 'Сотрудник', '${ORG}')`,
-    ...revisionTreeSql({
+    ...folderTreeSql({
       contractorId: ORG,
       objectId: OBJECT,
       userId: USER,
-      workId: WORK,
-      revisionId: REVISION,
+      folderId: FOLDER,
     }),
   ];
   for (const statement of fixture) {
@@ -117,7 +115,7 @@ afterAll(async () => {
 
 /** Исполнитель, отдающий заранее заготовленные ответы. */
 function executorReturning(...results: readonly { rows: unknown[] }[]): {
-  readonly db: Parameters<typeof appendRevisionEvent>[0];
+  readonly db: Parameters<typeof appendFolderEvent>[0];
   calls: () => number;
 } {
   let calls = 0;
@@ -129,17 +127,17 @@ function executorReturning(...results: readonly { rows: unknown[] }[]): {
     },
   };
   return {
-    db: stub as unknown as Parameters<typeof appendRevisionEvent>[0],
+    db: stub as unknown as Parameters<typeof appendFolderEvent>[0],
     calls: () => calls,
   };
 }
 
-describe('appendRevisionEvent: проигранная гонка за seq', () => {
+describe('appendFolderEvent: проигранная гонка за seq', () => {
   it('пустой rows — не сбой, а повтор: исключения нет', async () => {
     const stub = executorReturning({ rows: [] }, { rows: [{ seq: 7 }] });
 
-    const seq = await appendRevisionEvent(stub.db, {
-      revisionId: REVISION,
+    const seq = await appendFolderEvent(stub.db, {
+      folderId: FOLDER,
       eventType: 'recognition.failed',
     });
 
@@ -150,7 +148,7 @@ describe('appendRevisionEvent: проигранная гонка за seq', () =
   it('seq приходит от драйвера строкой (bigint), а возвращается числом', async () => {
     const stub = executorReturning({ rows: [{ seq: '3' }] });
 
-    const seq = await appendRevisionEvent(stub.db, { revisionId: REVISION, eventType: 'x' });
+    const seq = await appendFolderEvent(stub.db, { folderId: FOLDER, eventType: 'x' });
 
     expect(seq).toBe(3);
     expect(typeof seq).toBe('number');
@@ -159,8 +157,8 @@ describe('appendRevisionEvent: проигранная гонка за seq', () =
   it('затор исчерпывает лимит попыток и отдаёт 500, а не крутится вечно', async () => {
     const stub = executorReturning({ rows: [] });
 
-    const failure = await appendRevisionEvent(stub.db, {
-      revisionId: REVISION,
+    const failure = await appendFolderEvent(stub.db, {
+      folderId: FOLDER,
       eventType: 'recognition.failed',
     }).catch((error: unknown) => error);
 
@@ -178,11 +176,11 @@ describe('appendRevisionEvent: проигранная гонка за seq', () =
         calls += 1;
         return Promise.reject(new Error('соединение потеряно'));
       },
-    } as unknown as Parameters<typeof appendRevisionEvent>[0];
+    } as unknown as Parameters<typeof appendFolderEvent>[0];
 
-    await expect(
-      appendRevisionEvent(stub, { revisionId: REVISION, eventType: 'x' }),
-    ).rejects.toThrow('соединение потеряно');
+    await expect(appendFolderEvent(stub, { folderId: FOLDER, eventType: 'x' })).rejects.toThrow(
+      'соединение потеряно',
+    );
     expect(calls).toBe(1);
   });
 });
@@ -191,13 +189,13 @@ describe('appendRevisionEvent: проигранная гонка за seq', () =
 // Главное утверждение — на настоящей БД, внутри настоящей транзакции
 // =====================================================================
 
-describe('appendRevisionEvent внутри транзакции', () => {
+describe('appendFolderEvent внутри транзакции', () => {
   it('конфликт не абортирует транзакцию вызывающего и не оставляет дыр в seq', async () => {
     await db.transaction(async (tx) => {
       // Конкурент «уже зафиксирован»: номер 1 занят.
       await tx.execute(sql`
-        insert into revision_events (revision_id, seq, event_type, payload)
-        values (${REVISION}::uuid, 1, 'seed', '{}'::jsonb)
+        insert into folder_events (folder_id, seq, event_type, payload)
+        values (${FOLDER}::uuid, 1, 'seed', '{}'::jsonb)
       `);
 
       // Первый оператор подменяется на заведомо конфликтующий — ровно тот,
@@ -209,16 +207,16 @@ describe('appendRevisionEvent внутри транзакции', () => {
           if (!first) return tx.execute(query);
           first = false;
           return tx.execute(sql`
-            insert into revision_events (revision_id, seq, event_type, payload)
-            values (${REVISION}::uuid, 1, 'race', '{}'::jsonb)
-            on conflict (revision_id, seq) do nothing
+            insert into folder_events (folder_id, seq, event_type, payload)
+            values (${FOLDER}::uuid, 1, 'race', '{}'::jsonb)
+            on conflict (folder_id, seq) do nothing
             returning seq
           `);
         },
-      } as unknown as Parameters<typeof appendRevisionEvent>[0];
+      } as unknown as Parameters<typeof appendFolderEvent>[0];
 
-      const seq = await appendRevisionEvent(racing, {
-        revisionId: REVISION,
+      const seq = await appendFolderEvent(racing, {
+        folderId: FOLDER,
         eventType: 'recognition.failed',
       });
       expect(seq).toBe(2);
@@ -230,7 +228,7 @@ describe('appendRevisionEvent внутри транзакции', () => {
     });
 
     const rows = await testDb.query<{ seq: string | number; event_type: string }>(
-      `SELECT seq, event_type FROM revision_events WHERE revision_id = '${REVISION}' ORDER BY seq`,
+      `SELECT seq, event_type FROM folder_events WHERE folder_id = '${FOLDER}' ORDER BY seq`,
     );
     // Без дыр: SSE отличает «пропущенное вне окна хранения» от «ничего нового»
     // сравнением cursor + 1 < oldestSeq, и дырявая лента даёт ложный reset.
@@ -251,12 +249,12 @@ describe('appendRevisionEvent внутри транзакции', () => {
  * находила прогона и рождала НОВОГО мертвеца — сброс не заканчивал прошлую
  * попытку, а размножал её.
  */
-describe('cancelJobsOfRevision', () => {
+describe('cancelJobsOfFolder', () => {
   async function seed(type: 'checks.run' | 'doc.classify_pages', status: string): Promise<string> {
     const { jobId } = await enqueueSystemJob(db, {
       type,
-      payload: { revisionId: REVISION },
-      dedupeKey: `${type}:${REVISION}:cancel-${status}`,
+      payload: { folderId: FOLDER },
+      dedupeKey: `${type}:${FOLDER}:cancel-${status}`,
     });
     await testDb.query(`UPDATE jobs SET status = '${status}' WHERE id = '${jobId}'`);
     return jobId;
@@ -273,7 +271,7 @@ describe('cancelJobsOfRevision', () => {
     // `done` не трогается: работа сделана, переписывать её исход нечем.
     const done = await seed('checks.run', 'done');
 
-    const cancelled = await cancelJobsOfRevision(db, REVISION);
+    const cancelled = await cancelJobsOfFolder(db, FOLDER);
     expect(cancelled).toBeGreaterThanOrEqual(3);
 
     expect(await statusOf(queued)).toBe('cancelled');
@@ -287,11 +285,11 @@ describe('cancelJobsOfRevision', () => {
   it('открытая попытка закрывается исходом cancelled, а строка журнала остаётся', async () => {
     const jobId = await seed('doc.classify_pages', 'running');
     await testDb.query(
-      `INSERT INTO job_runs (job_id, job_type, revision_id, attempt)
-         VALUES ('${jobId}', 'doc.classify_pages', '${REVISION}', 1)`,
+      `INSERT INTO job_runs (job_id, job_type, folder_id, attempt)
+         VALUES ('${jobId}', 'doc.classify_pages', '${FOLDER}', 1)`,
     );
 
-    await cancelJobsOfRevision(db, REVISION);
+    await cancelJobsOfFolder(db, FOLDER);
 
     const runs = await testDb.query<{ outcome: string | null; finished_at: string | null }>(
       `SELECT outcome, finished_at FROM job_runs WHERE job_id = '${jobId}'`,
@@ -308,7 +306,7 @@ describe('cancelJobsOfRevision', () => {
     const analysis = await seed('doc.classify_pages', 'queued');
     const checks = await seed('checks.run', 'queued');
 
-    await cancelJobsOfRevision(db, REVISION, { stages: ['analysis'] });
+    await cancelJobsOfFolder(db, FOLDER, { stages: ['analysis'] });
 
     expect(await statusOf(analysis)).toBe('cancelled');
     expect(await statusOf(checks)).toBe('queued');
@@ -319,7 +317,7 @@ describe('cancelJobsOfRevision', () => {
 
     // Пустой список — «снимать нечего», а не «снять всё». Молчаливое расширение
     // до всех типов было бы худшим из возможных прочтений.
-    expect(await cancelJobsOfRevision(db, REVISION, { stages: [] })).toBe(0);
+    expect(await cancelJobsOfFolder(db, FOLDER, { stages: [] })).toBe(0);
     expect(await statusOf(job)).toBe('queued');
   });
 });
@@ -352,7 +350,7 @@ describe('cancelJobsOfRecognitionRun', () => {
   async function seed(runId: string, status: string, tag: string): Promise<string> {
     const { jobId } = await enqueueSystemJob(db, {
       type: 'vlm.recognize_page',
-      payload: { revisionId: REVISION, recognitionRunId: runId, pageIndex: pageIndex++ },
+      payload: { folderId: FOLDER, recognitionRunId: runId, pageIndex: pageIndex++ },
       dedupeKey: `vlm.recognize_page:${runId}:${tag}`,
     });
     await testDb.query(`UPDATE jobs SET status = '${status}' WHERE id = '${jobId}'`);
@@ -369,7 +367,7 @@ describe('cancelJobsOfRecognitionRun', () => {
     const parentDone = await seed(PARENT, 'done', 'done');
     const childQueued = await seed(CHILD, 'queued', 'child');
 
-    const cancelled = await cancelJobsOfRecognitionRun(db, REVISION, PARENT);
+    const cancelled = await cancelJobsOfRecognitionRun(db, FOLDER, PARENT);
     expect(cancelled).toBe(2);
 
     expect(await statusOf(parentDead)).toBe('cancelled');
@@ -384,11 +382,11 @@ describe('cancelJobsOfRecognitionRun', () => {
   it('открытая попытка родителя закрывается, а строка журнала остаётся', async () => {
     const jobId = await seed(PARENT, 'running', 'attempt');
     await testDb.query(
-      `INSERT INTO job_runs (job_id, job_type, revision_id, attempt)
-         VALUES ('${jobId}', 'vlm.recognize_page', '${REVISION}', 1)`,
+      `INSERT INTO job_runs (job_id, job_type, folder_id, attempt)
+         VALUES ('${jobId}', 'vlm.recognize_page', '${FOLDER}', 1)`,
     );
 
-    await cancelJobsOfRecognitionRun(db, REVISION, PARENT);
+    await cancelJobsOfRecognitionRun(db, FOLDER, PARENT);
 
     const runs = await testDb.query<{ outcome: string | null; finished_at: string | null }>(
       `SELECT outcome, finished_at FROM job_runs WHERE job_id = '${jobId}'`,
@@ -402,7 +400,7 @@ describe('cancelJobsOfRecognitionRun', () => {
     // Восстановление первого же прогона ревизии: у родителя задач может не
     // остаться вовсе (их снёс сброс конвейера), и это не повод для отказа.
     const unknown = '00000000-0000-4000-8000-0000000000af';
-    expect(await cancelJobsOfRecognitionRun(db, REVISION, unknown)).toBe(0);
+    expect(await cancelJobsOfRecognitionRun(db, FOLDER, unknown)).toBe(0);
   });
 });
 
@@ -427,12 +425,12 @@ describe('cancelJobsOfRecognitionRun', () => {
  */
 describe('enqueueSystemJob: какие состояния держат dedupe_key', () => {
   /** Свой ключ на состояние: тесты внутри describe делят одну базу. */
-  const keyOf = (status: string): string => `checks.run:${REVISION}:${status}`;
+  const keyOf = (status: string): string => `checks.run:${FOLDER}:${status}`;
 
   async function enqueue(status: string): Promise<{ jobId: string; created: boolean }> {
     return enqueueSystemJob(db, {
       type: 'checks.run',
-      payload: { revisionId: REVISION },
+      payload: { folderId: FOLDER },
       dedupeKey: keyOf(status),
     });
   }
@@ -478,14 +476,14 @@ describe('enqueueSystemJob: какие состояния держат dedupe_ke
     // Тот самый путь, из-за которого «нажал, и ничего не происходит»: сброс
     // отменяет задачи ревизии, и следующее нажатие обязано поставить работу
     // снова, а не получить в ответ отменённого мертвеца.
-    const key = `checks.run:${REVISION}:reset`;
+    const key = `checks.run:${FOLDER}:reset`;
     const before = await enqueueSystemJob(db, {
       type: 'checks.run',
-      payload: { revisionId: REVISION },
+      payload: { folderId: FOLDER },
       dedupeKey: key,
     });
 
-    await resetPipelineForRevision(db, REVISION);
+    await resetPipelineForFolder(db, FOLDER);
 
     const status = await testDb.query<{ status: string }>(
       `SELECT status FROM jobs WHERE id = '${before.jobId}'`,
@@ -494,7 +492,7 @@ describe('enqueueSystemJob: какие состояния держат dedupe_ke
 
     const after = await enqueueSystemJob(db, {
       type: 'checks.run',
-      payload: { revisionId: REVISION },
+      payload: { folderId: FOLDER },
       dedupeKey: key,
     });
     expect(after.created).toBe(true);
@@ -506,17 +504,17 @@ describe('enqueueSystemJob: какие состояния держат dedupe_ke
     // выбрасывает входящий целиком. Поэтому задача, поставленная ручной кнопкой
     // БЕЗ autoContinue, съедала нажатие «2. Распознать», сделанное следом:
     // цепочка доходила до своего звена и молча вставала.
-    const key = `doc.classify_pages:${REVISION}:auto`;
+    const key = `doc.classify_pages:${FOLDER}:auto`;
     const manual = await enqueueSystemJob(db, {
       type: 'doc.classify_pages',
-      payload: { revisionId: REVISION },
+      payload: { folderId: FOLDER },
       dedupeKey: key,
     });
     expect(await readJobAutoContinue(db, manual.jobId)).toBe(false);
 
     const throughRun = await enqueueSystemJob(db, {
       type: 'doc.classify_pages',
-      payload: { revisionId: REVISION, autoContinue: true },
+      payload: { folderId: FOLDER, autoContinue: true },
       dedupeKey: key,
     });
     expect(throughRun.jobId).toBe(manual.jobId);
@@ -528,7 +526,7 @@ describe('enqueueSystemJob: какие состояния держат dedupe_ke
     // неверно в другую сторону.
     await enqueueSystemJob(db, {
       type: 'doc.classify_pages',
-      payload: { revisionId: REVISION },
+      payload: { folderId: FOLDER },
       dedupeKey: key,
     });
     expect(await readJobAutoContinue(db, manual.jobId)).toBe(true);
@@ -544,16 +542,16 @@ describe('enqueueSystemJob: какие состояния держат dedupe_ke
     // Расхождение предиката с `ux_jobs_dedupe_key` даёт не тихий дефект, а
     // «no unique or exclusion constraint matching the ON CONFLICT
     // specification» на КАЖДОЙ постановке. Проверяется здесь, а не на стенде.
-    const key = `checks.run:${REVISION}:predicate`;
+    const key = `checks.run:${FOLDER}:predicate`;
     const first = await enqueueSystemJob(db, {
       type: 'checks.run',
-      payload: { revisionId: REVISION },
+      payload: { folderId: FOLDER },
       dedupeKey: key,
     });
     await expect(
       enqueueSystemJob(db, {
         type: 'checks.run',
-        payload: { revisionId: REVISION },
+        payload: { folderId: FOLDER },
         dedupeKey: key,
       }),
     ).resolves.toEqual({ jobId: first.jobId, created: false });
@@ -589,24 +587,24 @@ describe('computeProcessingStatus: разметка постранично', () 
          VALUES ('${BLOB}', 'blobs/${BLOB}', 1024, 'application/pdf')`,
     );
     await testDb.query(
-      `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order, verify_state)
-         VALUES ('${FILE}', '${REVISION}', '${BLOB}', 'komplekt.pdf', 0, 'ok')`,
+      `INSERT INTO source_files (id, folder_id, blob_sha256, file_name, sort_order, verify_state)
+         VALUES ('${FILE}', '${FOLDER}', '${BLOB}', 'komplekt.pdf', 0, 'ok')`,
     );
     await testDb.query(
       `INSERT INTO processing_bundles
-         (id, revision_id, aggregate_manifest_hash, working_pdf_blob_sha256, builder_version)
-       VALUES ('${BUNDLE}', '${REVISION}', '${'d'.repeat(64)}', '${BLOB}', 'bundle/1+pdf-lib')`,
+         (id, folder_id, aggregate_manifest_hash, working_pdf_blob_sha256, builder_version)
+       VALUES ('${BUNDLE}', '${FOLDER}', '${'d'.repeat(64)}', '${BLOB}', 'bundle/1+pdf-lib')`,
     );
     for (let index = 0; index < PAGE_COUNT; index += 1) {
       const pageId = id(210 + index);
       await testDb.query(
         `INSERT INTO source_pages
-           (id, revision_id, source_file_id, file_page_index, revision_ordinal, width_px, height_px, rotation)
-         VALUES ('${pageId}', '${REVISION}', '${FILE}', ${String(index)}, ${String(index)}, 1654, 2339, 0)`,
+           (id, folder_id, source_file_id, file_page_index, folder_ordinal, width_px, height_px, rotation)
+         VALUES ('${pageId}', '${FOLDER}', '${FILE}', ${String(index)}, ${String(index)}, 1654, 2339, 0)`,
       );
       await testDb.query(
-        `INSERT INTO processing_bundle_pages (bundle_id, revision_id, working_page_index, source_page_id)
-           VALUES ('${BUNDLE}', '${REVISION}', ${String(index)}, '${pageId}')`,
+        `INSERT INTO processing_bundle_pages (bundle_id, folder_id, working_page_index, source_page_id)
+           VALUES ('${BUNDLE}', '${FOLDER}', ${String(index)}, '${pageId}')`,
       );
     }
   }
@@ -616,7 +614,7 @@ describe('computeProcessingStatus: разметка постранично', () 
     const { jobId } = await enqueueSystemJob(db, {
       type: 'layout.detect_local',
       payload: {
-        revisionId: REVISION,
+        folderId: FOLDER,
         layoutRevisionId: id(220),
         pageIndices: [pageIndex],
       },
@@ -630,7 +628,7 @@ describe('computeProcessingStatus: разметка постранично', () 
     const { jobId } = await enqueueSystemJob(db, {
       type: 'page.orientation_probe',
       payload: {
-        revisionId: REVISION,
+        folderId: FOLDER,
         layoutRevisionId: id(220),
         bundleId: BUNDLE,
         sourcePageId: id(210 + pageIndex),
@@ -643,7 +641,7 @@ describe('computeProcessingStatus: разметка постранично', () 
 
   /** Чистая очередь: сценарии ниже проверяют состояния, а не их наслоение. */
   async function clearJobs(): Promise<void> {
-    await testDb.query(`DELETE FROM jobs WHERE payload ->> 'revisionId' = '${REVISION}'`);
+    await testDb.query(`DELETE FROM jobs WHERE payload ->> 'folderId' = '${FOLDER}'`);
   }
 
   const layoutOf = async (): Promise<{
@@ -652,7 +650,7 @@ describe('computeProcessingStatus: разметка постранично', () 
     pagesPending: number;
     pagesFailed: number;
   } | null> => {
-    const status = await computeProcessingStatus(db, SCOPE, REVISION);
+    const status = await computeProcessingStatus(db, SCOPE, FOLDER);
     return status?.layout ?? null;
   };
 
@@ -774,7 +772,7 @@ describe('computeProcessingStatus: разметка постранично', () 
     }
     await enqueueSystemJob(db, {
       type: 'layout.start',
-      payload: { revisionId: REVISION },
+      payload: { folderId: FOLDER },
       dedupeKey: 'layout.start:progress',
     });
 
@@ -792,7 +790,7 @@ describe('computeProcessingStatus: разметка постранично', () 
     // Полоса при этом обязана исчезнуть, а не показывать прошлый комплект.
     await testDb.query(
       `UPDATE jobs SET status = 'done'
-        WHERE payload ->> 'revisionId' = '${REVISION}' AND status IN ('queued', 'running')`,
+        WHERE payload ->> 'folderId' = '${FOLDER}' AND status IN ('queued', 'running')`,
     );
 
     expect(await layoutOf()).toBeNull();

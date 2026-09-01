@@ -39,13 +39,13 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 /**
  * Куда предъявляется талон. Значение участвует в ВЫВОДЕ ключа подписи.
  *
- * `revision-file-replacement` отделён от `revision-file` по тому же доводу, что
+ * `folder-file-replacement` отделён от `folder-file` по тому же доводу, что
  * и импорт справочника: у замены другие последствия — она сносит прежний файл и
  * весь разбор по нему, — и талон, годный для обоих маршрутов, означал бы, что
  * замену можно запустить забытой проверкой одного поля. Разный домен подписи
  * делает подмену невозможной по построению.
  */
-export type UploadPurpose = 'revision-file' | 'revision-file-replacement' | 'catalog-import';
+export type UploadPurpose = 'folder-file' | 'folder-file-replacement' | 'catalog-import';
 
 export interface UploadTicket {
   readonly uploadId: string;

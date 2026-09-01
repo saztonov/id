@@ -66,12 +66,12 @@ export function pageLabel(finding: Finding): string {
 }
 
 /** Есть ли у замечания рабочий адрес разметки. Без него ссылка не рисуется. */
-export function markupHref(revisionId: string, finding: Finding): string | null {
+export function markupHref(folderId: string, finding: Finding): string | null {
   const index = finding.page?.workingPageIndex ?? null;
   if (index === null) return null;
   const query = new URLSearchParams({ tab: 'markup', page: String(index) });
   if (finding.blockId !== null) query.set('block', finding.blockId);
-  return `/ids/revisions/${revisionId}?${query.toString()}`;
+  return `/ids/folders/${folderId}?${query.toString()}`;
 }
 
 /**

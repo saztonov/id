@@ -1,7 +1,7 @@
 /**
  * Запуск цепочки разметки поверх ГОТОВОГО рабочего документа.
  *
- * Вынесено из маршрута `POST /revisions/{id}/layout` отдельным модулем, потому
+ * Вынесено из маршрута `POST /folders/{id}/layout` отдельным модулем, потому
  * что вызывающих стало двое, и второй — не маршрут:
  *
  * 1. прежний маршрут «Разметить файл» (ручной путь инженера, не изменился);
@@ -27,7 +27,7 @@ import type { Database } from '../../db/repositories/users.js';
 import { listBundlePages } from '../../db/repositories/bundles.js';
 import { enqueueJob, reviveFailedJobs } from '../../db/repositories/jobs.js';
 import { ensureDraftLayout, pinMarkupPolicy } from '../../db/repositories/layout.js';
-import { resetPipelineForRevision } from '../../db/repositories/purge.js';
+import { resetPipelineForFolder } from '../../db/repositories/purge.js';
 import {
   readDetectionSettings,
   readImmutabilityEnforced,
@@ -60,20 +60,15 @@ export async function enqueueMarkupBuild(
   db: Database,
   scope: AuthScope,
   input: {
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly aggregateManifestHash: string;
     readonly logger: Logger;
   },
 ): Promise<{ readonly jobId: string; readonly created: boolean }> {
   const { jobId, created } = await enqueueJob(db, scope, {
     type: 'bundle.build',
-    payload: tracePayload({ revisionId: input.revisionId, startMarkup: true }),
-    dedupeKey: dedupeKeyFor(
-      'bundle.build',
-      input.revisionId,
-      input.aggregateManifestHash,
-      'markup',
-    ),
+    payload: tracePayload({ folderId: input.folderId, startMarkup: true }),
+    dedupeKey: dedupeKeyFor('bundle.build', input.folderId, input.aggregateManifestHash, 'markup'),
   });
 
   input.logger.info(
@@ -183,7 +178,7 @@ export async function startMarkupOnBundle(
   db: Database,
   scope: AuthScope,
   input: {
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly bundleId: string;
     readonly previewCached: boolean;
     readonly logger: Logger;
@@ -219,11 +214,11 @@ export async function startMarkupOnBundle(
    * больше нет.
    */
   if (!enforceGates) {
-    await resetPipelineForRevision(db, input.revisionId);
+    await resetPipelineForFolder(db, input.folderId);
   }
 
   const { layout, created } = await ensureDraftLayout(db, scope, {
-    revisionId: input.revisionId,
+    folderId: input.folderId,
     bundleId: input.bundleId,
     enforceGates,
     markupPolicy: detection.markupPolicy,
@@ -272,7 +267,7 @@ export async function startMarkupOnBundle(
    * дедупликация склеит новую задачу с мертвецом и вернёт `created: false`.
    */
   const revived = await reviveFailedJobs(db, {
-    revisionId: input.revisionId,
+    folderId: input.folderId,
     stage: 'layout',
     scopeKey: 'layoutRevisionId',
     scopeValue: layout.id,
@@ -348,7 +343,7 @@ export async function startMarkupOnBundle(
     if (orientation.enabled) {
       const probes = await enqueueOrientationProbes(db, scope, {
         layoutRevisionId: layout.id,
-        revisionId: input.revisionId,
+        folderId: input.folderId,
         bundleId: input.bundleId,
         pages: pageMap.map((page) => ({
           workingPageIndex: page.workingPageIndex,
@@ -370,7 +365,7 @@ export async function startMarkupOnBundle(
 
     const enqueued = await enqueueLocalDetectBatches(db, scope, {
       layoutRevisionId: layout.id,
-      revisionId: input.revisionId,
+      folderId: input.folderId,
       pages,
       overwriteExisting: false,
       logger: input.logger,
@@ -396,7 +391,7 @@ export async function startMarkupOnBundle(
     // в очереди, черновик может смениться (вытеснение №1 → создание №2), и
     // задача отработала бы по чужой цели.
     payload: tracePayload({
-      revisionId: input.revisionId,
+      folderId: input.folderId,
       bundleId: input.bundleId,
       layoutRevisionId: layout.id,
     }),
@@ -438,7 +433,7 @@ export async function enqueueDetectBatches(
   scope: AuthScope,
   input: {
     readonly layoutRevisionId: string;
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly pages: readonly number[];
     readonly logger: Logger;
   },
@@ -449,7 +444,7 @@ export async function enqueueDetectBatches(
     const { jobId } = await enqueueJob(db, scope, {
       type: 'layout.detect_pages',
       payload: tracePayload({
-        revisionId: input.revisionId,
+        folderId: input.folderId,
         layoutRevisionId: input.layoutRevisionId,
         pageIndices: batch,
         overwriteExisting: true,
@@ -485,7 +480,7 @@ export async function enqueueLocalDetectBatches(
   scope: AuthScope,
   input: {
     readonly layoutRevisionId: string;
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly pages: readonly number[];
     readonly overwriteExisting: boolean;
     readonly logger: Logger;
@@ -499,7 +494,7 @@ export async function enqueueLocalDetectBatches(
     const { jobId, created } = await enqueueJob(db, scope, {
       type: 'layout.detect_local',
       payload: tracePayload({
-        revisionId: input.revisionId,
+        folderId: input.folderId,
         layoutRevisionId: input.layoutRevisionId,
         pageIndices: [pageIndex],
         ...(input.overwriteExisting ? { overwriteExisting: true } : {}),
@@ -566,7 +561,7 @@ export async function enqueueOrientationProbes(
   scope: AuthScope,
   input: {
     readonly layoutRevisionId: string;
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly bundleId: string;
     readonly pages: readonly { readonly workingPageIndex: number; readonly sourcePageId: string }[];
     readonly logger: Logger;
@@ -578,7 +573,7 @@ export async function enqueueOrientationProbes(
     const { jobId, created } = await enqueueJob(db, scope, {
       type: 'page.orientation_probe',
       payload: tracePayload({
-        revisionId: input.revisionId,
+        folderId: input.folderId,
         layoutRevisionId: input.layoutRevisionId,
         bundleId: input.bundleId,
         sourcePageId: page.sourcePageId,

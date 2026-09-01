@@ -21,7 +21,7 @@ import type { PageClassification, PageInput } from './types.js';
 function page(id: string, text = ''): PageInput {
   return {
     sourcePageId: id,
-    revisionOrdinal: 1,
+    folderOrdinal: 1,
     sourceFileId: 'file-1',
     filePageIndex: 0,
     pageTextVersionId: `ptv-${id}`,

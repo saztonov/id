@@ -158,13 +158,13 @@ export async function uploadToTicket(
 
 /** Приём нового файла в ревизию. */
 export async function uploadFile(
-  revisionId: string,
+  folderId: string,
   file: File,
   onRetry?: UploadRetryListener,
 ): Promise<SourceFile> {
-  const ticket = await files.initUpload(revisionId, file.name, file.size);
+  const ticket = await files.initUpload(folderId, file.name, file.size);
   await uploadToTicket(ticket, file, onRetry);
-  return files.completeUpload(revisionId, ticket.uploadId);
+  return files.completeUpload(folderId, ticket.uploadId);
 }
 
 /**
@@ -177,12 +177,12 @@ export async function uploadFile(
  * файла отвергается, пока собран рабочий документ.
  */
 export async function replaceFile(
-  revisionId: string,
+  folderId: string,
   fileId: string,
   file: File,
   onRetry?: UploadRetryListener,
 ): Promise<SourceFile> {
-  const ticket = await files.initReplacement(revisionId, fileId, file.name, file.size);
+  const ticket = await files.initReplacement(folderId, fileId, file.name, file.size);
   await uploadToTicket(ticket, file, onRetry);
-  return files.completeReplacement(revisionId, fileId, ticket.uploadId);
+  return files.completeReplacement(folderId, fileId, ticket.uploadId);
 }

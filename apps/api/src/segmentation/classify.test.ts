@@ -44,7 +44,7 @@ const FIXTURE_TEXTS: Readonly<Record<string, readonly string[]>> = {
 function page(id: string, text: string, extra: Partial<PageInput> = {}): PageInput {
   return {
     sourcePageId: id,
-    revisionOrdinal: Number(id.replace(/\D/gu, '')) || 1,
+    folderOrdinal: Number(id.replace(/\D/gu, '')) || 1,
     sourceFileId: 'file-1',
     filePageIndex: 0,
     pageTextVersionId: `ptv-${id}`,

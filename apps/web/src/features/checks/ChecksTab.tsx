@@ -39,58 +39,35 @@
  *
  * `checks-summary` · `checks-run-state` · `checks-report` ·
  * `checks-report-section-{kind}` · `checks-report-row-{id}` ·
- * `findings-blocking` · `findings-waived`.
+ * `findings-waived`.
  */
-import { useState, type ReactNode } from 'react';
-import { Alert, App as AntApp, Button, Collapse, Space, Typography } from 'antd';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { bundles, checks, workflow } from '../../api/endpoints.js';
-import { revisionKeys } from '../../api/keys.js';
-import { describeError } from '../../api/problem.js';
-import type { Finding } from '../../api/types.js';
-import { useSession } from '../../app/session.js';
+import { type ReactNode } from 'react';
+import { Alert, Collapse, Space, Typography } from 'antd';
+import { useQuery } from '@tanstack/react-query';
+import { bundles, checks } from '../../api/endpoints.js';
+import { folderKeys } from '../../api/keys.js';
 import { ErrorState, LoadingState } from '../../shared/ui.js';
 import { coverageGap, runStateOf, splitFindings, summaryText, type RunState } from './grouping.js';
 import { ReportTable } from './ReportTable.js';
-import { OverrideDialog } from './OverrideDialog.js';
-import { ApprovalCard } from '../workflow/ApprovalCard.js';
 
-export function ChecksTab({ revisionId }: { revisionId: string }): ReactNode {
-  const { can } = useSession();
-  const { message } = AntApp.useApp();
-  const queryClient = useQueryClient();
-  const [overriding, setOverriding] = useState<Finding | null>(null);
-
+export function ChecksTab({ folderId }: { folderId: string }): ReactNode {
   const findings = useQuery({
-    queryKey: revisionKeys.findings(revisionId),
-    queryFn: () => checks.findings(revisionId),
+    queryKey: folderKeys.findings(folderId),
+    queryFn: () => checks.findings(folderId),
   });
   // Отдельный запрос от замечаний: состав комплекта не обязан ехать заново
   // после снятия одного замечания, а список замечаний — после пересборки
   // нарезки. Инвалидируются оба одним событием потока (`case 'checks'`).
   const reportQuery = useQuery({
-    queryKey: revisionKeys.checkReport(revisionId),
-    queryFn: () => checks.report(revisionId),
+    queryKey: folderKeys.checkReport(folderId),
+    queryFn: () => checks.report(folderId),
   });
   // Тот же ключ, что у вкладки «Файлы»: признак «состав изменился после
   // проверки» считает сервер, и второго запроса при переходе между вкладками
   // не будет.
   const bundleList = useQuery({
-    queryKey: revisionKeys.bundles(revisionId),
-    queryFn: () => bundles.list(revisionId),
-  });
-
-  const override = useMutation({
-    mutationFn: (input: { findingId: string; reason: string }) =>
-      workflow.override(input.findingId, input.reason),
-    onSuccess: async () => {
-      message.success('Замечание снято обоснованным решением руководителя');
-      setOverriding(null);
-      await queryClient.invalidateQueries({ queryKey: revisionKeys.findings(revisionId) });
-      await queryClient.invalidateQueries({ queryKey: revisionKeys.checkReport(revisionId) });
-      await queryClient.invalidateQueries({ queryKey: revisionKeys.workflow(revisionId) });
-    },
-    onError: (error) => message.error(describeError(error)),
+    queryKey: folderKeys.bundles(folderId),
+    queryFn: () => bundles.list(folderId),
   });
 
   if (findings.isPending || reportQuery.isPending)
@@ -104,20 +81,6 @@ export function ChecksTab({ revisionId }: { revisionId: string }): ReactNode {
   const runState = runStateOf(summary, bundle?.matchesCurrentFiles ?? true);
   const gap = coverageGap(summary);
 
-  /**
-   * Замечания, которые может снять только руководитель.
-   *
-   * Прежде кнопка стояла колонкой в таблице замечаний, и вместе с той таблицей
-   * исчезла бы возможность, а не только её вид (ADR-0014: «убраны кнопки, а не
-   * возможности»). Здесь она собрана отдельным списком: у того, кто снимать не
-   * вправе, раздела нет вовсе, а у руководителя он короткий — блокирующих
-   * замечаний единицы, и искать их по всей таблице состава было бы дольше.
-   */
-  const canOverride = can('revision.override');
-  const blocking = canOverride
-    ? items.filter((finding) => finding.state === 'open' && finding.isBlocking)
-    : [];
-
   return (
     <>
       <Typography.Paragraph data-testid="checks-summary">
@@ -126,29 +89,7 @@ export function ChecksTab({ revisionId }: { revisionId: string }): ReactNode {
 
       <RunStateAlert state={runState} gap={gap} />
 
-      <ReportTable revisionId={revisionId} report={reportQuery.data} />
-
-      {blocking.length > 0 && (
-        <div data-testid="findings-blocking" style={{ marginTop: 8, marginBottom: 24 }}>
-          <Typography.Title level={3} style={{ fontSize: 16 }}>
-            Требуют решения руководителя
-          </Typography.Title>
-          <Space direction="vertical" size={8} style={{ width: '100%' }}>
-            {blocking.map((finding) => (
-              <Space key={finding.id} size={8} align="start" wrap>
-                <Button size="small" onClick={() => setOverriding(finding)}>
-                  Снять с обоснованием
-                </Button>
-                <Typography.Text>{finding.text}</Typography.Text>
-                <Typography.Text type="secondary">
-                  — {finding.document?.label ?? finding.target.label}
-                  {finding.page === null ? '' : `, страница ${String(finding.page.number)}`}
-                </Typography.Text>
-              </Space>
-            ))}
-          </Space>
-        </div>
-      )}
+      <ReportTable folderId={folderId} report={reportQuery.data} />
 
       {sections.waived.length > 0 && (
         <div data-testid="findings-waived" style={{ marginTop: 24 }}>
@@ -180,24 +121,6 @@ export function ChecksTab({ revisionId }: { revisionId: string }): ReactNode {
           />
         </div>
       )}
-
-      {/*
-        Согласование — под результатом проверки. Подрядчик видит, что нашлось,
-        и тут же решает, отдавать ли комплект генподрядчику.
-      */}
-      <div style={{ marginTop: 24 }}>
-        <ApprovalCard revisionId={revisionId} />
-      </div>
-
-      <OverrideDialog
-        finding={overriding}
-        busy={override.isPending}
-        onCancel={() => setOverriding(null)}
-        onSubmit={(reason) => {
-          if (overriding === null) return;
-          override.mutate({ findingId: overriding.id, reason });
-        }}
-      />
     </>
   );
 }

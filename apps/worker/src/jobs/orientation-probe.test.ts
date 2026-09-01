@@ -40,7 +40,7 @@ function makeContext(
     type: 'page.orientation_probe',
     attempt: options.attempt,
     maxAttempts: options.maxAttempts,
-    revisionId: (payload['revisionId'] as string) ?? null,
+    folderId: (payload['folderId'] as string) ?? null,
     payload,
     db: undefined,
     logger: silentLogger(),
@@ -50,13 +50,13 @@ function makeContext(
   } as unknown as JobContext<'page.orientation_probe'>;
 }
 
-const REVISION = '00000000-0000-4000-8000-000000000001';
+const FOLDER = '00000000-0000-4000-8000-000000000001';
 const LAYOUT = '00000000-0000-4000-8000-000000000002';
 const BUNDLE = '00000000-0000-4000-8000-000000000003';
 const PAGE = '00000000-0000-4000-8000-000000000004';
 
 const PAYLOAD = {
-  revisionId: REVISION,
+  folderId: FOLDER,
   layoutRevisionId: LAYOUT,
   bundleId: BUNDLE,
   sourcePageId: PAGE,

@@ -45,8 +45,7 @@ function id(n: number): string {
 const OBJECT = id(1);
 const ORG = id(2);
 const USER = id(3);
-const WORK = id(4);
-const REVISION = id(5);
+const FOLDER = id(5);
 const FILE = id(6);
 const BUNDLE = id(7);
 const SHA = 'a'.repeat(64);
@@ -65,8 +64,8 @@ let db: Database;
 
 async function policyEvents(): Promise<readonly { event_type: string; payload: unknown }[]> {
   return testDb.query<{ event_type: string; payload: unknown }>(
-    `SELECT event_type, payload FROM revision_events
-      WHERE revision_id = '${REVISION}' AND event_type = 'layout.policy_pinned'
+    `SELECT event_type, payload FROM folder_events
+      WHERE folder_id = '${FOLDER}' AND event_type = 'layout.policy_pinned'
       ORDER BY seq`,
   );
 }
@@ -88,17 +87,15 @@ beforeAll(async () => {
        VALUES ('${OBJECT}', 'roofing') ON CONFLICT DO NOTHING`,
     `INSERT INTO object_contractors (object_id, contractor_id)
        VALUES ('${OBJECT}', '${ORG}') ON CONFLICT DO NOTHING`,
-    `INSERT INTO works
+    `INSERT INTO folders
        (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-       VALUES ('${WORK}', '${OBJECT}', '${ORG}', '${ORG}', 'roofing', DATE '2026-01-01', 'Комплект', '${USER}')`,
-    `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
-       VALUES ('${REVISION}', '${WORK}', '${OBJECT}', '${ORG}', 1, 'draft')`,
+     VALUES ('${FOLDER}', '${OBJECT}', '${ORG}', '${ORG}', 'roofing', DATE '2026-01-01', 'Комплект', '${USER}')`,
     `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
        VALUES ('${SHA}', 'blobs/${SHA}', 1024, 'application/pdf')`,
-    `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order, verify_state)
-       VALUES ('${FILE}', '${REVISION}', '${SHA}', 'комплект.pdf', 0, 'ok')`,
-    `INSERT INTO processing_bundles (id, revision_id, aggregate_manifest_hash, working_pdf_blob_sha256, builder_version)
-       VALUES ('${BUNDLE}', '${REVISION}', '${'b'.repeat(64)}', '${SHA}', 'bundle/1+pdf-lib')`,
+    `INSERT INTO source_files (id, folder_id, blob_sha256, file_name, sort_order, verify_state)
+       VALUES ('${FILE}', '${FOLDER}', '${SHA}', 'комплект.pdf', 0, 'ok')`,
+    `INSERT INTO processing_bundles (id, folder_id, aggregate_manifest_hash, working_pdf_blob_sha256, builder_version)
+       VALUES ('${BUNDLE}', '${FOLDER}', '${'b'.repeat(64)}', '${SHA}', 'bundle/1+pdf-lib')`,
   ];
   for (const statement of fixture) await testDb.query(statement);
 
@@ -115,7 +112,7 @@ describe('пин правила разметки', () => {
     // появления правила, и судиться они обязаны тем правилом, по которому их
     // действительно размечали.
     const { layout, created } = await ensureDraftLayout(db, SCOPE, {
-      revisionId: REVISION,
+      folderId: FOLDER,
       bundleId: BUNDLE,
     });
 
@@ -127,7 +124,7 @@ describe('пин правила разметки', () => {
     // Иначе любое обращение к разметке — открытие экрана, гранулярный маршрут —
     // молча меняло бы правило посреди идущего веера задач.
     const { layout, created } = await ensureDraftLayout(db, SCOPE, {
-      revisionId: REVISION,
+      folderId: FOLDER,
       bundleId: BUNDLE,
       markupPolicy: SHEET_AWARE,
     });
@@ -194,7 +191,7 @@ describe('пин правила разметки', () => {
 /** Единственный черновик поставки: частичный UNIQUE не даёт им сосуществовать. */
 async function draftId(): Promise<string | null> {
   const rows = await testDb.query<{ id: string }>(
-    `SELECT id FROM layout_revisions WHERE revision_id = '${REVISION}' AND state = 'draft'`,
+    `SELECT id FROM layout_revisions WHERE folder_id = '${FOLDER}' AND state = 'draft'`,
   );
   return rows[0]?.id ?? null;
 }

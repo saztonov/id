@@ -14,7 +14,7 @@
  */
 import type { Logger } from 'pino';
 import type { EnqueueJobInput, EnqueueResult, JobExecutor } from '../db/repositories/jobs.js';
-import { appendRevisionEvent, reapExpiredLeases } from '../db/repositories/jobs.js';
+import { appendFolderEvent, reapExpiredLeases } from '../db/repositories/jobs.js';
 import type { Database } from '../db/repositories/users.js';
 import {
   JOB_TYPES,
@@ -30,7 +30,7 @@ export interface JobContext<K extends JobType = JobType> {
   readonly attempt: number;
   readonly maxAttempts: number;
   /** Ревизия поставки, если задача к ней относится. */
-  readonly revisionId: string | null;
+  readonly folderId: string | null;
   readonly payload: JobPayloadMap[K];
   readonly db: Database;
   /** Дочерний логгер с `request_id`, `job_type`, `job_id` и номером попытки (§11). */
@@ -139,18 +139,18 @@ export function createMaintenanceRegistry(options: MaintenanceRegistryOptions = 
  * функции — «как обработчик сообщает о прогрессе», и место ей рядом с
  * определением контекста.
  */
-export async function emitRevisionEvent(
+export async function emitFolderEvent(
   db: JobExecutor,
-  revisionId: string | null,
+  folderId: string | null,
   logger: Logger,
   eventType: string,
   payload?: Record<string, unknown>,
 ): Promise<void> {
-  if (revisionId === null) {
+  if (folderId === null) {
     // Обслуживающая задача не относится к поставке, и «прицепить» её событие
     // к какой-нибудь ревизии нельзя: лента ревизии — это её история.
-    logger.debug({ event: 'revision_event_skipped', event_type: eventType }, 'событие без ревизии');
+    logger.debug({ event: 'folder_event_skipped', event_type: eventType }, 'событие без ревизии');
     return;
   }
-  await appendRevisionEvent(db, { revisionId, eventType, ...(payload ? { payload } : {}) });
+  await appendFolderEvent(db, { folderId, eventType, ...(payload ? { payload } : {}) });
 }

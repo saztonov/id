@@ -22,7 +22,7 @@ import {
 import { DetectionConfigurationError } from '../detection/errors.js';
 import type { MarkupTarget } from './markup.js';
 
-const REVISION = '00000000-0000-4000-8000-000000000001';
+const FOLDER = '00000000-0000-4000-8000-000000000001';
 const LAYOUT = '00000000-0000-4000-8000-000000000002';
 const BUNDLE = '00000000-0000-4000-8000-000000000003';
 
@@ -200,7 +200,7 @@ interface Recorder {
 function target(policy: MarkupPolicy): MarkupTarget {
   return {
     layoutRevisionId: LAYOUT,
-    revisionId: REVISION,
+    folderId: FOLDER,
     bundleId: BUNDLE,
     objectId: '00000000-0000-4000-8000-000000000005',
     state: 'draft',
@@ -256,7 +256,7 @@ function recorder(): Recorder {
 
 function context(pageIndices: readonly number[]): JobContext<'layout.detect_local'> {
   return {
-    payload: { revisionId: REVISION, layoutRevisionId: LAYOUT, pageIndices },
+    payload: { folderId: FOLDER, layoutRevisionId: LAYOUT, pageIndices },
     signal: new AbortController().signal,
     logger: { info: () => {}, warn: () => {}, error: () => {} },
     enqueue: () => Promise.resolve({ jobId: 'job', created: true }),

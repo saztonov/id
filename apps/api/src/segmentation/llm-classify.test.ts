@@ -27,7 +27,7 @@ const PROMPT = { system: 'системный промт', user: 'пользов�
 function page(text: string, extra: Partial<PageInput> = {}): PageInput {
   return {
     sourcePageId: 'p1',
-    revisionOrdinal: 1,
+    folderOrdinal: 1,
     sourceFileId: 'file-1',
     filePageIndex: 0,
     pageTextVersionId: 'ptv-1',

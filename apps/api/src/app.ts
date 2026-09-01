@@ -102,7 +102,7 @@ import { registerHealthRoutes } from './routes/health.js';
 import { registerCatalogRoutes } from './modules/catalog/routes.js';
 import { registerCatalogImportRoutes } from './modules/catalog/imports.js';
 import { registerObjectRuleProfileRoutes } from './modules/catalog/object-rule-profiles.js';
-import { registerRevisionEventRoutes } from './modules/events/sse.js';
+import { registerFolderEventRoutes } from './modules/events/sse.js';
 import { registerNavigationRoutes } from './modules/navigation/routes.js';
 import { registerFileRoutes } from './modules/files/routes.js';
 import { registerBundleRoutes } from './modules/bundles/routes.js';
@@ -111,7 +111,6 @@ import { registerPipelineRoutes } from './modules/pipeline/routes.js';
 import { registerLayoutRoutes } from './modules/layout/routes.js';
 import { registerRecognitionRoutes } from './modules/recognition/routes.js';
 import { registerDocumentRoutes } from './modules/documents/routes.js';
-import { registerWorkflowRoutes } from './modules/workflow/routes.js';
 import { queueSnapshot } from './db/repositories/jobs.js';
 import { createStorage, type StorageProvider } from './storage/provider.js';
 import { LOCAL_UPLOAD_PATH } from './storage/local.js';
@@ -661,7 +660,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppInstan
   // Приём ошибок браузера. Без него исключение при отрисовке гасит интерфейс
   // и не оставляет следа ни в одном журнале.
   registerClientErrorRoutes(app);
-  registerRevisionEventRoutes(app);
+  registerFolderEventRoutes(app);
   registerCatalogRoutes(app);
   registerCatalogImportRoutes(app);
   // Профили правил объекта — тот же префикс `/catalog`, но свой модуль: у них своя
@@ -696,10 +695,9 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppInstan
   // собственные тесты и недостижим снаружи — отказ S3 в чистом виде.
   registerDocumentRoutes(app);
   // Согласование, нарезка, архив, retention и legal hold (§4.1, §4.2, §9.6,
-  // §13). До S10 права `submission.submit`, `revision.return`,
-  // `revision.override` и `archive.download` были объявлены в матрице и не
+  // §13). До S10 права `submission.submit`, `folder.return`,
+  // `folder.override` и `archive.download` были объявлены в матрице и не
   // имели ни одного маршрута — то есть выглядели защитой, ничего не защищая.
-  registerWorkflowRoutes(app);
 
   app.addHook('onClose', async () => {
     // Журнал дописывается до закрытия пула: после него писать некуда, и

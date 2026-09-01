@@ -217,7 +217,7 @@ export const docTypeCandidates = pgTable("doc_type_candidates", {
 	occurrences: integer().default(1).notNull(),
 	firstSeenAt: timestamp("first_seen_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
 	lastSeenAt: timestamp("last_seen_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-	sampleRevisionId: uuid("sample_revision_id"),
+	sampleFolderId: uuid("sample_folder_id"),
 	sampleSourcePageId: uuid("sample_source_page_id"),
 	status: text().default('new').notNull(),
 	mappedDocTypeCode: text("mapped_doc_type_code"),
@@ -226,8 +226,8 @@ export const docTypeCandidates = pgTable("doc_type_candidates", {
 }, (table) => [
 	index("ix_doc_type_candidates_mapped").using("btree", table.mappedDocTypeCode.asc().nullsLast().op("text_ops")),
 	index("ix_doc_type_candidates_reviewed_by").using("btree", table.reviewedBy.asc().nullsLast().op("uuid_ops")),
+	index("ix_doc_type_candidates_sample_folder").using("btree", table.sampleFolderId.asc().nullsLast().op("uuid_ops")),
 	index("ix_doc_type_candidates_sample_page").using("btree", table.sampleSourcePageId.asc().nullsLast().op("uuid_ops")),
-	index("ix_doc_type_candidates_sample_revision").using("btree", table.sampleRevisionId.asc().nullsLast().op("uuid_ops")),
 	index("ix_doc_type_candidates_status").using("btree", table.status.asc().nullsLast().op("text_ops"), table.occurrences.desc().nullsFirst().op("text_ops")),
 	foreignKey({
 			columns: [table.mappedDocTypeCode],
@@ -245,60 +245,9 @@ export const docTypeCandidates = pgTable("doc_type_candidates", {
 	check("doc_type_candidates_mapped_chk", sql`(status <> 'mapped'::text) OR (mapped_doc_type_code IS NOT NULL)`),
 ]);
 
-export const submissionRevisions = pgTable("submission_revisions", {
-	id: uuid().defaultRandom().primaryKey().notNull(),
-	workId: uuid("work_id").notNull(),
-	objectId: uuid("object_id").notNull(),
-	contractorId: uuid("contractor_id").notNull(),
-	revisionNo: integer("revision_no").notNull(),
-	parentRevisionId: uuid("parent_revision_id"),
-	status: text().default('draft').notNull(),
-	aggregateManifestHash: text("aggregate_manifest_hash"),
-	version: integer().default(0).notNull(),
-	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-	updatedAt: timestamp("updated_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-	submittedAt: timestamp("submitted_at", { withTimezone: true, mode: 'string' }),
-	submittedBy: uuid("submitted_by"),
-	decidedAt: timestamp("decided_at", { withTimezone: true, mode: 'string' }),
-	decidedBy: uuid("decided_by"),
-	returnReason: text("return_reason"),
-}, (table) => [
-	index("ix_submission_revisions_contractor").using("btree", table.contractorId.asc().nullsLast().op("uuid_ops")),
-	index("ix_submission_revisions_decided_by").using("btree", table.decidedBy.asc().nullsLast().op("uuid_ops")),
-	index("ix_submission_revisions_object").using("btree", table.objectId.asc().nullsLast().op("uuid_ops")),
-	index("ix_submission_revisions_parent").using("btree", table.parentRevisionId.asc().nullsLast().op("uuid_ops")),
-	index("ix_submission_revisions_status").using("btree", table.status.asc().nullsLast().op("text_ops")),
-	index("ix_submission_revisions_submitted_by").using("btree", table.submittedBy.asc().nullsLast().op("uuid_ops")),
-	uniqueIndex("ux_submission_revisions_single_draft").using("btree", table.workId.asc().nullsLast().op("uuid_ops")).where(sql`(status = 'draft'::text)`),
-	foreignKey({
-			columns: [table.parentRevisionId],
-			foreignColumns: [table.id],
-			name: "submission_revisions_parent_revision_id_fkey"
-		}),
-	foreignKey({
-			columns: [table.submittedBy],
-			foreignColumns: [users.id],
-			name: "submission_revisions_submitted_by_fkey"
-		}),
-	foreignKey({
-			columns: [table.decidedBy],
-			foreignColumns: [users.id],
-			name: "submission_revisions_decided_by_fkey"
-		}),
-	unique("submission_revisions_scope_uq").on(table.contractorId, table.id, table.objectId),
-	unique("submission_revisions_object_uq").on(table.id, table.objectId),
-	unique("submission_revisions_work_no_uq").on(table.revisionNo, table.workId),
-	unique("submission_revisions_work_id_uq").on(table.id, table.workId),
-	check("submission_revisions_revision_no_chk", sql`revision_no > 0`),
-	check("submission_revisions_version_chk", sql`version >= 0`),
-	check("submission_revisions_status_chk", sql`status = ANY (ARRAY['draft'::text, 'submitted'::text, 'in_review'::text, 'returned'::text, 'approved'::text, 'superseded'::text])`),
-	check("submission_revisions_manifest_hash_chk", sql`aggregate_manifest_hash ~ '^[0-9a-f]{64}$'::text`),
-	check("submission_revisions_parent_chk", sql`(revision_no = 1) OR (parent_revision_id IS NOT NULL)`),
-]);
-
 export const sourceFiles = pgTable("source_files", {
 	id: uuid().defaultRandom().primaryKey().notNull(),
-	revisionId: uuid("revision_id").notNull(),
+	folderId: uuid("folder_id").notNull(),
 	blobSha256: text("blob_sha256").notNull(),
 	fileName: text("file_name").notNull(),
 	sortOrder: integer("sort_order").notNull(),
@@ -309,13 +258,8 @@ export const sourceFiles = pgTable("source_files", {
 }, (table) => [
 	index("ix_source_files_blob").using("btree", table.blobSha256.asc().nullsLast().op("text_ops")),
 	index("ix_source_files_verify_state").using("btree", table.verifyState.asc().nullsLast().op("text_ops")).where(sql`(verify_state <> 'ok'::text)`),
-	foreignKey({
-			columns: [table.revisionId],
-			foreignColumns: [submissionRevisions.id],
-			name: "source_files_revision_id_fkey"
-		}),
-	unique("source_files_order_uq").on(table.revisionId, table.sortOrder),
-	unique("source_files_revision_id_uq").on(table.id, table.revisionId),
+	unique("source_files_order_uq").on(table.folderId, table.sortOrder),
+	unique("source_files_folder_id_uq").on(table.folderId, table.id),
 	check("source_files_sort_order_chk", sql`sort_order >= 0`),
 	check("source_files_verify_state_chk", sql`verify_state = ANY (ARRAY['pending'::text, 'ok'::text, 'quarantined'::text])`),
 ]);
@@ -333,9 +277,55 @@ export const storedBlobs = pgTable("stored_blobs", {
 	check("stored_blobs_size_chk", sql`size_bytes >= 0`),
 ]);
 
+export const folders = pgTable("folders", {
+	id: uuid().defaultRandom().primaryKey().notNull(),
+	objectId: uuid("object_id").notNull(),
+	contractorId: uuid("contractor_id").notNull(),
+	aggregateManifestHash: text("aggregate_manifest_hash"),
+	version: integer().default(0).notNull(),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	updatedAt: timestamp("updated_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	sectionCode: text("section_code").notNull(),
+	period: date(),
+	title: text().notNull(),
+	managedByContractorId: uuid("managed_by_contractor_id").notNull(),
+	contractorAssumed: boolean("contractor_assumed").default(false).notNull(),
+	contractorRaw: text("contractor_raw"),
+	ordinal: integer(),
+	autoRunEnabled: boolean("auto_run_enabled").default(false).notNull(),
+	createdBy: uuid("created_by").notNull(),
+}, (table) => [
+	index("ix_folders_contractor").using("btree", table.contractorId.asc().nullsLast().op("uuid_ops")),
+	index("ix_folders_created_by").using("btree", table.createdBy.asc().nullsLast().op("uuid_ops")),
+	index("ix_folders_managed_by").using("btree", table.managedByContractorId.asc().nullsLast().op("uuid_ops")),
+	index("ix_folders_object").using("btree", table.objectId.asc().nullsLast().op("uuid_ops")),
+	index("ix_folders_section_period").using("btree", table.objectId.asc().nullsLast().op("uuid_ops"), table.sectionCode.asc().nullsLast().op("uuid_ops"), table.period.asc().nullsLast().op("date_ops")),
+	foreignKey({
+			columns: [table.managedByContractorId],
+			foreignColumns: [counterparties.id],
+			name: "folders_managed_by_contractor_id_fkey"
+		}),
+	foreignKey({
+			columns: [table.createdBy],
+			foreignColumns: [users.id],
+			name: "folders_created_by_fkey"
+		}),
+	foreignKey({
+			columns: [table.contractorId],
+			foreignColumns: [counterparties.id],
+			name: "folders_contractor_id_fkey"
+		}),
+	unique("folders_scope_uq").on(table.contractorId, table.id, table.objectId),
+	unique("folders_object_uq").on(table.id, table.objectId),
+	check("folders_version_chk", sql`version >= 0`),
+	check("folders_period_chk", sql`(period IS NULL) OR (EXTRACT(day FROM period) = (1)::numeric)`),
+	check("folders_ordinal_chk", sql`(ordinal IS NULL) OR (ordinal > 0)`),
+	check("folders_manifest_hash_chk", sql`aggregate_manifest_hash ~ '^[0-9a-f]{64}$'::text`),
+]);
+
 export const layoutRevisions = pgTable("layout_revisions", {
 	id: uuid().defaultRandom().primaryKey().notNull(),
-	revisionId: uuid("revision_id").notNull(),
+	folderId: uuid("folder_id").notNull(),
 	objectId: uuid("object_id").notNull(),
 	bundleId: uuid("bundle_id").notNull(),
 	revisionNo: integer("revision_no").notNull(),
@@ -357,11 +347,11 @@ export const layoutRevisions = pgTable("layout_revisions", {
 	index("ix_layout_revisions_manual_editor").using("btree", table.firstManualEditBy.asc().nullsLast().op("uuid_ops")),
 	index("ix_layout_revisions_object").using("btree", table.objectId.asc().nullsLast().op("uuid_ops")),
 	index("ix_layout_revisions_profile").using("btree", table.layoutProfileId.asc().nullsLast().op("uuid_ops")),
-	uniqueIndex("ux_layout_revisions_single_draft").using("btree", table.revisionId.asc().nullsLast().op("uuid_ops")).where(sql`(state = 'draft'::text)`),
+	uniqueIndex("ux_layout_revisions_single_draft").using("btree", table.folderId.asc().nullsLast().op("uuid_ops")).where(sql`(state = 'draft'::text)`),
 	foreignKey({
-			columns: [table.revisionId],
-			foreignColumns: [submissionRevisions.id],
-			name: "layout_revisions_revision_id_fkey"
+			columns: [table.folderId],
+			foreignColumns: [folders.id],
+			name: "layout_revisions_folder_id_fkey"
 		}),
 	foreignKey({
 			columns: [table.frozenBy],
@@ -369,8 +359,8 @@ export const layoutRevisions = pgTable("layout_revisions", {
 			name: "layout_revisions_frozen_by_fkey"
 		}),
 	foreignKey({
-			columns: [table.revisionId, table.objectId],
-			foreignColumns: [submissionRevisions.id, submissionRevisions.objectId],
+			columns: [table.folderId, table.objectId],
+			foreignColumns: [folders.id, folders.objectId],
 			name: "layout_revisions_scope_fk"
 		}),
 	foreignKey({
@@ -378,9 +368,9 @@ export const layoutRevisions = pgTable("layout_revisions", {
 			foreignColumns: [users.id],
 			name: "layout_revisions_first_manual_edit_by_fkey"
 		}),
-	unique("layout_revisions_no_uq").on(table.revisionId, table.revisionNo),
-	unique("layout_revisions_revision_id_uq").on(table.id, table.revisionId),
-	unique("layout_revisions_scope_uq").on(table.bundleId, table.id, table.objectId, table.revisionId),
+	unique("layout_revisions_no_uq").on(table.folderId, table.revisionNo),
+	unique("layout_revisions_scope_uq").on(table.bundleId, table.folderId, table.id, table.objectId),
+	unique("layout_revisions_folder_id_uq").on(table.folderId, table.id),
 	check("layout_revisions_revision_no_chk", sql`revision_no > 0`),
 	check("layout_revisions_version_chk", sql`version >= 0`),
 	check("layout_revisions_blocks_hash_chk", sql`blocks_hash ~ '^[0-9a-f]{64}$'::text`),
@@ -392,7 +382,7 @@ export const layoutRevisions = pgTable("layout_revisions", {
 
 export const processingBundles = pgTable("processing_bundles", {
 	id: uuid().defaultRandom().primaryKey().notNull(),
-	revisionId: uuid("revision_id").notNull(),
+	folderId: uuid("folder_id").notNull(),
 	aggregateManifestHash: text("aggregate_manifest_hash").notNull(),
 	workingPdfBlobSha256: text("working_pdf_blob_sha256").notNull(),
 	builderVersion: text("builder_version").notNull(),
@@ -400,26 +390,26 @@ export const processingBundles = pgTable("processing_bundles", {
 }, (table) => [
 	index("ix_processing_bundles_blob").using("btree", table.workingPdfBlobSha256.asc().nullsLast().op("text_ops")),
 	foreignKey({
-			columns: [table.revisionId],
-			foreignColumns: [submissionRevisions.id],
-			name: "processing_bundles_revision_id_fkey"
-		}),
-	foreignKey({
 			columns: [table.workingPdfBlobSha256],
 			foreignColumns: [storedBlobs.sha256],
 			name: "processing_bundles_working_pdf_blob_sha256_fkey"
 		}),
-	unique("processing_bundles_manifest_uq").on(table.aggregateManifestHash, table.builderVersion, table.revisionId),
-	unique("processing_bundles_revision_id_uq").on(table.id, table.revisionId),
+	foreignKey({
+			columns: [table.folderId],
+			foreignColumns: [folders.id],
+			name: "processing_bundles_folder_id_fkey"
+		}),
+	unique("processing_bundles_manifest_uq").on(table.aggregateManifestHash, table.builderVersion, table.folderId),
+	unique("processing_bundles_folder_id_uq").on(table.folderId, table.id),
 	check("processing_bundles_manifest_hash_chk", sql`aggregate_manifest_hash ~ '^[0-9a-f]{64}$'::text`),
 ]);
 
 export const sourcePages = pgTable("source_pages", {
 	id: uuid().defaultRandom().primaryKey().notNull(),
-	revisionId: uuid("revision_id").notNull(),
+	folderId: uuid("folder_id").notNull(),
 	sourceFileId: uuid("source_file_id").notNull(),
 	filePageIndex: integer("file_page_index").notNull(),
-	revisionOrdinal: integer("revision_ordinal").notNull(),
+	folderOrdinal: integer("folder_ordinal").notNull(),
 	widthPx: integer("width_px").notNull(),
 	heightPx: integer("height_px").notNull(),
 	rotation: integer().default(0).notNull(),
@@ -428,29 +418,29 @@ export const sourcePages = pgTable("source_pages", {
 }, (table) => [
 	index("ix_source_pages_file").using("btree", table.sourceFileId.asc().nullsLast().op("uuid_ops")),
 	foreignKey({
-			columns: [table.revisionId],
-			foreignColumns: [submissionRevisions.id],
-			name: "source_pages_revision_id_fkey"
-		}),
-	foreignKey({
 			columns: [table.sourceFileId],
 			foreignColumns: [sourceFiles.id],
 			name: "source_pages_source_file_id_fkey"
 		}),
 	foreignKey({
-			columns: [table.revisionId, table.sourceFileId],
-			foreignColumns: [sourceFiles.id, sourceFiles.revisionId],
+			columns: [table.folderId, table.sourceFileId],
+			foreignColumns: [sourceFiles.folderId, sourceFiles.id],
 			name: "source_pages_file_fk"
 		}),
+	foreignKey({
+			columns: [table.folderId],
+			foreignColumns: [folders.id],
+			name: "source_pages_folder_id_fkey"
+		}),
 	unique("source_pages_file_index_uq").on(table.filePageIndex, table.sourceFileId),
-	unique("source_pages_revision_ordinal_uq").on(table.revisionId, table.revisionOrdinal),
-	unique("source_pages_revision_id_uq").on(table.id, table.revisionId),
+	unique("source_pages_folder_id_uq").on(table.folderId, table.id),
+	unique("source_pages_folder_ordinal_uq").on(table.folderId, table.folderOrdinal),
 	check("source_pages_file_page_index_chk", sql`file_page_index >= 0`),
-	check("source_pages_revision_ordinal_chk", sql`revision_ordinal >= 0`),
 	check("source_pages_width_chk", sql`width_px > 0`),
 	check("source_pages_height_chk", sql`height_px > 0`),
 	check("source_pages_rotation_chk", sql`rotation = ANY (ARRAY[0, 90, 180, 270])`),
 	check("source_pages_attention_flags_chk", sql`attention_flags <@ ARRAY['no_blocks'::text, 'low_coverage'::text, 'suspicious_overlap'::text, 'bbox_out_of_page'::text, 'degenerate_geometry'::text, 'tiny_block'::text, 'neighbor_mismatch'::text, 'blank_page_candidate'::text, 'missing_expected_stamp'::text, 'layout_hash_mismatch'::text, 'text_fallback_applied'::text]`),
+	check("source_pages_folder_ordinal_chk", sql`folder_ordinal >= 0`),
 ]);
 
 export const artifactVersions = pgTable("artifact_versions", {
@@ -490,7 +480,7 @@ export const rdRunDocuments = pgTable("rd_run_documents", {
 export const layoutBlocks = pgTable("layout_blocks", {
 	id: uuid().defaultRandom().primaryKey().notNull(),
 	layoutRevisionId: uuid("layout_revision_id").notNull(),
-	revisionId: uuid("revision_id").notNull(),
+	folderId: uuid("folder_id").notNull(),
 	bundleId: uuid("bundle_id").notNull(),
 	sourcePageId: uuid("source_page_id").notNull(),
 	workingPageIndex: integer("working_page_index").notNull(),
@@ -509,8 +499,8 @@ export const layoutBlocks = pgTable("layout_blocks", {
 	detectionScore: doublePrecision("detection_score"),
 	detectionModelVersion: text("detection_model_version"),
 }, (table) => [
+	index("ix_layout_blocks_folder_page").using("btree", table.layoutRevisionId.asc().nullsLast().op("uuid_ops"), table.sourcePageId.asc().nullsLast().op("uuid_ops"), table.sortOrder.asc().nullsLast().op("uuid_ops")),
 	index("ix_layout_blocks_object").using("btree", table.objectId.asc().nullsLast().op("uuid_ops")),
-	index("ix_layout_blocks_revision_page").using("btree", table.layoutRevisionId.asc().nullsLast().op("uuid_ops"), table.sourcePageId.asc().nullsLast().op("uuid_ops"), table.sortOrder.asc().nullsLast().op("uuid_ops")),
 	index("ix_layout_blocks_source_page").using("btree", table.sourcePageId.asc().nullsLast().op("uuid_ops")),
 	foreignKey({
 			columns: [table.layoutRevisionId],
@@ -523,17 +513,17 @@ export const layoutBlocks = pgTable("layout_blocks", {
 			name: "layout_blocks_source_page_id_fkey"
 		}),
 	foreignKey({
-			columns: [table.layoutRevisionId, table.revisionId, table.bundleId, table.objectId],
-			foreignColumns: [layoutRevisions.bundleId, layoutRevisions.id, layoutRevisions.objectId, layoutRevisions.revisionId],
+			columns: [table.layoutRevisionId, table.folderId, table.bundleId, table.objectId],
+			foreignColumns: [layoutRevisions.bundleId, layoutRevisions.folderId, layoutRevisions.id, layoutRevisions.objectId],
 			name: "layout_blocks_scope_fk"
 		}).onDelete("cascade"),
 	foreignKey({
-			columns: [table.revisionId, table.sourcePageId],
-			foreignColumns: [sourcePages.id, sourcePages.revisionId],
+			columns: [table.folderId, table.sourcePageId],
+			foreignColumns: [sourcePages.folderId, sourcePages.id],
 			name: "layout_blocks_source_page_fk"
 		}),
-	unique("layout_blocks_revision_id_uq").on(table.id, table.revisionId),
 	unique("layout_blocks_layout_revision_uq").on(table.id, table.layoutRevisionId),
+	unique("layout_blocks_folder_id_uq").on(table.folderId, table.id),
 	check("layout_blocks_working_page_index_chk", sql`working_page_index >= 0`),
 	check("layout_blocks_sort_order_chk", sql`sort_order >= 0`),
 	check("layout_blocks_block_type_chk", sql`block_type = ANY (ARRAY['text'::text, 'image'::text, 'stamp'::text])`),
@@ -546,7 +536,7 @@ export const layoutBlocks = pgTable("layout_blocks", {
 
 export const recognitionRuns = pgTable("recognition_runs", {
 	id: uuid().defaultRandom().primaryKey().notNull(),
-	revisionId: uuid("revision_id").notNull(),
+	folderId: uuid("folder_id").notNull(),
 	layoutRevisionId: uuid("layout_revision_id").notNull(),
 	rdRunDocumentId: uuid("rd_run_document_id"),
 	rdJobId: text("rd_job_id"),
@@ -563,16 +553,11 @@ export const recognitionRuns = pgTable("recognition_runs", {
 	recoveryRound: integer("recovery_round").default(0).notNull(),
 	repairOfRunId: uuid("repair_of_run_id"),
 }, (table) => [
+	index("ix_recognition_runs_folder").using("btree", table.folderId.asc().nullsLast().op("uuid_ops")),
 	index("ix_recognition_runs_layout").using("btree", table.layoutRevisionId.asc().nullsLast().op("uuid_ops")),
 	index("ix_recognition_runs_rd_document").using("btree", table.rdRunDocumentId.asc().nullsLast().op("uuid_ops")),
 	index("ix_recognition_runs_repair_of").using("btree", table.repairOfRunId.asc().nullsLast().op("uuid_ops")).where(sql`(repair_of_run_id IS NOT NULL)`),
-	index("ix_recognition_runs_revision").using("btree", table.revisionId.asc().nullsLast().op("uuid_ops")),
 	index("ix_recognition_runs_status").using("btree", table.status.asc().nullsLast().op("text_ops")).where(sql`(status = 'running'::text)`),
-	foreignKey({
-			columns: [table.revisionId],
-			foreignColumns: [submissionRevisions.id],
-			name: "recognition_runs_revision_id_fkey"
-		}),
 	foreignKey({
 			columns: [table.layoutRevisionId],
 			foreignColumns: [layoutRevisions.id],
@@ -584,8 +569,8 @@ export const recognitionRuns = pgTable("recognition_runs", {
 			name: "recognition_runs_rd_run_document_id_fkey"
 		}),
 	foreignKey({
-			columns: [table.revisionId, table.layoutRevisionId],
-			foreignColumns: [layoutRevisions.id, layoutRevisions.revisionId],
+			columns: [table.folderId, table.layoutRevisionId],
+			foreignColumns: [layoutRevisions.folderId, layoutRevisions.id],
 			name: "recognition_runs_layout_fk"
 		}),
 	foreignKey({
@@ -594,12 +579,17 @@ export const recognitionRuns = pgTable("recognition_runs", {
 			name: "recognition_runs_rd_document_fk"
 		}),
 	foreignKey({
+			columns: [table.folderId],
+			foreignColumns: [folders.id],
+			name: "recognition_runs_folder_id_fkey"
+		}),
+	foreignKey({
 			columns: [table.repairOfRunId],
 			foreignColumns: [table.id],
 			name: "recognition_runs_repair_of_run_id_fkey"
 		}),
-	unique("recognition_runs_revision_id_uq").on(table.id, table.revisionId),
 	unique("recognition_runs_layout_revision_uq").on(table.id, table.layoutRevisionId),
+	unique("recognition_runs_folder_id_uq").on(table.folderId, table.id),
 	check("recognition_runs_status_chk", sql`status = ANY (ARRAY['running'::text, 'done'::text, 'integrity_error'::text, 'failed'::text])`),
 	check("recognition_runs_local_hash_chk", sql`local_layout_hash ~ '^[0-9a-f]{64}$'::text`),
 	check("recognition_runs_remote_before_chk", sql`remote_layout_hash_before ~ '^[0-9a-f]{64}$'::text`),
@@ -670,7 +660,7 @@ export const currentBlockResult = pgTable("current_block_result", {
 
 export const aiRuns = pgTable("ai_runs", {
 	id: uuid().defaultRandom().primaryKey().notNull(),
-	revisionId: uuid("revision_id").notNull(),
+	folderId: uuid("folder_id").notNull(),
 	stage: text().notNull(),
 	provider: text().notNull(),
 	model: text().notNull(),
@@ -686,13 +676,13 @@ export const aiRuns = pgTable("ai_runs", {
 	requestId: text("request_id"),
 	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
 }, (table) => [
+	index("ix_ai_runs_folder").using("btree", table.folderId.asc().nullsLast().op("timestamptz_ops"), table.createdAt.desc().nullsFirst().op("timestamptz_ops")),
 	index("ix_ai_runs_request").using("btree", table.requestId.asc().nullsLast().op("text_ops")),
-	index("ix_ai_runs_revision").using("btree", table.revisionId.asc().nullsLast().op("uuid_ops"), table.createdAt.desc().nullsFirst().op("uuid_ops")),
-	index("ix_ai_runs_stage").using("btree", table.stage.asc().nullsLast().op("text_ops"), table.createdAt.desc().nullsFirst().op("text_ops")),
+	index("ix_ai_runs_stage").using("btree", table.stage.asc().nullsLast().op("timestamptz_ops"), table.createdAt.desc().nullsFirst().op("text_ops")),
 	foreignKey({
-			columns: [table.revisionId],
-			foreignColumns: [submissionRevisions.id],
-			name: "ai_runs_revision_id_fkey"
+			columns: [table.folderId],
+			foreignColumns: [folders.id],
+			name: "ai_runs_folder_id_fkey"
 		}),
 	check("ai_runs_provider_chk", sql`provider = ANY (ARRAY['proxy_llm'::text, 'rdweb'::text, 'recorded'::text])`),
 	check("ai_runs_input_hash_chk", sql`input_hash ~ '^[0-9a-f]{64}$'::text`),
@@ -703,7 +693,7 @@ export const aiRuns = pgTable("ai_runs", {
 
 export const pageTextVersions = pgTable("page_text_versions", {
 	id: uuid().defaultRandom().primaryKey().notNull(),
-	revisionId: uuid("revision_id").notNull(),
+	folderId: uuid("folder_id").notNull(),
 	sourcePageId: uuid("source_page_id").notNull(),
 	recognitionRunId: uuid("recognition_run_id").notNull(),
 	artifactVersionId: uuid("artifact_version_id").notNull(),
@@ -736,17 +726,17 @@ export const pageTextVersions = pgTable("page_text_versions", {
 			name: "page_text_versions_artifact_fk"
 		}),
 	foreignKey({
-			columns: [table.revisionId, table.sourcePageId],
-			foreignColumns: [sourcePages.id, sourcePages.revisionId],
+			columns: [table.folderId, table.sourcePageId],
+			foreignColumns: [sourcePages.folderId, sourcePages.id],
 			name: "page_text_versions_page_fk"
 		}),
 	foreignKey({
-			columns: [table.revisionId, table.recognitionRunId],
-			foreignColumns: [recognitionRuns.id, recognitionRuns.revisionId],
+			columns: [table.folderId, table.recognitionRunId],
+			foreignColumns: [recognitionRuns.folderId, recognitionRuns.id],
 			name: "page_text_versions_run_fk"
 		}),
 	unique("page_text_versions_page_run_uq").on(table.recognitionRunId, table.sourcePageId),
-	unique("page_text_versions_revision_id_uq").on(table.id, table.revisionId),
+	unique("page_text_versions_folder_id_uq").on(table.folderId, table.id),
 	check("page_text_versions_sha256_chk", sql`text_sha256 ~ '^[0-9a-f]{64}$'::text`),
 	check("page_text_versions_offset_convention_chk", sql`offset_convention = 'utf16-code-unit'::text`),
 	check("page_text_versions_render_version_chk", sql`render_version ~ '^[a-z0-9][a-z0-9._-]*$'::text`),
@@ -754,7 +744,7 @@ export const pageTextVersions = pgTable("page_text_versions", {
 
 export const pageAssignments = pgTable("page_assignments", {
 	id: uuid().defaultRandom().primaryKey().notNull(),
-	revisionId: uuid("revision_id").notNull(),
+	folderId: uuid("folder_id").notNull(),
 	sourcePageId: uuid("source_page_id").notNull(),
 	documentId: uuid("document_id"),
 	sortOrder: integer("sort_order"),
@@ -766,25 +756,77 @@ export const pageAssignments = pgTable("page_assignments", {
 	index("ix_page_assignments_document").using("btree", table.documentId.asc().nullsLast().op("int4_ops"), table.sortOrder.asc().nullsLast().op("uuid_ops")),
 	index("ix_page_assignments_role").using("btree", table.pageRoleCode.asc().nullsLast().op("text_ops")),
 	index("ix_page_assignments_source_page").using("btree", table.sourcePageId.asc().nullsLast().op("uuid_ops")),
-	index("ix_page_assignments_unassigned").using("btree", table.revisionId.asc().nullsLast().op("uuid_ops")).where(sql`(document_id IS NULL)`),
+	index("ix_page_assignments_unassigned").using("btree", table.folderId.asc().nullsLast().op("uuid_ops")).where(sql`(document_id IS NULL)`),
 	foreignKey({
 			columns: [table.pageRoleCode],
 			foreignColumns: [pageRoles.code],
 			name: "page_assignments_page_role_code_fkey"
 		}),
 	foreignKey({
-			columns: [table.revisionId, table.sourcePageId],
-			foreignColumns: [sourcePages.id, sourcePages.revisionId],
+			columns: [table.folderId, table.sourcePageId],
+			foreignColumns: [sourcePages.folderId, sourcePages.id],
 			name: "page_assignments_source_page_fk"
 		}),
-	unique("page_assignments_page_uq").on(table.revisionId, table.sourcePageId),
+	unique("page_assignments_page_uq").on(table.folderId, table.sourcePageId),
 	check("page_assignments_sort_order_chk", sql`(sort_order IS NULL) OR (sort_order >= 0)`),
 	check("page_assignments_state_chk", sql`((document_id IS NOT NULL) AND (sort_order IS NOT NULL) AND (reason IS NULL)) OR ((document_id IS NULL) AND (sort_order IS NULL) AND (page_role_code IS NULL) AND (reason IS NOT NULL))`),
 ]);
 
+export const fieldValues = pgTable("field_values", {
+	id: uuid().defaultRandom().primaryKey().notNull(),
+	folderId: uuid("folder_id").notNull(),
+	documentId: uuid("document_id").notNull(),
+	fieldCode: text("field_code").notNull(),
+	valueText: text("value_text"),
+	valueDate: date("value_date"),
+	valueNum: numeric("value_num"),
+	valueJson: jsonb("value_json"),
+	confidence: doublePrecision(),
+	isVerified: boolean("is_verified").default(false).notNull(),
+	extractorVersion: text("extractor_version").notNull(),
+	pageTextVersionId: uuid("page_text_version_id"),
+	sourceBlockId: uuid("source_block_id"),
+	charSpan: int4range("char_span"),
+	quote: text(),
+	extractedBy: text("extracted_by").notNull(),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	complectId: uuid("complect_id"),
+}, (table) => [
+	index("ix_field_values_complect").using("btree", table.complectId.asc().nullsLast().op("uuid_ops")),
+	index("ix_field_values_document").using("btree", table.documentId.asc().nullsLast().op("uuid_ops"), table.fieldCode.asc().nullsLast().op("uuid_ops")),
+	index("ix_field_values_folder").using("btree", table.folderId.asc().nullsLast().op("uuid_ops")),
+	index("ix_field_values_page_text").using("btree", table.pageTextVersionId.asc().nullsLast().op("uuid_ops")),
+	index("ix_field_values_source_block").using("btree", table.sourceBlockId.asc().nullsLast().op("uuid_ops")),
+	foreignKey({
+			columns: [table.pageTextVersionId],
+			foreignColumns: [pageTextVersions.id],
+			name: "field_values_page_text_version_id_fkey"
+		}),
+	foreignKey({
+			columns: [table.sourceBlockId],
+			foreignColumns: [layoutBlocks.id],
+			name: "field_values_source_block_id_fkey"
+		}),
+	foreignKey({
+			columns: [table.folderId, table.pageTextVersionId],
+			foreignColumns: [pageTextVersions.folderId, pageTextVersions.id],
+			name: "field_values_page_text_fk"
+		}),
+	foreignKey({
+			columns: [table.folderId, table.sourceBlockId],
+			foreignColumns: [layoutBlocks.folderId, layoutBlocks.id],
+			name: "field_values_source_block_fk"
+		}),
+	check("field_values_field_code_chk", sql`field_code ~ '^[a-z][a-z0-9_]*$'::text`),
+	check("field_values_confidence_chk", sql`(confidence IS NULL) OR ((confidence >= (0)::double precision) AND (confidence <= (1)::double precision))`),
+	check("field_values_extracted_by_chk", sql`extracted_by = ANY (ARRAY['rule'::text, 'llm'::text, 'manual'::text])`),
+	check("field_values_span_source_chk", sql`(char_span IS NULL) OR (page_text_version_id IS NOT NULL)`),
+	check("field_values_span_bounds_chk", sql`(char_span IS NULL) OR (lower(char_span) >= 0)`),
+]);
+
 export const registryRows = pgTable("registry_rows", {
 	id: uuid().defaultRandom().primaryKey().notNull(),
-	revisionId: uuid("revision_id").notNull(),
+	folderId: uuid("folder_id").notNull(),
 	documentId: uuid("document_id").notNull(),
 	rowNo: integer("row_no").notNull(),
 	sectionTitle: text("section_title"),
@@ -801,12 +843,14 @@ export const registryRows = pgTable("registry_rows", {
 	matchState: text("match_state").default('missing').notNull(),
 	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
 	ordinal: integer().notNull(),
+	complectId: uuid("complect_id"),
 }, (table) => [
-	index("ix_registry_rows_document_ordinal").using("btree", table.documentId.asc().nullsLast().op("uuid_ops"), table.ordinal.asc().nullsLast().op("int4_ops")),
+	index("ix_registry_rows_complect").using("btree", table.complectId.asc().nullsLast().op("uuid_ops")),
+	index("ix_registry_rows_document_ordinal").using("btree", table.documentId.asc().nullsLast().op("int4_ops"), table.ordinal.asc().nullsLast().op("int4_ops")),
+	index("ix_registry_rows_folder").using("btree", table.folderId.asc().nullsLast().op("uuid_ops")),
 	index("ix_registry_rows_matched").using("btree", table.matchedDocumentId.asc().nullsLast().op("uuid_ops")),
 	index("ix_registry_rows_no_folded").using("btree", table.docNoFolded.asc().nullsLast().op("text_ops")),
 	index("ix_registry_rows_no_norm").using("btree", table.docNoNorm.asc().nullsLast().op("text_ops")),
-	index("ix_registry_rows_revision").using("btree", table.revisionId.asc().nullsLast().op("uuid_ops")),
 	unique("registry_rows_ordinal_uq").on(table.documentId, table.ordinal),
 	check("registry_rows_row_no_chk", sql`row_no > 0`),
 	check("registry_rows_match_score_chk", sql`(match_score IS NULL) OR ((match_score >= (0)::double precision) AND (match_score <= (1)::double precision))`),
@@ -815,59 +859,9 @@ export const registryRows = pgTable("registry_rows", {
 	check("registry_rows_match_state_chk", sql`match_state = ANY (ARRAY['matched'::text, 'missing'::text, 'extra'::text, 'ambiguous'::text, 'candidate'::text])`),
 ]);
 
-export const fieldValues = pgTable("field_values", {
-	id: uuid().defaultRandom().primaryKey().notNull(),
-	revisionId: uuid("revision_id").notNull(),
-	documentId: uuid("document_id").notNull(),
-	fieldCode: text("field_code").notNull(),
-	valueText: text("value_text"),
-	valueDate: date("value_date"),
-	valueNum: numeric("value_num"),
-	valueJson: jsonb("value_json"),
-	confidence: doublePrecision(),
-	isVerified: boolean("is_verified").default(false).notNull(),
-	extractorVersion: text("extractor_version").notNull(),
-	pageTextVersionId: uuid("page_text_version_id"),
-	sourceBlockId: uuid("source_block_id"),
-	charSpan: int4range("char_span"),
-	quote: text(),
-	extractedBy: text("extracted_by").notNull(),
-	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-}, (table) => [
-	index("ix_field_values_document").using("btree", table.documentId.asc().nullsLast().op("uuid_ops"), table.fieldCode.asc().nullsLast().op("text_ops")),
-	index("ix_field_values_page_text").using("btree", table.pageTextVersionId.asc().nullsLast().op("uuid_ops")),
-	index("ix_field_values_revision").using("btree", table.revisionId.asc().nullsLast().op("uuid_ops")),
-	index("ix_field_values_source_block").using("btree", table.sourceBlockId.asc().nullsLast().op("uuid_ops")),
-	foreignKey({
-			columns: [table.pageTextVersionId],
-			foreignColumns: [pageTextVersions.id],
-			name: "field_values_page_text_version_id_fkey"
-		}),
-	foreignKey({
-			columns: [table.sourceBlockId],
-			foreignColumns: [layoutBlocks.id],
-			name: "field_values_source_block_id_fkey"
-		}),
-	foreignKey({
-			columns: [table.revisionId, table.pageTextVersionId],
-			foreignColumns: [pageTextVersions.id, pageTextVersions.revisionId],
-			name: "field_values_page_text_fk"
-		}),
-	foreignKey({
-			columns: [table.revisionId, table.sourceBlockId],
-			foreignColumns: [layoutBlocks.id, layoutBlocks.revisionId],
-			name: "field_values_source_block_fk"
-		}),
-	check("field_values_field_code_chk", sql`field_code ~ '^[a-z][a-z0-9_]*$'::text`),
-	check("field_values_confidence_chk", sql`(confidence IS NULL) OR ((confidence >= (0)::double precision) AND (confidence <= (1)::double precision))`),
-	check("field_values_extracted_by_chk", sql`extracted_by = ANY (ARRAY['rule'::text, 'llm'::text, 'manual'::text])`),
-	check("field_values_span_source_chk", sql`(char_span IS NULL) OR (page_text_version_id IS NOT NULL)`),
-	check("field_values_span_bounds_chk", sql`(char_span IS NULL) OR (lower(char_span) >= 0)`),
-]);
-
 export const materials = pgTable("materials", {
 	id: uuid().defaultRandom().primaryKey().notNull(),
-	revisionId: uuid("revision_id").notNull(),
+	folderId: uuid("folder_id").notNull(),
 	nameRaw: text("name_raw").notNull(),
 	nameNorm: text("name_norm").notNull(),
 	mark: text(),
@@ -875,15 +869,17 @@ export const materials = pgTable("materials", {
 	categoryCode: text("category_code"),
 	source: text().notNull(),
 	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	complectId: uuid("complect_id"),
 }, (table) => [
+	index("ix_materials_complect").using("btree", table.complectId.asc().nullsLast().op("uuid_ops")),
+	index("ix_materials_folder").using("btree", table.folderId.asc().nullsLast().op("uuid_ops")),
 	index("ix_materials_name_norm").using("gin", table.nameNorm.asc().nullsLast().op("gin_trgm_ops")),
-	index("ix_materials_revision").using("btree", table.revisionId.asc().nullsLast().op("uuid_ops")),
 	foreignKey({
-			columns: [table.revisionId],
-			foreignColumns: [submissionRevisions.id],
-			name: "materials_revision_id_fkey"
+			columns: [table.folderId],
+			foreignColumns: [folders.id],
+			name: "materials_folder_id_fkey"
 		}),
-	unique("materials_revision_id_uq").on(table.id, table.revisionId),
+	unique("materials_folder_id_uq").on(table.folderId, table.id),
 	check("materials_source_chk", sql`source = ANY (ARRAY['act_p3'::text, 'registry'::text, 'quality_doc'::text, 'manual'::text])`),
 	check("materials_category_chk", sql`(category_code IS NULL) OR (category_code ~ '^[a-z][a-z0-9_]*$'::text)`),
 ]);
@@ -905,39 +901,6 @@ export const batches = pgTable("batches", {
 			name: "batches_material_id_fkey"
 		}).onDelete("cascade"),
 	unique("batches_material_id_uq").on(table.id, table.materialId),
-]);
-
-export const materialDocuments = pgTable("material_documents", {
-	id: uuid().defaultRandom().primaryKey().notNull(),
-	revisionId: uuid("revision_id").notNull(),
-	materialId: uuid("material_id").notNull(),
-	documentId: uuid("document_id").notNull(),
-	batchId: uuid("batch_id"),
-	relation: text().notNull(),
-	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-}, (table) => [
-	index("ix_material_documents_batch").using("btree", table.batchId.asc().nullsLast().op("uuid_ops")),
-	index("ix_material_documents_document").using("btree", table.documentId.asc().nullsLast().op("uuid_ops")),
-	index("ix_material_documents_material").using("btree", table.materialId.asc().nullsLast().op("uuid_ops")),
-	index("ix_material_documents_revision").using("btree", table.revisionId.asc().nullsLast().op("uuid_ops")),
-	uniqueIndex("ux_material_documents_with_batch").using("btree", table.materialId.asc().nullsLast().op("text_ops"), table.documentId.asc().nullsLast().op("text_ops"), table.batchId.asc().nullsLast().op("text_ops"), table.relation.asc().nullsLast().op("uuid_ops")).where(sql`(batch_id IS NOT NULL)`),
-	uniqueIndex("ux_material_documents_without_batch").using("btree", table.materialId.asc().nullsLast().op("uuid_ops"), table.documentId.asc().nullsLast().op("text_ops"), table.relation.asc().nullsLast().op("text_ops")).where(sql`(batch_id IS NULL)`),
-	foreignKey({
-			columns: [table.materialId],
-			foreignColumns: [materials.id],
-			name: "material_documents_material_id_fkey"
-		}).onDelete("cascade"),
-	foreignKey({
-			columns: [table.materialId, table.batchId],
-			foreignColumns: [batches.id, batches.materialId],
-			name: "material_documents_batch_fk"
-		}),
-	foreignKey({
-			columns: [table.revisionId, table.materialId],
-			foreignColumns: [materials.id, materials.revisionId],
-			name: "material_documents_material_fk"
-		}).onDelete("cascade"),
-	check("material_documents_relation_chk", sql`relation ~ '^[a-z][a-z0-9_]*$'::text`),
 ]);
 
 export const ruleDefinitions = pgTable("rule_definitions", {
@@ -963,6 +926,41 @@ export const ruleDefinitions = pgTable("rule_definitions", {
 	check("rule_definitions_waiver_roles_chk", sql`waiver_roles <@ ARRAY['contractor'::text, 'general_contractor'::text, 'engineer'::text, 'manager'::text, 'admin'::text]`),
 ]);
 
+export const materialDocuments = pgTable("material_documents", {
+	id: uuid().defaultRandom().primaryKey().notNull(),
+	folderId: uuid("folder_id").notNull(),
+	materialId: uuid("material_id").notNull(),
+	documentId: uuid("document_id").notNull(),
+	batchId: uuid("batch_id"),
+	relation: text().notNull(),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	complectId: uuid("complect_id"),
+}, (table) => [
+	index("ix_material_documents_batch").using("btree", table.batchId.asc().nullsLast().op("uuid_ops")),
+	index("ix_material_documents_complect").using("btree", table.complectId.asc().nullsLast().op("uuid_ops")),
+	index("ix_material_documents_document").using("btree", table.documentId.asc().nullsLast().op("uuid_ops")),
+	index("ix_material_documents_folder").using("btree", table.folderId.asc().nullsLast().op("uuid_ops")),
+	index("ix_material_documents_material").using("btree", table.materialId.asc().nullsLast().op("uuid_ops")),
+	uniqueIndex("ux_material_documents_with_batch").using("btree", table.materialId.asc().nullsLast().op("text_ops"), table.documentId.asc().nullsLast().op("uuid_ops"), table.batchId.asc().nullsLast().op("uuid_ops"), table.relation.asc().nullsLast().op("uuid_ops")).where(sql`(batch_id IS NOT NULL)`),
+	uniqueIndex("ux_material_documents_without_batch").using("btree", table.materialId.asc().nullsLast().op("uuid_ops"), table.documentId.asc().nullsLast().op("text_ops"), table.relation.asc().nullsLast().op("text_ops")).where(sql`(batch_id IS NULL)`),
+	foreignKey({
+			columns: [table.materialId],
+			foreignColumns: [materials.id],
+			name: "material_documents_material_id_fkey"
+		}).onDelete("cascade"),
+	foreignKey({
+			columns: [table.materialId, table.batchId],
+			foreignColumns: [batches.id, batches.materialId],
+			name: "material_documents_batch_fk"
+		}),
+	foreignKey({
+			columns: [table.folderId, table.materialId],
+			foreignColumns: [materials.folderId, materials.id],
+			name: "material_documents_material_fk"
+		}).onDelete("cascade"),
+	check("material_documents_relation_chk", sql`relation ~ '^[a-z][a-z0-9_]*$'::text`),
+]);
+
 export const rulesetVersions = pgTable("ruleset_versions", {
 	id: uuid().defaultRandom().primaryKey().notNull(),
 	version: text().notNull(),
@@ -985,7 +983,7 @@ export const rulesetVersions = pgTable("ruleset_versions", {
 
 export const validationRuns = pgTable("validation_runs", {
 	id: uuid().defaultRandom().primaryKey().notNull(),
-	revisionId: uuid("revision_id").notNull(),
+	folderId: uuid("folder_id").notNull(),
 	rulesetVersionId: uuid("ruleset_version_id").notNull(),
 	objectRuleProfileId: uuid("object_rule_profile_id"),
 	startedAt: timestamp("started_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
@@ -993,15 +991,10 @@ export const validationRuns = pgTable("validation_runs", {
 	counts: jsonb().default({}).notNull(),
 	sectionProfileId: uuid("section_profile_id"),
 }, (table) => [
+	index("ix_validation_runs_folder").using("btree", table.folderId.asc().nullsLast().op("timestamptz_ops"), table.startedAt.desc().nullsFirst().op("uuid_ops")),
 	index("ix_validation_runs_profile").using("btree", table.objectRuleProfileId.asc().nullsLast().op("uuid_ops")),
-	index("ix_validation_runs_revision").using("btree", table.revisionId.asc().nullsLast().op("timestamptz_ops"), table.startedAt.desc().nullsFirst().op("uuid_ops")),
 	index("ix_validation_runs_ruleset").using("btree", table.rulesetVersionId.asc().nullsLast().op("uuid_ops")),
 	index("ix_validation_runs_section_profile").using("btree", table.sectionProfileId.asc().nullsLast().op("uuid_ops")),
-	foreignKey({
-			columns: [table.revisionId],
-			foreignColumns: [submissionRevisions.id],
-			name: "validation_runs_revision_id_fkey"
-		}),
 	foreignKey({
 			columns: [table.rulesetVersionId],
 			foreignColumns: [rulesetVersions.id],
@@ -1017,13 +1010,32 @@ export const validationRuns = pgTable("validation_runs", {
 			foreignColumns: [sectionProfiles.id],
 			name: "validation_runs_section_profile_id_fkey"
 		}),
-	unique("validation_runs_revision_uq").on(table.id, table.revisionId),
+	foreignKey({
+			columns: [table.folderId],
+			foreignColumns: [folders.id],
+			name: "validation_runs_folder_id_fkey"
+		}),
+	unique("validation_runs_folder_uq").on(table.folderId, table.id),
+]);
+
+export const appSettings = pgTable("app_settings", {
+	key: text().primaryKey().notNull(),
+	value: jsonb().notNull(),
+	updatedBy: uuid("updated_by"),
+	updatedAt: timestamp("updated_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+}, (table) => [
+	index("ix_app_settings_updated_by").using("btree", table.updatedBy.asc().nullsLast().op("uuid_ops")),
+	foreignKey({
+			columns: [table.updatedBy],
+			foreignColumns: [users.id],
+			name: "app_settings_updated_by_fkey"
+		}),
 ]);
 
 export const findings = pgTable("findings", {
 	id: uuid().defaultRandom().primaryKey().notNull(),
 	validationRunId: uuid("validation_run_id").notNull(),
-	revisionId: uuid("revision_id").notNull(),
+	folderId: uuid("folder_id").notNull(),
 	objectId: uuid("object_id").notNull(),
 	contractorId: uuid("contractor_id").notNull(),
 	ruleCode: text("rule_code").notNull(),
@@ -1044,13 +1056,15 @@ export const findings = pgTable("findings", {
 	waiverReason: text("waiver_reason"),
 	resolvedAt: timestamp("resolved_at", { withTimezone: true, mode: 'string' }),
 	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	complectId: uuid("complect_id"),
 }, (table) => [
 	index("ix_findings_block").using("btree", table.blockId.asc().nullsLast().op("uuid_ops")),
-	index("ix_findings_blocking").using("btree", table.revisionId.asc().nullsLast().op("uuid_ops")).where(sql`is_blocking`),
+	index("ix_findings_blocking").using("btree", table.folderId.asc().nullsLast().op("uuid_ops")).where(sql`is_blocking`),
+	index("ix_findings_complect").using("btree", table.complectId.asc().nullsLast().op("uuid_ops")),
 	index("ix_findings_confirmed_by").using("btree", table.confirmedBy.asc().nullsLast().op("uuid_ops")),
 	index("ix_findings_contractor").using("btree", table.contractorId.asc().nullsLast().op("uuid_ops")),
+	index("ix_findings_folder_state").using("btree", table.folderId.asc().nullsLast().op("uuid_ops"), table.state.asc().nullsLast().op("text_ops"), table.severity.asc().nullsLast().op("text_ops")),
 	index("ix_findings_object").using("btree", table.objectId.asc().nullsLast().op("uuid_ops")),
-	index("ix_findings_revision_state").using("btree", table.revisionId.asc().nullsLast().op("uuid_ops"), table.state.asc().nullsLast().op("text_ops"), table.severity.asc().nullsLast().op("text_ops")),
 	index("ix_findings_rule").using("btree", table.ruleCode.asc().nullsLast().op("text_ops")),
 	index("ix_findings_run").using("btree", table.validationRunId.asc().nullsLast().op("uuid_ops")),
 	index("ix_findings_source_page").using("btree", table.sourcePageId.asc().nullsLast().op("uuid_ops")),
@@ -1086,59 +1100,22 @@ export const findings = pgTable("findings", {
 			name: "findings_waived_by_fkey"
 		}),
 	foreignKey({
-			columns: [table.validationRunId, table.revisionId],
-			foreignColumns: [validationRuns.id, validationRuns.revisionId],
+			columns: [table.validationRunId, table.folderId],
+			foreignColumns: [validationRuns.folderId, validationRuns.id],
 			name: "findings_run_fk"
 		}),
 	foreignKey({
-			columns: [table.revisionId, table.objectId, table.contractorId],
-			foreignColumns: [submissionRevisions.contractorId, submissionRevisions.id, submissionRevisions.objectId],
+			columns: [table.folderId, table.objectId, table.contractorId],
+			foreignColumns: [folders.contractorId, folders.id, folders.objectId],
 			name: "findings_scope_fk"
 		}),
 	check("findings_severity_chk", sql`severity = ANY (ARRAY['error'::text, 'warning'::text, 'info'::text])`),
 	check("findings_state_chk", sql`state = ANY (ARRAY['open'::text, 'resolved'::text, 'waived'::text, 'undetermined'::text])`),
 	check("findings_origin_chk", sql`origin = ANY (ARRAY['deterministic'::text, 'llm'::text, 'external_unavailable'::text])`),
-	check("findings_target_type_chk", sql`target_type = ANY (ARRAY['revision'::text, 'source_page'::text, 'document'::text, 'field_value'::text, 'registry_row'::text, 'material'::text, 'batch'::text])`),
 	check("findings_llm_blocking_chk", sql`(NOT ((origin = 'llm'::text) AND is_blocking)) OR (confirmed_by IS NOT NULL)`),
 	check("findings_undetermined_chk", sql`NOT ((state = 'undetermined'::text) AND is_blocking)`),
 	check("findings_waived_chk", sql`(state <> 'waived'::text) OR ((waived_by IS NOT NULL) AND (waiver_reason IS NOT NULL))`),
-]);
-
-export const reviewActions = pgTable("review_actions", {
-	id: uuid().defaultRandom().primaryKey().notNull(),
-	revisionId: uuid("revision_id").notNull(),
-	actorUserId: uuid("actor_user_id").notNull(),
-	action: text().notNull(),
-	comment: text(),
-	at: timestamp({ withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-}, (table) => [
-	index("ix_review_actions_actor").using("btree", table.actorUserId.asc().nullsLast().op("uuid_ops")),
-	index("ix_review_actions_revision").using("btree", table.revisionId.asc().nullsLast().op("timestamptz_ops"), table.at.desc().nullsFirst().op("timestamptz_ops")),
-	foreignKey({
-			columns: [table.revisionId],
-			foreignColumns: [submissionRevisions.id],
-			name: "review_actions_revision_id_fkey"
-		}),
-	foreignKey({
-			columns: [table.actorUserId],
-			foreignColumns: [users.id],
-			name: "review_actions_actor_user_id_fkey"
-		}),
-	check("review_actions_action_chk", sql`action ~ '^[a-z][a-z0-9_]*$'::text`),
-]);
-
-export const appSettings = pgTable("app_settings", {
-	key: text().primaryKey().notNull(),
-	value: jsonb().notNull(),
-	updatedBy: uuid("updated_by"),
-	updatedAt: timestamp("updated_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-}, (table) => [
-	index("ix_app_settings_updated_by").using("btree", table.updatedBy.asc().nullsLast().op("uuid_ops")),
-	foreignKey({
-			columns: [table.updatedBy],
-			foreignColumns: [users.id],
-			name: "app_settings_updated_by_fkey"
-		}),
+	check("findings_target_type_chk", sql`target_type = ANY (ARRAY['folder'::text, 'source_page'::text, 'document'::text, 'field_value'::text, 'registry_row'::text, 'material'::text, 'batch'::text])`),
 ]);
 
 export const jobs = pgTable("jobs", {
@@ -1159,8 +1136,8 @@ export const jobs = pgTable("jobs", {
 	leaseExpiries: integer("lease_expiries").default(0).notNull(),
 }, (table) => [
 	index("ix_jobs_claim").using("btree", table.priority.desc().nullsFirst().op("int4_ops"), table.nextRunAt.asc().nullsLast().op("timestamptz_ops")).where(sql`(status = 'queued'::text)`),
+	index("ix_jobs_folder").using("btree", sql`((payload ->> 'folderId'::text))`).where(sql`(status = ANY (ARRAY['queued'::text, 'running'::text, 'failed'::text]))`),
 	index("ix_jobs_lease").using("btree", table.lockedUntil.asc().nullsLast().op("timestamptz_ops")).where(sql`(status = 'running'::text)`),
-	index("ix_jobs_revision").using("btree", sql`((payload ->> 'revisionId'::text))`).where(sql`(status = ANY (ARRAY['queued'::text, 'running'::text, 'failed'::text]))`),
 	index("ix_jobs_status_next_run").using("btree", table.status.asc().nullsLast().op("timestamptz_ops"), table.nextRunAt.asc().nullsLast().op("timestamptz_ops")),
 	uniqueIndex("ux_jobs_dedupe_key").using("btree", table.dedupeKey.asc().nullsLast().op("text_ops")).where(sql`((dedupe_key IS NOT NULL) AND (status <> ALL (ARRAY['done'::text, 'cancelled'::text])))`),
 	check("jobs_type_chk", sql`type ~ '^[a-z][a-z0-9_]*([.][a-z0-9_]+)*$'::text`),
@@ -1200,7 +1177,7 @@ export const jobRuns = pgTable("job_runs", {
 	id: uuid().defaultRandom().primaryKey().notNull(),
 	jobId: uuid("job_id"),
 	jobType: text("job_type").notNull(),
-	revisionId: uuid("revision_id"),
+	folderId: uuid("folder_id"),
 	requestId: text("request_id"),
 	startedAt: timestamp("started_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
 	finishedAt: timestamp("finished_at", { withTimezone: true, mode: 'string' }),
@@ -1211,10 +1188,10 @@ export const jobRuns = pgTable("job_runs", {
 	errorMessage: text("error_message"),
 	payloadDigest: text("payload_digest"),
 }, (table) => [
+	index("ix_job_runs_folder").using("btree", table.folderId.asc().nullsLast().op("uuid_ops"), table.startedAt.desc().nullsFirst().op("timestamptz_ops")),
 	index("ix_job_runs_in_flight").using("btree", table.startedAt.asc().nullsLast().op("timestamptz_ops")).where(sql`(outcome IS NULL)`),
 	index("ix_job_runs_job").using("btree", table.jobId.asc().nullsLast().op("uuid_ops")),
 	index("ix_job_runs_request").using("btree", table.requestId.asc().nullsLast().op("text_ops")),
-	index("ix_job_runs_revision").using("btree", table.revisionId.asc().nullsLast().op("uuid_ops"), table.startedAt.desc().nullsFirst().op("uuid_ops")),
 	index("ix_job_runs_type").using("btree", table.jobType.asc().nullsLast().op("text_ops"), table.startedAt.desc().nullsFirst().op("timestamptz_ops")),
 	foreignKey({
 			columns: [table.jobId],
@@ -1222,9 +1199,9 @@ export const jobRuns = pgTable("job_runs", {
 			name: "job_runs_job_id_fkey"
 		}).onDelete("set null"),
 	foreignKey({
-			columns: [table.revisionId],
-			foreignColumns: [submissionRevisions.id],
-			name: "job_runs_revision_id_fkey"
+			columns: [table.folderId],
+			foreignColumns: [folders.id],
+			name: "job_runs_folder_id_fkey"
 		}),
 	check("job_runs_attempt_chk", sql`attempt > 0`),
 	check("job_runs_duration_chk", sql`(duration_ms IS NULL) OR (duration_ms >= 0)`),
@@ -1308,41 +1285,9 @@ export const layoutProfiles = pgTable("layout_profiles", {
 	check("layout_profiles_period_chk", sql`(effective_to IS NULL) OR (effective_to > effective_from)`),
 ]);
 
-export const submissionArchives = pgTable("submission_archives", {
-	id: uuid().defaultRandom().primaryKey().notNull(),
-	revisionId: uuid("revision_id").notNull(),
-	objectId: uuid("object_id").notNull(),
-	contractorId: uuid("contractor_id").notNull(),
-	s3Key: text("s3_key").notNull(),
-	archiveSha256: text("archive_sha256").notNull(),
-	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
-	byteSize: bigint("byte_size", { mode: "number" }).notNull(),
-	entryCount: integer("entry_count").notNull(),
-	builderVersion: text("builder_version").notNull(),
-	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-}, (table) => [
-	index("ix_submission_archives_contractor").using("btree", table.contractorId.asc().nullsLast().op("uuid_ops")),
-	index("ix_submission_archives_object").using("btree", table.objectId.asc().nullsLast().op("uuid_ops")),
-	foreignKey({
-			columns: [table.revisionId],
-			foreignColumns: [submissionRevisions.id],
-			name: "submission_archives_revision_id_fkey"
-		}),
-	foreignKey({
-			columns: [table.revisionId, table.objectId, table.contractorId],
-			foreignColumns: [submissionRevisions.contractorId, submissionRevisions.id, submissionRevisions.objectId],
-			name: "submission_archives_scope_fk"
-		}),
-	unique("submission_archives_revision_id_key").on(table.revisionId),
-	unique("submission_archives_s3_key_key").on(table.s3Key),
-	check("submission_archives_sha_chk", sql`archive_sha256 ~ '^[0-9a-f]{64}$'::text`),
-	check("submission_archives_size_chk", sql`byte_size > 0`),
-	check("submission_archives_entries_chk", sql`entry_count > 0`),
-]);
-
 export const logicalDocuments = pgTable("logical_documents", {
 	id: uuid().defaultRandom().primaryKey().notNull(),
-	revisionId: uuid("revision_id").notNull(),
+	folderId: uuid("folder_id").notNull(),
 	objectId: uuid("object_id").notNull(),
 	contractorId: uuid("contractor_id").notNull(),
 	docTypeCode: text("doc_type_code"),
@@ -1367,22 +1312,24 @@ export const logicalDocuments = pgTable("logical_documents", {
 	derivedPdfToolkit: text("derived_pdf_toolkit"),
 	derivedNoteApplied: boolean("derived_note_applied"),
 	confirmationSource: text("confirmation_source").default('human').notNull(),
+	complectId: uuid("complect_id"),
 }, (table) => [
+	index("ix_logical_documents_complect").using("btree", table.complectId.asc().nullsLast().op("uuid_ops")),
 	index("ix_logical_documents_confirmed_by").using("btree", table.confirmedBy.asc().nullsLast().op("uuid_ops")),
 	index("ix_logical_documents_contractor").using("btree", table.contractorId.asc().nullsLast().op("uuid_ops")),
 	index("ix_logical_documents_doc_type").using("btree", table.docTypeCode.asc().nullsLast().op("text_ops")),
-	index("ix_logical_documents_needs_review").using("btree", table.revisionId.asc().nullsLast().op("uuid_ops")).where(sql`needs_review`),
+	index("ix_logical_documents_folder").using("btree", table.folderId.asc().nullsLast().op("int4_ops"), table.ordinal.asc().nullsLast().op("uuid_ops")),
+	index("ix_logical_documents_needs_review").using("btree", table.folderId.asc().nullsLast().op("uuid_ops")).where(sql`needs_review`),
 	index("ix_logical_documents_object").using("btree", table.objectId.asc().nullsLast().op("uuid_ops")),
-	index("ix_logical_documents_revision").using("btree", table.revisionId.asc().nullsLast().op("int4_ops"), table.ordinal.asc().nullsLast().op("uuid_ops")),
-	foreignKey({
-			columns: [table.revisionId],
-			foreignColumns: [submissionRevisions.id],
-			name: "logical_documents_revision_id_fkey"
-		}),
 	foreignKey({
 			columns: [table.docTypeCode],
 			foreignColumns: [docTypes.code],
 			name: "logical_documents_doc_type_code_fkey"
+		}),
+	foreignKey({
+			columns: [table.folderId],
+			foreignColumns: [folders.id],
+			name: "logical_documents_folder_id_fkey"
 		}),
 	foreignKey({
 			columns: [table.confirmedBy],
@@ -1390,11 +1337,11 @@ export const logicalDocuments = pgTable("logical_documents", {
 			name: "logical_documents_confirmed_by_fkey"
 		}),
 	foreignKey({
-			columns: [table.revisionId, table.objectId, table.contractorId],
-			foreignColumns: [submissionRevisions.contractorId, submissionRevisions.id, submissionRevisions.objectId],
+			columns: [table.folderId, table.objectId, table.contractorId],
+			foreignColumns: [folders.contractorId, folders.id, folders.objectId],
 			name: "logical_documents_scope_fk"
 		}),
-	unique("logical_documents_revision_id_uq").on(table.id, table.revisionId),
+	unique("logical_documents_folder_id_uq").on(table.folderId, table.id),
 	check("logical_documents_ordinal_chk", sql`ordinal >= 0`),
 	check("logical_documents_type_confidence_chk", sql`(type_confidence IS NULL) OR ((type_confidence >= (0)::double precision) AND (type_confidence <= (1)::double precision))`),
 	check("logical_documents_boundary_confidence_chk", sql`(boundary_confidence IS NULL) OR ((boundary_confidence >= (0)::double precision) AND (boundary_confidence <= (1)::double precision))`),
@@ -1406,44 +1353,6 @@ export const logicalDocuments = pgTable("logical_documents", {
 	check("logical_documents_derived_sizes_chk", sql`((derived_pdf_page_count IS NULL) OR (derived_pdf_page_count > 0)) AND ((derived_pdf_bytes IS NULL) OR (derived_pdf_bytes > 0))`),
 	check("logical_documents_confirmation_source_chk", sql`confirmation_source = ANY (ARRAY['human'::text, 'machine'::text])`),
 	check("logical_documents_confirmed_chk", sql`(NOT is_confirmed) OR (confirmation_source = 'machine'::text) OR (confirmed_by IS NOT NULL)`),
-]);
-
-export const legalHolds = pgTable("legal_holds", {
-	id: uuid().defaultRandom().primaryKey().notNull(),
-	revisionId: uuid("revision_id").notNull(),
-	objectId: uuid("object_id").notNull(),
-	reason: text().notNull(),
-	placedBy: uuid("placed_by").notNull(),
-	placedAt: timestamp("placed_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-	releasedBy: uuid("released_by"),
-	releasedAt: timestamp("released_at", { withTimezone: true, mode: 'string' }),
-	releaseNote: text("release_note"),
-}, (table) => [
-	index("ix_legal_holds_object").using("btree", table.objectId.asc().nullsLast().op("uuid_ops")),
-	index("ix_legal_holds_placed_by").using("btree", table.placedBy.asc().nullsLast().op("uuid_ops")),
-	uniqueIndex("ux_legal_holds_active").using("btree", table.revisionId.asc().nullsLast().op("uuid_ops")).where(sql`(released_at IS NULL)`),
-	foreignKey({
-			columns: [table.revisionId],
-			foreignColumns: [submissionRevisions.id],
-			name: "legal_holds_revision_id_fkey"
-		}),
-	foreignKey({
-			columns: [table.placedBy],
-			foreignColumns: [users.id],
-			name: "legal_holds_placed_by_fkey"
-		}),
-	foreignKey({
-			columns: [table.releasedBy],
-			foreignColumns: [users.id],
-			name: "legal_holds_released_by_fkey"
-		}),
-	foreignKey({
-			columns: [table.revisionId, table.objectId],
-			foreignColumns: [submissionRevisions.id, submissionRevisions.objectId],
-			name: "legal_holds_object_fk"
-		}),
-	check("legal_holds_reason_chk", sql`length(btrim(reason)) >= 10`),
-	check("legal_holds_release_chk", sql`(released_by IS NULL) = (released_at IS NULL)`),
 ]);
 
 export const userCredentials = pgTable("user_credentials", {
@@ -1589,7 +1498,7 @@ export const processingFeedback = pgTable("processing_feedback", {
 	feedbackType: text("feedback_type").notNull(),
 	reasonCode: text("reason_code").notNull(),
 	severity: text().default('warn').notNull(),
-	revisionId: uuid("revision_id"),
+	folderId: uuid("folder_id"),
 	recognitionRunId: uuid("recognition_run_id"),
 	sourcePageId: uuid("source_page_id"),
 	workingPageIndex: integer("working_page_index"),
@@ -1614,11 +1523,11 @@ export const processingFeedback = pgTable("processing_feedback", {
 }, (table) => [
 	index("ix_processing_feedback_at").using("btree", table.at.desc().nullsFirst().op("timestamptz_ops")),
 	index("ix_processing_feedback_block").using("btree", table.layoutBlockId.asc().nullsLast().op("uuid_ops")).where(sql`(layout_block_id IS NOT NULL)`),
-	index("ix_processing_feedback_doc_type").using("btree", table.docTypeCode.asc().nullsLast().op("text_ops"), table.at.desc().nullsFirst().op("timestamptz_ops")),
-	index("ix_processing_feedback_prompt").using("btree", table.promptCode.asc().nullsLast().op("int4_ops"), table.promptVersion.asc().nullsLast().op("int4_ops"), table.at.desc().nullsFirst().op("timestamptz_ops")),
+	index("ix_processing_feedback_doc_type").using("btree", table.docTypeCode.asc().nullsLast().op("timestamptz_ops"), table.at.desc().nullsFirst().op("text_ops")),
+	index("ix_processing_feedback_folder").using("btree", table.folderId.asc().nullsLast().op("timestamptz_ops"), table.at.desc().nullsFirst().op("uuid_ops")),
+	index("ix_processing_feedback_prompt").using("btree", table.promptCode.asc().nullsLast().op("int4_ops"), table.promptVersion.asc().nullsLast().op("timestamptz_ops"), table.at.desc().nullsFirst().op("timestamptz_ops")),
 	index("ix_processing_feedback_reason").using("btree", table.reasonCode.asc().nullsLast().op("timestamptz_ops"), table.at.desc().nullsFirst().op("text_ops")),
-	index("ix_processing_feedback_revision").using("btree", table.revisionId.asc().nullsLast().op("timestamptz_ops"), table.at.desc().nullsFirst().op("timestamptz_ops")),
-	index("ix_processing_feedback_stage").using("btree", table.pipelineStage.asc().nullsLast().op("text_ops"), table.at.desc().nullsFirst().op("timestamptz_ops")),
+	index("ix_processing_feedback_stage").using("btree", table.pipelineStage.asc().nullsLast().op("timestamptz_ops"), table.at.desc().nullsFirst().op("timestamptz_ops")),
 	check("processing_feedback_type_chk", sql`feedback_type = ANY (ARRAY['system_failure'::text, 'recognition_failure'::text, 'wrong_extraction'::text, 'check_error'::text, 'manual_correction'::text])`),
 	check("processing_feedback_severity_chk", sql`severity = ANY (ARRAY['info'::text, 'warn'::text, 'error'::text])`),
 	check("processing_feedback_stage_chk", sql`(pipeline_stage IS NULL) OR (pipeline_stage = ANY (ARRAY['uploaded'::text, 'layout'::text, 'recognition'::text, 'analysis'::text, 'checks'::text, 'ready'::text, 'failed'::text, 'detect'::text, 'match'::text]))`),
@@ -1647,7 +1556,7 @@ export const errorSamples = pgTable("error_samples", {
 	statusCode: integer("status_code"),
 	errorCode: text("error_code"),
 	objectId: uuid("object_id"),
-	revisionId: uuid("revision_id"),
+	folderId: uuid("folder_id"),
 	jobId: uuid("job_id"),
 	jobType: text("job_type"),
 	attempt: integer(),
@@ -1815,194 +1724,38 @@ export const sections = pgTable("sections", {
 	check("sections_sort_order_chk", sql`sort_order >= 0`),
 ]);
 
-export const registries = pgTable("registries", {
+export const complects = pgTable("complects", {
 	id: uuid().defaultRandom().primaryKey().notNull(),
-	objectId: uuid("object_id").notNull(),
-	sectionCode: text("section_code").notNull(),
-	period: date().notNull(),
-	number: text(),
-	folderNo: text("folder_no"),
-	building: text(),
-	floor: text(),
-	structure: text(),
-	status: text().default('draft').notNull(),
-	version: integer().default(0).notNull(),
-	issuedBy: uuid("issued_by"),
-	issuedAt: timestamp("issued_at", { withTimezone: true, mode: 'string' }),
-	issuedFileRevisionId: uuid("issued_file_revision_id"),
-	acceptedBy: uuid("accepted_by"),
-	acceptedAt: timestamp("accepted_at", { withTimezone: true, mode: 'string' }),
-	createdBy: uuid("created_by").notNull(),
-	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-	updatedAt: timestamp("updated_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-}, (table) => [
-	index("ix_registries_accepted_by").using("btree", table.acceptedBy.asc().nullsLast().op("uuid_ops")),
-	index("ix_registries_created_by").using("btree", table.createdBy.asc().nullsLast().op("uuid_ops")),
-	index("ix_registries_issued_by").using("btree", table.issuedBy.asc().nullsLast().op("uuid_ops")),
-	index("ix_registries_issued_file").using("btree", table.issuedFileRevisionId.asc().nullsLast().op("uuid_ops")),
-	index("ix_registries_object_status").using("btree", table.objectId.asc().nullsLast().op("uuid_ops"), table.status.asc().nullsLast().op("uuid_ops")),
-	index("ix_registries_section").using("btree", table.sectionCode.asc().nullsLast().op("text_ops")),
-	uniqueIndex("ux_registries_object_number").using("btree", table.objectId.asc().nullsLast().op("uuid_ops"), table.number.asc().nullsLast().op("text_ops")).where(sql`(number IS NOT NULL)`),
-	foreignKey({
-			columns: [table.objectId],
-			foreignColumns: [constructionObjects.id],
-			name: "registries_object_id_fkey"
-		}),
-	foreignKey({
-			columns: [table.issuedBy],
-			foreignColumns: [users.id],
-			name: "registries_issued_by_fkey"
-		}),
-	foreignKey({
-			columns: [table.issuedFileRevisionId],
-			foreignColumns: [submissionRevisions.id],
-			name: "registries_issued_file_revision_id_fkey"
-		}),
-	foreignKey({
-			columns: [table.acceptedBy],
-			foreignColumns: [users.id],
-			name: "registries_accepted_by_fkey"
-		}),
-	foreignKey({
-			columns: [table.createdBy],
-			foreignColumns: [users.id],
-			name: "registries_created_by_fkey"
-		}),
-	unique("registries_object_id_uq").on(table.id, table.objectId),
-	check("registries_status_chk", sql`status = ANY (ARRAY['draft'::text, 'issued'::text, 'accepted'::text])`),
-	check("registries_version_chk", sql`version >= 0`),
-	check("registries_period_chk", sql`EXTRACT(day FROM period) = (1)::numeric`),
-	check("registries_number_required_chk", sql`(status = 'draft'::text) OR (number IS NOT NULL)`),
-]);
-
-export const works = pgTable("works", {
-	id: uuid().defaultRandom().primaryKey().notNull(),
+	folderId: uuid("folder_id").notNull(),
 	objectId: uuid("object_id").notNull(),
 	contractorId: uuid("contractor_id").notNull(),
-	title: text().notNull(),
-	currentRevisionId: uuid("current_revision_id"),
-	createdBy: uuid("created_by").notNull(),
-	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-	sectionCode: text("section_code").notNull(),
-	period: date(),
-	managedByContractorId: uuid("managed_by_contractor_id").notNull(),
-	registryId: uuid("registry_id"),
-	kind: text().default('complect').notNull(),
-	ordinal: integer(),
-	autoRunEnabled: boolean("auto_run_enabled").default(false).notNull(),
-	updatedAt: timestamp("updated_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-	contractorAssumed: boolean("contractor_assumed").default(false).notNull(),
-	contractorRaw: text("contractor_raw"),
-}, (table) => [
-	index("ix_works_contractor").using("btree", table.contractorId.asc().nullsLast().op("uuid_ops")),
-	index("ix_works_created_by").using("btree", table.createdBy.asc().nullsLast().op("uuid_ops")),
-	index("ix_works_current_revision").using("btree", table.currentRevisionId.asc().nullsLast().op("uuid_ops")),
-	index("ix_works_managed_by").using("btree", table.managedByContractorId.asc().nullsLast().op("uuid_ops")),
-	index("ix_works_object").using("btree", table.objectId.asc().nullsLast().op("uuid_ops")),
-	index("ix_works_object_section_period").using("btree", table.objectId.asc().nullsLast().op("date_ops"), table.sectionCode.asc().nullsLast().op("uuid_ops"), table.period.asc().nullsLast().op("text_ops")),
-	index("ix_works_registry").using("btree", table.registryId.asc().nullsLast().op("uuid_ops")),
-	uniqueIndex("ux_works_registry_file").using("btree", table.registryId.asc().nullsLast().op("uuid_ops")).where(sql`(kind = 'registry'::text)`),
-	uniqueIndex("ux_works_registry_ordinal").using("btree", table.registryId.asc().nullsLast().op("uuid_ops"), table.ordinal.asc().nullsLast().op("int4_ops")).where(sql`(ordinal IS NOT NULL)`),
-	foreignKey({
-			columns: [table.managedByContractorId],
-			foreignColumns: [counterparties.id],
-			name: "works_managed_by_contractor_id_fkey"
-		}),
-	foreignKey({
-			columns: [table.objectId, table.registryId],
-			foreignColumns: [registries.id, registries.objectId],
-			name: "works_registry_fk"
-		}),
-	foreignKey({
-			columns: [table.id, table.currentRevisionId],
-			foreignColumns: [submissionRevisions.id, submissionRevisions.workId],
-			name: "works_current_revision_fk"
-		}),
-	foreignKey({
-			columns: [table.objectId],
-			foreignColumns: [constructionObjects.id],
-			name: "works_object_id_fkey"
-		}),
-	foreignKey({
-			columns: [table.contractorId],
-			foreignColumns: [counterparties.id],
-			name: "works_contractor_id_fkey"
-		}),
-	foreignKey({
-			columns: [table.createdBy],
-			foreignColumns: [users.id],
-			name: "works_created_by_fkey"
-		}),
-	unique("works_scope_uq").on(table.contractorId, table.id, table.objectId),
-	unique("works_registry_id_uq").on(table.id, table.registryId),
-	check("works_kind_chk", sql`kind = ANY (ARRAY['complect'::text, 'registry'::text])`),
-	check("works_ordinal_chk", sql`(ordinal IS NULL) OR (ordinal > 0)`),
-	check("works_registry_kind_chk", sql`(kind <> 'registry'::text) OR (registry_id IS NOT NULL)`),
-	check("works_period_chk", sql`(period IS NULL) OR (EXTRACT(day FROM period) = (1)::numeric)`),
-	check("works_contractor_assumed_chk", sql`(NOT contractor_assumed) OR (kind = 'complect'::text)`),
-]);
-
-export const registryReconciliations = pgTable("registry_reconciliations", {
-	id: uuid().defaultRandom().primaryKey().notNull(),
-	objectId: uuid("object_id").notNull(),
-	registryId: uuid("registry_id").notNull(),
-	workId: uuid("work_id").notNull(),
-	revisionId: uuid("revision_id").notNull(),
-	verdict: text().notNull(),
-	version: integer().default(0).notNull(),
-	headerRegistryNo: text("header_registry_no"),
-	headerFolderNo: text("header_folder_no"),
-	headerMismatch: boolean("header_mismatch").default(false).notNull(),
-	parserVersion: text("parser_version").notNull(),
-	matcherVersion: text("matcher_version").notNull(),
-	finishedAt: timestamp("finished_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-	groupsTotal: integer("groups_total").default(0).notNull(),
-	groupsMatched: integer("groups_matched").default(0).notNull(),
-	groupsMissing: integer("groups_missing").default(0).notNull(),
-	groupsAmbiguous: integer("groups_ambiguous").default(0).notNull(),
-	rowsTotal: integer("rows_total").default(0).notNull(),
-	rowsMatched: integer("rows_matched").default(0).notNull(),
-	rowsMissing: integer("rows_missing").default(0).notNull(),
-	rowsAmbiguous: integer("rows_ambiguous").default(0).notNull(),
-	rowsFieldMismatch: integer("rows_field_mismatch").default(0).notNull(),
-	worksTotal: integer("works_total").default(0).notNull(),
-	worksExtra: integer("works_extra").default(0).notNull(),
-	extraDocuments: integer("extra_documents").default(0).notNull(),
-	warnings: text().array().default([""]).notNull(),
-	reviewedBy: uuid("reviewed_by"),
-	reviewedAt: timestamp("reviewed_at", { withTimezone: true, mode: 'string' }),
-	reviewedNote: text("reviewed_note"),
+	ordinal: integer().notNull(),
+	actDocumentId: uuid("act_document_id"),
+	actNumber: text("act_number"),
+	actDate: date("act_date"),
 	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
 }, (table) => [
-	index("ix_registry_reconciliations_object").using("btree", table.objectId.asc().nullsLast().op("uuid_ops")),
-	index("ix_registry_reconciliations_registry").using("btree", table.registryId.asc().nullsLast().op("uuid_ops")),
-	index("ix_registry_reconciliations_reviewed_by").using("btree", table.reviewedBy.asc().nullsLast().op("uuid_ops")),
+	index("ix_complects_act_document").using("btree", table.actDocumentId.asc().nullsLast().op("uuid_ops")),
+	index("ix_complects_folder").using("btree", table.folderId.asc().nullsLast().op("int4_ops"), table.ordinal.asc().nullsLast().op("int4_ops")),
 	foreignKey({
-			columns: [table.reviewedBy],
-			foreignColumns: [users.id],
-			name: "registry_reconciliations_reviewed_by_fkey"
-		}),
+			columns: [table.folderId],
+			foreignColumns: [folders.id],
+			name: "complects_folder_id_fkey"
+		}).onDelete("cascade"),
 	foreignKey({
-			columns: [table.objectId, table.registryId],
-			foreignColumns: [registries.id, registries.objectId],
-			name: "registry_reconciliations_registry_fk"
-		}),
+			columns: [table.actDocumentId],
+			foreignColumns: [logicalDocuments.id],
+			name: "complects_act_document_id_fkey"
+		}).onDelete("set null"),
 	foreignKey({
-			columns: [table.registryId, table.workId],
-			foreignColumns: [works.id, works.registryId],
-			name: "registry_reconciliations_work_fk"
+			columns: [table.folderId, table.objectId, table.contractorId],
+			foreignColumns: [folders.contractorId, folders.id, folders.objectId],
+			name: "complects_folder_fk"
 		}),
-	foreignKey({
-			columns: [table.workId, table.revisionId],
-			foreignColumns: [submissionRevisions.id, submissionRevisions.workId],
-			name: "registry_reconciliations_revision_fk"
-		}),
-	unique("registry_reconciliations_scan_uq").on(table.registryId, table.revisionId),
-	unique("registry_reconciliations_revision_uq").on(table.id, table.revisionId),
-	check("registry_reconciliations_verdict_chk", sql`verdict = ANY (ARRAY['unparsed'::text, 'mismatch'::text, 'clean'::text])`),
-	check("registry_reconciliations_version_chk", sql`version >= 0`),
-	check("registry_reconciliations_counts_chk", sql`(groups_total >= 0) AND (rows_total >= 0) AND (works_total >= 0) AND (((groups_matched + groups_missing) + groups_ambiguous) = groups_total) AND (((rows_matched + rows_missing) + rows_ambiguous) = rows_total) AND ((works_extra >= 0) AND (works_extra <= works_total)) AND ((rows_field_mismatch >= 0) AND (rows_field_mismatch <= rows_total)) AND (extra_documents >= 0)`),
-	check("registry_reconciliations_reviewed_chk", sql`((reviewed_by IS NULL) AND (reviewed_at IS NULL) AND (reviewed_note IS NULL)) OR ((reviewed_by IS NOT NULL) AND (reviewed_at IS NOT NULL) AND (reviewed_note IS NOT NULL) AND ((char_length(reviewed_note) >= 10) AND (char_length(reviewed_note) <= 1000)))`),
+	unique("complects_ordinal_uq").on(table.folderId, table.ordinal),
+	unique("complects_scope_uq").on(table.contractorId, table.id, table.objectId),
+	unique("complects_folder_uq").on(table.folderId, table.id),
+	check("complects_ordinal_chk", sql`ordinal > 0`),
 ]);
 
 export const userObjectScopes = pgTable("user_object_scopes", {
@@ -2040,12 +1793,12 @@ export const userRoles = pgTable("user_roles", {
 
 export const processingBundlePages = pgTable("processing_bundle_pages", {
 	bundleId: uuid("bundle_id").notNull(),
-	revisionId: uuid("revision_id").notNull(),
+	folderId: uuid("folder_id").notNull(),
 	workingPageIndex: integer("working_page_index").notNull(),
 	sourcePageId: uuid("source_page_id").notNull(),
 }, (table) => [
+	index("ix_processing_bundle_pages_folder").using("btree", table.folderId.asc().nullsLast().op("uuid_ops")),
 	index("ix_processing_bundle_pages_page").using("btree", table.sourcePageId.asc().nullsLast().op("uuid_ops")),
-	index("ix_processing_bundle_pages_revision").using("btree", table.revisionId.asc().nullsLast().op("uuid_ops")),
 	foreignKey({
 			columns: [table.bundleId],
 			foreignColumns: [processingBundles.id],
@@ -2057,13 +1810,13 @@ export const processingBundlePages = pgTable("processing_bundle_pages", {
 			name: "processing_bundle_pages_source_page_id_fkey"
 		}),
 	foreignKey({
-			columns: [table.bundleId, table.revisionId],
-			foreignColumns: [processingBundles.id, processingBundles.revisionId],
+			columns: [table.bundleId, table.folderId],
+			foreignColumns: [processingBundles.folderId, processingBundles.id],
 			name: "processing_bundle_pages_bundle_fk"
 		}),
 	foreignKey({
-			columns: [table.revisionId, table.sourcePageId],
-			foreignColumns: [sourcePages.id, sourcePages.revisionId],
+			columns: [table.folderId, table.sourcePageId],
+			foreignColumns: [sourcePages.folderId, sourcePages.id],
 			name: "processing_bundle_pages_page_fk"
 		}),
 	primaryKey({ columns: [table.bundleId, table.workingPageIndex], name: "processing_bundle_pages_pkey"}),
@@ -2150,32 +1903,8 @@ export const objectContractors = pgTable("object_contractors", {
 	primaryKey({ columns: [table.contractorId, table.objectId], name: "object_contractors_pkey"}),
 ]);
 
-export const documentRelations = pgTable("document_relations", {
-	parentDocumentId: uuid("parent_document_id").notNull(),
-	childDocumentId: uuid("child_document_id").notNull(),
-	relation: text().notNull(),
-	revisionId: uuid("revision_id").notNull(),
-	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-}, (table) => [
-	index("ix_document_relations_child").using("btree", table.childDocumentId.asc().nullsLast().op("uuid_ops")),
-	index("ix_document_relations_revision").using("btree", table.revisionId.asc().nullsLast().op("uuid_ops")),
-	foreignKey({
-			columns: [table.parentDocumentId, table.revisionId],
-			foreignColumns: [logicalDocuments.id, logicalDocuments.revisionId],
-			name: "document_relations_parent_fk"
-		}).onDelete("cascade"),
-	foreignKey({
-			columns: [table.childDocumentId, table.revisionId],
-			foreignColumns: [logicalDocuments.id, logicalDocuments.revisionId],
-			name: "document_relations_child_fk"
-		}).onDelete("cascade"),
-	primaryKey({ columns: [table.childDocumentId, table.parentDocumentId, table.relation], name: "document_relations_pkey"}),
-	check("document_relations_self_chk", sql`parent_document_id <> child_document_id`),
-	check("document_relations_relation_chk", sql`relation = ANY (ARRAY['annex'::text, 'quality_doc'::text, 'protocol'::text, 'copy_certification'::text, 'signature_page'::text, 'supersedes'::text, 'duplicate'::text])`),
-]);
-
-export const revisionEvents = pgTable("revision_events", {
-	revisionId: uuid("revision_id").notNull(),
+export const folderEvents = pgTable("folder_events", {
+	folderId: uuid("folder_id").notNull(),
 	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
 	seq: bigint({ mode: "number" }).notNull(),
 	eventType: text("event_type").notNull(),
@@ -2183,12 +1912,12 @@ export const revisionEvents = pgTable("revision_events", {
 	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
 }, (table) => [
 	foreignKey({
-			columns: [table.revisionId],
-			foreignColumns: [submissionRevisions.id],
-			name: "revision_events_revision_id_fkey"
+			columns: [table.folderId],
+			foreignColumns: [folders.id],
+			name: "folder_events_folder_id_fkey"
 		}),
-	primaryKey({ columns: [table.revisionId, table.seq], name: "revision_events_pkey"}),
-	check("revision_events_seq_chk", sql`seq > 0`),
+	primaryKey({ columns: [table.folderId, table.seq], name: "folder_events_pkey"}),
+	check("folder_events_seq_chk", sql`seq > 0`),
 ]);
 
 export const httpAnomalyStatsHourly = pgTable("http_anomaly_stats_hourly", {
@@ -2204,6 +1933,37 @@ export const httpAnomalyStatsHourly = pgTable("http_anomaly_stats_hourly", {
 	primaryKey({ columns: [table.bucketAt, table.problemSlug, table.route, table.statusCode], name: "http_anomaly_stats_hourly_pkey"}),
 	check("http_anomaly_status_chk", sql`(status_code >= 400) AND (status_code <= 499)`),
 	check("http_anomaly_count_chk", sql`count >= 0`),
+]);
+
+export const documentRelations = pgTable("document_relations", {
+	parentDocumentId: uuid("parent_document_id").notNull(),
+	childDocumentId: uuid("child_document_id").notNull(),
+	relation: text().notNull(),
+	folderId: uuid("folder_id").notNull(),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	complectId: uuid("complect_id"),
+}, (table) => [
+	index("ix_document_relations_child").using("btree", table.childDocumentId.asc().nullsLast().op("uuid_ops")),
+	index("ix_document_relations_complect").using("btree", table.complectId.asc().nullsLast().op("uuid_ops")),
+	index("ix_document_relations_folder").using("btree", table.folderId.asc().nullsLast().op("uuid_ops")),
+	foreignKey({
+			columns: [table.parentDocumentId, table.folderId],
+			foreignColumns: [logicalDocuments.folderId, logicalDocuments.id],
+			name: "document_relations_parent_fk"
+		}).onDelete("cascade"),
+	foreignKey({
+			columns: [table.childDocumentId, table.folderId],
+			foreignColumns: [logicalDocuments.folderId, logicalDocuments.id],
+			name: "document_relations_child_fk"
+		}).onDelete("cascade"),
+	foreignKey({
+			columns: [table.folderId, table.complectId],
+			foreignColumns: [complects.folderId, complects.id],
+			name: "document_relations_complect_fk"
+		}),
+	primaryKey({ columns: [table.childDocumentId, table.parentDocumentId, table.relation], name: "document_relations_pkey"}),
+	check("document_relations_self_chk", sql`parent_document_id <> child_document_id`),
+	check("document_relations_relation_chk", sql`relation = ANY (ARRAY['annex'::text, 'quality_doc'::text, 'protocol'::text, 'copy_certification'::text, 'signature_page'::text, 'supersedes'::text, 'duplicate'::text])`),
 ]);
 
 export const rulesetRules = pgTable("ruleset_rules", {
@@ -2230,64 +1990,40 @@ export const rulesetRules = pgTable("ruleset_rules", {
 ]);
 
 export const registryRowCandidates = pgTable("registry_row_candidates", {
-	revisionId: uuid("revision_id").notNull(),
+	folderId: uuid("folder_id").notNull(),
 	registryRowId: uuid("registry_row_id").notNull(),
 	documentId: uuid("document_id").notNull(),
 	basis: text().notNull(),
 	score: doublePrecision().notNull(),
 	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	complectId: uuid("complect_id"),
 }, (table) => [
+	index("ix_registry_row_candidates_complect").using("btree", table.complectId.asc().nullsLast().op("uuid_ops")),
 	index("ix_registry_row_candidates_document").using("btree", table.documentId.asc().nullsLast().op("uuid_ops")),
-	index("ix_registry_row_candidates_revision").using("btree", table.revisionId.asc().nullsLast().op("uuid_ops")),
+	index("ix_registry_row_candidates_folder").using("btree", table.folderId.asc().nullsLast().op("uuid_ops")),
 	foreignKey({
-			columns: [table.revisionId],
-			foreignColumns: [submissionRevisions.id],
-			name: "registry_row_candidates_revision_id_fkey"
-		}).onDelete("cascade"),
+			columns: [table.folderId, table.complectId],
+			foreignColumns: [complects.folderId, complects.id],
+			name: "registry_row_candidates_complect_fk"
+		}),
 	foreignKey({
 			columns: [table.registryRowId],
 			foreignColumns: [registryRows.id],
 			name: "registry_row_candidates_row_fk"
 		}).onDelete("cascade"),
 	foreignKey({
-			columns: [table.revisionId, table.documentId],
-			foreignColumns: [logicalDocuments.id, logicalDocuments.revisionId],
+			columns: [table.folderId, table.documentId],
+			foreignColumns: [logicalDocuments.folderId, logicalDocuments.id],
 			name: "registry_row_candidates_document_fk"
+		}).onDelete("cascade"),
+	foreignKey({
+			columns: [table.folderId],
+			foreignColumns: [folders.id],
+			name: "registry_row_candidates_folder_id_fkey"
 		}).onDelete("cascade"),
 	primaryKey({ columns: [table.documentId, table.registryRowId], name: "registry_row_candidates_pk"}),
 	check("registry_row_candidates_basis_chk", sql`basis = ANY (ARRAY['doc_no'::text, 'doc_type'::text, 'issued_at'::text, 'doc_type_and_issued_at'::text])`),
 	check("registry_row_candidates_score_chk", sql`(score >= (0)::double precision) AND (score <= (1)::double precision)`),
-]);
-
-export const registryItems = pgTable("registry_items", {
-	registryId: uuid("registry_id").notNull(),
-	ordinal: integer().notNull(),
-	workId: uuid("work_id").notNull(),
-	revisionId: uuid("revision_id").notNull(),
-	contractorId: uuid("contractor_id").notNull(),
-	title: text().notNull(),
-	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-}, (table) => [
-	index("ix_registry_items_contractor").using("btree", table.contractorId.asc().nullsLast().op("uuid_ops")),
-	index("ix_registry_items_work").using("btree", table.workId.asc().nullsLast().op("uuid_ops")),
-	foreignKey({
-			columns: [table.registryId],
-			foreignColumns: [registries.id],
-			name: "registry_items_registry_id_fkey"
-		}),
-	foreignKey({
-			columns: [table.contractorId],
-			foreignColumns: [counterparties.id],
-			name: "registry_items_contractor_id_fkey"
-		}),
-	foreignKey({
-			columns: [table.workId, table.revisionId],
-			foreignColumns: [submissionRevisions.id, submissionRevisions.workId],
-			name: "registry_items_revision_fk"
-		}),
-	primaryKey({ columns: [table.ordinal, table.registryId], name: "registry_items_pkey"}),
-	unique("registry_items_work_uq").on(table.registryId, table.workId),
-	check("registry_items_ordinal_chk", sql`ordinal > 0`),
 ]);
 
 export const recognitionRunPages = pgTable("recognition_run_pages", {
@@ -2378,50 +2114,8 @@ export const errorStatsHourly = pgTable("error_stats_hourly", {
 	check("error_stats_hourly_count_chk", sql`count >= 0`),
 ]);
 
-export const registryReconciliationExtraDocs = pgTable("registry_reconciliation_extra_docs", {
-	reconciliationId: uuid("reconciliation_id").notNull(),
-	revisionId: uuid("revision_id").notNull(),
-	documentId: uuid("document_id").notNull(),
-	workId: uuid("work_id").notNull(),
-	docRevisionId: uuid("doc_revision_id").notNull(),
-	contractorId: uuid("contractor_id").notNull(),
-	docNoRaw: text("doc_no_raw"),
-	docNameRaw: text("doc_name_raw"),
-	docTypeCode: text("doc_type_code"),
-}, (table) => [
-	index("ix_registry_reconciliation_extra_docs_contractor").using("btree", table.contractorId.asc().nullsLast().op("uuid_ops")),
-	index("ix_registry_reconciliation_extra_docs_revision").using("btree", table.docRevisionId.asc().nullsLast().op("uuid_ops")),
-	index("ix_registry_reconciliation_extra_docs_work").using("btree", table.reconciliationId.asc().nullsLast().op("uuid_ops"), table.workId.asc().nullsLast().op("uuid_ops")),
-	foreignKey({
-			columns: [table.documentId],
-			foreignColumns: [logicalDocuments.id],
-			name: "registry_reconciliation_extra_docs_document_id_fkey"
-		}),
-	foreignKey({
-			columns: [table.workId],
-			foreignColumns: [works.id],
-			name: "registry_reconciliation_extra_docs_work_id_fkey"
-		}),
-	foreignKey({
-			columns: [table.docRevisionId],
-			foreignColumns: [submissionRevisions.id],
-			name: "registry_reconciliation_extra_docs_doc_revision_id_fkey"
-		}),
-	foreignKey({
-			columns: [table.contractorId],
-			foreignColumns: [counterparties.id],
-			name: "registry_reconciliation_extra_docs_contractor_id_fkey"
-		}),
-	foreignKey({
-			columns: [table.reconciliationId, table.revisionId],
-			foreignColumns: [registryReconciliations.id, registryReconciliations.revisionId],
-			name: "registry_reconciliation_extra_docs_parent_fk"
-		}).onDelete("cascade"),
-	primaryKey({ columns: [table.documentId, table.reconciliationId], name: "registry_reconciliation_extra_docs_pkey"}),
-]);
-
 export const pageOrientations = pgTable("page_orientations", {
-	revisionId: uuid("revision_id").notNull(),
+	folderId: uuid("folder_id").notNull(),
 	sourcePageId: uuid("source_page_id").notNull(),
 	contentRotation: integer("content_rotation").notNull(),
 	source: text().notNull(),
@@ -2435,13 +2129,13 @@ export const pageOrientations = pgTable("page_orientations", {
 	probeError: text("probe_error"),
 	updatedAt: timestamp("updated_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
 }, (table) => [
-	index("ix_page_orientations_rotated").using("btree", table.revisionId.asc().nullsLast().op("uuid_ops")).where(sql`(content_rotation <> 0)`),
+	index("ix_page_orientations_rotated").using("btree", table.folderId.asc().nullsLast().op("uuid_ops")).where(sql`(content_rotation <> 0)`),
 	foreignKey({
-			columns: [table.revisionId, table.sourcePageId],
-			foreignColumns: [sourcePages.id, sourcePages.revisionId],
+			columns: [table.folderId, table.sourcePageId],
+			foreignColumns: [sourcePages.folderId, sourcePages.id],
 			name: "page_orientations_source_page_fk"
 		}).onDelete("cascade"),
-	primaryKey({ columns: [table.revisionId, table.sourcePageId], name: "page_orientations_pkey"}),
+	primaryKey({ columns: [table.folderId, table.sourcePageId], name: "page_orientations_pkey"}),
 	check("page_orientations_rotation_chk", sql`content_rotation = ANY (ARRAY[0, 90, 180, 270])`),
 	check("page_orientations_probe_rotation_chk", sql`(probe_rotation IS NULL) OR (probe_rotation = ANY (ARRAY[0, 90, 180, 270]))`),
 	check("page_orientations_source_chk", sql`source = ANY (ARRAY['probe'::text, 'user'::text])`),
@@ -2449,97 +2143,8 @@ export const pageOrientations = pgTable("page_orientations", {
 	check("page_orientations_probe_evidence_chk", sql`(source <> 'probe'::text) OR (probe_rotation IS NOT NULL) OR (probe_error IS NOT NULL)`),
 ]);
 
-export const registryReconciliationGroups = pgTable("registry_reconciliation_groups", {
-	reconciliationId: uuid("reconciliation_id").notNull(),
-	revisionId: uuid("revision_id").notNull(),
-	ordinal: integer().notNull(),
-	groupNo: text("group_no"),
-	titleRaw: text("title_raw").notNull(),
-	actNoRaw: text("act_no_raw"),
-	actNoNorm: text("act_no_norm"),
-	contractorRaw: text("contractor_raw"),
-	matchedWorkId: uuid("matched_work_id"),
-	matchedRevisionId: uuid("matched_revision_id"),
-	matchedContractorId: uuid("matched_contractor_id"),
-	matchState: text("match_state").notNull(),
-	matchScore: numeric("match_score", { precision: 4, scale:  3 }),
-	reason: text().notNull(),
-}, (table) => [
-	index("ix_registry_reconciliation_groups_work").using("btree", table.matchedWorkId.asc().nullsLast().op("uuid_ops")),
-	foreignKey({
-			columns: [table.matchedWorkId],
-			foreignColumns: [works.id],
-			name: "registry_reconciliation_groups_matched_work_id_fkey"
-		}),
-	foreignKey({
-			columns: [table.matchedRevisionId],
-			foreignColumns: [submissionRevisions.id],
-			name: "registry_reconciliation_groups_matched_revision_id_fkey"
-		}),
-	foreignKey({
-			columns: [table.matchedContractorId],
-			foreignColumns: [counterparties.id],
-			name: "registry_reconciliation_groups_matched_contractor_id_fkey"
-		}),
-	foreignKey({
-			columns: [table.reconciliationId, table.revisionId],
-			foreignColumns: [registryReconciliations.id, registryReconciliations.revisionId],
-			name: "registry_reconciliation_groups_parent_fk"
-		}).onDelete("cascade"),
-	primaryKey({ columns: [table.ordinal, table.reconciliationId], name: "registry_reconciliation_groups_pkey"}),
-	check("registry_reconciliation_groups_ordinal_chk", sql`ordinal >= 0`),
-	check("registry_reconciliation_groups_state_chk", sql`match_state = ANY (ARRAY['matched'::text, 'missing'::text, 'ambiguous'::text])`),
-	check("registry_reconciliation_groups_score_chk", sql`(match_score IS NULL) OR ((match_score >= (0)::numeric) AND (match_score <= (1)::numeric))`),
-	check("registry_reconciliation_groups_matched_chk", sql`((match_state = 'matched'::text) AND (matched_work_id IS NOT NULL)) OR ((match_state <> 'matched'::text) AND (matched_work_id IS NULL))`),
-]);
-
-export const registryReconciliationWorks = pgTable("registry_reconciliation_works", {
-	reconciliationId: uuid("reconciliation_id").notNull(),
-	revisionId: uuid("revision_id").notNull(),
-	workId: uuid("work_id").notNull(),
-	matchedRevisionId: uuid("matched_revision_id"),
-	contractorId: uuid("contractor_id").notNull(),
-	title: text().notNull(),
-	contractorName: text("contractor_name"),
-	state: text().notNull(),
-	verdict: text().notNull(),
-	rowsTotal: integer("rows_total").default(0).notNull(),
-	rowsMatched: integer("rows_matched").default(0).notNull(),
-	rowsMissing: integer("rows_missing").default(0).notNull(),
-	rowsAmbiguous: integer("rows_ambiguous").default(0).notNull(),
-	rowsFieldMismatch: integer("rows_field_mismatch").default(0).notNull(),
-	extraDocuments: integer("extra_documents").default(0).notNull(),
-}, (table) => [
-	index("ix_registry_reconciliation_works_contractor").using("btree", table.contractorId.asc().nullsLast().op("uuid_ops")),
-	index("ix_registry_reconciliation_works_revision").using("btree", table.matchedRevisionId.asc().nullsLast().op("uuid_ops")),
-	foreignKey({
-			columns: [table.workId],
-			foreignColumns: [works.id],
-			name: "registry_reconciliation_works_work_id_fkey"
-		}),
-	foreignKey({
-			columns: [table.matchedRevisionId],
-			foreignColumns: [submissionRevisions.id],
-			name: "registry_reconciliation_works_matched_revision_id_fkey"
-		}),
-	foreignKey({
-			columns: [table.contractorId],
-			foreignColumns: [counterparties.id],
-			name: "registry_reconciliation_works_contractor_id_fkey"
-		}),
-	foreignKey({
-			columns: [table.reconciliationId, table.revisionId],
-			foreignColumns: [registryReconciliations.id, registryReconciliations.revisionId],
-			name: "registry_reconciliation_works_parent_fk"
-		}).onDelete("cascade"),
-	primaryKey({ columns: [table.reconciliationId, table.workId], name: "registry_reconciliation_works_pkey"}),
-	check("registry_reconciliation_works_state_chk", sql`state = ANY (ARRAY['matched'::text, 'extra'::text])`),
-	check("registry_reconciliation_works_verdict_chk", sql`verdict = ANY (ARRAY['unparsed'::text, 'mismatch'::text, 'clean'::text])`),
-	check("registry_reconciliation_works_counts_chk", sql`(rows_total >= 0) AND (extra_documents >= 0) AND (((rows_matched + rows_missing) + rows_ambiguous) = rows_total) AND ((rows_field_mismatch >= 0) AND (rows_field_mismatch <= rows_total))`),
-]);
-
 export const pageClassifications = pgTable("page_classifications", {
-	revisionId: uuid("revision_id").notNull(),
+	folderId: uuid("folder_id").notNull(),
 	sourcePageId: uuid("source_page_id").notNull(),
 	label: text().notNull(),
 	docTypeCode: text("doc_type_code"),
@@ -2558,7 +2163,7 @@ export const pageClassifications = pgTable("page_classifications", {
 	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
 }, (table) => [
 	index("ix_page_classifications_doc_type").using("btree", table.docTypeCode.asc().nullsLast().op("text_ops")),
-	index("ix_page_classifications_other").using("btree", table.revisionId.asc().nullsLast().op("uuid_ops")).where(sql`(type_outcome = 'other'::text)`),
+	index("ix_page_classifications_other").using("btree", table.folderId.asc().nullsLast().op("uuid_ops")).where(sql`(type_outcome = 'other'::text)`),
 	index("ix_page_classifications_page_text").using("btree", table.pageTextVersionId.asc().nullsLast().op("uuid_ops")),
 	index("ix_page_classifications_role").using("btree", table.pageRoleCode.asc().nullsLast().op("text_ops")),
 	foreignKey({
@@ -2572,16 +2177,16 @@ export const pageClassifications = pgTable("page_classifications", {
 			name: "page_classifications_page_role_code_fkey"
 		}),
 	foreignKey({
-			columns: [table.revisionId, table.sourcePageId],
-			foreignColumns: [sourcePages.id, sourcePages.revisionId],
+			columns: [table.folderId, table.sourcePageId],
+			foreignColumns: [sourcePages.folderId, sourcePages.id],
 			name: "page_classifications_source_page_fk"
 		}).onDelete("cascade"),
 	foreignKey({
-			columns: [table.revisionId, table.pageTextVersionId],
-			foreignColumns: [pageTextVersions.id, pageTextVersions.revisionId],
+			columns: [table.folderId, table.pageTextVersionId],
+			foreignColumns: [pageTextVersions.folderId, pageTextVersions.id],
 			name: "page_classifications_page_text_fk"
 		}),
-	primaryKey({ columns: [table.revisionId, table.sourcePageId], name: "page_classifications_pkey"}),
+	primaryKey({ columns: [table.folderId, table.sourcePageId], name: "page_classifications_pkey"}),
 	check("page_classifications_label_chk", sql`label = ANY (ARRAY['B-DOC'::text, 'I-DOC'::text, 'A-ROLE'::text, 'U'::text])`),
 	check("page_classifications_type_outcome_chk", sql`type_outcome = ANY (ARRAY['known'::text, 'other'::text, 'uncertain'::text, 'none'::text])`),
 	check("page_classifications_source_chk", sql`source = ANY (ARRAY['anchor'::text, 'blocks'::text, 'llm'::text, 'manual'::text])`),
@@ -2592,71 +2197,8 @@ export const pageClassifications = pgTable("page_classifications", {
 	check("page_classifications_span_bounds_chk", sql`(char_span IS NULL) OR (lower(char_span) >= 0)`),
 	check("page_classifications_quote_span_chk", sql`(quote IS NULL) OR (char_span IS NOT NULL)`),
 ]);
-
-export const registryReconciliationRows = pgTable("registry_reconciliation_rows", {
-	reconciliationId: uuid("reconciliation_id").notNull(),
-	revisionId: uuid("revision_id").notNull(),
-	ordinal: integer().notNull(),
-	groupOrdinal: integer("group_ordinal").notNull(),
-	workId: uuid("work_id"),
-	contractorId: uuid("contractor_id"),
-	rowNo: text("row_no"),
-	docNameRaw: text("doc_name_raw").notNull(),
-	docNoRaw: text("doc_no_raw"),
-	docNoNorm: text("doc_no_norm"),
-	docNoFolded: text("doc_no_folded"),
-	orgRaw: text("org_raw"),
-	issuedAt: date("issued_at"),
-	validFrom: date("valid_from"),
-	validTo: date("valid_to"),
-	sheets: integer(),
-	copies: integer(),
-	pagesRaw: text("pages_raw"),
-	matchedDocumentId: uuid("matched_document_id"),
-	matchState: text("match_state").notNull(),
-	matchScore: numeric("match_score", { precision: 4, scale:  3 }),
-	fieldMismatches: text("field_mismatches").array().default([""]).notNull(),
-	reason: text().notNull(),
-}, (table) => [
-	index("ix_registry_reconciliation_rows_document").using("btree", table.matchedDocumentId.asc().nullsLast().op("uuid_ops")),
-	index("ix_registry_reconciliation_rows_work").using("btree", table.reconciliationId.asc().nullsLast().op("uuid_ops"), table.workId.asc().nullsLast().op("uuid_ops")),
-	foreignKey({
-			columns: [table.contractorId],
-			foreignColumns: [counterparties.id],
-			name: "registry_reconciliation_rows_contractor_id_fkey"
-		}),
-	foreignKey({
-			columns: [table.matchedDocumentId],
-			foreignColumns: [logicalDocuments.id],
-			name: "registry_reconciliation_rows_matched_document_id_fkey"
-		}),
-	foreignKey({
-			columns: [table.reconciliationId, table.groupOrdinal],
-			foreignColumns: [registryReconciliationGroups.ordinal, registryReconciliationGroups.reconciliationId],
-			name: "registry_reconciliation_rows_group_fk"
-		}).onDelete("cascade"),
-	foreignKey({
-			columns: [table.reconciliationId, table.revisionId],
-			foreignColumns: [registryReconciliations.id, registryReconciliations.revisionId],
-			name: "registry_reconciliation_rows_parent_fk"
-		}).onDelete("cascade"),
-	foreignKey({
-			columns: [table.workId],
-			foreignColumns: [works.id],
-			name: "registry_reconciliation_rows_work_id_fkey"
-		}),
-	primaryKey({ columns: [table.ordinal, table.reconciliationId], name: "registry_reconciliation_rows_pkey"}),
-	check("registry_reconciliation_rows_ordinal_chk", sql`ordinal >= 0`),
-	check("registry_reconciliation_rows_group_chk", sql`group_ordinal >= 0`),
-	check("registry_reconciliation_rows_state_chk", sql`match_state = ANY (ARRAY['matched'::text, 'missing'::text, 'ambiguous'::text])`),
-	check("registry_reconciliation_rows_score_chk", sql`(match_score IS NULL) OR ((match_score >= (0)::numeric) AND (match_score <= (1)::numeric))`),
-	check("registry_reconciliation_rows_matched_chk", sql`((match_state = 'matched'::text) AND (matched_document_id IS NOT NULL)) OR ((match_state <> 'matched'::text) AND (matched_document_id IS NULL))`),
-	check("registry_reconciliation_rows_fields_chk", sql`(match_state = 'matched'::text) OR (cardinality(field_mismatches) = 0)`),
-	check("registry_reconciliation_rows_sheets_chk", sql`(sheets IS NULL) OR (sheets >= 0)`),
-	check("registry_reconciliation_rows_copies_chk", sql`(copies IS NULL) OR (copies >= 0)`),
-]);
-export const vUnaccountedPages = pgView("v_unaccounted_pages", {	revisionId: uuid("revision_id"),
+export const vUnaccountedPages = pgView("v_unaccounted_pages", {	folderId: uuid("folder_id"),
 	sourcePageId: uuid("source_page_id"),
 	sourceFileId: uuid("source_file_id"),
-	revisionOrdinal: integer("revision_ordinal"),
-}).as(sql`SELECT revision_id, id AS source_page_id, source_file_id, revision_ordinal FROM source_pages p WHERE NOT (EXISTS ( SELECT 1 FROM page_assignments a WHERE a.revision_id = p.revision_id AND a.source_page_id = p.id))`);
+	folderOrdinal: integer("folder_ordinal"),
+}).as(sql`SELECT folder_id, id AS source_page_id, source_file_id, folder_ordinal FROM source_pages p WHERE NOT (EXISTS ( SELECT 1 FROM page_assignments a WHERE a.folder_id = p.folder_id AND a.source_page_id = p.id))`);

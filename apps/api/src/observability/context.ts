@@ -18,7 +18,7 @@ export interface RequestContext {
   requestId: string;
   userId?: string;
   objectId?: string;
-  revisionId?: string;
+  folderId?: string;
   /**
    * Шаблон маршрута (`/api/objects/:objectId`), а не конкретный путь.
    * Конкретный путь в этом поле означал бы неограниченную кардинальность
@@ -57,7 +57,7 @@ function applyPatch(target: RequestContext, patch: ContextPatch): void {
   if (patch.requestId !== undefined) target.requestId = patch.requestId;
   if (patch.userId !== undefined) target.userId = patch.userId;
   if (patch.objectId !== undefined) target.objectId = patch.objectId;
-  if (patch.revisionId !== undefined) target.revisionId = patch.revisionId;
+  if (patch.folderId !== undefined) target.folderId = patch.folderId;
   if (patch.route !== undefined) target.route = patch.route;
   if (patch.jobType !== undefined) target.jobType = patch.jobType;
   if (patch.jobId !== undefined) target.jobId = patch.jobId;
@@ -104,7 +104,7 @@ export function traceFields(): Record<string, string | number> {
   const fields: Record<string, string | number> = { request_id: context.requestId };
   if (context.userId !== undefined) fields.user_id = context.userId;
   if (context.objectId !== undefined) fields.object_id = context.objectId;
-  if (context.revisionId !== undefined) fields.revision_id = context.revisionId;
+  if (context.folderId !== undefined) fields.folder_id = context.folderId;
   if (context.route !== undefined) fields.route = context.route;
   if (context.jobType !== undefined) fields.job_type = context.jobType;
   if (context.jobId !== undefined) fields.job_id = context.jobId;

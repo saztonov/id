@@ -43,23 +43,6 @@ export type UserRole = z.infer<typeof userRoleSchema>;
 // --- Жизненный цикл поставки (§3, §10) ---
 
 /**
- * Состояние ревизии поставки.
- *
- * `superseded` — ревизия закрыта возвратом: она остаётся неизменяемой, а
- * работа продолжается в новой draft с `parentRevisionId`. Возврат не
- * «переоткрывает» ревизию, иначе история согласования переписывалась бы.
- */
-export const workflowStatusSchema = z.enum([
-  'draft',
-  'submitted',
-  'in_review',
-  'returned',
-  'approved',
-  'superseded',
-]);
-export type WorkflowStatus = z.infer<typeof workflowStatusSchema>;
-
-/**
  * Стадия конвейера (§12).
  *
  * В БД не хранится: это вычисляемая сводка над `job_runs` и состояниями
@@ -342,7 +325,7 @@ export type FindingOrigin = z.infer<typeof findingOriginSchema>;
 
 /** К чему привязано замечание (`findings.target_type`). */
 export const findingTargetTypeSchema = z.enum([
-  'revision',
+  'folder',
   'source_page',
   'document',
   'field_value',

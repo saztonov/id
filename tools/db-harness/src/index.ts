@@ -244,21 +244,18 @@ function normalizeRow(row: Record<string, unknown>): Record<string, unknown> {
  * Идентификаторы передаются вызывающим, а не генерируются здесь: тесты
  * проверяют ответы по конкретным UUID и печатают их в ожиданиях.
  */
-export interface RevisionTreeIds {
+export interface FolderTreeIds {
   /** Организация-исполнитель. Строку `counterparties` создаёт вызывающий. */
   readonly contractorId: string;
   readonly objectId: string;
   readonly userId: string;
-  readonly workId: string;
-  readonly revisionId: string;
+  readonly folderId: string;
   /** Код раздела работ. Заводится этой же функцией, если его ещё нет. */
   readonly sectionCode?: string;
   readonly sectionName?: string;
   /** Месяц комплекта первым числом. По умолчанию — январь 2026. */
   readonly period?: string;
-  readonly workTitle?: string;
-  readonly revisionNo?: number;
-  readonly revisionStatus?: string;
+  readonly folderTitle?: string;
   /**
    * Организация, ведущая комплект. По умолчанию совпадает с исполнителем;
    * задаётся отдельно там, где комплект заводит ПТО генподрядчика.
@@ -270,11 +267,11 @@ function quote(value: string): string {
   return `'${value.replace(/'/g, "''")}'`;
 }
 
-export function revisionTreeSql(ids: RevisionTreeIds): string[] {
+export function folderTreeSql(ids: FolderTreeIds): string[] {
   const sectionCode = ids.sectionCode ?? 'roofing';
   const sectionName = ids.sectionName ?? 'Кровля';
   const period = ids.period ?? '2026-01-01';
-  const title = ids.workTitle ?? 'Комплект работ';
+  const title = ids.folderTitle ?? 'Комплект работ';
   const managedBy = ids.managedByContractorId ?? ids.contractorId;
 
   return [
@@ -288,12 +285,10 @@ export function revisionTreeSql(ids: RevisionTreeIds): string[] {
        VALUES ('${ids.objectId}', '${ids.contractorId}') ON CONFLICT DO NOTHING`,
     `INSERT INTO object_contractors (object_id, contractor_id)
        VALUES ('${ids.objectId}', '${managedBy}') ON CONFLICT DO NOTHING`,
-    `INSERT INTO works
-       (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-     VALUES ('${ids.workId}', '${ids.objectId}', '${ids.contractorId}', '${managedBy}',
+    `INSERT INTO folders
+       (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title,
+        created_by)
+     VALUES ('${ids.folderId}', '${ids.objectId}', '${ids.contractorId}', '${managedBy}',
              ${quote(sectionCode)}, DATE ${quote(period)}, ${quote(title)}, '${ids.userId}')`,
-    `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
-     VALUES ('${ids.revisionId}', '${ids.workId}', '${ids.objectId}', '${ids.contractorId}',
-             ${String(ids.revisionNo ?? 1)}, ${quote(ids.revisionStatus ?? 'draft')})`,
   ];
 }

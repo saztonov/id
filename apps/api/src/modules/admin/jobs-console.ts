@@ -66,7 +66,7 @@ const listQuerySchema = z.object({
   status: z.enum(JOB_STATUSES).optional(),
   type: z.enum(JOB_TYPES as [string, ...string[]]).optional(),
   queue: z.enum(JOB_QUEUES).optional(),
-  revisionId: z.uuid().optional(),
+  folderId: z.uuid().optional(),
   deadOnly: z
     .string()
     .optional()
@@ -90,7 +90,7 @@ const jobSchema = z.object({
   lockedUntil: z.string().nullable(),
   lastError: z.string().nullable(),
   dedupeKey: z.string().nullable(),
-  revisionId: z.string().nullable(),
+  folderId: z.string().nullable(),
   createdAt: z.string(),
   updatedAt: z.string(),
   isDead: z.boolean(),
@@ -100,7 +100,7 @@ const jobRunSchema = z.object({
   id: z.uuid(),
   jobId: z.uuid().nullable(),
   jobType: z.string(),
-  revisionId: z.uuid().nullable(),
+  folderId: z.uuid().nullable(),
   requestId: z.string().nullable(),
   attempt: z.int(),
   startedAt: z.string(),
@@ -142,7 +142,7 @@ export function registerJobsConsoleRoutes(app: AppInstance): void {
         status: query.status,
         type: query.type,
         queue: query.queue,
-        revisionId: query.revisionId,
+        folderId: query.folderId,
         deadOnly: query.deadOnly,
         cursor: query.cursor,
         limit: query.limit,

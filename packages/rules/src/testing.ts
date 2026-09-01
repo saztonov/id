@@ -25,7 +25,7 @@ import type {
   RdDocumentNode,
   RegistryRowNode,
   RelationNode,
-  RevisionNode,
+  FolderNode,
   RuleSnapshotEntry,
   RuleSpec,
 } from './types.js';
@@ -158,14 +158,13 @@ export function makeCounterparty(patch: Partial<CounterpartyNode> = {}): Counter
   };
 }
 
-export function makeRevision(patch: Partial<RevisionNode> = {}): RevisionNode {
+export function makeFolder(patch: Partial<FolderNode> = {}): FolderNode {
   return {
     id: 'rev-1',
     objectId: 'obj-1',
     contractorId: 'cp-1',
     sectionCode: 'roofing',
-    workTitle: 'Кровля автостоянки',
-    status: 'submitted',
+    folderTitle: 'Кровля автостоянки',
     ...patch,
   };
 }
@@ -207,7 +206,7 @@ export function makeUnavailableRegistries(): ExternalRegistriesSnapshot {
 
 export function makeGraph(patch: Partial<CheckGraph> = {}): CheckGraph {
   return {
-    revision: makeRevision(),
+    folder: makeFolder(),
     object: makeObject(),
     profile: makeProfile(),
     counterparties: [],

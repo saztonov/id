@@ -31,7 +31,7 @@
  * (`withScope`), и повторяют решение модуля документов: список чужой ревизии —
  * это 200 и `items: []`, а 404 отдаётся там, где обработчик сам ищет строку и
  * не находит её (в этом модуле — `POST .../checks`, который перед постановкой
- * задачи читает ревизию через `findRevisionForFiles`). Разнобой был бы хуже
+ * задачи читает ревизию через `findFolderForFiles`). Разнобой был бы хуже
  * любого из двух вариантов: одинаковые по смыслу отказы обязаны выглядеть
  * одинаково, иначе клиент учится различать «нет прав» и «нет данных» по коду.
  */
@@ -64,10 +64,8 @@ const ORG_A = id(2);
 const ORG_B = id(3);
 const OBJECT = id(4);
 
-const SUBMISSION_A = id(10);
-const REVISION_A = id(11);
-const SUBMISSION_B = id(12);
-const REVISION_B = id(13);
+const FOLDER_A = id(11);
+const FOLDER_B = id(13);
 
 const USER_A = id(20);
 const USER_B = id(21);
@@ -100,8 +98,7 @@ const TEXT_A0 = id(69);
 const DOCUMENT_A = id(70);
 
 /** Ревизия с двумя прогонами: авторитетный тот, что новее. */
-const SUBMISSION_C = id(80);
-const REVISION_C = id(81);
+const FOLDER_C = id(81);
 const RUN_C_OLD = id(82);
 const RUN_C_NEW = id(83);
 const FINDING_C_OLD = id(84);
@@ -114,8 +111,7 @@ const FINDING_C_NEW = id(85);
  * страниц и документов ревизии А, и дописать туда акт с реестром значило бы
  * переписать их ради фикстуры соседнего теста.
  */
-const SUBMISSION_D = id(90);
-const REVISION_D = id(91);
+const FOLDER_D = id(91);
 const FILE_D = id(92);
 const PAGE_D0 = id(93);
 const PAGE_D1 = id(94);
@@ -134,8 +130,7 @@ const FINDING_D_MATERIAL = id(107);
 const REG_ROW_MATCHED = id(108);
 const REG_ROW_MISSING = id(109);
 /** Ревизия без единого прогона правил: состав виден, проверки не было. */
-const SUBMISSION_E = id(110);
-const REVISION_E = id(111);
+const FOLDER_E = id(111);
 const DOC_E = id(112);
 
 const SHA = (letter: string): string => letter.repeat(64);
@@ -195,11 +190,9 @@ const FIXTURE: readonly string[] = [
   // --- Поставка А ------------------------------------------------------------
   `INSERT INTO object_contractors (object_id, contractor_id)
        VALUES ('${OBJECT}', '${ORG_A}') ON CONFLICT DO NOTHING`,
-  `INSERT INTO works
+  `INSERT INTO folders
        (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-     VALUES ('${SUBMISSION_A}', '${OBJECT}', '${ORG_A}', '${ORG_A}', 'roofing', DATE '2026-01-01', 'Поставка А', '${USER_A}')`,
-  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
-     VALUES ('${REVISION_A}', '${SUBMISSION_A}', '${OBJECT}', '${ORG_A}', 1, 'draft')`,
+     VALUES ('${FOLDER_A}', '${OBJECT}', '${ORG_A}', '${ORG_A}', 'roofing', DATE '2026-01-01', 'Поставка А', '${USER_A}')`,
   // Разбор комплекта А. Три страницы: две отнесены к сертификату, третья
   // осталась непривязанной с названной причиной — именно её считает сводка
   // покрытия, а не пустое `v_unaccounted_pages`.
@@ -207,57 +200,57 @@ const FIXTURE: readonly string[] = [
      VALUES ('${SHA('a')}', 'blobs/${SHA('a')}', 2048, 'application/pdf')`,
   `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
      VALUES ('${SHA('b')}', 'blobs/${SHA('b')}', 4096, 'application/pdf')`,
-  `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order, verify_state)
-     VALUES ('${FILE_A}', '${REVISION_A}', '${SHA('a')}', 'komplekt.pdf', 0, 'ok')`,
-  `INSERT INTO source_pages (id, revision_id, source_file_id, file_page_index, revision_ordinal, width_px, height_px, rotation)
-     VALUES ('${PAGE_A0}', '${REVISION_A}', '${FILE_A}', 0, 0, 1654, 2339, 0)`,
-  `INSERT INTO source_pages (id, revision_id, source_file_id, file_page_index, revision_ordinal, width_px, height_px, rotation)
-     VALUES ('${PAGE_A1}', '${REVISION_A}', '${FILE_A}', 1, 1, 1654, 2339, 0)`,
-  `INSERT INTO source_pages (id, revision_id, source_file_id, file_page_index, revision_ordinal, width_px, height_px, rotation)
-     VALUES ('${PAGE_A2}', '${REVISION_A}', '${FILE_A}', 2, 2, 1654, 2339, 0)`,
-  `INSERT INTO processing_bundles (id, revision_id, aggregate_manifest_hash, working_pdf_blob_sha256, builder_version)
-     VALUES ('${BUNDLE_A}', '${REVISION_A}', '${SHA('e')}', '${SHA('b')}', 'bundle/1+pdf-lib')`,
-  `INSERT INTO processing_bundle_pages (bundle_id, revision_id, working_page_index, source_page_id)
-     VALUES ('${BUNDLE_A}', '${REVISION_A}', 0, '${PAGE_A0}')`,
-  `INSERT INTO processing_bundle_pages (bundle_id, revision_id, working_page_index, source_page_id)
-     VALUES ('${BUNDLE_A}', '${REVISION_A}', 1, '${PAGE_A1}')`,
-  `INSERT INTO processing_bundle_pages (bundle_id, revision_id, working_page_index, source_page_id)
-     VALUES ('${BUNDLE_A}', '${REVISION_A}', 2, '${PAGE_A2}')`,
-  `INSERT INTO layout_revisions (id, revision_id, object_id, bundle_id, revision_no, state)
-     VALUES ('${LAYOUT_A}', '${REVISION_A}', '${OBJECT}', '${BUNDLE_A}', 1, 'draft')`,
+  `INSERT INTO source_files (id, folder_id, blob_sha256, file_name, sort_order, verify_state)
+     VALUES ('${FILE_A}', '${FOLDER_A}', '${SHA('a')}', 'komplekt.pdf', 0, 'ok')`,
+  `INSERT INTO source_pages (id, folder_id, source_file_id, file_page_index, folder_ordinal, width_px, height_px, rotation)
+     VALUES ('${PAGE_A0}', '${FOLDER_A}', '${FILE_A}', 0, 0, 1654, 2339, 0)`,
+  `INSERT INTO source_pages (id, folder_id, source_file_id, file_page_index, folder_ordinal, width_px, height_px, rotation)
+     VALUES ('${PAGE_A1}', '${FOLDER_A}', '${FILE_A}', 1, 1, 1654, 2339, 0)`,
+  `INSERT INTO source_pages (id, folder_id, source_file_id, file_page_index, folder_ordinal, width_px, height_px, rotation)
+     VALUES ('${PAGE_A2}', '${FOLDER_A}', '${FILE_A}', 2, 2, 1654, 2339, 0)`,
+  `INSERT INTO processing_bundles (id, folder_id, aggregate_manifest_hash, working_pdf_blob_sha256, builder_version)
+     VALUES ('${BUNDLE_A}', '${FOLDER_A}', '${SHA('e')}', '${SHA('b')}', 'bundle/1+pdf-lib')`,
+  `INSERT INTO processing_bundle_pages (bundle_id, folder_id, working_page_index, source_page_id)
+     VALUES ('${BUNDLE_A}', '${FOLDER_A}', 0, '${PAGE_A0}')`,
+  `INSERT INTO processing_bundle_pages (bundle_id, folder_id, working_page_index, source_page_id)
+     VALUES ('${BUNDLE_A}', '${FOLDER_A}', 1, '${PAGE_A1}')`,
+  `INSERT INTO processing_bundle_pages (bundle_id, folder_id, working_page_index, source_page_id)
+     VALUES ('${BUNDLE_A}', '${FOLDER_A}', 2, '${PAGE_A2}')`,
+  `INSERT INTO layout_revisions (id, folder_id, object_id, bundle_id, revision_no, state)
+     VALUES ('${LAYOUT_A}', '${FOLDER_A}', '${OBJECT}', '${BUNDLE_A}', 1, 'draft')`,
   // Хэш набора блоков отдельным UPDATE: он появляется у разметки не при
   // создании, а когда по ней стартовал прогон распознавания.
   `UPDATE layout_revisions SET blocks_hash = '${SHA('7')}'
      WHERE id = '${LAYOUT_A}'`,
   `INSERT INTO rd_run_documents (id, layout_revision_id, rd_document_id, rd_project_id)
      VALUES ('${RUN_DOC_A}', '${LAYOUT_A}', 'doc_a', 'prj-portal')`,
-  `INSERT INTO recognition_runs (id, revision_id, layout_revision_id, rd_run_document_id,
+  `INSERT INTO recognition_runs (id, folder_id, layout_revision_id, rd_run_document_id,
                                  local_layout_hash, working_pdf_sha256, status, finished_at)
-     VALUES ('${RECOGNITION_A}', '${REVISION_A}', '${LAYOUT_A}', '${RUN_DOC_A}',
+     VALUES ('${RECOGNITION_A}', '${FOLDER_A}', '${LAYOUT_A}', '${RUN_DOC_A}',
              '${SHA('7')}', '${SHA('b')}', 'done', now())`,
   `INSERT INTO artifact_versions (id, recognition_run_id, kind, s3_key, artifact_sha256, byte_size)
      VALUES ('${ARTIFACT_A}', '${RECOGNITION_A}', 'md', 'artifacts/a.md', '${SHA('4')}', 20)`,
-  `INSERT INTO page_text_versions (id, revision_id, source_page_id, recognition_run_id,
+  `INSERT INTO page_text_versions (id, folder_id, source_page_id, recognition_run_id,
                                    artifact_version_id, text_md, text_sha256)
-     VALUES ('${TEXT_A0}', '${REVISION_A}', '${PAGE_A0}', '${RECOGNITION_A}', '${ARTIFACT_A}',
+     VALUES ('${TEXT_A0}', '${FOLDER_A}', '${PAGE_A0}', '${RECOGNITION_A}', '${ARTIFACT_A}',
              'СЕРТИФИКАТ СООТВЕТСТВИЯ действителен до 12.03.2024', '${SHA('6')}')`,
-  `INSERT INTO logical_documents (id, revision_id, object_id, contractor_id, doc_type_code, ordinal, title)
-     VALUES ('${DOCUMENT_A}', '${REVISION_A}', '${OBJECT}', '${ORG_A}', 'cert_conformity', 0, 'Сертификат № 42')`,
-  `INSERT INTO page_assignments (revision_id, source_page_id, document_id, sort_order)
-     VALUES ('${REVISION_A}', '${PAGE_A0}', '${DOCUMENT_A}', 0)`,
-  `INSERT INTO page_assignments (revision_id, source_page_id, document_id, sort_order)
-     VALUES ('${REVISION_A}', '${PAGE_A1}', '${DOCUMENT_A}', 1)`,
-  `INSERT INTO page_assignments (revision_id, source_page_id, reason)
-     VALUES ('${REVISION_A}', '${PAGE_A2}', 'вид документа не определён')`,
+  `INSERT INTO logical_documents (id, folder_id, object_id, contractor_id, doc_type_code, ordinal, title)
+     VALUES ('${DOCUMENT_A}', '${FOLDER_A}', '${OBJECT}', '${ORG_A}', 'cert_conformity', 0, 'Сертификат № 42')`,
+  `INSERT INTO page_assignments (folder_id, source_page_id, document_id, sort_order)
+     VALUES ('${FOLDER_A}', '${PAGE_A0}', '${DOCUMENT_A}', 0)`,
+  `INSERT INTO page_assignments (folder_id, source_page_id, document_id, sort_order)
+     VALUES ('${FOLDER_A}', '${PAGE_A1}', '${DOCUMENT_A}', 1)`,
+  `INSERT INTO page_assignments (folder_id, source_page_id, reason)
+     VALUES ('${FOLDER_A}', '${PAGE_A2}', 'вид документа не определён')`,
 
-  `INSERT INTO validation_runs (id, revision_id, ruleset_version_id, finished_at, counts)
-     VALUES ('${RUN_A}', '${REVISION_A}', '${RULESET_VERSION}', now(),
+  `INSERT INTO validation_runs (id, folder_id, ruleset_version_id, finished_at, counts)
+     VALUES ('${RUN_A}', '${FOLDER_A}', '${RULESET_VERSION}', now(),
              '{"error": 1, "warning": 0}'::jsonb)`,
   // Замечание уровня ДОКУМЕНТА и без страницы: страницу выдача обязана вывести
   // из первой страницы документа и честно назвать это приблизительным.
-  `INSERT INTO findings (id, validation_run_id, revision_id, object_id, contractor_id, rule_code,
+  `INSERT INTO findings (id, validation_run_id, folder_id, object_id, contractor_id, rule_code,
                          severity, state, origin, is_blocking, target_type, target_id, message, hint)
-     VALUES ('${FINDING_A}', '${RUN_A}', '${REVISION_A}', '${OBJECT}', '${ORG_A}', '${RULE_CODE}',
+     VALUES ('${FINDING_A}', '${RUN_A}', '${FOLDER_A}', '${OBJECT}', '${ORG_A}', '${RULE_CODE}',
              'error', 'open', 'deterministic', true, 'document', '${DOCUMENT_A}',
              'Номер акта не соответствует шаблону объекта.', 'Проверьте нумерацию актов.')`,
   `INSERT INTO finding_evidence (finding_id, page_text_version_id, char_span, quote)
@@ -266,18 +259,16 @@ const FIXTURE: readonly string[] = [
   // --- Поставка Б: те же сущности, но с маркером -----------------------------
   `INSERT INTO object_contractors (object_id, contractor_id)
        VALUES ('${OBJECT}', '${ORG_B}') ON CONFLICT DO NOTHING`,
-  `INSERT INTO works
+  `INSERT INTO folders
        (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-     VALUES ('${SUBMISSION_B}', '${OBJECT}', '${ORG_B}', '${ORG_B}', 'roofing', DATE '2026-01-01', 'Поставка Б', '${USER_B}')`,
-  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
-     VALUES ('${REVISION_B}', '${SUBMISSION_B}', '${OBJECT}', '${ORG_B}', 1, 'draft')`,
-  `INSERT INTO validation_runs (id, revision_id, ruleset_version_id, finished_at, counts)
-     VALUES ('${RUN_B}', '${REVISION_B}', '${RULESET_VERSION}', now(),
+     VALUES ('${FOLDER_B}', '${OBJECT}', '${ORG_B}', '${ORG_B}', 'roofing', DATE '2026-01-01', 'Поставка Б', '${USER_B}')`,
+  `INSERT INTO validation_runs (id, folder_id, ruleset_version_id, finished_at, counts)
+     VALUES ('${RUN_B}', '${FOLDER_B}', '${RULESET_VERSION}', now(),
              '{"error": 1, "note": "${SECRET}"}'::jsonb)`,
-  `INSERT INTO findings (id, validation_run_id, revision_id, object_id, contractor_id, rule_code,
+  `INSERT INTO findings (id, validation_run_id, folder_id, object_id, contractor_id, rule_code,
                          severity, state, origin, is_blocking, target_type, target_id, message, hint)
-     VALUES ('${FINDING_B}', '${RUN_B}', '${REVISION_B}', '${OBJECT}', '${ORG_B}', '${RULE_CODE}',
-             'error', 'open', 'deterministic', true, 'revision', '${REVISION_B}',
+     VALUES ('${FINDING_B}', '${RUN_B}', '${FOLDER_B}', '${OBJECT}', '${ORG_B}', '${RULE_CODE}',
+             'error', 'open', 'deterministic', true, 'folder', '${FOLDER_B}',
              '${SECRET}', 'Подсказка поставки Б.')`,
 
   // --- Поставка В: два прогона, второй новее -------------------------------
@@ -285,26 +276,24 @@ const FIXTURE: readonly string[] = [
   // `saveFindings` заменяет строки только своего прогона, поэтому в базе
   // законно лежат замечания обоих. Выдача обязана показывать один — иначе
   // второе нажатие «Распознать» удваивало бы список.
-  `INSERT INTO works
+  `INSERT INTO folders
        (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-     VALUES ('${SUBMISSION_C}', '${OBJECT}', '${ORG_A}', '${ORG_A}', 'roofing', DATE '2026-02-01', 'Поставка В', '${USER_A}')`,
-  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
-     VALUES ('${REVISION_C}', '${SUBMISSION_C}', '${OBJECT}', '${ORG_A}', 1, 'draft')`,
-  `INSERT INTO validation_runs (id, revision_id, ruleset_version_id, started_at, finished_at)
-     VALUES ('${RUN_C_OLD}', '${REVISION_C}', '${RULESET_VERSION}',
+     VALUES ('${FOLDER_C}', '${OBJECT}', '${ORG_A}', '${ORG_A}', 'roofing', DATE '2026-02-01', 'Поставка В', '${USER_A}')`,
+  `INSERT INTO validation_runs (id, folder_id, ruleset_version_id, started_at, finished_at)
+     VALUES ('${RUN_C_OLD}', '${FOLDER_C}', '${RULESET_VERSION}',
              now() - interval '2 hours', now() - interval '2 hours')`,
-  `INSERT INTO validation_runs (id, revision_id, ruleset_version_id, started_at, finished_at)
-     VALUES ('${RUN_C_NEW}', '${REVISION_C}', '${RULESET_VERSION}',
+  `INSERT INTO validation_runs (id, folder_id, ruleset_version_id, started_at, finished_at)
+     VALUES ('${RUN_C_NEW}', '${FOLDER_C}', '${RULESET_VERSION}',
              now() - interval '1 hour', now() - interval '1 hour')`,
-  `INSERT INTO findings (id, validation_run_id, revision_id, object_id, contractor_id, rule_code,
+  `INSERT INTO findings (id, validation_run_id, folder_id, object_id, contractor_id, rule_code,
                          severity, state, origin, is_blocking, target_type, target_id, message)
-     VALUES ('${FINDING_C_OLD}', '${RUN_C_OLD}', '${REVISION_C}', '${OBJECT}', '${ORG_A}', '${RULE_CODE}',
-             'error', 'open', 'deterministic', true, 'revision', '${REVISION_C}',
+     VALUES ('${FINDING_C_OLD}', '${RUN_C_OLD}', '${FOLDER_C}', '${OBJECT}', '${ORG_A}', '${RULE_CODE}',
+             'error', 'open', 'deterministic', true, 'folder', '${FOLDER_C}',
              'Замечание прошлого прогона.')`,
-  `INSERT INTO findings (id, validation_run_id, revision_id, object_id, contractor_id, rule_code,
+  `INSERT INTO findings (id, validation_run_id, folder_id, object_id, contractor_id, rule_code,
                          severity, state, origin, is_blocking, target_type, target_id, message)
-     VALUES ('${FINDING_C_NEW}', '${RUN_C_NEW}', '${REVISION_C}', '${OBJECT}', '${ORG_A}', '${RULE_CODE}',
-             'warning', 'open', 'deterministic', false, 'revision', '${REVISION_C}',
+     VALUES ('${FINDING_C_NEW}', '${RUN_C_NEW}', '${FOLDER_C}', '${OBJECT}', '${ORG_A}', '${RULE_CODE}',
+             'warning', 'open', 'deterministic', false, 'folder', '${FOLDER_C}',
              'Замечание последнего прогона.')`,
 
   // --- Поставка Г: комплект полного состава для отчёта -----------------------
@@ -312,68 +301,66 @@ const FIXTURE: readonly string[] = [
   // Акт, реестр приложений с двумя строками (одна сошлась, вторая нет),
   // сертификат со сроком и паспорт. Плюс замечание о материале, которому места
   // ни в одной строке отчёта нет по построению.
-  `INSERT INTO works
+  `INSERT INTO folders
        (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-     VALUES ('${SUBMISSION_D}', '${OBJECT}', '${ORG_A}', '${ORG_A}', 'roofing', DATE '2026-03-01', 'Поставка Г', '${USER_A}')`,
-  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
-     VALUES ('${REVISION_D}', '${SUBMISSION_D}', '${OBJECT}', '${ORG_A}', 1, 'draft')`,
+     VALUES ('${FOLDER_D}', '${OBJECT}', '${ORG_A}', '${ORG_A}', 'roofing', DATE '2026-03-01', 'Поставка Г', '${USER_A}')`,
   `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
      VALUES ('${SHA('d')}', 'blobs/${SHA('d')}', 8192, 'application/pdf')`,
-  `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order, verify_state)
-     VALUES ('${FILE_D}', '${REVISION_D}', '${SHA('d')}', 'komplekt-g.pdf', 0, 'ok')`,
+  `INSERT INTO source_files (id, folder_id, blob_sha256, file_name, sort_order, verify_state)
+     VALUES ('${FILE_D}', '${FOLDER_D}', '${SHA('d')}', 'komplekt-g.pdf', 0, 'ok')`,
   ...[PAGE_D0, PAGE_D1, PAGE_D2, PAGE_D3, PAGE_D4].map(
     (page, index) =>
-      `INSERT INTO source_pages (id, revision_id, source_file_id, file_page_index, revision_ordinal, width_px, height_px, rotation)
-         VALUES ('${page}', '${REVISION_D}', '${FILE_D}', ${String(index)}, ${String(index)}, 1654, 2339, 0)`,
+      `INSERT INTO source_pages (id, folder_id, source_file_id, file_page_index, folder_ordinal, width_px, height_px, rotation)
+         VALUES ('${page}', '${FOLDER_D}', '${FILE_D}', ${String(index)}, ${String(index)}, 1654, 2339, 0)`,
   ),
-  `INSERT INTO processing_bundles (id, revision_id, aggregate_manifest_hash, working_pdf_blob_sha256, builder_version)
-     VALUES ('${BUNDLE_D}', '${REVISION_D}', '${SHA('c')}', '${SHA('d')}', 'bundle/1+pdf-lib')`,
+  `INSERT INTO processing_bundles (id, folder_id, aggregate_manifest_hash, working_pdf_blob_sha256, builder_version)
+     VALUES ('${BUNDLE_D}', '${FOLDER_D}', '${SHA('c')}', '${SHA('d')}', 'bundle/1+pdf-lib')`,
   ...[PAGE_D0, PAGE_D1, PAGE_D2, PAGE_D3, PAGE_D4].map(
     (page, index) =>
-      `INSERT INTO processing_bundle_pages (bundle_id, revision_id, working_page_index, source_page_id)
-         VALUES ('${BUNDLE_D}', '${REVISION_D}', ${String(index)}, '${page}')`,
+      `INSERT INTO processing_bundle_pages (bundle_id, folder_id, working_page_index, source_page_id)
+         VALUES ('${BUNDLE_D}', '${FOLDER_D}', ${String(index)}, '${page}')`,
   ),
   // Порядок вставки НАРОЧНО обратный порядку страниц: отчёт обязан упорядочить
   // документы по первой странице, а не по `ordinal` и не по порядку в таблице.
-  `INSERT INTO logical_documents (id, revision_id, object_id, contractor_id, doc_type_code, ordinal, title)
-     VALUES ('${DOC_D_PASSPORT}', '${REVISION_D}', '${OBJECT}', '${ORG_A}', 'quality_passport', 0, 'Паспорт')`,
-  `INSERT INTO logical_documents (id, revision_id, object_id, contractor_id, doc_type_code, ordinal, title)
-     VALUES ('${DOC_D_CERT}', '${REVISION_D}', '${OBJECT}', '${ORG_A}', 'cert_conformity', 1, 'Сертификат')`,
-  `INSERT INTO logical_documents (id, revision_id, object_id, contractor_id, doc_type_code, ordinal, title)
-     VALUES ('${DOC_D_REGISTRY}', '${REVISION_D}', '${OBJECT}', '${ORG_A}', 'annex_registry', 2, 'Реестр приложений')`,
-  `INSERT INTO logical_documents (id, revision_id, object_id, contractor_id, doc_type_code, ordinal, title)
-     VALUES ('${DOC_D_ACT}', '${REVISION_D}', '${OBJECT}', '${ORG_A}', 'aosr', 3, 'АОСР')`,
-  `INSERT INTO page_assignments (revision_id, source_page_id, document_id, sort_order)
-     VALUES ('${REVISION_D}', '${PAGE_D0}', '${DOC_D_ACT}', 0)`,
-  `INSERT INTO page_assignments (revision_id, source_page_id, document_id, sort_order)
-     VALUES ('${REVISION_D}', '${PAGE_D1}', '${DOC_D_ACT}', 1)`,
-  `INSERT INTO page_assignments (revision_id, source_page_id, document_id, sort_order)
-     VALUES ('${REVISION_D}', '${PAGE_D2}', '${DOC_D_REGISTRY}', 0)`,
-  `INSERT INTO page_assignments (revision_id, source_page_id, document_id, sort_order)
-     VALUES ('${REVISION_D}', '${PAGE_D3}', '${DOC_D_CERT}', 0)`,
-  `INSERT INTO page_assignments (revision_id, source_page_id, document_id, sort_order)
-     VALUES ('${REVISION_D}', '${PAGE_D4}', '${DOC_D_PASSPORT}', 0)`,
-  `INSERT INTO field_values (revision_id, document_id, field_code, value_text, extractor_version, extracted_by)
-     VALUES ('${REVISION_D}', '${DOC_D_ACT}', 'act_number', '01-Бл-П', 'extract/1', 'rule')`,
-  `INSERT INTO field_values (revision_id, document_id, field_code, value_text, extractor_version, extracted_by)
-     VALUES ('${REVISION_D}', '${DOC_D_CERT}', 'number', 'РОСС RU.0001', 'extract/1', 'rule')`,
-  `INSERT INTO field_values (revision_id, document_id, field_code, value_date, extractor_version, extracted_by)
-     VALUES ('${REVISION_D}', '${DOC_D_CERT}', 'issued_at', DATE '2023-03-12', 'extract/1', 'rule')`,
-  `INSERT INTO field_values (revision_id, document_id, field_code, value_date, extractor_version, extracted_by)
-     VALUES ('${REVISION_D}', '${DOC_D_CERT}', 'valid_to', DATE '2024-03-12', 'extract/1', 'rule')`,
-  `INSERT INTO registry_rows (id, revision_id, document_id, row_no, ordinal, doc_name_raw, doc_no_raw, org_raw,
+  `INSERT INTO logical_documents (id, folder_id, object_id, contractor_id, doc_type_code, ordinal, title)
+     VALUES ('${DOC_D_PASSPORT}', '${FOLDER_D}', '${OBJECT}', '${ORG_A}', 'quality_passport', 0, 'Паспорт')`,
+  `INSERT INTO logical_documents (id, folder_id, object_id, contractor_id, doc_type_code, ordinal, title)
+     VALUES ('${DOC_D_CERT}', '${FOLDER_D}', '${OBJECT}', '${ORG_A}', 'cert_conformity', 1, 'Сертификат')`,
+  `INSERT INTO logical_documents (id, folder_id, object_id, contractor_id, doc_type_code, ordinal, title)
+     VALUES ('${DOC_D_REGISTRY}', '${FOLDER_D}', '${OBJECT}', '${ORG_A}', 'annex_registry', 2, 'Реестр приложений')`,
+  `INSERT INTO logical_documents (id, folder_id, object_id, contractor_id, doc_type_code, ordinal, title)
+     VALUES ('${DOC_D_ACT}', '${FOLDER_D}', '${OBJECT}', '${ORG_A}', 'aosr', 3, 'АОСР')`,
+  `INSERT INTO page_assignments (folder_id, source_page_id, document_id, sort_order)
+     VALUES ('${FOLDER_D}', '${PAGE_D0}', '${DOC_D_ACT}', 0)`,
+  `INSERT INTO page_assignments (folder_id, source_page_id, document_id, sort_order)
+     VALUES ('${FOLDER_D}', '${PAGE_D1}', '${DOC_D_ACT}', 1)`,
+  `INSERT INTO page_assignments (folder_id, source_page_id, document_id, sort_order)
+     VALUES ('${FOLDER_D}', '${PAGE_D2}', '${DOC_D_REGISTRY}', 0)`,
+  `INSERT INTO page_assignments (folder_id, source_page_id, document_id, sort_order)
+     VALUES ('${FOLDER_D}', '${PAGE_D3}', '${DOC_D_CERT}', 0)`,
+  `INSERT INTO page_assignments (folder_id, source_page_id, document_id, sort_order)
+     VALUES ('${FOLDER_D}', '${PAGE_D4}', '${DOC_D_PASSPORT}', 0)`,
+  `INSERT INTO field_values (folder_id, document_id, field_code, value_text, extractor_version, extracted_by)
+     VALUES ('${FOLDER_D}', '${DOC_D_ACT}', 'act_number', '01-Бл-П', 'extract/1', 'rule')`,
+  `INSERT INTO field_values (folder_id, document_id, field_code, value_text, extractor_version, extracted_by)
+     VALUES ('${FOLDER_D}', '${DOC_D_CERT}', 'number', 'РОСС RU.0001', 'extract/1', 'rule')`,
+  `INSERT INTO field_values (folder_id, document_id, field_code, value_date, extractor_version, extracted_by)
+     VALUES ('${FOLDER_D}', '${DOC_D_CERT}', 'issued_at', DATE '2023-03-12', 'extract/1', 'rule')`,
+  `INSERT INTO field_values (folder_id, document_id, field_code, value_date, extractor_version, extracted_by)
+     VALUES ('${FOLDER_D}', '${DOC_D_CERT}', 'valid_to', DATE '2024-03-12', 'extract/1', 'rule')`,
+  `INSERT INTO registry_rows (id, folder_id, document_id, row_no, ordinal, doc_name_raw, doc_no_raw, org_raw,
                               matched_document_id, match_score, match_state)
-     VALUES ('${REG_ROW_MATCHED}', '${REVISION_D}', '${DOC_D_REGISTRY}', 1, 0,
+     VALUES ('${REG_ROW_MATCHED}', '${FOLDER_D}', '${DOC_D_REGISTRY}', 1, 0,
              'Документ о качестве', 'РОСС RU.0001', 'ООО «Завод»',
              '${DOC_D_CERT}', 1, 'matched')`,
-  `INSERT INTO registry_rows (id, revision_id, document_id, row_no, ordinal, doc_name_raw, doc_no_raw, match_state)
-     VALUES ('${REG_ROW_MISSING}', '${REVISION_D}', '${DOC_D_REGISTRY}', 2, 1,
+  `INSERT INTO registry_rows (id, folder_id, document_id, row_no, ordinal, doc_name_raw, doc_no_raw, match_state)
+     VALUES ('${REG_ROW_MISSING}', '${FOLDER_D}', '${DOC_D_REGISTRY}', 2, 1,
              'Паспорт качества', '16005', 'missing')`,
   // Журнал исполнения: чек-лист акта показывается по нему, а не по замечаниям.
   // Четыре пункта нарочно разного исхода — пройденный, провалившийся,
   // неприменимый и не исполнявшийся: галочка обязана достаться только первому.
-  `INSERT INTO validation_runs (id, revision_id, ruleset_version_id, started_at, finished_at, counts)
-     VALUES ('${RUN_D}', '${REVISION_D}', '${RULESET_VERSION}', now(), now(), '{
+  `INSERT INTO validation_runs (id, folder_id, ruleset_version_id, started_at, finished_at, counts)
+     VALUES ('${RUN_D}', '${FOLDER_D}', '${RULESET_VERSION}', now(), now(), '{
        "journal": {
          "engineVersion": "checks/1",
          "rulesetVersion": "2026.1",
@@ -387,30 +374,28 @@ const FIXTURE: readonly string[] = [
          "engineCounts": {}
        }
      }'::jsonb)`,
-  `INSERT INTO findings (id, validation_run_id, revision_id, object_id, contractor_id, rule_code,
+  `INSERT INTO findings (id, validation_run_id, folder_id, object_id, contractor_id, rule_code,
                          severity, state, origin, is_blocking, target_type, target_id, message)
-     VALUES ('${FINDING_D_ACT}', '${RUN_D}', '${REVISION_D}', '${OBJECT}', '${ORG_A}', 'AOSR.HDR.021',
+     VALUES ('${FINDING_D_ACT}', '${RUN_D}', '${FOLDER_D}', '${OBJECT}', '${ORG_A}', 'AOSR.HDR.021',
              'error', 'open', 'deterministic', true, 'document', '${DOC_D_ACT}',
              'Контрольная сумма ИНН в шапке акта не сходится.')`,
-  `INSERT INTO findings (id, validation_run_id, revision_id, object_id, contractor_id, rule_code,
+  `INSERT INTO findings (id, validation_run_id, folder_id, object_id, contractor_id, rule_code,
                          severity, state, origin, is_blocking, target_type, target_id, message)
-     VALUES ('${FINDING_D_CERT}', '${RUN_D}', '${REVISION_D}', '${OBJECT}', '${ORG_A}', 'DATE.302',
+     VALUES ('${FINDING_D_CERT}', '${RUN_D}', '${FOLDER_D}', '${OBJECT}', '${ORG_A}', 'DATE.302',
              'warning', 'open', 'deterministic', false, 'document', '${DOC_D_CERT}',
              'Документ истёк 12.03.2024.')`,
-  `INSERT INTO findings (id, validation_run_id, revision_id, object_id, contractor_id, rule_code,
+  `INSERT INTO findings (id, validation_run_id, folder_id, object_id, contractor_id, rule_code,
                          severity, state, origin, is_blocking, target_type, target_id, message)
-     VALUES ('${FINDING_D_MATERIAL}', '${RUN_D}', '${REVISION_D}', '${OBJECT}', '${ORG_A}', 'MAT.110',
+     VALUES ('${FINDING_D_MATERIAL}', '${RUN_D}', '${FOLDER_D}', '${OBJECT}', '${ORG_A}', 'MAT.110',
              'error', 'open', 'deterministic', false, 'material', '${id(199)}',
              'На материал нет документа о качестве.')`,
 
   // --- Поставка Д: состав есть, проверки не было ----------------------------
-  `INSERT INTO works
+  `INSERT INTO folders
        (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-     VALUES ('${SUBMISSION_E}', '${OBJECT}', '${ORG_A}', '${ORG_A}', 'roofing', DATE '2026-04-01', 'Поставка Д', '${USER_A}')`,
-  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
-     VALUES ('${REVISION_E}', '${SUBMISSION_E}', '${OBJECT}', '${ORG_A}', 1, 'draft')`,
-  `INSERT INTO logical_documents (id, revision_id, object_id, contractor_id, doc_type_code, ordinal, title)
-     VALUES ('${DOC_E}', '${REVISION_E}', '${OBJECT}', '${ORG_A}', 'cert_conformity', 0, 'Сертификат Д')`,
+     VALUES ('${FOLDER_E}', '${OBJECT}', '${ORG_A}', '${ORG_A}', 'roofing', DATE '2026-04-01', 'Поставка Д', '${USER_A}')`,
+  `INSERT INTO logical_documents (id, folder_id, object_id, contractor_id, doc_type_code, ordinal, title)
+     VALUES ('${DOC_E}', '${FOLDER_E}', '${OBJECT}', '${ORG_A}', 'cert_conformity', 0, 'Сертификат Д')`,
 ];
 
 const STORAGE_DIR = mkdtempSync(join(tmpdir(), 'id-checks-routes-'));
@@ -570,8 +555,8 @@ function summaryOf(response: LightMyRequestResponse): ChecksSummaryOf['summary']
  * знать, ЧТО попадёт в колонку, иначе смена формата ключа в роуте молча
  * переставала бы дедуплицировать, а проверка продолжала бы проходить.
  */
-function dedupeKey(revisionId: string, header: string): string {
-  return `checks.run:${revisionId}:${header}`;
+function dedupeKey(folderId: string, header: string): string {
+  return `checks.run:${folderId}:${header}`;
 }
 
 async function jobsByKey(key: string): Promise<readonly { id: string; payload: string }[]> {
@@ -589,12 +574,12 @@ async function totalCheckJobs(): Promise<number> {
 }
 
 // =====================================================================
-// GET /revisions/{id}/findings — изоляция (§1.6, non-degradable)
+// GET /folders/{id}/findings — изоляция (§1.6, non-degradable)
 // =====================================================================
 
-describe('GET /api/v1/revisions/{id}/findings', () => {
+describe('GET /api/v1/folders/{id}/findings', () => {
   it('владелец получает СВОИ замечания, и список непуст', async () => {
-    const a = await as(KC.a, 'GET', `/api/v1/revisions/${REVISION_A}/findings`);
+    const a = await as(KC.a, 'GET', `/api/v1/folders/${FOLDER_A}/findings`);
     expect(a.statusCode).toBe(200);
     expect(items(a)).toHaveLength(1);
     expect(items(a)[0]?.id).toBe(FINDING_A);
@@ -602,14 +587,14 @@ describe('GET /api/v1/revisions/{id}/findings', () => {
 
     // Владелец поставки Б получает маркер — без этого утверждения проверка
     // «маркера нет в ответе подрядчика А» доказывала бы лишь, что его нет нигде.
-    const b = await as(KC.b, 'GET', `/api/v1/revisions/${REVISION_B}/findings`);
+    const b = await as(KC.b, 'GET', `/api/v1/folders/${FOLDER_B}/findings`);
     expect(b.statusCode).toBe(200);
     expect(items(b)).toHaveLength(1);
     expect(b.body).toContain(SECRET);
   });
 
   it('подрядчик А не получает замечаний ревизии Б ни списком, ни по прямому прогону', async () => {
-    const list = await as(KC.a, 'GET', `/api/v1/revisions/${REVISION_B}/findings`);
+    const list = await as(KC.a, 'GET', `/api/v1/folders/${FOLDER_B}/findings`);
     expect(list.statusCode).toBe(200);
     expect(items(list)).toEqual([]);
     expect(list.body).not.toContain(SECRET);
@@ -619,7 +604,7 @@ describe('GET /api/v1/revisions/{id}/findings', () => {
     const byRun = await as(
       KC.a,
       'GET',
-      `/api/v1/revisions/${REVISION_B}/findings?validationRunId=${RUN_B}`,
+      `/api/v1/folders/${FOLDER_B}/findings?validationRunId=${RUN_B}`,
     );
     expect(byRun.statusCode).toBe(200);
     expect(items(byRun)).toEqual([]);
@@ -630,7 +615,7 @@ describe('GET /api/v1/revisions/{id}/findings', () => {
     const crossed = await as(
       KC.a,
       'GET',
-      `/api/v1/revisions/${REVISION_A}/findings?validationRunId=${RUN_B}`,
+      `/api/v1/folders/${FOLDER_A}/findings?validationRunId=${RUN_B}`,
     );
     expect(items(crossed)).toEqual([]);
     expect(crossed.body).not.toContain(SECRET);
@@ -640,16 +625,16 @@ describe('GET /api/v1/revisions/{id}/findings', () => {
     const own = await as(
       KC.a,
       'GET',
-      `/api/v1/revisions/${REVISION_A}/findings?validationRunId=${RUN_A}`,
+      `/api/v1/folders/${FOLDER_A}/findings?validationRunId=${RUN_A}`,
     );
     expect(items(own)).toHaveLength(1);
   });
 
   it('инженер объекта видит замечания ОБОИХ подрядчиков', async () => {
-    const a = await as(KC.engineer, 'GET', `/api/v1/revisions/${REVISION_A}/findings`);
+    const a = await as(KC.engineer, 'GET', `/api/v1/folders/${FOLDER_A}/findings`);
     expect(items(a)).toHaveLength(1);
 
-    const b = await as(KC.engineer, 'GET', `/api/v1/revisions/${REVISION_B}/findings`);
+    const b = await as(KC.engineer, 'GET', `/api/v1/folders/${FOLDER_B}/findings`);
     expect(items(b)).toHaveLength(1);
     expect(b.body).toContain(SECRET);
   });
@@ -659,12 +644,8 @@ describe('GET /api/v1/revisions/{id}/findings', () => {
     // ни одного объекта, не видел ничего. Назначений больше нет (S37) — теперь
     // утверждение сторожит обратное, потому что молчаливый возврат ограничения
     // выглядел бы на экране как исчезнувшие замечания.
-    for (const revision of [REVISION_A, REVISION_B]) {
-      const response = await as(
-        KC.engineerNoScope,
-        'GET',
-        `/api/v1/revisions/${revision}/findings`,
-      );
+    for (const folder of [FOLDER_A, FOLDER_B]) {
+      const response = await as(KC.engineerNoScope, 'GET', `/api/v1/folders/${folder}/findings`);
       expect(response.statusCode).toBe(200);
       expect(items(response)).toHaveLength(1);
     }
@@ -674,10 +655,10 @@ describe('GET /api/v1/revisions/{id}/findings', () => {
     // Утечка тоньше, чем «видно чужое замечание»: список пуст, а `latestRun`
     // рассказывал бы, что проверка соседа шла вчера в 14:20. Это тот же класс
     // сведения о чужой работе, что счётчики чужой папки (§16).
-    const foreign = await as(KC.a, 'GET', `/api/v1/revisions/${REVISION_B}/findings`);
+    const foreign = await as(KC.a, 'GET', `/api/v1/folders/${FOLDER_B}/findings`);
     expect(summaryOf(foreign).latestRun).toBeNull();
 
-    const own = await as(KC.b, 'GET', `/api/v1/revisions/${REVISION_B}/findings`);
+    const own = await as(KC.b, 'GET', `/api/v1/folders/${FOLDER_B}/findings`);
     expect(summaryOf(own).latestRun).not.toBeNull();
   });
 });
@@ -688,7 +669,7 @@ describe('GET /api/v1/revisions/{id}/findings', () => {
 
 describe('обогащение замечаний', () => {
   it('называет вид документа из справочника, а не код типа', async () => {
-    const response = await as(KC.a, 'GET', `/api/v1/revisions/${REVISION_A}/findings`);
+    const response = await as(KC.a, 'GET', `/api/v1/folders/${FOLDER_A}/findings`);
     const finding = items(response)[0] as unknown as EnrichedFinding;
 
     expect(finding.document?.docTypeCode).toBe('cert_conformity');
@@ -699,7 +680,7 @@ describe('обогащение замечаний', () => {
   });
 
   it('выводит страницу из начала документа и НАЗЫВАЕТ это приблизительным', async () => {
-    const response = await as(KC.a, 'GET', `/api/v1/revisions/${REVISION_A}/findings`);
+    const response = await as(KC.a, 'GET', `/api/v1/folders/${FOLDER_A}/findings`);
     const finding = items(response)[0] as unknown as EnrichedFinding;
 
     // У замечания нет своей страницы: `source_page_id` пуст. Без вывода из
@@ -715,7 +696,7 @@ describe('обогащение замечаний', () => {
   });
 
   it('отдаёт цитату доказательства — она заменяет удалённый раздел «Реквизиты»', async () => {
-    const response = await as(KC.a, 'GET', `/api/v1/revisions/${REVISION_A}/findings`);
+    const response = await as(KC.a, 'GET', `/api/v1/folders/${FOLDER_A}/findings`);
     const finding = items(response)[0] as unknown as EnrichedFinding;
 
     expect(finding.evidence).toHaveLength(1);
@@ -724,7 +705,7 @@ describe('обогащение замечаний', () => {
   });
 
   it('сводка различает распознанное, разобранное и непривязанное', async () => {
-    const response = await as(KC.a, 'GET', `/api/v1/revisions/${REVISION_A}/findings`);
+    const response = await as(KC.a, 'GET', `/api/v1/folders/${FOLDER_A}/findings`);
     const { coverage, counts } = summaryOf(response);
 
     expect(coverage.pagesTotal).toBe(3);
@@ -747,7 +728,7 @@ describe('обогащение замечаний', () => {
     // прогон описывал документы, которых больше нет.
     await db.exec(`UPDATE findings SET target_id = '${id(999)}' WHERE id = '${FINDING_A}'`);
     try {
-      const response = await as(KC.a, 'GET', `/api/v1/revisions/${REVISION_A}/findings`);
+      const response = await as(KC.a, 'GET', `/api/v1/folders/${FOLDER_A}/findings`);
       const finding = items(response)[0] as unknown as EnrichedFinding;
       expect(finding.target.kind).toBe('gone');
       expect(finding.target.label).toContain('пересобран');
@@ -766,7 +747,7 @@ describe('прогон, который показывается', () => {
     // Ровно тот дефект, из-за которого второе нажатие «Распознать» удваивало
     // список: `saveFindings` заменяет строки только своего прогона, а выдача
     // читала всю ревизию.
-    const response = await as(KC.a, 'GET', `/api/v1/revisions/${REVISION_C}/findings`);
+    const response = await as(KC.a, 'GET', `/api/v1/folders/${FOLDER_C}/findings`);
     expect(items(response)).toHaveLength(1);
     expect(items(response)[0]?.id).toBe(FINDING_C_NEW);
     expect(summaryOf(response).shownRunId).toBe(RUN_C_NEW);
@@ -775,7 +756,7 @@ describe('прогон, который показывается', () => {
   it('идущая проверка не гасит прежний результат, но видна отдельно', async () => {
     await db.exec(`UPDATE validation_runs SET finished_at = NULL WHERE id = '${RUN_C_NEW}'`);
     try {
-      const response = await as(KC.a, 'GET', `/api/v1/revisions/${REVISION_C}/findings`);
+      const response = await as(KC.a, 'GET', `/api/v1/folders/${FOLDER_C}/findings`);
       const summary = summaryOf(response);
 
       // Авторитетный — новый и незавершённый: по нему запирается согласование.
@@ -798,7 +779,7 @@ describe('прогон, который показывается', () => {
     const response = await as(
       KC.a,
       'GET',
-      `/api/v1/revisions/${REVISION_C}/findings?validationRunId=${RUN_C_OLD}`,
+      `/api/v1/folders/${FOLDER_C}/findings?validationRunId=${RUN_C_OLD}`,
     );
     expect(items(response)[0]?.id).toBe(FINDING_C_OLD);
     expect(summaryOf(response).shownRunId).toBe(RUN_C_OLD);
@@ -807,18 +788,18 @@ describe('прогон, который показывается', () => {
 });
 
 // =====================================================================
-// GET /revisions/{id}/checks — изоляция
+// GET /folders/{id}/checks — изоляция
 // =====================================================================
 
-describe('GET /api/v1/revisions/{id}/checks', () => {
+describe('GET /api/v1/folders/{id}/checks', () => {
   it('владелец получает СВОИ прогоны, и список непуст', async () => {
-    const a = await as(KC.a, 'GET', `/api/v1/revisions/${REVISION_A}/checks`);
+    const a = await as(KC.a, 'GET', `/api/v1/folders/${FOLDER_A}/checks`);
     expect(a.statusCode).toBe(200);
     expect(items(a)).toHaveLength(1);
     expect(items(a)[0]?.id).toBe(RUN_A);
     expect(items(a)[0]?.rulesetVersionId).toBe(RULESET_VERSION);
 
-    const b = await as(KC.b, 'GET', `/api/v1/revisions/${REVISION_B}/checks`);
+    const b = await as(KC.b, 'GET', `/api/v1/folders/${FOLDER_B}/checks`);
     expect(items(b)).toHaveLength(1);
     // Сводка прогона отдаётся passthrough-объектом, поэтому маркер доходит до
     // владельца — и потому его отсутствие у чужого читателя что-то значит.
@@ -826,30 +807,30 @@ describe('GET /api/v1/revisions/{id}/checks', () => {
   });
 
   it('подрядчик А не получает прогонов ревизии Б', async () => {
-    const list = await as(KC.a, 'GET', `/api/v1/revisions/${REVISION_B}/checks`);
+    const list = await as(KC.a, 'GET', `/api/v1/folders/${FOLDER_B}/checks`);
     expect(list.statusCode).toBe(200);
     expect(items(list)).toEqual([]);
     expect(list.body).not.toContain(SECRET);
 
     // Положительный контроль рядом: свой список подрядчика А непуст.
-    const own = await as(KC.a, 'GET', `/api/v1/revisions/${REVISION_A}/checks`);
+    const own = await as(KC.a, 'GET', `/api/v1/folders/${FOLDER_A}/checks`);
     expect(items(own)).toHaveLength(1);
   });
 
   it('подрядчик Б не получает прогонов ревизии А — изоляция симметрична', async () => {
-    const list = await as(KC.b, 'GET', `/api/v1/revisions/${REVISION_A}/checks`);
+    const list = await as(KC.b, 'GET', `/api/v1/folders/${FOLDER_A}/checks`);
     expect(items(list)).toEqual([]);
 
-    const own = await as(KC.b, 'GET', `/api/v1/revisions/${REVISION_B}/checks`);
+    const own = await as(KC.b, 'GET', `/api/v1/folders/${FOLDER_B}/checks`);
     expect(items(own)).toHaveLength(1);
   });
 
   it('прогоны видны любому инженеру, а не только назначенному на объект', async () => {
-    const any = await as(KC.engineerNoScope, 'GET', `/api/v1/revisions/${REVISION_A}/checks`);
+    const any = await as(KC.engineerNoScope, 'GET', `/api/v1/folders/${FOLDER_A}/checks`);
     expect(any.statusCode).toBe(200);
     expect(items(any)).toHaveLength(1);
 
-    const scoped = await as(KC.engineer, 'GET', `/api/v1/revisions/${REVISION_A}/checks`);
+    const scoped = await as(KC.engineer, 'GET', `/api/v1/folders/${FOLDER_A}/checks`);
     expect(items(scoped)).toHaveLength(1);
   });
 });
@@ -884,13 +865,13 @@ describe('GET /api/v1/admin/rule-catalog', () => {
 });
 
 // =====================================================================
-// POST /revisions/{id}/checks — право, область и идемпотентность
+// POST /folders/{id}/checks — право, область и идемпотентность
 // =====================================================================
 
-describe('POST /api/v1/revisions/{id}/checks', () => {
+describe('POST /api/v1/folders/{id}/checks', () => {
   it('подрядчику запуск проверок запрещён и задача не ставится', async () => {
     const before = await totalCheckJobs();
-    const response = await as(KC.a, 'POST', `/api/v1/revisions/${REVISION_A}/checks`, {
+    const response = await as(KC.a, 'POST', `/api/v1/folders/${FOLDER_A}/checks`, {
       body: {},
       idempotencyKey: 'contractor-attempt',
     });
@@ -904,17 +885,17 @@ describe('POST /api/v1/revisions/{id}/checks', () => {
     // 404 у постановки задачи не проверялась бы вовсе.
     const before = await totalCheckJobs();
     const missing = '00000000-0000-4000-8000-00000000dead';
-    const response = await as(KC.engineerNoScope, 'POST', `/api/v1/revisions/${missing}/checks`, {
+    const response = await as(KC.engineerNoScope, 'POST', `/api/v1/folders/${missing}/checks`, {
       body: {},
-      idempotencyKey: 'missing-revision',
+      idempotencyKey: 'missing-folder',
     });
     expect(response.statusCode).toBe(404);
-    expect(await jobsByKey(dedupeKey(missing, 'missing-revision'))).toHaveLength(0);
+    expect(await jobsByKey(dedupeKey(missing, 'missing-folder'))).toHaveLength(0);
     expect(await totalCheckJobs()).toBe(before);
   });
 
   it('первый запуск ставит РОВНО ОДНУ задачу checks.run с ревизией в payload', async () => {
-    const response = await as(KC.engineer, 'POST', `/api/v1/revisions/${REVISION_A}/checks`, {
+    const response = await as(KC.engineer, 'POST', `/api/v1/folders/${FOLDER_A}/checks`, {
       body: {},
       idempotencyKey: 'run-1',
     });
@@ -923,18 +904,18 @@ describe('POST /api/v1/revisions/{id}/checks', () => {
     expect(body.created).toBe(true);
     expect(body.jobId).not.toBeNull();
 
-    const rows = await jobsByKey(dedupeKey(REVISION_A, 'run-1'));
+    const rows = await jobsByKey(dedupeKey(FOLDER_A, 'run-1'));
     expect(rows).toHaveLength(1);
     expect(rows[0]?.id).toBe(body.jobId);
     const payload = JSON.parse(rows[0]?.payload ?? '{}') as Record<string, unknown>;
-    expect(payload.revisionId).toBe(REVISION_A);
+    expect(payload.folderId).toBe(FOLDER_A);
   });
 
   it('повтор с тем же Idempotency-Key даёт тот же jobId и НЕ заводит второй строки', async () => {
     const before = await totalCheckJobs();
-    const first = await jobsByKey(dedupeKey(REVISION_A, 'run-1'));
+    const first = await jobsByKey(dedupeKey(FOLDER_A, 'run-1'));
 
-    const response = await as(KC.engineer, 'POST', `/api/v1/revisions/${REVISION_A}/checks`, {
+    const response = await as(KC.engineer, 'POST', `/api/v1/folders/${FOLDER_A}/checks`, {
       body: {},
       idempotencyKey: 'run-1',
     });
@@ -944,39 +925,39 @@ describe('POST /api/v1/revisions/{id}/checks', () => {
     expect(body.created).toBe(false);
     expect(body.jobId).toBe(first[0]?.id);
 
-    expect(await jobsByKey(dedupeKey(REVISION_A, 'run-1'))).toHaveLength(1);
+    expect(await jobsByKey(dedupeKey(FOLDER_A, 'run-1'))).toHaveLength(1);
     expect(await totalCheckJobs()).toBe(before);
   });
 
   it('другой Idempotency-Key — осознанный повторный прогон, вторая задача', async () => {
     const before = await totalCheckJobs();
-    const response = await as(KC.engineer, 'POST', `/api/v1/revisions/${REVISION_A}/checks`, {
+    const response = await as(KC.engineer, 'POST', `/api/v1/folders/${FOLDER_A}/checks`, {
       body: {},
       idempotencyKey: 'run-2',
     });
     expect(response.statusCode).toBe(202);
     expect(response.json<{ created: boolean }>().created).toBe(true);
 
-    expect(await jobsByKey(dedupeKey(REVISION_A, 'run-2'))).toHaveLength(1);
+    expect(await jobsByKey(dedupeKey(FOLDER_A, 'run-2'))).toHaveLength(1);
     // Первая задача при этом на месте: новый ключ добавляет прогон, а не
     // подменяет уже стоящий.
-    expect(await jobsByKey(dedupeKey(REVISION_A, 'run-1'))).toHaveLength(1);
+    expect(await jobsByKey(dedupeKey(FOLDER_A, 'run-1'))).toHaveLength(1);
     expect(await totalCheckJobs()).toBe(before + 1);
   });
 
   it('без заголовка ключ строится по ревизии, и повторы сливаются в одну задачу', async () => {
-    const first = await as(KC.manager, 'POST', `/api/v1/revisions/${REVISION_B}/checks`, {
+    const first = await as(KC.manager, 'POST', `/api/v1/folders/${FOLDER_B}/checks`, {
       body: {},
     });
     expect(first.statusCode).toBe(202);
     expect(first.json<{ created: boolean }>().created).toBe(true);
 
-    const second = await as(KC.manager, 'POST', `/api/v1/revisions/${REVISION_B}/checks`, {
+    const second = await as(KC.manager, 'POST', `/api/v1/folders/${FOLDER_B}/checks`, {
       body: {},
     });
     expect(second.json<{ created: boolean }>().created).toBe(false);
 
-    expect(await jobsByKey(dedupeKey(REVISION_B, 'default'))).toHaveLength(1);
+    expect(await jobsByKey(dedupeKey(FOLDER_B, 'default'))).toHaveLength(1);
   });
 });
 
@@ -991,10 +972,10 @@ describe('регистрация маршрутов', () => {
    */
   it('все маршруты модуля достижимы в собранном приложении', () => {
     const expected: readonly (readonly ['GET' | 'POST', string])[] = [
-      ['POST', '/api/v1/revisions/:revisionId/checks'],
-      ['GET', '/api/v1/revisions/:revisionId/checks'],
-      ['GET', '/api/v1/revisions/:revisionId/findings'],
-      ['GET', '/api/v1/revisions/:revisionId/check-report'],
+      ['POST', '/api/v1/folders/:folderId/checks'],
+      ['GET', '/api/v1/folders/:folderId/checks'],
+      ['GET', '/api/v1/folders/:folderId/findings'],
+      ['GET', '/api/v1/folders/:folderId/check-report'],
       ['GET', '/api/v1/admin/rule-catalog'],
     ];
     for (const [method, url] of expected) {
@@ -1061,8 +1042,8 @@ interface ReportBody {
   }[];
 }
 
-async function report(kcSub: string, revisionId: string): Promise<ReportBody> {
-  const response = await as(kcSub, 'GET', `/api/v1/revisions/${revisionId}/check-report`);
+async function report(kcSub: string, folderId: string): Promise<ReportBody> {
+  const response = await as(kcSub, 'GET', `/api/v1/folders/${folderId}/check-report`);
   expect(response.statusCode).toBe(200);
   return response.json<ReportBody>();
 }
@@ -1073,9 +1054,9 @@ function sectionOf(body: ReportBody, kind: string): ReportBody['sections'][numbe
   return found;
 }
 
-describe('GET /revisions/:id/check-report', () => {
+describe('GET /folders/:id/check-report', () => {
   it('порядок секций задан заказчиком: акт, реестр, документы о качестве', async () => {
-    const body = await report(KC.a, REVISION_D);
+    const body = await report(KC.a, FOLDER_D);
     // Пересортировка на клиенте либо повторила бы этот порядок, либо разошлась
     // бы с ним, поэтому его держит сервер.
     expect(body.sections.map((section) => section.kind)).toEqual([
@@ -1088,7 +1069,7 @@ describe('GET /revisions/:id/check-report', () => {
   });
 
   it('акт идёт одной строкой с чек-листом, и галочка достаётся только пройденному', async () => {
-    const act = sectionOf(await report(KC.a, REVISION_D), 'act');
+    const act = sectionOf(await report(KC.a, FOLDER_D), 'act');
     expect(act.rows).toHaveLength(1);
 
     const row = act.rows[0] as ReportRowBody;
@@ -1111,7 +1092,7 @@ describe('GET /revisions/:id/check-report', () => {
   });
 
   it('способ устранения виден в строке, а не только в раскрытии', async () => {
-    const findings = sectionOf(await report(KC.engineer, REVISION_A), 'quality');
+    const findings = sectionOf(await report(KC.engineer, FOLDER_A), 'quality');
     const cert = findings.rows[0] as ReportRowBody;
     // ADR-0016 назвал это отдельным решением: замечание без способа устранения
     // бесполезно подрядчику, а раскрытие — ещё одно нажатие ради двух строк.
@@ -1119,7 +1100,7 @@ describe('GET /revisions/:id/check-report', () => {
   });
 
   it('название пункта чек-листа берётся из набора правил, а не из кода', async () => {
-    const act = sectionOf(await report(KC.a, REVISION_D), 'act');
+    const act = sectionOf(await report(KC.a, FOLDER_D), 'act');
     const item = (act.rows[0] as ReportRowBody).items.find(
       (candidate) => candidate.code === 'AOSR.HDR.020',
     );
@@ -1129,7 +1110,7 @@ describe('GET /revisions/:id/check-report', () => {
   });
 
   it('строки внутреннего реестра показывают наличие каждого названного документа', async () => {
-    const registry = sectionOf(await report(KC.a, REVISION_D), 'registry');
+    const registry = sectionOf(await report(KC.a, FOLDER_D), 'registry');
     const rows = registry.rows;
 
     // Первой идёт сам документ-реестр, за ним — его строки по порядку.
@@ -1147,7 +1128,7 @@ describe('GET /revisions/:id/check-report', () => {
   });
 
   it('у сертификата видны даты и замечание о сроке', async () => {
-    const quality = sectionOf(await report(KC.a, REVISION_D), 'quality');
+    const quality = sectionOf(await report(KC.a, FOLDER_D), 'quality');
     const cert = quality.rows.find((row) => row.id === DOC_D_CERT);
 
     expect(cert?.dates).toEqual({
@@ -1163,21 +1144,21 @@ describe('GET /revisions/:id/check-report', () => {
   });
 
   it('документ без замечаний подтверждается прямо, а не молчанием', async () => {
-    const quality = sectionOf(await report(KC.a, REVISION_D), 'quality');
+    const quality = sectionOf(await report(KC.a, FOLDER_D), 'quality');
     const passport = quality.rows.find((row) => row.id === DOC_D_PASSPORT);
     expect(passport?.status).toBe('ok');
     expect(passport?.statusText).toBe('данные верны');
   });
 
   it('документы упорядочены по первой странице, а не по порядку в базе', async () => {
-    const quality = sectionOf(await report(KC.a, REVISION_D), 'quality');
+    const quality = sectionOf(await report(KC.a, FOLDER_D), 'quality');
     // В фикстуре паспорт вставлен ПЕРВЫМ и имеет ordinal 0, но лежит на
     // последней странице: человек листает комплект, а не таблицу.
     expect(quality.rows.map((row) => row.id)).toEqual([DOC_D_CERT, DOC_D_PASSPORT]);
   });
 
   it('ни одно видимое замечание не теряется: чему не нашлось строки — в отдельной секции', async () => {
-    const body = await report(KC.a, REVISION_D);
+    const body = await report(KC.a, FOLDER_D);
     const placed = new Set(
       body.sections.flatMap((section) => section.rows.flatMap((row) => row.findingIds)),
     );
@@ -1191,7 +1172,7 @@ describe('GET /revisions/:id/check-report', () => {
   });
 
   it('БЕЗ прогона состав виден, но каждая строка честно говорит «не знаю»', async () => {
-    const body = await report(KC.a, REVISION_E);
+    const body = await report(KC.a, FOLDER_E);
     expect(body.runId).toBeNull();
 
     const quality = sectionOf(body, 'quality');
@@ -1203,13 +1184,13 @@ describe('GET /revisions/:id/check-report', () => {
   });
 
   it('без реестра приложений секция объясняет, почему сверять не с чем', async () => {
-    const registry = sectionOf(await report(KC.a, REVISION_E), 'registry');
+    const registry = sectionOf(await report(KC.a, FOLDER_E), 'registry');
     expect(registry.rows).toHaveLength(0);
     expect(registry.note).toContain('не найден');
   });
 
   it('чужой комплект не отдаётся: ни состава, ни замечаний', async () => {
-    const body = await report(KC.b, REVISION_D);
+    const body = await report(KC.b, FOLDER_D);
     // Положительный контроль стоит выше: владелец получает непустой отчёт, и
     // только поэтому пустота у соседа доказывает изоляцию, а не сломанный запрос.
     expect(body.sections).toHaveLength(0);
@@ -1217,7 +1198,7 @@ describe('GET /revisions/:id/check-report', () => {
   });
 
   it('отчёт открыт любому инженеру, а не только назначенному на объект', async () => {
-    const body = await report(KC.engineerNoScope, REVISION_D);
+    const body = await report(KC.engineerNoScope, FOLDER_D);
     expect(body.sections.length).toBeGreaterThan(0);
   });
 });

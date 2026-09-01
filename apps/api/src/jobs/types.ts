@@ -105,7 +105,7 @@ const basePayload = z.object({
 const uuid = z.uuid();
 
 /** Задача, работающая над ревизией поставки. Таких — большинство. */
-const revisionPayload = basePayload.extend({ revisionId: uuid });
+const folderPayload = basePayload.extend({ folderId: uuid });
 
 /**
  * Сквозной прогон: «доведи до конца, не спрашивая» (S21).
@@ -126,9 +126,9 @@ const revisionPayload = basePayload.extend({ revisionId: uuid });
 const autoContinue = z.boolean().optional();
 
 /** Звено цепочки анализа: сквозной прогон протягивается через все шесть. */
-const analysisPayload = revisionPayload.extend({ autoContinue });
+const analysisPayload = folderPayload.extend({ autoContinue });
 
-const filePayload = revisionPayload.extend({ sourceFileId: uuid });
+const filePayload = folderPayload.extend({ sourceFileId: uuid });
 
 /**
  * Задачи разметки 4–6 и 9: рабочий документ И ревизия разметки.
@@ -140,7 +140,7 @@ const filePayload = revisionPayload.extend({ sourceFileId: uuid });
  * противоположную факту. Цель обязана адресоваться явно — так же, как её уже
  * адресуют задачи 7 и 8.
  */
-const markupPayload = revisionPayload.extend({
+const markupPayload = folderPayload.extend({
   bundleId: uuid,
   layoutRevisionId: uuid,
 });
@@ -152,14 +152,14 @@ const markupPayload = revisionPayload.extend({
  * разметки; `sourcePageId` — ключ строки разворота (он переживает пересборку
  * рабочего документа, в отличие от индекса листа).
  */
-const orientationProbePayload = revisionPayload.extend({
+const orientationProbePayload = folderPayload.extend({
   layoutRevisionId: uuid,
   bundleId: uuid,
   sourcePageId: uuid,
   workingPageIndex: z.int().nonnegative(),
 });
 
-const layoutPayload = revisionPayload.extend({
+const layoutPayload = folderPayload.extend({
   layoutRevisionId: uuid,
   /**
    * Страницы пачкой: детекция у RD WEB синхронная и постраничная (§5.2, п.3),
@@ -177,7 +177,7 @@ const layoutPayload = revisionPayload.extend({
   overwriteExisting: z.boolean().optional(),
 });
 
-const recognitionPayload = revisionPayload.extend({ recognitionRunId: uuid, autoContinue });
+const recognitionPayload = folderPayload.extend({ recognitionRunId: uuid, autoContinue });
 
 /** Обслуживание: ревизии у такой задачи нет, и это не упущение payload. */
 const maintenancePayload = basePayload.extend({
@@ -245,7 +245,7 @@ export const JOB_DEFINITIONS = {
   },
   'bundle.build': {
     queue: 'cpu',
-    payload: revisionPayload.extend({
+    payload: folderPayload.extend({
       /**
        * Продолжить разметкой сразу после сборки (кнопка S21 «Разметить»).
        *
@@ -304,7 +304,7 @@ export const JOB_DEFINITIONS = {
    */
   'layout.start': {
     queue: 'io',
-    payload: revisionPayload,
+    payload: folderPayload,
     stage: 'layout',
     maxAttempts: 3,
     leaseMs: DEFAULT_LEASE_MS,
@@ -548,7 +548,7 @@ export const JOB_DEFINITIONS = {
    * ревизии: сверяется папка целиком, а скан описи — лишь один из её входов.
    * Решение не косметическое, и вот почему.
    *
-   * `enqueueJob` проверяет областью `revisionId` из payload — рубеж против
+   * `enqueueJob` проверяет областью `folderId` из payload — рубеж против
    * «поставить задачу на чужую поставку, зная её идентификатор» (§16). Но скан
    * описи подан ГЕНПОДРЯДЧИКОМ, а запускать сверку вправе и субподрядчик: ему
    * важно знать об ошибках в своих документах. Назови payload ревизию скана —
@@ -577,7 +577,7 @@ export const JOB_DEFINITIONS = {
   // 20–23. Проверки и выдача (§9, §10 плана: нарезка после подтверждения границ).
   'checks.run': {
     queue: 'io',
-    payload: revisionPayload.extend({ validationRunId: uuid.optional() }),
+    payload: folderPayload.extend({ validationRunId: uuid.optional() }),
     stage: 'checks',
     maxAttempts: 3,
     leaseMs: 600_000,
@@ -595,7 +595,7 @@ export const JOB_DEFINITIONS = {
    */
   'checks.llm_review': {
     queue: 'llm',
-    payload: revisionPayload.extend({ validationRunId: uuid }),
+    payload: folderPayload.extend({ validationRunId: uuid }),
     stage: 'checks',
     maxAttempts: 3,
     leaseMs: 900_000,
@@ -603,7 +603,7 @@ export const JOB_DEFINITIONS = {
   },
   'checks.summarize': {
     queue: 'io',
-    payload: revisionPayload.extend({ validationRunId: uuid }),
+    payload: folderPayload.extend({ validationRunId: uuid }),
     stage: 'checks',
     maxAttempts: 3,
     leaseMs: DEFAULT_LEASE_MS,
@@ -611,7 +611,7 @@ export const JOB_DEFINITIONS = {
   },
   'doc.materialize_pdf': {
     queue: 'cpu',
-    payload: revisionPayload.extend({ documentId: uuid.optional() }),
+    payload: folderPayload.extend({ documentId: uuid.optional() }),
     stage: 'ready',
     maxAttempts: 3,
     leaseMs: 900_000,
@@ -619,7 +619,7 @@ export const JOB_DEFINITIONS = {
   },
   'submission.build_archive': {
     queue: 'cpu',
-    payload: revisionPayload,
+    payload: folderPayload,
     stage: 'ready',
     maxAttempts: 3,
     leaseMs: 900_000,
@@ -686,7 +686,7 @@ export type JobPayload<K extends JobType = JobType> = JobPayloadMap[K];
 /** Payload любой задачи в виде, пригодном для чтения общим кодом. */
 export type AnyJobPayload = Record<string, unknown> & {
   readonly request_id?: string;
-  readonly revisionId?: string;
+  readonly folderId?: string;
 };
 
 export function isJobType(value: unknown): value is JobType {
@@ -731,9 +731,9 @@ export function parseJobPayload<K extends JobType>(
 }
 
 /** Ревизия из payload, если задача к ней относится. Нужна и `job_runs`, и контексту. */
-export function revisionIdOf(payload: unknown): string | undefined {
+export function folderIdOf(payload: unknown): string | undefined {
   if (typeof payload !== 'object' || payload === null) return undefined;
-  const value = (payload as { revisionId?: unknown }).revisionId;
+  const value = (payload as { folderId?: unknown }).folderId;
   return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 

@@ -120,15 +120,13 @@ import {
   objectRuleProfiles,
   objectSections,
   rdDocuments,
-  registries,
-  registryItems,
   ruleDefinitions,
   sectionProfiles,
   sections,
-  submissionRevisions,
+  folders,
   userObjectScopes,
   users,
-  works,
+  validationRuns,
 } from '@id/db';
 import type {
   AutonomyLevel,
@@ -232,7 +230,7 @@ export interface DocTypeCandidateView {
   readonly occurrences: number;
   readonly firstSeenAt: string;
   readonly lastSeenAt: string;
-  readonly sampleRevisionId: string | null;
+  readonly sampleFolderId: string | null;
   readonly sampleSourcePageId: string | null;
   readonly status: DocTypeCandidateStatus;
   readonly mappedDocTypeCode: string | null;
@@ -251,7 +249,7 @@ export interface DocTypeCandidateView {
  * и одноимённая таблица внутри и снаружи связала бы условие не с той стороной. С
  * псевдонимом такая ошибка невозможна — имена различны.
  */
-const scopeWorks = alias(works, 'scope_works');
+const scopeFolders = alias(folders, 'scope_folders');
 const scopeObjects = alias(constructionObjects, 'scope_objects');
 const scopeRdDocuments = alias(rdDocuments, 'scope_rd_documents');
 
@@ -324,7 +322,7 @@ function counterpartyVisibility(scope: AuthScope): SQL {
   // Область в обеих ветках берётся из withScope(): «строка справочника — это я»
   // выражается целью, где колонкой подрядчика служит сам первичный ключ.
   const itself = withScope(scope, {
-    objectId: scopeWorks.objectId,
+    objectId: scopeFolders.objectId,
     contractorId: counterparties.id,
   });
 
@@ -768,10 +766,9 @@ const COUNTERPARTY_REFERENCES: readonly ReferenceCheck[] = [
     constructionObjects.generalContractorId,
   ),
   refs('шифры рабочей документации', rdDocuments, rdDocuments.designerId),
-  refs('комплекты работ', works, works.contractorId),
-  refs('комплекты (ведущая организация)', works, works.managedByContractorId),
+  refs('папки ИД', folders, folders.contractorId),
+  refs('папки (ведущая организация)', folders, folders.managedByContractorId),
   refs('закрепления за объектами', objectContractors, objectContractors.contractorId),
-  refs('строки переданных реестров', registryItems, registryItems.contractorId),
 ];
 
 /** Кто ссылается на объект строительства. */
@@ -779,8 +776,7 @@ const CONSTRUCTION_OBJECT_REFERENCES: readonly ReferenceCheck[] = [
   refs('включённые разделы работ', objectSections, objectSections.objectId),
   refs('шифры рабочей документации', rdDocuments, rdDocuments.objectId),
   refs('закреплённые подрядчики', objectContractors, objectContractors.objectId),
-  refs('реестры', registries, registries.objectId),
-  refs('комплекты работ', works, works.objectId),
+  refs('папки ИД', folders, folders.objectId),
   refs('профили правил объекта', objectRuleProfiles, objectRuleProfiles.objectId),
   refs('назначенные области видимости', userObjectScopes, userObjectScopes.objectId),
 ];
@@ -1847,19 +1843,18 @@ export async function evaluateSectionAutonomyReadiness(
     });
   }
 
-  // Раздел теперь лежит на самом комплекте, поэтому цепочка «поставка → том →
-  // раздел объекта» схлопнулась в одно условие. Файлы реестров в
-  // счёт не идут: это не работы, и автоматизм по ним не калибруется.
+  // Раздел лежит на самой папке, поэтому цепочка «поставка → том → раздел
+  // объекта» схлопнулась в одно условие.
+  //
+  // «Накоплено» считается по ЗАВЕРШЁННОМУ прогону проверок, а не по факту
+  // подачи: статусов подачи больше нет (S44), а калибровать автоматизм по
+  // заведённым, но не разобранным папкам значило бы считать пустые карточки.
   const counted = await executor
-    .select({ total: sql<number>`count(distinct ${works.id})::int` })
-    .from(works)
-    .innerJoin(submissionRevisions, eq(submissionRevisions.workId, works.id))
+    .select({ total: sql<number>`count(distinct ${folders.id})::int` })
+    .from(folders)
+    .innerJoin(validationRuns, eq(validationRuns.folderId, folders.id))
     .where(
-      and(
-        eq(works.sectionCode, sectionCode),
-        eq(works.kind, 'complect'),
-        sql`${submissionRevisions.submittedAt} is not null`,
-      ),
+      and(eq(folders.sectionCode, sectionCode), sql`${validationRuns.finishedAt} is not null`),
     );
   const delivered = counted[0]?.total ?? 0;
 
@@ -1867,7 +1862,7 @@ export async function evaluateSectionAutonomyReadiness(
     refusals.push({
       code: 'autonomy_insufficient_data',
       message:
-        `Недостаточно данных: поданных комплектов ${delivered} из ${AUTONOMY_MIN_WORKS}. ` +
+        `Недостаточно данных: разобранных папок ${delivered} из ${AUTONOMY_MIN_WORKS}. ` +
         'Автоматический режим включается по накопленной статистике раздела (§16), ' +
         'а не сразу после публикации первой версии профиля.',
     });
@@ -2770,7 +2765,7 @@ const CANDIDATE_SELECTION = {
   occurrences: docTypeCandidates.occurrences,
   firstSeenAt: isoTimestamp(docTypeCandidates.firstSeenAt),
   lastSeenAt: isoTimestamp(docTypeCandidates.lastSeenAt),
-  sampleRevisionId: docTypeCandidates.sampleRevisionId,
+  sampleFolderId: docTypeCandidates.sampleFolderId,
   sampleSourcePageId: docTypeCandidates.sampleSourcePageId,
   status: docTypeCandidates.status,
   mappedDocTypeCode: docTypeCandidates.mappedDocTypeCode,
@@ -2838,7 +2833,7 @@ export function normalizeObservedTitle(title: string): string {
 export interface ObserveCandidateInput {
   readonly observedTitle: string;
   /** Ревизия и страница-пример: по ним администратор откроет исходный документ. */
-  readonly revisionId: string;
+  readonly folderId: string;
   readonly sourcePageId: string;
 }
 
@@ -2869,7 +2864,7 @@ export interface ObserveCandidateOutcome {
  * ## Область видимости
  *
  * Читается очередь всеми (кандидаты — конфигурация портала, решение S4), но
- * ЗАПИСЬ примера идёт под областью вызывающего: `sample_revision_id` и
+ * ЗАПИСЬ примера идёт под областью вызывающего: `sample_folder_id` и
  * `sample_source_page_id` — это указатели на конкретную страницу конкретной
  * поставки, и записать сюда чужую ревизию значило бы дать администратору (а
  * через него и очереди) ссылку, которой у писавшего не было права.
@@ -2905,16 +2900,16 @@ export async function observeDocTypeCandidate(
   }
 
   const visible = await db
-    .select({ id: submissionRevisions.id })
-    .from(submissionRevisions)
+    .select({ id: folders.id })
+    .from(folders)
     .where(
       withScope(
         scope,
         {
-          objectId: submissionRevisions.objectId,
-          contractorId: submissionRevisions.contractorId,
+          objectId: folders.objectId,
+          contractorId: folders.contractorId,
         },
-        eq(submissionRevisions.id, input.revisionId),
+        eq(folders.id, input.folderId),
       ),
     )
     .limit(1);
@@ -2928,14 +2923,14 @@ export async function observeDocTypeCandidate(
     created: boolean;
   }>(sql`
     insert into ${docTypeCandidates}
-      (observed_title_norm, observed_title_sample, sample_revision_id, sample_source_page_id)
-    values (${norm}, ${sample}, ${input.revisionId}::uuid, ${input.sourcePageId}::uuid)
+      (observed_title_norm, observed_title_sample, sample_folder_id, sample_source_page_id)
+    values (${norm}, ${sample}, ${input.folderId}::uuid, ${input.sourcePageId}::uuid)
     on conflict (observed_title_norm) do update
        set occurrences = ${docTypeCandidates}.occurrences + 1,
            last_seen_at = now(),
            -- Пример не перезаписывается: обновляется только отсутствующий.
-           sample_revision_id = coalesce(
-             ${docTypeCandidates}.sample_revision_id, excluded.sample_revision_id),
+           sample_folder_id = coalesce(
+             ${docTypeCandidates}.sample_folder_id, excluded.sample_folder_id),
            sample_source_page_id = coalesce(
              ${docTypeCandidates}.sample_source_page_id, excluded.sample_source_page_id)
     returning occurrences, status, (xmax = 0) as created
@@ -3248,7 +3243,7 @@ function toCandidateView(row: {
   occurrences: number;
   firstSeenAt: string;
   lastSeenAt: string;
-  sampleRevisionId: string | null;
+  sampleFolderId: string | null;
   sampleSourcePageId: string | null;
   status: string;
   mappedDocTypeCode: string | null;

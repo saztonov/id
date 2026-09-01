@@ -26,7 +26,7 @@ import type { PageInput } from './types.js';
 function neutralPage(text: string, id = 'p1'): PageInput {
   return {
     sourcePageId: id,
-    revisionOrdinal: 4,
+    folderOrdinal: 4,
     sourceFileId: 'file-1',
     filePageIndex: 3,
     pageTextVersionId: 'ptv-1',

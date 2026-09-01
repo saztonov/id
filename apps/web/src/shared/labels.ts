@@ -20,11 +20,8 @@ import type {
   PageMarkupMode,
   ProcessingStage,
   RecognitionStatus,
-  RegistryStatus,
   Severity,
   VerifyState,
-  WorkflowStatus,
-  WorkKind,
 } from '@id/contracts';
 
 export function labelOf<K extends string>(
@@ -33,39 +30,6 @@ export function labelOf<K extends string>(
 ): string {
   return (dictionary as Record<string, string | undefined>)[code] ?? code;
 }
-
-export const WORKFLOW_STATUS_LABELS: Record<WorkflowStatus, string> = {
-  draft: 'Черновик',
-  submitted: 'Подана',
-  in_review: 'На проверке',
-  returned: 'Возвращена',
-  approved: 'Согласована',
-  superseded: 'Заменена',
-};
-
-/**
- * Состояния реестра передачи (миграция 0028).
- *
- * «Передан» и «Принят» — про движение бумаги между организациями, а не про
- * согласование содержимого: содержимое согласуется в ревизиях комплектов, и
- * подписи здесь намеренно не повторяют слов рабочего процесса ревизии.
- */
-export const REGISTRY_STATUS_LABELS: Record<RegistryStatus, string> = {
-  draft: 'Собирается',
-  issued: 'Передан',
-  accepted: 'Принят',
-};
-
-/**
- * Вид комплекта.
- *
- * Файл описи проходит тем же конвейером, что и работа, и отличается от неё
- * только этим кодом — на экране разницу обязано быть видно словом.
- */
-export const WORK_KIND_LABELS: Record<WorkKind, string> = {
-  complect: 'Комплект работы',
-  registry: 'Файл реестра',
-};
 
 export const VERIFY_STATE_LABELS: Record<VerifyState, string> = {
   pending: 'Проверяется',
@@ -165,7 +129,7 @@ export const PAGE_ROLE_LABELS: Record<string, string> = {
  * ищет строку реестра приложений.
  */
 export const FINDING_TARGET_LABELS: Record<string, string> = {
-  revision: 'ревизия целиком',
+  folder: 'ревизия целиком',
   source_page: 'страница',
   document: 'документ',
   field_value: 'реквизит',

@@ -7,26 +7,26 @@
  * выглядит как «сервер не сохранил».
  */
 export const layoutKeys = {
-  revisions: (revisionId: string) => ['layouts', 'of-revision', revisionId] as const,
+  folders: (folderId: string) => ['layouts', 'of-folder', folderId] as const,
   detail: (layoutId: string) => ['layouts', layoutId] as const,
   blocks: (layoutId: string) => ['layouts', layoutId, 'blocks'] as const,
 };
 
-export const revisionKeys = {
-  files: (revisionId: string) => ['revisions', revisionId, 'files'] as const,
-  bundles: (revisionId: string) => ['revisions', revisionId, 'bundles'] as const,
+export const folderKeys = {
+  files: (folderId: string) => ['folders', folderId, 'files'] as const,
+  bundles: (folderId: string) => ['folders', folderId, 'bundles'] as const,
   bundlePages: (bundleId: string) => ['bundles', bundleId, 'pages'] as const,
-  workflow: (revisionId: string) => ['revisions', revisionId, 'workflow'] as const,
-  processingStatus: (revisionId: string) => ['revisions', revisionId, 'processing-status'] as const,
-  documents: (revisionId: string) => ['revisions', revisionId, 'documents'] as const,
-  pages: (revisionId: string) => ['revisions', revisionId, 'pages'] as const,
-  registry: (revisionId: string) => ['revisions', revisionId, 'registry'] as const,
-  classifications: (revisionId: string) => ['revisions', revisionId, 'classifications'] as const,
-  checkRuns: (revisionId: string) => ['revisions', revisionId, 'check-runs'] as const,
-  findings: (revisionId: string) => ['revisions', revisionId, 'findings'] as const,
-  checkReport: (revisionId: string) => ['revisions', revisionId, 'check-report'] as const,
-  recognitionRuns: (revisionId: string) => ['revisions', revisionId, 'recognition-runs'] as const,
-  archive: (revisionId: string) => ['revisions', revisionId, 'archive'] as const,
+  workflow: (folderId: string) => ['folders', folderId, 'workflow'] as const,
+  processingStatus: (folderId: string) => ['folders', folderId, 'processing-status'] as const,
+  documents: (folderId: string) => ['folders', folderId, 'documents'] as const,
+  pages: (folderId: string) => ['folders', folderId, 'pages'] as const,
+  registry: (folderId: string) => ['folders', folderId, 'registry'] as const,
+  classifications: (folderId: string) => ['folders', folderId, 'classifications'] as const,
+  checkRuns: (folderId: string) => ['folders', folderId, 'check-runs'] as const,
+  findings: (folderId: string) => ['folders', folderId, 'findings'] as const,
+  checkReport: (folderId: string) => ['folders', folderId, 'check-report'] as const,
+  recognitionRuns: (folderId: string) => ['folders', folderId, 'recognition-runs'] as const,
+  archive: (folderId: string) => ['folders', folderId, 'archive'] as const,
 };
 
 export const pipelineKeys = {
@@ -95,19 +95,20 @@ export const catalogKeys = {
 export const navigationKeys = {
   /** Префикс всей навигационной ветки: обесценивается целиком после удаления. */
   root: ['nav'] as const,
-  works: (filter: string) => ['nav', 'works', filter] as const,
-  workDeletionPreview: (workId: string) => ['nav', 'works', 'one', workId, 'deletion'] as const,
+  folderList: (filter: string) => ['nav', 'folders', filter] as const,
+  folderDeletionPreview: (folderId: string) =>
+    ['nav', 'folders', 'one', folderId, 'deletion'] as const,
   /**
    * Состояние конвейера по странице списка комплектов.
    *
    * Идентификаторы входят в КЛЮЧ: страница «Показать ещё» меняет состав
    * вопроса, и общий ключ отдал бы ответ про прежнюю страницу.
    */
-  worksPipeline: (objectId: string, workIds: string) =>
-    ['nav', 'works', 'pipeline', objectId, workIds] as const,
+  foldersPipeline: (objectId: string, folderIds: string) =>
+    ['nav', 'folders', 'pipeline', objectId, folderIds] as const,
   registryDeletionPreview: (registryId: string) =>
     ['nav', 'registries', 'one', registryId, 'deletion'] as const,
-  work: (workId: string) => ['nav', 'works', 'one', workId] as const,
+  folder: (folderId: string) => ['nav', 'folders', 'one', folderId] as const,
   sectionCounts: (objectId: string, filter: string) =>
     ['nav', 'works', 'counts', objectId, filter] as const,
   registries: (filter: string) => ['nav', 'registries', filter] as const,
@@ -115,9 +116,7 @@ export const navigationKeys = {
   registryItems: (registryId: string) => ['nav', 'registries', 'one', registryId, 'items'] as const,
   registryReconciliation: (registryId: string) =>
     ['nav', 'registries', 'one', registryId, 'reconciliation'] as const,
-  workReconciliation: (revisionId: string) =>
-    ['nav', 'revisions', revisionId, 'reconciliation'] as const,
-  revisions: (workId: string) => ['nav', 'revisions', workId] as const,
+  workReconciliation: (folderId: string) => ['nav', 'folders', folderId, 'reconciliation'] as const,
 };
 
 export const adminKeys = {

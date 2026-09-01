@@ -179,32 +179,32 @@ export interface SegmentationDeps {
    * портах целиком, и один прямой вызов сделал бы их непроверяемыми без базы.
    * Возвращает `true`, если месяц записан именно этим вызовом.
    */
-  readonly fillWorkPeriod: (revisionId: string, period: string) => Promise<boolean>;
+  readonly fillFolderPeriod: (folderId: string, period: string) => Promise<boolean>;
   /**
    * Заменить ПОДСТАВЛЕННОГО порталом исполнителя организацией из акта (S37).
    *
-   * Пара к `fillWorkPeriod` и по той же причине порт: обработчики этого файла
+   * Пара к `fillFolderPeriod` и по той же причине порт: обработчики этого файла
    * написаны на портах целиком. Названного человеком исполнителя не трогает —
    * условие живёт в самом операторе, а не в вызывающем.
    */
-  readonly replaceAssumedContractor: (revisionId: string, contractorId: string) => Promise<boolean>;
+  readonly replaceAssumedContractor: (folderId: string, contractorId: string) => Promise<boolean>;
   /** Запомнить наименование из акта, которого нет в справочнике объекта. */
-  readonly rememberContractorRaw: (revisionId: string, raw: string) => Promise<boolean>;
+  readonly rememberContractorRaw: (folderId: string, raw: string) => Promise<boolean>;
   /** Организации справочника, с которыми сопоставляется исполнитель из акта. */
   readonly listMatchableContractors: () => Promise<
     readonly { id: string; name: string; inn: string | null; ogrn: string | null }[]
   >;
   /** Вход сегментации: страницы ревизии, текст последнего успешного прогона. */
-  loadPages(revisionId: string): Promise<SegmentationInput>;
+  loadPages(folderId: string): Promise<SegmentationInput>;
 
   savePageClassifications(input: {
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly classifications: readonly PageClassification[];
   }): Promise<{ readonly removed: number; readonly written: number }>;
-  listPageClassifications(revisionId: string): Promise<readonly PageClassificationView[]>;
+  listPageClassifications(folderId: string): Promise<readonly PageClassificationView[]>;
 
   applySegmentation(input: {
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly segmentation: Segmentation;
   }): Promise<{
     readonly documentsCreated: number;
@@ -216,37 +216,37 @@ export interface SegmentationDeps {
     readonly documentIds: readonly string[];
   }>;
 
-  listDocuments(revisionId: string): Promise<readonly LogicalDocumentView[]>;
-  listPageAssignments(revisionId: string): Promise<readonly PageAssignmentView[]>;
+  listDocuments(folderId: string): Promise<readonly LogicalDocumentView[]>;
+  listPageAssignments(folderId: string): Promise<readonly PageAssignmentView[]>;
   listFieldValues(documentId: string): Promise<readonly FieldValueView[]>;
 
   saveFieldValues(input: {
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly documentId: string;
     readonly fields: ReturnType<typeof extractFields>;
     readonly extractorVersion: string;
   }): Promise<{ readonly removed: number; readonly written: number }>;
 
   saveRegistryRows(input: {
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly documentId: string;
     readonly rows: readonly ParsedRegistryRow[];
   }): Promise<{ readonly removed: number; readonly written: number }>;
-  listRegistryRows(revisionId: string): Promise<readonly RegistryRowView[]>;
+  listRegistryRows(folderId: string): Promise<readonly RegistryRowView[]>;
   saveRegistryMatches(input: {
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly matches: readonly RegistryMatch[];
   }): Promise<{ readonly updated: number; readonly skipped: number }>;
 
   saveDocumentRelations(input: {
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly relations: readonly DocumentRelationInput[];
   }): Promise<{ readonly removed: number; readonly written: number; readonly skipped: number }>;
 
   /** Наблюдение незнакомого заголовка: цикл роста каталога (§3.2). */
   observeCandidate(input: {
     readonly observedTitle: string;
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly sourcePageId: string;
   }): Promise<{ readonly created: boolean; readonly occurrences: number }>;
 
@@ -275,7 +275,7 @@ export interface SegmentationDeps {
 
   /** Строка `ai_runs`: только хэши и структурированный результат (§3.5). */
   recordAiRun(input: {
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly stage: LlmTextStage;
     readonly provider: LlmProviderName;
     readonly model: string;
@@ -330,7 +330,7 @@ function isFallbackType(code: string | null): boolean {
 function toPageInputs(input: SegmentationInput): readonly PageInput[] {
   return input.pages.map((page) => ({
     sourcePageId: page.sourcePageId,
-    revisionOrdinal: page.revisionOrdinal,
+    folderOrdinal: page.folderOrdinal,
     sourceFileId: page.sourceFileId,
     filePageIndex: page.filePageIndex,
     pageTextVersionId: page.pageTextVersionId,
@@ -420,16 +420,16 @@ export function createClassifyPagesHandler(
   deps: SegmentationDeps,
 ): JobHandler<'doc.classify_pages'> {
   return async (ctx: JobContext<'doc.classify_pages'>) => {
-    const { revisionId } = ctx.payload;
-    const input = await deps.loadPages(revisionId);
+    const { folderId } = ctx.payload;
+    const input = await deps.loadPages(folderId);
 
     if (input.recognitionRunId === null) {
       throw new SegmentationStateError(
-        `Ревизия ${revisionId}: завершённого прогона распознавания нет, классифицировать нечего.`,
+        `Ревизия ${folderId}: завершённого прогона распознавания нет, классифицировать нечего.`,
       );
     }
     if (input.pages.length === 0) {
-      throw new SegmentationStateError(`Ревизия ${revisionId}: страниц не найдено.`);
+      throw new SegmentationStateError(`Ревизия ${folderId}: страниц не найдено.`);
     }
 
     const pages = toPageInputs(input);
@@ -470,6 +470,10 @@ export function createClassifyPagesHandler(
     if (undecided.length > 0 && deps.callLlm !== null && prompt !== null) {
       const codes = promptDocTypeCodes();
       for (const candidate of undecided) {
+        // Кооперативная отмена — по той же причине, что в обходе документов
+        // ниже: брошенная попытка обязана прекратить звонить в шлюз.
+        ctx.signal.throwIfAborted();
+
         const page = byId.get(candidate.sourcePageId);
         if (page === undefined) continue;
         const index = order.get(candidate.sourcePageId) ?? 0;
@@ -479,7 +483,7 @@ export function createClassifyPagesHandler(
         };
 
         const outcome = await runLlmForPage(deps, ctx, {
-          revisionId,
+          folderId,
           page,
           neighbours,
           prompt,
@@ -513,7 +517,7 @@ export function createClassifyPagesHandler(
       (page) => result.get(page.sourcePageId) as PageClassification,
     );
 
-    const saved = await deps.savePageClassifications({ revisionId, classifications });
+    const saved = await deps.savePageClassifications({ folderId, classifications });
 
     // Нулевая запись при непустом входе — отказ, а не успех: значит решения
     // страниц до базы не доехали, а следующая задача применила бы пустоту.
@@ -537,8 +541,8 @@ export function createClassifyPagesHandler(
 
     await ctx.enqueue({
       type: 'doc.segment',
-      payload: { revisionId, ...forwardAutoContinue(ctx) },
-      dedupeKey: `doc.segment:${revisionId}`,
+      payload: { folderId, ...forwardAutoContinue(ctx) },
+      dedupeKey: `doc.segment:${folderId}`,
     });
   };
 }
@@ -579,7 +583,7 @@ async function runLlmForPage(
   deps: SegmentationDeps,
   ctx: JobContext<'doc.classify_pages'>,
   input: {
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly page: PageInput;
     readonly neighbours: { readonly before: PageInput | null; readonly after: PageInput | null };
     readonly prompt: PublishedPrompt;
@@ -667,7 +671,7 @@ async function runLlmForPage(
 async function writeAiRun(
   deps: SegmentationDeps,
   ctx: JobContext<'doc.classify_pages'>,
-  input: { readonly revisionId: string; readonly prompt: PublishedPrompt },
+  input: { readonly folderId: string; readonly prompt: PublishedPrompt },
   call: LlmCallResult | null,
   structured: {
     readonly sourcePageId: string;
@@ -713,7 +717,7 @@ async function writeAiRun(
   if (trace === null) return;
 
   await deps.recordAiRun({
-    revisionId: input.revisionId,
+    folderId: input.folderId,
     stage: PAGE_CLASSIFY_STAGE,
     provider: trace.provider,
     model: trace.model,
@@ -747,19 +751,19 @@ async function writeAiRun(
  */
 export function createSegmentHandler(deps: SegmentationDeps): JobHandler<'doc.segment'> {
   return async (ctx: JobContext<'doc.segment'>) => {
-    const { revisionId } = ctx.payload;
+    const { folderId } = ctx.payload;
 
-    const stored = await deps.listPageClassifications(revisionId);
+    const stored = await deps.listPageClassifications(folderId);
     if (stored.length === 0) {
       // Охранник 1. Пустой вход при существующей сборке — это повтор после
       // сбоя задачи 14, и применить его значило бы «успешно» удалить все
       // документы ревизии.
       throw new SegmentationStateError(
-        `Ревизия ${revisionId}: решений по страницам нет, пересобирать документы не из чего.`,
+        `Ревизия ${folderId}: решений по страницам нет, пересобирать документы не из чего.`,
       );
     }
 
-    const existing = await deps.listDocuments(revisionId);
+    const existing = await deps.listDocuments(folderId);
     // Охранник 2. Подтверждение ЧЕЛОВЕКОМ — работа инженера, и §8.2 объявляет
     // ручное решение приоритетным. Молча переписать его пересегментацией — тот
     // же класс отказа, что импорт блоков на S6.
@@ -773,15 +777,15 @@ export function createSegmentHandler(deps: SegmentationDeps): JobHandler<'doc.se
     );
     if (confirmed.length > 0) {
       throw new SegmentationStateError(
-        `Ревизия ${revisionId}: ${confirmed.length} документов подтверждены человеком; ` +
+        `Ревизия ${folderId}: ${confirmed.length} документов подтверждены человеком; ` +
           'пересегментация переписала бы их. Снимите подтверждение явным действием.',
       );
     }
 
-    const input = await deps.loadPages(revisionId);
+    const input = await deps.loadPages(folderId);
     const pages = toPageInputs(input);
     if (pages.length === 0) {
-      throw new SegmentationStateError(`Ревизия ${revisionId}: страниц не найдено.`);
+      throw new SegmentationStateError(`Ревизия ${folderId}: страниц не найдено.`);
     }
 
     const known = new Set(pages.map((page) => page.sourcePageId));
@@ -792,13 +796,13 @@ export function createSegmentHandler(deps: SegmentationDeps): JobHandler<'doc.se
       // Решения и страницы разошлись: между задачами 14 и 15 состав ревизии
       // изменился. Декодер такое отвергнет и сам, но диагностика здесь точнее.
       throw new SegmentationStateError(
-        `Ревизия ${revisionId}: решений ${classifications.length} против ${pages.length} страниц; ` +
+        `Ревизия ${folderId}: решений ${classifications.length} против ${pages.length} страниц; ` +
           'состав ревизии изменился, требуется повторная классификация.',
       );
     }
 
     const segmentation = decodeSegmentation(pages, classifications);
-    const applied = await deps.applySegmentation({ revisionId, segmentation });
+    const applied = await deps.applySegmentation({ folderId, segmentation });
 
     // Кандидаты в справочник — после успешного применения: заголовок, чья
     // сегментация откатилась, наблюдением не является.
@@ -811,7 +815,7 @@ export function createSegmentHandler(deps: SegmentationDeps): JobHandler<'doc.se
       if (firstPage === undefined) continue;
       const outcome = await deps.observeCandidate({
         observedTitle: title,
-        revisionId,
+        folderId,
         sourcePageId: firstPage.sourcePageId,
       });
       candidates += 1;
@@ -847,14 +851,14 @@ export function createSegmentHandler(deps: SegmentationDeps): JobHandler<'doc.se
     // отработавшей.
     await ctx.enqueue({
       type: 'doc.materialize_pdf',
-      payload: { revisionId },
-      dedupeKey: `doc.materialize_pdf:${revisionId}`,
+      payload: { folderId },
+      dedupeKey: `doc.materialize_pdf:${folderId}`,
     });
 
     await ctx.enqueue({
       type: 'doc.extract_fields',
-      payload: { revisionId, ...forwardAutoContinue(ctx) },
-      dedupeKey: `doc.extract_fields:${revisionId}`,
+      payload: { folderId, ...forwardAutoContinue(ctx) },
+      dedupeKey: `doc.extract_fields:${folderId}`,
     });
   };
 }
@@ -885,27 +889,27 @@ export function createExtractFieldsHandler(
   deps: SegmentationDeps,
 ): JobHandler<'doc.extract_fields'> {
   return async (ctx: JobContext<'doc.extract_fields'>) => {
-    const { revisionId, documentId } = ctx.payload;
+    const { folderId, documentId } = ctx.payload;
 
-    const documents = await deps.listDocuments(revisionId);
+    const documents = await deps.listDocuments(folderId);
     const targets =
       documentId === undefined ? documents : documents.filter((d) => d.id === documentId);
     if (targets.length === 0) {
       throw new SegmentationStateError(
         documentId === undefined
-          ? `Ревизия ${revisionId}: документов нет, извлекать реквизиты не из чего.`
-          : `Документ ${documentId} не принадлежит ревизии ${revisionId}.`,
+          ? `Ревизия ${folderId}: документов нет, извлекать реквизиты не из чего.`
+          : `Документ ${documentId} не принадлежит ревизии ${folderId}.`,
       );
     }
 
-    const input = await deps.loadPages(revisionId);
+    const input = await deps.loadPages(folderId);
     const textOf = new Map(
       input.pages.map((page) => [
         page.sourcePageId,
         { pageTextVersionId: page.pageTextVersionId, text: page.text },
       ]),
     );
-    const assignments = await deps.listPageAssignments(revisionId);
+    const assignments = await deps.listPageAssignments(folderId);
     const pagesOfDocument = new Map<string, string[]>();
     for (const assignment of [...assignments].sort(
       (a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0),
@@ -937,6 +941,15 @@ export function createExtractFieldsHandler(
       ogrn: string | null;
     } | null = null;
     for (const document of targets) {
+      // Отмена проверяется НА КАЖДОМ документе, а не однажды на входе.
+      //
+      // Сторож задачи обрывает попытку по `leaseMs`, но кооперативную отмену
+      // обязан подхватить сам обход: без этой строки брошенная попытка
+      // продолжала обходить все 134 документа рядом с новой, взятой ей на
+      // смену. На боевом прогоне это дало три перекрывающиеся попытки и
+      // тройные копии реквизитов — при том, что сама запись идемпотентна.
+      ctx.signal.throwIfAborted();
+
       const pageIds = pagesOfDocument.get(document.id) ?? [];
       const pages = pageIds
         .map((id) => textOf.get(id))
@@ -966,7 +979,7 @@ export function createExtractFieldsHandler(
       // реквизитами, ровно как до S21.
       if (llmPrompt !== null && deps.callLlm !== null && llmStop === null) {
         const outcome = await runLlmExtraction(deps, ctx, {
-          revisionId,
+          folderId,
           document,
           typeConfident,
           pages,
@@ -1009,7 +1022,7 @@ export function createExtractFieldsHandler(
       }
 
       const outcome = await deps.saveFieldValues({
-        revisionId,
+        folderId,
         documentId: document.id,
         fields,
         extractorVersion: SEGMENTATION_VERSION,
@@ -1052,7 +1065,7 @@ export function createExtractFieldsHandler(
     if (documentId === undefined) {
       const period = periodOfEarliestAct(actDates);
       if (period !== null) {
-        const filled = await deps.fillWorkPeriod(revisionId, period);
+        const filled = await deps.fillFolderPeriod(folderId, period);
         if (filled) {
           ctx.logger.info({ period }, 'месяц комплекта выведен по дате акта');
           await ctx.emit('work.period_resolved', { period });
@@ -1098,7 +1111,7 @@ export function createExtractFieldsHandler(
         // чтобы экран сказал, чего именно не хватает.
         const raw = contractorTriple.name;
         if (raw !== null) {
-          const remembered = await deps.rememberContractorRaw(revisionId, raw);
+          const remembered = await deps.rememberContractorRaw(folderId, raw);
           if (remembered) {
             ctx.logger.info(
               { contractor: raw },
@@ -1108,7 +1121,7 @@ export function createExtractFieldsHandler(
           }
         }
       } else {
-        const replaced = await deps.replaceAssumedContractor(revisionId, matched.id);
+        const replaced = await deps.replaceAssumedContractor(folderId, matched.id);
         if (replaced) {
           ctx.logger.info({ contractorId: matched.id }, 'исполнитель комплекта выведен из акта');
           await ctx.emit('work.contractor_resolved', { contractorId: matched.id });
@@ -1119,8 +1132,8 @@ export function createExtractFieldsHandler(
     if (documentId === undefined) {
       await ctx.enqueue({
         type: 'doc.parse_registry',
-        payload: { revisionId, ...forwardAutoContinue(ctx) },
-        dedupeKey: `doc.parse_registry:${revisionId}`,
+        payload: { folderId, ...forwardAutoContinue(ctx) },
+        dedupeKey: `doc.parse_registry:${folderId}`,
       });
     }
   };
@@ -1150,7 +1163,7 @@ async function runLlmExtraction(
   deps: SegmentationDeps,
   ctx: JobContext<'doc.extract_fields'>,
   input: {
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly document: LogicalDocumentView;
     readonly typeConfident: boolean;
     readonly pages: readonly { readonly pageTextVersionId: string | null; readonly text: string }[];
@@ -1233,7 +1246,7 @@ async function runLlmExtraction(
 async function writeExtractAiRun(
   deps: SegmentationDeps,
   ctx: JobContext<'doc.extract_fields'>,
-  input: { readonly revisionId: string; readonly prompt: PublishedPrompt },
+  input: { readonly folderId: string; readonly prompt: PublishedPrompt },
   call: LlmCallResult | null,
   structured: { documentId: string; accepted: number; problems: readonly string[] },
 ): Promise<void> {
@@ -1242,7 +1255,7 @@ async function writeExtractAiRun(
   if (call === null) return;
 
   await deps.recordAiRun({
-    revisionId: input.revisionId,
+    folderId: input.folderId,
     stage: FIELD_EXTRACT_STAGE,
     provider: call.provider,
     model: call.model,
@@ -1282,14 +1295,14 @@ export function createParseRegistryHandler(
   deps: SegmentationDeps,
 ): JobHandler<'doc.parse_registry'> {
   return async (ctx: JobContext<'doc.parse_registry'>) => {
-    const { revisionId } = ctx.payload;
+    const { folderId } = ctx.payload;
 
-    const documents = await deps.listDocuments(revisionId);
+    const documents = await deps.listDocuments(folderId);
     const registries = documents.filter((document) => document.docTypeCode === REGISTRY_TYPE);
 
-    const input = await deps.loadPages(revisionId);
+    const input = await deps.loadPages(folderId);
     const pageById = new Map(input.pages.map((page) => [page.sourcePageId, page]));
-    const assignments = [...(await deps.listPageAssignments(revisionId))].sort(
+    const assignments = [...(await deps.listPageAssignments(folderId))].sort(
       (a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0),
     );
 
@@ -1309,7 +1322,7 @@ export function createParseRegistryHandler(
       const parsed = parseAnnexRegistry({ pages });
       warnings.push(...parsed.warnings);
       const outcome = await deps.saveRegistryRows({
-        revisionId,
+        folderId,
         documentId: registry.id,
         rows: parsed.rows,
       });
@@ -1322,8 +1335,8 @@ export function createParseRegistryHandler(
 
     await ctx.enqueue({
       type: 'doc.match_registry',
-      payload: { revisionId, ...forwardAutoContinue(ctx) },
-      dedupeKey: `doc.match_registry:${revisionId}`,
+      payload: { folderId, ...forwardAutoContinue(ctx) },
+      dedupeKey: `doc.match_registry:${folderId}`,
     });
   };
 }
@@ -1353,10 +1366,10 @@ export function createMatchRegistryHandler(
   deps: SegmentationDeps,
 ): JobHandler<'doc.match_registry'> {
   return async (ctx: JobContext<'doc.match_registry'>) => {
-    const { revisionId } = ctx.payload;
+    const { folderId } = ctx.payload;
 
-    const stored = await deps.listRegistryRows(revisionId);
-    const documents = await deps.listDocuments(revisionId);
+    const stored = await deps.listRegistryRows(folderId);
+    const documents = await deps.listDocuments(folderId);
 
     if (stored.length === 0) {
       const counts = { rows: 0, matched: 0, missing: 0, ambiguous: 0, candidate: 0, extra: 0 };
@@ -1364,8 +1377,8 @@ export function createMatchRegistryHandler(
       await ctx.emit('documents.registry_matched', counts);
       await ctx.enqueue({
         type: 'graph.build',
-        payload: { revisionId, ...forwardAutoContinue(ctx) },
-        dedupeKey: `graph.build:${revisionId}`,
+        payload: { folderId, ...forwardAutoContinue(ctx) },
+        dedupeKey: `graph.build:${folderId}`,
       });
       return;
     }
@@ -1387,16 +1400,33 @@ export function createMatchRegistryHandler(
     }
 
     const registryDocumentIds = new Set(stored.map((row) => row.documentId));
-    const matchable: readonly MatchableDocument[] = documents
-      // Сам реестр в сверку не входит: он перечисляет приложения, а не себя.
-      .filter((document) => !registryDocumentIds.has(document.id))
-      .map((document) => ({
-        documentId: document.id,
-        docTypeCode: document.docTypeCode,
-        numbers: numbers.get(document.id) ?? [],
-        issuedAt: issuedAt.get(document.id) ?? null,
-        title: document.title,
-      }));
+
+    /**
+     * Кандидаты сверки — документы ЭТОГО ЖЕ комплекта, а не всей папки.
+     *
+     * Прежде сверка искала по всей ревизии, и на папке из двенадцати актов это
+     * давало 72 строки «сопоставлено неоднозначно» из 138: один и тот же
+     * сертификат лежит в приложениях каждого акта, и по номеру он отвечал
+     * двенадцати строкам сразу. Различить их сверка не могла и честно
+     * отказывалась — правильный ответ на неправильно поставленный вопрос.
+     *
+     * Комплект границу и задаёт: перечень приложений принадлежит одному акту, и
+     * искать его строки за пределами этого акта незачем. Документы вне
+     * комплектов (опись, титулы) в кандидаты не попадают вовсе: перечень
+     * приложений акта их не называет.
+     */
+    const candidatesOf = (complectId: string | null): readonly MatchableDocument[] =>
+      documents
+        // Сам реестр в сверку не входит: он перечисляет приложения, а не себя.
+        .filter((document) => !registryDocumentIds.has(document.id))
+        .filter((document) => complectId !== null && document.complectId === complectId)
+        .map((document) => ({
+          documentId: document.id,
+          docTypeCode: document.docTypeCode,
+          numbers: numbers.get(document.id) ?? [],
+          issuedAt: issuedAt.get(document.id) ?? null,
+          title: document.title,
+        }));
 
     const matches: RegistryMatch[] = [];
     let matched = 0;
@@ -1405,8 +1435,12 @@ export function createMatchRegistryHandler(
     let candidate = 0;
     const extra = new Set<string>();
 
-    // По каждому реестру отдельно: строки разных актов не конкурируют.
+    // По каждому перечню отдельно: и строки, и КАНДИДАТЫ берутся из одного
+    // комплекта — перечень принадлежит акту, и документы соседних актов ему
+    // не отвечают.
+    const complectOfDocument = new Map(documents.map((d) => [d.id, d.complectId]));
     for (const registryDocumentId of registryDocumentIds) {
+      const matchable = candidatesOf(complectOfDocument.get(registryDocumentId) ?? null);
       const rowsOfRegistry = stored.filter((row) => row.documentId === registryDocumentId);
       const parsed: readonly ParsedRegistryRow[] = rowsOfRegistry.map((row) => ({
         rowNo: row.rowNo,
@@ -1445,7 +1479,7 @@ export function createMatchRegistryHandler(
       }
     }
 
-    const saved = await deps.saveRegistryMatches({ revisionId, matches });
+    const saved = await deps.saveRegistryMatches({ folderId, matches });
     if (saved.updated !== matches.length) {
       throw new SegmentationStateError(
         `Записано ${saved.updated} решений сверки из ${matches.length}.`,
@@ -1465,8 +1499,8 @@ export function createMatchRegistryHandler(
 
     await ctx.enqueue({
       type: 'graph.build',
-      payload: { revisionId, ...forwardAutoContinue(ctx) },
-      dedupeKey: `graph.build:${revisionId}`,
+      payload: { folderId, ...forwardAutoContinue(ctx) },
+      dedupeKey: `graph.build:${folderId}`,
     });
   };
 }
@@ -1533,18 +1567,18 @@ function actItem3Text(field: FieldValueView | undefined): string {
  */
 export function createGraphBuildHandler(deps: SegmentationDeps): JobHandler<'graph.build'> {
   return async (ctx: JobContext<'graph.build'>) => {
-    const { revisionId } = ctx.payload;
+    const { folderId } = ctx.payload;
 
-    const documents = [...(await deps.listDocuments(revisionId))].sort(
+    const documents = [...(await deps.listDocuments(folderId))].sort(
       (a, b) => a.ordinal - b.ordinal,
     );
     if (documents.length === 0) {
       throw new SegmentationStateError(
-        `Ревизия ${revisionId}: документов нет, граф строить не из чего.`,
+        `Ревизия ${folderId}: документов нет, граф строить не из чего.`,
       );
     }
 
-    const rows = await deps.listRegistryRows(revisionId);
+    const rows = await deps.listRegistryRows(folderId);
     const byId = new Map(documents.map((document) => [document.id, document]));
     const relations: DocumentRelationInput[] = [];
     const seen = new Set<string>();
@@ -1639,9 +1673,14 @@ export function createGraphBuildHandler(deps: SegmentationDeps): JobHandler<'gra
       }
     }
 
-    // Дубли: одинаковый вид и одинаковый номер. Правило по контексту, а не
-    // ограничение БД (§9.3, `XS`) — один и тот же лист законно встречается в
-    // разных поставках, но не дважды в одной.
+    // Дубли: одинаковый вид и одинаковый номер В ОДНОМ КОМПЛЕКТЕ. Правило по
+    // контексту, а не ограничение БД (§9.3, `XS`).
+    //
+    // Границей служит комплект, а не папка. Один и тот же сертификат законно
+    // лежит в приложениях каждого из двенадцати актов папки: подрядчик обязан
+    // приложить его к КАЖДОМУ акту, где применён материал. На боевом прогоне
+    // сравнение по всей папке дало 74 ребра `duplicate` — то есть объявило
+    // дублями законные экземпляры и увело сверку в «неоднозначно».
     //
     // Чертёж в сравнение не входит: собственного номера у него на листе нет, и
     // тот, что извлечён, взят из штампа — а в штамп печатается шифр рабочей
@@ -1657,7 +1696,7 @@ export function createGraphBuildHandler(deps: SegmentationDeps): JobHandler<'gra
       const fields = fieldsByDocument.get(document.id) ?? [];
       const number = fields.find((field) => field.fieldCode === 'number')?.valueText ?? null;
       if (number === null || number.trim() === '') continue;
-      const key = `${code}|${number.trim().toUpperCase()}`;
+      const key = `${document.complectId ?? 'вне комплектов'}|${code}|${number.trim().toUpperCase()}`;
       const list = numbers.get(key) ?? [];
       list.push(document.id);
       numbers.set(key, list);
@@ -1669,7 +1708,7 @@ export function createGraphBuildHandler(deps: SegmentationDeps): JobHandler<'gra
       for (const other of rest) add(first, other, 'duplicate');
     }
 
-    const saved = await deps.saveDocumentRelations({ revisionId, relations });
+    const saved = await deps.saveDocumentRelations({ folderId, relations });
     const counts = {
       documents: documents.length,
       relations: saved.written,
@@ -1686,8 +1725,8 @@ export function createGraphBuildHandler(deps: SegmentationDeps): JobHandler<'gra
     if (ctx.payload.autoContinue === true) {
       await ctx.enqueue({
         type: 'checks.run',
-        payload: { revisionId },
-        dedupeKey: `checks.run:${revisionId}`,
+        payload: { folderId },
+        dedupeKey: `checks.run:${folderId}`,
       });
     }
   };

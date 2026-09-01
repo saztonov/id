@@ -9,7 +9,7 @@
 import { z } from 'zod';
 import { artifactKindSchema, recognitionStatusSchema, sha256Schema } from '@id/contracts';
 
-export const revisionIdParamSchema = z.object({ revisionId: z.uuid() });
+export const folderIdParamSchema = z.object({ folderId: z.uuid() });
 export const runIdParamSchema = z.object({ runId: z.uuid() });
 export const artifactParamSchema = z.object({ runId: z.uuid(), kind: artifactKindSchema });
 
@@ -27,7 +27,7 @@ export const recognizeRequestSchema = z.object({
 
 export const recognitionRunViewSchema = z.object({
   id: z.uuid(),
-  revisionId: z.uuid(),
+  folderId: z.uuid(),
   layoutRevisionId: z.uuid(),
   rdJobId: z.string().nullable(),
   localLayoutHash: sha256Schema,

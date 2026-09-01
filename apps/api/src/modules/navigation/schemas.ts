@@ -2,8 +2,8 @@
  * Схемы запросов и ответов навигации «объект → комплект → ревизия» и реестров
  * передачи (§3, §14).
  *
- * Формы самих сущностей берутся из `@id/contracts` целиком (`workSchema`,
- * `registrySchema`, `submissionRevisionSchema`), а не переписываются здесь:
+ * Формы самих сущностей берутся из `@id/contracts` целиком (`folderSchema`,
+ * `registrySchema`, `folderSchema`), а не переписываются здесь:
  * ответ навигации и ответ любого другого модуля обязаны описывать один и тот же
  * комплект одинаково, иначе клиент получит две несовместимые его версии.
  *
@@ -20,19 +20,9 @@ import {
   MAX_PAGE_LIMIT,
   periodSchema,
   processingStageSchema,
-  reconciliationExtraDocumentSchema,
-  reconciliationGroupSchema,
-  reconciliationRowSchema,
-  reconciliationWorkSchema,
-  registryItemSchema,
-  registryReconciliationSchema,
-  registrySchema,
-  registryStatusSchema,
   sectionCodeSchema,
-  sortOrderSchema,
-  submissionRevisionSchema,
+  folderSchema,
   uuidSchema,
-  workSchema,
 } from '@id/contracts';
 
 const pageQuerySchema = z.object({
@@ -65,7 +55,7 @@ const searchSchema = z.string().min(1).max(200);
  *
  * Границы включительные и независимые: задана одна — вторая не подразумевается.
  */
-export const workListQuerySchema = pageQuerySchema.extend({
+export const folderListQuerySchema = pageQuerySchema.extend({
   objectId: uuidSchema.optional(),
   sectionCode: sectionCodeSchema.optional(),
   period: periodSchema.optional(),
@@ -79,9 +69,6 @@ export const workListQuerySchema = pageQuerySchema.extend({
   includeUndatedPeriod: queryFlagSchema.optional(),
   periodFrom: periodSchema.optional(),
   periodTo: periodSchema.optional(),
-  registryId: uuidSchema.optional(),
-  /** Только комплекты, ещё не включённые ни в один реестр. */
-  unassigned: queryFlagSchema.optional(),
   search: searchSchema.optional(),
 });
 
@@ -99,37 +86,35 @@ export const sectionCountsQuerySchema = z.object({
   period: periodSchema.optional(),
   periodFrom: periodSchema.optional(),
   periodTo: periodSchema.optional(),
-  unassigned: queryFlagSchema.optional(),
   search: searchSchema.optional(),
 });
 
 export const objectIdParamSchema = z.object({ objectId: uuidSchema });
 
 export const sectionCountsSchema = z.array(
-  z.object({ sectionCode: sectionCodeSchema, works: z.int().min(0) }),
+  z.object({ sectionCode: sectionCodeSchema, folders: z.int().min(0) }),
 );
 
 /**
  * Состояние конвейера по комплектам страницы списка.
  *
  * Идентификаторы приходят строкой через запятую, а не массивом: это `GET`, и
- * повторяющийся ключ (`?workIds=a&workIds=b`) разные клиенты кодируют
+ * повторяющийся ключ (`?folderIds=a&folderIds=b`) разные клиенты кодируют
  * по-разному. Ограничение сверху — `MAX_PAGE_LIMIT`: спрашивать про больше, чем
  * помещается на странице, незачем, а без потолка запрос стал бы способом
  * заказать произвольно тяжёлый агрегат.
  */
-export const workPipelineQuerySchema = z.object({
-  workIds: z
+export const folderPipelineQuerySchema = z.object({
+  folderIds: z
     .string()
     .min(1)
     .transform((value) => value.split(',').map((part) => part.trim()))
     .pipe(z.array(uuidSchema).min(1).max(MAX_PAGE_LIMIT)),
 });
 
-export const workPipelineSchema = z.array(
+export const folderPipelineSchema = z.array(
   z.object({
-    workId: uuidSchema,
-    revisionId: uuidSchema,
+    folderId: uuidSchema,
     stage: processingStageSchema,
     queued: z.int().min(0),
     running: z.int().min(0),
@@ -137,7 +122,7 @@ export const workPipelineSchema = z.array(
   }),
 );
 
-export const workIdParamSchema = z.object({ workId: uuidSchema });
+export const folderIdParamSchema = z.object({ folderId: uuidSchema });
 
 /**
  * Предпросмотр удаления комплекта (S24).
@@ -147,36 +132,9 @@ export const workIdParamSchema = z.object({ workId: uuidSchema });
  * посчитать их ему нечем. Диалог удаления обязан назвать, что именно исчезнет, —
  * иначе «Удалить комплект?» это вопрос, на который нельзя ответить осознанно.
  */
-/**
- * Что исчезнет вместе с реестром.
- *
- * `worksDetached` и удаляемое названы РАЗНЫМИ полями намеренно: комплекты
- * состава только отвязываются, и склеить их в один счётчик «будет удалено»
- * значило бы напугать человека тем, чего не произойдёт.
- */
-export const registryDeletionPreviewSchema = z.object({
-  registryId: uuidSchema,
-  number: z.string().nullable(),
-  status: registryStatusSchema,
-  worksDetached: z.int().nonnegative(),
-  registryItems: z.int().nonnegative(),
-  reconciliations: z.int().nonnegative(),
-  file: z
-    .object({
-      workId: uuidSchema,
-      title: z.string(),
-      revisions: z.int().nonnegative(),
-      files: z.int().nonnegative(),
-      pages: z.int().nonnegative(),
-    })
-    .nullable(),
-  blockers: z.array(z.string()),
-});
-
-export const workDeletionPreviewSchema = z.object({
-  workId: uuidSchema,
+export const folderDeletionPreviewSchema = z.object({
+  folderId: uuidSchema,
   title: z.string(),
-  revisions: z.int().nonnegative(),
   files: z.int().nonnegative(),
   pages: z.int().nonnegative(),
   layoutBlocks: z.int().nonnegative(),
@@ -186,9 +144,9 @@ export const workDeletionPreviewSchema = z.object({
   blockers: z.array(z.string()),
 });
 
-export const workPageSchema = cursorPageSchema(workSchema);
+export const folderPageSchema = cursorPageSchema(folderSchema);
 
-export const workListSchema = z.array(workSchema);
+export const folderListSchema = z.array(folderSchema);
 
 /**
  * Тело заведения комплекта.
@@ -205,7 +163,7 @@ export const workListSchema = z.array(workSchema);
  * знает исполнителя, вправе назвать его, и такое значение признаком не метится.
  * Разбор — в `resolveActingContractor`.
  */
-export const createWorkBodySchema = z.object({
+export const createFolderBodySchema = z.object({
   objectId: uuidSchema,
   sectionCode: sectionCodeSchema,
   // Месяца здесь нет намеренно (S30): его выводит конвейер по самому раннему
@@ -215,7 +173,7 @@ export const createWorkBodySchema = z.object({
   contractorId: uuidSchema.nullish(),
 });
 
-export const updateWorkBodySchema = z
+export const updateFolderBodySchema = z
   .object({
     title: z.string().min(1).max(1000).optional(),
     autoRunEnabled: z.boolean().optional(),
@@ -225,146 +183,11 @@ export const updateWorkBodySchema = z
   });
 
 /** Ответ заведения: и комплект, и открытая вместе с ним первая ревизия. */
-export const createdWorkSchema = z.object({
-  work: workSchema,
-  revision: submissionRevisionSchema,
-});
+export const createdFolderSchema = z.object({ folder: folderSchema });
 
 // =====================================================================
 // Ревизии
 // =====================================================================
 
-export const revisionListQuerySchema = pageQuerySchema;
-
-export const revisionPageSchema = cursorPageSchema(submissionRevisionSchema);
-
 // =====================================================================
 // Реестры
-// =====================================================================
-
-export const registryListQuerySchema = pageQuerySchema.extend({
-  objectId: uuidSchema.optional(),
-  sectionCode: sectionCodeSchema.optional(),
-  period: periodSchema.optional(),
-  status: registryStatusSchema.optional(),
-});
-
-export const registryIdParamSchema = z.object({ registryId: uuidSchema });
-
-/** Ревизия комплекта: адрес результата сверки по ОДНОМУ комплекту (S20). */
-export const revisionIdParamSchema = z.object({ revisionId: uuidSchema });
-
-export const registryWorkParamsSchema = z.object({
-  registryId: uuidSchema,
-  workId: uuidSchema,
-});
-
-export const registryPageSchema = cursorPageSchema(registrySchema);
-
-export const createRegistryBodySchema = z.object({
-  objectId: uuidSchema,
-  sectionCode: sectionCodeSchema,
-  period: periodSchema,
-  number: z.string().max(128).nullish(),
-  folderNo: z.string().max(64).nullish(),
-  building: z.string().max(128).nullish(),
-  floor: z.string().max(64).nullish(),
-  structure: z.string().max(255).nullish(),
-});
-
-export const updateRegistryBodySchema = z
-  .object({
-    number: z.string().max(128).nullish(),
-    folderNo: z.string().max(64).nullish(),
-    building: z.string().max(128).nullish(),
-    floor: z.string().max(64).nullish(),
-    structure: z.string().max(255).nullish(),
-  })
-  .refine((body) => Object.keys(body).length > 0, {
-    message: 'Запрос не содержит ни одного изменяемого поля.',
-  });
-
-/** Порядок работы в реестре. Не задан — комплект встаёт в конец. */
-export const includeWorkBodySchema = z.object({ ordinal: sortOrderSchema.nullish() });
-
-const registryBlockerSchema = z.object({
-  code: z.string().min(1).max(64),
-  message: z.string().min(1).max(1000),
-});
-
-/**
- * Карточка реестра.
- *
- * `works`, `file` и `blockers` — необязательные поля, и это не небрежность
- * схемы: подрядчику они не отдаются вовсе. «В папке 7 комплектов, из них ваш
- * один» — сведение о работе конкурентов, полученное арифметикой, и отдавать его
- * нулём вместо отсутствия значило бы соврать вместо умолчания.
- */
-export const registryViewSchema = z.object({
-  registry: registrySchema,
-  works: z.array(workSchema).optional(),
-  file: workSchema.nullish(),
-  blockers: z.array(registryBlockerSchema).optional(),
-  /**
-   * Сводка сверки описи — числа и вердикт, без списков (S20).
-   *
-   * Поле того же класса, что `works`/`blockers`: подрядчику не отдаётся вовсе,
-   * потому что относится к папке целиком. Свои расхождения он читает на экране
-   * СВОЕГО комплекта, где нет ни чужих работ, ни общих счётчиков.
-   */
-  reconciliation: registryReconciliationSchema.nullish(),
-});
-
-export const registryItemListSchema = z.array(registryItemSchema);
-
-// =====================================================================
-// Сверка описи передачи (S20)
-// =====================================================================
-
-/**
- * Постановка сверки. `202`, а не `200`: сверяет воркер, и ответ маршрута
- * означает «задача принята», а не «результат готов».
- */
-export const reconcileResponseSchema = z.object({
-  jobId: uuidSchema,
-  /** `false` — такая задача уже стоит в очереди; повтор безопасен (§12). */
-  created: z.boolean(),
-});
-
-/**
- * Сводка сверки ПО ПАПКЕ.
- *
- * Отдаётся только под `registry.manage`. Здесь есть всё, что относится к папке
- * целиком, — шапка описи, группы без комплекта, комплекты вне описи, общие
- * счётчики, — и потому маршрут, отдающий эту схему, подрядчику недоступен.
- */
-export const registryReconciliationViewSchema = z.object({
-  reconciliation: registryReconciliationSchema.nullable(),
-  works: z.array(reconciliationWorkSchema).optional(),
-  groups: z.array(reconciliationGroupSchema).optional(),
-  rows: z.array(reconciliationRowSchema).optional(),
-  extraDocuments: z.array(reconciliationExtraDocumentSchema).optional(),
-});
-
-/**
- * Результат сверки ПО ОДНОМУ КОМПЛЕКТУ.
- *
- * Полей о папке в схеме нет вовсе — ни шапки, ни групп, ни чужих комплектов,
- * ни общих счётчиков. Это не забывчивость и не «спрячем на экране»: подрядчик
- * имеет право знать об ошибках в своих документах и не имеет права знать о
- * работе соседей по папке, и выражено это типом, а не условием в обработчике,
- * которое однажды забудут.
- */
-export const workReconciliationViewSchema = z.object({
-  work: reconciliationWorkSchema.nullable(),
-  rows: z.array(reconciliationRowSchema),
-  extraDocuments: z.array(reconciliationExtraDocumentSchema),
-  /** Версия разбора и время прогона: ими объясняется расхождение двух сверок. */
-  parserVersion: z.string().max(64).nullable(),
-  finishedAt: z.string().max(64).nullable(),
-});
-
-/** Отметка «расхождение разобрано»: суждение человека, а не наблюдение. */
-export const reviewReconciliationBodySchema = z.object({
-  note: z.string().min(10).max(1000),
-});

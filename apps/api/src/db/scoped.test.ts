@@ -20,7 +20,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { createPgliteDatabase, type TestDatabase } from '@id/db-harness';
 import { loadMigrations } from '@id/migrator';
-import { submissionRevisions, works } from '@id/db';
+import { folders } from '@id/db';
 
 import type { AuthScope } from '../auth/scope.js';
 import { scopeWhere, withScope, type ScopeTarget } from './scoped.js';
@@ -52,10 +52,6 @@ const WORK_A_ON_B = id(11);
 /** Комплект подрядчика Б на объекте Б: тот же объект, другая организация. */
 const WORK_B_ON_B = id(12);
 
-const REVISION_A_ON_A = id(13);
-const REVISION_A_ON_B = id(14);
-const REVISION_B_ON_B = id(15);
-
 const ALL_WORKS = [WORK_A_ON_A, WORK_A_ON_B, WORK_B_ON_B];
 
 const TITLE_B_ON_B = 'Кровля автостоянки, подрядчик Б';
@@ -80,35 +76,29 @@ const FIXTURE: readonly string[] = [
        VALUES ('${OBJECT_B}', 'roofing') ON CONFLICT DO NOTHING`,
   `INSERT INTO object_contractors (object_id, contractor_id)
        VALUES ('${OBJECT_A}', '${CONTRACTOR_A}') ON CONFLICT DO NOTHING`,
-  `INSERT INTO works
+  `INSERT INTO folders
        (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
      VALUES ('${WORK_A_ON_A}', '${OBJECT_A}', '${CONTRACTOR_A}', '${CONTRACTOR_A}', 'roofing', DATE '2026-01-01', 'Кровля автостоянки, подрядчик А', '${USER}')`,
   `INSERT INTO object_contractors (object_id, contractor_id)
        VALUES ('${OBJECT_B}', '${CONTRACTOR_A}') ON CONFLICT DO NOTHING`,
-  `INSERT INTO works
+  `INSERT INTO folders
        (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
      VALUES ('${WORK_A_ON_B}', '${OBJECT_B}', '${CONTRACTOR_A}', '${CONTRACTOR_A}', 'roofing', DATE '2026-01-01', 'Кровля корпуса Б, подрядчик А', '${USER}')`,
   `INSERT INTO object_contractors (object_id, contractor_id)
        VALUES ('${OBJECT_B}', '${CONTRACTOR_B}') ON CONFLICT DO NOTHING`,
-  `INSERT INTO works
+  `INSERT INTO folders
        (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
      VALUES ('${WORK_B_ON_B}', '${OBJECT_B}', '${CONTRACTOR_B}', '${CONTRACTOR_B}', 'roofing', DATE '2026-01-01', '${TITLE_B_ON_B}', '${USER}')`,
-  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no)
-     VALUES ('${REVISION_A_ON_A}', '${WORK_A_ON_A}', '${OBJECT_A}', '${CONTRACTOR_A}', 1)`,
-  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no)
-     VALUES ('${REVISION_A_ON_B}', '${WORK_A_ON_B}', '${OBJECT_B}', '${CONTRACTOR_A}', 1)`,
-  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no)
-     VALUES ('${REVISION_B_ON_B}', '${WORK_B_ON_B}', '${OBJECT_B}', '${CONTRACTOR_B}', 1)`,
 ];
 
 const WORK_SCOPE: ScopeTarget = {
-  objectId: works.objectId,
-  contractorId: works.contractorId,
+  objectId: folders.objectId,
+  contractorId: folders.contractorId,
 };
 
-const REVISION_SCOPE: ScopeTarget = {
-  objectId: submissionRevisions.objectId,
-  contractorId: submissionRevisions.contractorId,
+const FOLDER_SCOPE: ScopeTarget = {
+  objectId: folders.objectId,
+  contractorId: folders.contractorId,
 };
 
 const CONTRACTOR_A_SCOPE: AuthScope = {
@@ -152,24 +142,24 @@ afterAll(async () => {
 /** Идентификаторы комплектов, которые вернёт база при заданном условии. */
 async function workIds(where: SQL): Promise<string[]> {
   const query = new QueryBuilder()
-    .select({ id: works.id })
-    .from(works)
+    .select({ id: folders.id })
+    .from(folders)
     .where(where)
     // Номера у комплекта нет: порядок в реестре присваивает реестр. Сортировка
     // по идентификатору даёт тот же устойчивый порядок, что и прежний номер.
-    .orderBy(asc(works.id))
+    .orderBy(asc(folders.id))
     .toSQL();
 
   const rows = await db.query<{ id: string }>(query.sql, [...query.params]);
   return rows.map((row) => row.id);
 }
 
-async function revisionIds(where: SQL): Promise<string[]> {
+async function folderIds(where: SQL): Promise<string[]> {
   const query = new QueryBuilder()
-    .select({ id: submissionRevisions.id })
-    .from(submissionRevisions)
+    .select({ id: folders.id })
+    .from(folders)
     .where(where)
-    .orderBy(asc(submissionRevisions.id))
+    .orderBy(asc(folders.id))
     .toSQL();
 
   const rows = await db.query<{ id: string }>(query.sql, [...query.params]);
@@ -209,9 +199,9 @@ describe('scopeWhere на настоящей БД', () => {
   });
 
   it('применяется к любой таблице с колонками области', async () => {
-    expect(await revisionIds(scopeWhere(CONTRACTOR_A_SCOPE, REVISION_SCOPE))).toEqual([
-      REVISION_A_ON_A,
-      REVISION_A_ON_B,
+    expect(await folderIds(scopeWhere(CONTRACTOR_A_SCOPE, FOLDER_SCOPE))).toEqual([
+      WORK_A_ON_A,
+      WORK_A_ON_B,
     ]);
   });
 
@@ -236,7 +226,7 @@ describe('scopeWhere на настоящей БД', () => {
 describe('withScope: область плюс прикладное условие', () => {
   it('сужает область прикладным условием', async () => {
     expect(
-      await workIds(withScope(MANAGER_SCOPE, WORK_SCOPE, eq(works.title, TITLE_B_ON_B))),
+      await workIds(withScope(MANAGER_SCOPE, WORK_SCOPE, eq(folders.title, TITLE_B_ON_B))),
     ).toEqual([WORK_B_ON_B]);
   });
 
@@ -244,7 +234,7 @@ describe('withScope: область плюс прикладное условие
     // Условие выбирает поставку подрядчика Б, область — подрядчика А.
     // Пересечение пусто; потерянная область вернула бы чужую строку.
     expect(
-      await workIds(withScope(CONTRACTOR_A_SCOPE, WORK_SCOPE, eq(works.title, TITLE_B_ON_B))),
+      await workIds(withScope(CONTRACTOR_A_SCOPE, WORK_SCOPE, eq(folders.title, TITLE_B_ON_B))),
     ).toEqual([]);
   });
 
@@ -253,7 +243,7 @@ describe('withScope: область плюс прикладное условие
     // contractorId в запрос: параметр ложится ПОВЕРХ области, а не вместо неё.
     expect(
       await workIds(
-        withScope(CONTRACTOR_A_SCOPE, WORK_SCOPE, eq(works.contractorId, CONTRACTOR_B)),
+        withScope(CONTRACTOR_A_SCOPE, WORK_SCOPE, eq(folders.contractorId, CONTRACTOR_B)),
       ),
     ).toEqual([]);
   });
@@ -263,8 +253,8 @@ describe('withScope: область плюс прикладное условие
       withScope(
         ENGINEER_SCOPE,
         WORK_SCOPE,
-        eq(works.contractorId, CONTRACTOR_A),
-        eq(works.id, WORK_A_ON_B),
+        eq(folders.contractorId, CONTRACTOR_A),
+        eq(folders.id, WORK_A_ON_B),
       ),
     );
     expect(both).toEqual([WORK_A_ON_B]);
@@ -276,8 +266,8 @@ describe('withScope: область плюс прикладное условие
         withScope(
           CONTRACTOR_B_SCOPE,
           WORK_SCOPE,
-          eq(works.contractorId, CONTRACTOR_A),
-          eq(works.id, WORK_A_ON_B),
+          eq(folders.contractorId, CONTRACTOR_A),
+          eq(folders.id, WORK_A_ON_B),
         ),
       ),
     ).toEqual([]);

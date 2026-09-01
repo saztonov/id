@@ -95,8 +95,7 @@ function id(n: number): string {
 const ORG_CUSTOMER = id(1);
 const ORG_CONTRACTOR = id(2);
 const OBJECT = id(4);
-const SUBMISSION = id(10);
-const REVISION = id(11);
+const FOLDER = id(11);
 const USER_CONTRACTOR = id(20);
 const USER_ADMIN = id(21);
 const FILE_A = id(30);
@@ -315,19 +314,17 @@ function fixtureStatements(
        VALUES ('${OBJECT}', '${ORG_CONTRACTOR}') ON CONFLICT DO NOTHING`,
     // Месяц НЕ задан намеренно (S30): его обязан вывести конвейер по самому
     // раннему распознанному акту — это и проверяется ниже.
-    `INSERT INTO works
+    `INSERT INTO folders
        (id, object_id, contractor_id, managed_by_contractor_id, section_code, title, created_by)
-     VALUES ('${SUBMISSION}', '${OBJECT}', '${ORG_CONTRACTOR}', '${ORG_CONTRACTOR}', 'roofing', 'Поставка 1', '${USER_CONTRACTOR}')`,
-    `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
-       VALUES ('${REVISION}', '${SUBMISSION}', '${OBJECT}', '${ORG_CONTRACTOR}', 1, 'draft')`,
+     VALUES ('${FOLDER}', '${OBJECT}', '${ORG_CONTRACTOR}', '${ORG_CONTRACTOR}', 'roofing', 'Поставка 1', '${USER_CONTRACTOR}')`,
     `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
        VALUES ('${shaA}', 'blobs/${shaA.slice(0, 2)}/${shaA.slice(2, 4)}/${shaA}', ${sizeA}, 'application/pdf')`,
     `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
        VALUES ('${shaB}', 'blobs/${shaB.slice(0, 2)}/${shaB.slice(2, 4)}/${shaB}', ${sizeB}, 'application/pdf')`,
-    `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order)
-       VALUES ('${FILE_A}', '${REVISION}', '${shaA}', 'часть-1.pdf', 0)`,
-    `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order)
-       VALUES ('${FILE_B}', '${REVISION}', '${shaB}', 'часть-2.pdf', 1)`,
+    `INSERT INTO source_files (id, folder_id, blob_sha256, file_name, sort_order)
+       VALUES ('${FILE_A}', '${FOLDER}', '${shaA}', 'часть-1.pdf', 0)`,
+    `INSERT INTO source_files (id, folder_id, blob_sha256, file_name, sort_order)
+       VALUES ('${FILE_B}', '${FOLDER}', '${shaB}', 'часть-2.pdf', 1)`,
     // Опубликованный промт стадии: §10 требует цикла draft → publish с
     // аудитом, поэтому в бою его публикует администратор. Здесь та же строка
     // заводится напрямую — важно, что публикатор настоящий пользователь, а не
@@ -478,29 +475,29 @@ beforeAll(async () => {
     for (const type of ['file.verify', 'file.signature_probe'] as const) {
       await enqueueSystemJob(db, {
         type,
-        payload: { revisionId: REVISION, sourceFileId },
+        payload: { folderId: FOLDER, sourceFileId },
         dedupeKey: dedupeKeyFor(type, sourceFileId),
       });
     }
   }
   await enqueueSystemJob(db, {
     type: 'bundle.build',
-    payload: { revisionId: REVISION },
-    dedupeKey: dedupeKeyFor('bundle.build', REVISION),
+    payload: { folderId: FOLDER },
+    dedupeKey: dedupeKeyFor('bundle.build', FOLDER),
   });
   await drainQueue();
 
   const bundles = await testDb.query<{ id: string }>(
-    `SELECT id FROM processing_bundles WHERE revision_id = '${REVISION}'`,
+    `SELECT id FROM processing_bundles WHERE folder_id = '${FOLDER}'`,
   );
   bundleId = bundles[0]?.id ?? '';
   expect(bundleId).not.toBe('');
 
   // Стадии 4–13: разметка и распознавание — полностью, как в бою.
-  const { layout } = await ensureDraftLayout(db, SCOPE, { revisionId: REVISION, bundleId });
+  const { layout } = await ensureDraftLayout(db, SCOPE, { folderId: FOLDER, bundleId });
   await enqueueSystemJob(db, {
     type: 'rd.create_run_document',
-    payload: { revisionId: REVISION, bundleId, layoutRevisionId: layout.id },
+    payload: { folderId: FOLDER, bundleId, layoutRevisionId: layout.id },
     dedupeKey: dedupeKeyFor('rd.create_run_document', layout.id),
   });
   await drainQueue();
@@ -512,7 +509,7 @@ beforeAll(async () => {
   });
   await enqueueSystemJob(db, {
     type: 'layout.reconcile',
-    payload: { revisionId: REVISION, recognitionRunId: run.id },
+    payload: { folderId: FOLDER, recognitionRunId: run.id },
     dedupeKey: dedupeKeyFor('layout.reconcile', run.id),
   });
   await drainQueue();
@@ -525,8 +522,8 @@ beforeAll(async () => {
   // Стадии 14–19: то, ради чего написан файл.
   await enqueueSystemJob(db, {
     type: 'doc.classify_pages',
-    payload: { revisionId: REVISION },
-    dedupeKey: dedupeKeyFor('doc.classify_pages', REVISION),
+    payload: { folderId: FOLDER },
+    dedupeKey: dedupeKeyFor('doc.classify_pages', FOLDER),
   });
   await drainQueue();
 }, 600_000);
@@ -602,31 +599,31 @@ describe('задачи 14–19 действительно выполняются
 describe('инвариант назначения страниц', () => {
   it('каждая страница учтена ровно один раз', async () => {
     const pages = await count(
-      `SELECT count(*) AS count FROM source_pages WHERE revision_id = '${REVISION}'`,
+      `SELECT count(*) AS count FROM source_pages WHERE folder_id = '${FOLDER}'`,
     );
     const assignments = await count(
-      `SELECT count(*) AS count FROM page_assignments WHERE revision_id = '${REVISION}'`,
+      `SELECT count(*) AS count FROM page_assignments WHERE folder_id = '${FOLDER}'`,
     );
     expect(pages).toBe(PAGE_TEXTS.length);
     expect(assignments).toBe(pages);
   });
 
   it('неучтённых страниц нет', async () => {
-    const unaccounted = await listUnaccountedPages(db, SCOPE, REVISION);
+    const unaccounted = await listUnaccountedPages(db, SCOPE, FOLDER);
     expect(unaccounted).toEqual([]);
   });
 
   it('страница не может оказаться в двух документах', async () => {
     const duplicates = await count(
       `SELECT count(*) AS count FROM (
-         SELECT source_page_id FROM page_assignments WHERE revision_id = '${REVISION}'
+         SELECT source_page_id FROM page_assignments WHERE folder_id = '${FOLDER}'
           GROUP BY source_page_id HAVING count(*) > 1) t`,
     );
     expect(duplicates).toBe(0);
   });
 
   it('привязанная и непривязанная страница описаны полностью', async () => {
-    const assignments = await listPageAssignments(db, SCOPE, REVISION);
+    const assignments = await listPageAssignments(db, SCOPE, FOLDER);
     for (const assignment of assignments) {
       if (assignment.documentId === null) {
         expect(assignment.reason, assignment.sourcePageId).not.toBeNull();
@@ -649,14 +646,14 @@ describe('непривязанные страницы существуют яв�
     // непривязанных строк в комплекте не исполняется вовсе, и его поломка
     // остаётся невидимой: мутация, убравшая запись целиком, не роняла ни
     // одного теста, пока в комплекте не появилась пустая страница.
-    const assignments = await listPageAssignments(db, SCOPE, REVISION);
-    const blank = assignments.find((a) => a.revisionOrdinal === PAGE_TEXTS.length - 1);
+    const assignments = await listPageAssignments(db, SCOPE, FOLDER);
+    const blank = assignments.find((a) => a.folderOrdinal === PAGE_TEXTS.length - 1);
     expect(blank).toBeDefined();
     expect(blank?.documentId).toBeNull();
     expect(blank?.reason).not.toBeNull();
     // И при этом страница именно УЧТЕНА: отсутствие строки не отличалось бы
     // от потерянной страницы.
-    expect(await listUnaccountedPages(db, SCOPE, REVISION)).toEqual([]);
+    expect(await listUnaccountedPages(db, SCOPE, FOLDER)).toEqual([]);
   });
 });
 /**
@@ -677,14 +674,14 @@ describe('месяц комплекта', () => {
     const actDates = await testDb.query<{ value_date: string }>(
       `SELECT to_char(fv.value_date, 'YYYY-MM-DD') AS value_date FROM field_values fv
          JOIN logical_documents d ON d.id = fv.document_id
-        WHERE fv.revision_id = '${REVISION}'
+        WHERE fv.folder_id = '${FOLDER}'
           AND fv.field_code = 'act_date'
           AND d.doc_type_code LIKE 'aosr%'
           AND fv.value_date IS NOT NULL
         ORDER BY fv.value_date`,
     );
     const work = await testDb.query<{ period: string | null }>(
-      `SELECT to_char(period, 'YYYY-MM-DD') AS period FROM works WHERE id = '${SUBMISSION}'`,
+      `SELECT to_char(period, 'YYYY-MM-DD') AS period FROM folders WHERE id = '${FOLDER}'`,
     );
 
     // Обе стороны названы: и прочитанная дата, и выведенный из неё месяц.
@@ -698,13 +695,13 @@ describe('месяц комплекта', () => {
     // Месяц был NOT NULL до S30, и снятие ограничения касается пятнадцати
     // запросов. Утверждение выше проверяет значение; это — что конвейер вообще
     // дошёл до документов, не споткнувшись о пустое поле.
-    expect(await listLogicalDocuments(db, SCOPE, REVISION)).not.toHaveLength(0);
+    expect(await listLogicalDocuments(db, SCOPE, FOLDER)).not.toHaveLength(0);
   });
 });
 
 describe('гейт S8', () => {
   it('акт, реестр, сертификат, декларации и протокол опознаны', async () => {
-    const documents = await listLogicalDocuments(db, SCOPE, REVISION);
+    const documents = await listLogicalDocuments(db, SCOPE, FOLDER);
     const codes = documents.map((document) => document.docTypeCode);
     expect(codes).toContain('aosr');
     expect(codes).toContain('annex_registry');
@@ -713,7 +710,7 @@ describe('гейт S8', () => {
   });
 
   it('реестр приложений собран из ДВУХ страниц и даёт 29 строк', async () => {
-    const rows = await listRegistryRows(db, SCOPE, REVISION);
+    const rows = await listRegistryRows(db, SCOPE, FOLDER);
     expect(rows).toHaveLength(29);
     expect(rows.map((row) => row.rowNo)).toEqual(
       Array.from({ length: 29 }, (_value, index) => index + 1),
@@ -721,10 +718,10 @@ describe('гейт S8', () => {
   });
 
   it('приложение присоединено к сертификату по номеру родителя', async () => {
-    const documents = await listLogicalDocuments(db, SCOPE, REVISION);
+    const documents = await listLogicalDocuments(db, SCOPE, FOLDER);
     const cert = documents.find((document) => document.docTypeCode === 'cert_conformity');
     expect(cert).toBeDefined();
-    const assignments = await listPageAssignments(db, SCOPE, REVISION);
+    const assignments = await listPageAssignments(db, SCOPE, FOLDER);
     const pagesOfCert = assignments.filter((a) => a.documentId === cert?.id);
     // Сертификат и лист приложения — один документ из двух страниц.
     expect(pagesOfCert).toHaveLength(2);
@@ -732,7 +729,7 @@ describe('гейт S8', () => {
   });
 
   it('коллизия после фолдинга гомоглифов даёт ambiguous, а не matched', async () => {
-    const rows = await listRegistryRows(db, SCOPE, REVISION);
+    const rows = await listRegistryRows(db, SCOPE, FOLDER);
     const collided = rows.find((row) => row.rowNo === 2);
     expect(collided).toBeDefined();
     // Две декларации, набранные в разных алфавитах, после фолдинга неразличимы.
@@ -742,7 +739,7 @@ describe('гейт S8', () => {
   });
 
   it('строка реестра с точным номером сведена с документом', async () => {
-    const rows = await listRegistryRows(db, SCOPE, REVISION);
+    const rows = await listRegistryRows(db, SCOPE, FOLDER);
     const exact = rows.find((row) => row.rowNo === 1);
     expect(exact?.matchState).toBe('matched');
     expect(exact?.matchedDocumentId).not.toBeNull();
@@ -750,7 +747,7 @@ describe('гейт S8', () => {
   });
 
   it('документ через границу файлов собран верно', async () => {
-    const documents = await listLogicalDocuments(db, SCOPE, REVISION);
+    const documents = await listLogicalDocuments(db, SCOPE, FOLDER);
     const protocolPages = await protocolPageFiles(documents);
     // Обе страницы протокола — в одном документе и из РАЗНЫХ исходных файлов.
     expect(protocolPages).toHaveLength(2);
@@ -758,7 +755,7 @@ describe('гейт S8', () => {
   });
 
   it('документ незнакомого вида получает резервный тип и попадает в кандидаты', async () => {
-    const classifications = await listPageClassifications(db, SCOPE, REVISION);
+    const classifications = await listPageClassifications(db, SCOPE, FOLDER);
     const unknown = classifications.find((c) => c.observedTitle === UNKNOWN_TITLE);
     expect(unknown).toBeDefined();
     // Два разных «не знаю» различены: это `other`, а не `uncertain`.
@@ -772,8 +769,8 @@ describe('гейт S8', () => {
   });
 
   it('незнакомый вид не меняет границы соседних документов', async () => {
-    const assignments = await listPageAssignments(db, SCOPE, REVISION);
-    const byOrdinal = new Map(assignments.map((a) => [a.revisionOrdinal, a]));
+    const assignments = await listPageAssignments(db, SCOPE, FOLDER);
+    const byOrdinal = new Map(assignments.map((a) => [a.folderOrdinal, a]));
     const unknownPage = byOrdinal.get(10);
     const declarationPage = byOrdinal.get(9);
     expect(unknownPage?.documentId).not.toBeNull();
@@ -781,15 +778,15 @@ describe('гейт S8', () => {
     // Соседняя декларация осталась самостоятельным документом: незнакомец не
     // притянул её к себе и не разорвал.
     expect(unknownPage?.documentId).not.toBe(declarationPage?.documentId);
-    const documents = await listLogicalDocuments(db, SCOPE, REVISION);
+    const documents = await listLogicalDocuments(db, SCOPE, FOLDER);
     const declaration = documents.find((d) => d.id === declarationPage?.documentId);
     expect(declaration?.docTypeCode).toBe('declaration');
   });
 
   it('базовые реквизиты извлекаются и у документа неизвестного вида', async () => {
-    const documents = await listLogicalDocuments(db, SCOPE, REVISION);
-    const assignments = await listPageAssignments(db, SCOPE, REVISION);
-    const unknownPage = assignments.find((a) => a.revisionOrdinal === 10);
+    const documents = await listLogicalDocuments(db, SCOPE, FOLDER);
+    const assignments = await listPageAssignments(db, SCOPE, FOLDER);
+    const unknownPage = assignments.find((a) => a.folderOrdinal === 10);
     const unknown = documents.find((d) => d.id === unknownPage?.documentId);
     expect(unknown).toBeDefined();
 
@@ -802,7 +799,7 @@ describe('гейт S8', () => {
   });
 
   it('ни один документ не остался без учёта страниц', async () => {
-    const documents = await listLogicalDocuments(db, SCOPE, REVISION);
+    const documents = await listLogicalDocuments(db, SCOPE, FOLDER);
     for (const document of documents) {
       expect(document.pageCount, document.id).toBeGreaterThan(0);
     }
@@ -863,7 +860,7 @@ describe('провайдер модели', () => {
       structured_result: string;
     }>(
       `SELECT provider, model, input_hash, output_hash, structured_result::text AS structured_result
-         FROM ai_runs WHERE revision_id = '${REVISION}'`,
+         FROM ai_runs WHERE folder_id = '${FOLDER}'`,
     );
     expect(rows.length).toBeGreaterThan(0);
     for (const row of rows) {
@@ -925,33 +922,33 @@ describe('провайдер модели', () => {
 
 describe('повтор задач безопасен', () => {
   it('повторный прогон всей цепочки даёт тот же учёт страниц', async () => {
-    const before = await listPageAssignments(db, SCOPE, REVISION);
-    const documentsBefore = (await listLogicalDocuments(db, SCOPE, REVISION)).length;
+    const before = await listPageAssignments(db, SCOPE, FOLDER);
+    const documentsBefore = (await listLogicalDocuments(db, SCOPE, FOLDER)).length;
 
     await enqueueSystemJob(db, {
       type: 'doc.classify_pages',
-      payload: { revisionId: REVISION },
-      dedupeKey: `doc.classify_pages:${REVISION}:repeat`,
+      payload: { folderId: FOLDER },
+      dedupeKey: `doc.classify_pages:${FOLDER}:repeat`,
     });
     await drainQueue();
 
-    const after = await listPageAssignments(db, SCOPE, REVISION);
+    const after = await listPageAssignments(db, SCOPE, FOLDER);
     expect(after).toHaveLength(before.length);
-    expect((await listLogicalDocuments(db, SCOPE, REVISION)).length).toBe(documentsBefore);
-    expect(await listUnaccountedPages(db, SCOPE, REVISION)).toEqual([]);
+    expect((await listLogicalDocuments(db, SCOPE, FOLDER)).length).toBe(documentsBefore);
+    expect(await listUnaccountedPages(db, SCOPE, FOLDER)).toEqual([]);
     // Реестр переразобран, а не потерян: 29 строк на месте.
-    expect(await listRegistryRows(db, SCOPE, REVISION)).toHaveLength(29);
+    expect(await listRegistryRows(db, SCOPE, FOLDER)).toHaveLength(29);
   });
 
   it('пересегментация при пустом наборе решений отвергается, а не стирает документы', async () => {
-    const before = (await listLogicalDocuments(db, SCOPE, REVISION)).length;
+    const before = (await listLogicalDocuments(db, SCOPE, FOLDER)).length;
     expect(before).toBeGreaterThan(0);
 
-    await testDb.query(`DELETE FROM page_classifications WHERE revision_id = '${REVISION}'`);
+    await testDb.query(`DELETE FROM page_classifications WHERE folder_id = '${FOLDER}'`);
     await enqueueSystemJob(db, {
       type: 'doc.segment',
-      payload: { revisionId: REVISION },
-      dedupeKey: `doc.segment:${REVISION}:empty`,
+      payload: { folderId: FOLDER },
+      dedupeKey: `doc.segment:${FOLDER}:empty`,
     });
     await drainQueue();
 
@@ -962,7 +959,7 @@ describe('повтор задач безопасен', () => {
         WHERE job_type = 'doc.segment' AND outcome <> 'succeeded'`,
     );
     expect(failed).toBeGreaterThan(0);
-    expect((await listLogicalDocuments(db, SCOPE, REVISION)).length).toBe(before);
-    expect(await listUnaccountedPages(db, SCOPE, REVISION)).toEqual([]);
+    expect((await listLogicalDocuments(db, SCOPE, FOLDER)).length).toBe(before);
+    expect(await listUnaccountedPages(db, SCOPE, FOLDER)).toEqual([]);
   });
 });

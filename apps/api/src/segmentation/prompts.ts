@@ -192,7 +192,7 @@ export function renderUserPrompt(
     text.replace(token, () => value);
   let out = template;
   out = put(out, '{{DOC_TYPE_CODES}}', docTypeCodes.join(', '));
-  out = put(out, '{{ORDINAL}}', String(page.revisionOrdinal));
+  out = put(out, '{{ORDINAL}}', String(page.folderOrdinal));
   out = put(out, '{{ROTATION}}', `${page.rotation}°`);
   out = put(out, '{{BLOCKS}}', blocks);
   out = put(

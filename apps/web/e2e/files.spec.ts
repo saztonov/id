@@ -17,7 +17,7 @@ const FIXTURE = fileURLToPath(
 );
 
 test('подрядчик загружает файл, и он появляется в составе ревизии', async ({ page }) => {
-  await signIn(page, KC.contractor, `/ids/revisions/${IDS.revisionEmpty}?tab=files`);
+  await signIn(page, KC.contractor, `/ids/folders/${IDS.folderEmpty}?tab=files`);
 
   await expect(page.getByText('Файлов в ревизии нет')).toBeVisible();
 
@@ -39,7 +39,7 @@ test('подрядчик загружает файл, и он появляетс
   });
 
   // Последствие в базе: файл принят, страницы разобраны сервером.
-  const files = await page.request.get(`/api/v1/revisions/${IDS.revisionEmpty}/files`);
+  const files = await page.request.get(`/api/v1/folders/${IDS.folderEmpty}/files`);
   const body = (await files.json()) as {
     items: { fileName: string; verifyState: string; pageCount: number; sizeBytes: number }[];
   };
@@ -50,12 +50,12 @@ test('подрядчик загружает файл, и он появляетс
   expect(stored?.sizeBytes).toBeGreaterThan(0);
 
   // Содержимое отдаётся нашим эндпоинтом под сессией, а не presigned URL.
-  const content = await page.request.get(`/api/v1/files/${IDS.revisionEmpty}/content`);
+  const content = await page.request.get(`/api/v1/files/${IDS.folderEmpty}/content`);
   expect([200, 404]).toContain(content.status());
 });
 
 test('«Разметить файл» доступно только после сборки рабочего документа', async ({ page }) => {
-  await signIn(page, KC.contractor, `/ids/revisions/${IDS.revisionEmpty}?tab=files`);
+  await signIn(page, KC.contractor, `/ids/folders/${IDS.folderEmpty}?tab=files`);
 
   // Рабочего документа у этой ревизии нет: экран говорит об этом и не даёт
   // нажать кнопку, которая гарантированно получила бы 409.
@@ -64,7 +64,7 @@ test('«Разметить файл» доступно только после �
 });
 
 test('сборка рабочего документа ставит задачу конвейера', async ({ page }) => {
-  await signIn(page, KC.contractor, `/ids/revisions/${IDS.revisionEmpty}?tab=files`);
+  await signIn(page, KC.contractor, `/ids/folders/${IDS.folderEmpty}?tab=files`);
 
   // Локатор ячейки уточнён `exact` (S24): у кнопок-пиктограмм в колонке действий
   // доступное имя называет объект («Удалить «Многостраничный.pdf»»), поэтому
@@ -98,9 +98,9 @@ test('сборка рабочего документа ставит задачу
  * файл вместе со всем разбором.
  */
 test('замена ставит новый файл на место старого и говорит, что уйдёт', async ({ page }) => {
-  await signIn(page, KC.contractor, `/ids/revisions/${IDS.revisionEmpty}?tab=files`);
+  await signIn(page, KC.contractor, `/ids/folders/${IDS.folderEmpty}?tab=files`);
 
-  const before = await page.request.get(`/api/v1/revisions/${IDS.revisionEmpty}/files`);
+  const before = await page.request.get(`/api/v1/folders/${IDS.folderEmpty}/files`);
   const item = ((await before.json()) as { items: { id: string; sortOrder: number }[] }).items[0];
   expect(item, 'предыдущий сценарий обязан был оставить файл').toBeDefined();
 
@@ -124,10 +124,12 @@ test('замена ставит новый файл на место старог
   });
 
   // Последствие в базе: файл один, на прежней позиции, и это НОВЫЙ файл.
-  const after = await page.request.get(`/api/v1/revisions/${IDS.revisionEmpty}/files`);
-  const items = ((await after.json()) as {
-    items: { id: string; fileName: string; sortOrder: number }[];
-  }).items;
+  const after = await page.request.get(`/api/v1/folders/${IDS.folderEmpty}/files`);
+  const items = (
+    (await after.json()) as {
+      items: { id: string; fileName: string; sortOrder: number }[];
+    }
+  ).items;
   expect(items).toHaveLength(1);
   expect(items[0]?.fileName).toBe('Замена.pdf');
   expect(items[0]?.sortOrder).toBe(item?.sortOrder);
@@ -135,7 +137,7 @@ test('замена ставит новый файл на место старог
 });
 
 test('замена сбрасывает проверку, и экран об этом говорит', async ({ page }) => {
-  await signIn(page, KC.contractor, `/ids/revisions/${IDS.revisionEmpty}?tab=checks`);
+  await signIn(page, KC.contractor, `/ids/folders/${IDS.folderEmpty}?tab=checks`);
 
   // Прогонов у этой ревизии не было, а после замены и подавно: экран обязан
   // сказать это словами, а не молчать пустым списком — молчание неотличимо от

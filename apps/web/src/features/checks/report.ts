@@ -157,12 +157,12 @@ export function formatDate(iso: string): string {
  * лист, а выделить тот блок, о котором речь. Без него проверяющий открывает
  * страницу, не находит обещанного и перестаёт верить остальным строкам тоже.
  */
-export function rowHref(revisionId: string, row: ReportRow): string | null {
+export function rowHref(folderId: string, row: ReportRow): string | null {
   const index = row.page?.workingPageIndex ?? null;
   if (index === null) return null;
   const query = new URLSearchParams({ tab: 'markup', page: String(index) });
   if (row.blockId !== null) query.set('block', row.blockId);
-  return `/ids/revisions/${revisionId}?${query.toString()}`;
+  return `/ids/folders/${folderId}?${query.toString()}`;
 }
 
 /**

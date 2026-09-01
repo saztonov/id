@@ -117,13 +117,12 @@ function unknownSectionGraph(): CheckGraph {
     // Профиль раздела не опубликован: раздел новый, настройки для него ещё
     // нет (§9.1, строка 2).
     profile: makeUnconfiguredProfile(),
-    revision: {
+    folder: {
       id: 'rev-unknown',
       objectId: 'obj-1',
       contractorId: 'cp-1',
       sectionCode: 'external_mechanical_systems',
-      workTitle: 'Наружные сети водоснабжения',
-      status: 'submitted',
+      folderTitle: 'Наружные сети водоснабжения',
     },
     today: '2026-03-01',
   });

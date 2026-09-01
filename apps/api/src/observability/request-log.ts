@@ -82,7 +82,7 @@ export interface RequestLogFields {
   readonly route?: string | undefined;
   readonly userId?: string | undefined;
   readonly objectId?: string | undefined;
-  readonly revisionId?: string | undefined;
+  readonly folderId?: string | undefined;
 }
 
 interface MutableFields {
@@ -90,7 +90,7 @@ interface MutableFields {
   route?: string;
   userId?: string;
   objectId?: string;
-  revisionId?: string;
+  folderId?: string;
 }
 
 const fieldsByRequest = new WeakMap<IncomingMessage, MutableFields>();
@@ -112,13 +112,13 @@ export function setRequestLogFields(req: IncomingMessage, fields: RequestLogFiel
   if (fields.route !== undefined) target.route = fields.route;
   if (fields.userId !== undefined) target.userId = fields.userId;
   if (fields.objectId !== undefined) target.objectId = fields.objectId;
-  if (fields.revisionId !== undefined) target.revisionId = fields.revisionId;
+  if (fields.folderId !== undefined) target.folderId = fields.folderId;
 
   updateContext({
     route: fields.route,
     userId: fields.userId,
     objectId: fields.objectId,
-    revisionId: fields.revisionId,
+    folderId: fields.folderId,
   });
 }
 
@@ -253,7 +253,7 @@ export function createRequestLogHandler(options: RequestLogOptions): RequestLogH
       duration_ms: durationOf(res),
       user_id: fields?.userId,
       object_id: fields?.objectId,
-      revision_id: fields?.revisionId,
+      folder_id: fields?.folderId,
     };
   };
 

@@ -175,7 +175,7 @@ const sampleSchema = z.object({
   statusCode: z.int().nullable(),
   errorCode: z.string().nullable(),
   objectId: uuidSchema.nullable(),
-  revisionId: uuidSchema.nullable(),
+  folderId: uuidSchema.nullable(),
   jobId: uuidSchema.nullable(),
   jobType: z.string().nullable(),
   attempt: z.int().nullable(),

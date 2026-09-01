@@ -98,7 +98,7 @@ async function relationsOf(
   } as unknown as SegmentationDeps;
 
   const ctx = {
-    payload: { revisionId: 'rev-1' },
+    payload: { folderId: 'rev-1' },
     logger: { info: () => undefined, warn: () => undefined },
     emit: () => Promise.resolve(),
     enqueue: () => Promise.resolve({ jobId: 'j', created: true }),

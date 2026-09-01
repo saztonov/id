@@ -29,7 +29,7 @@ import {
   type RunTarget,
 } from './recognition.js';
 
-const REVISION = '00000000-0000-4000-8000-000000000011';
+const FOLDER = '00000000-0000-4000-8000-000000000011';
 const LAYOUT = '00000000-0000-4000-8000-000000000013';
 const RUN = '00000000-0000-4000-8000-000000000014';
 
@@ -66,8 +66,8 @@ function makeContext(
     type: 'layout.reconcile',
     attempt: options.attempt ?? 1,
     maxAttempts: options.maxAttempts ?? 5,
-    revisionId: REVISION,
-    payload: { revisionId: REVISION, recognitionRunId: RUN },
+    folderId: FOLDER,
+    payload: { folderId: FOLDER, recognitionRunId: RUN },
     db: undefined,
     logger: recordingLogger(sink.logs),
     signal: new AbortController().signal,
@@ -115,7 +115,7 @@ const MATCHING_HASH = remoteHashOf([remoteBlock()]);
 function run(overrides: Partial<RunTarget> = {}): RunTarget {
   return {
     runId: RUN,
-    revisionId: REVISION,
+    folderId: FOLDER,
     layoutRevisionId: LAYOUT,
     status: 'running',
     rdDocumentId: 'doc_1',

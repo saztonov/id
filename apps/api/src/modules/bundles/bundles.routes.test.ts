@@ -54,14 +54,10 @@ const ORG_CONTRACTOR = id(2);
 const ORG_OTHER = id(3);
 const OBJECT = id(4);
 
-const SUBMISSION = id(10);
-const REVISION = id(11);
-const SUBMISSION_OTHER = id(12);
-const REVISION_OTHER = id(13);
-const SUBMISSION_EMPTY = id(14);
-const REVISION_EMPTY = id(15);
-const SUBMISSION_DIRTY = id(16);
-const REVISION_DIRTY = id(17);
+const FOLDER = id(11);
+const FOLDER_OTHER = id(13);
+const FOLDER_EMPTY = id(15);
+const FOLDER_DIRTY = id(17);
 
 const USER_CONTRACTOR = id(20);
 const USER_OTHER = id(21);
@@ -114,69 +110,61 @@ const FIXTURE: readonly string[] = [
   // Ревизия, готовая к сборке: два проверенных файла, три страницы.
   `INSERT INTO object_contractors (object_id, contractor_id)
        VALUES ('${OBJECT}', '${ORG_CONTRACTOR}') ON CONFLICT DO NOTHING`,
-  `INSERT INTO works
+  `INSERT INTO folders
        (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-     VALUES ('${SUBMISSION}', '${OBJECT}', '${ORG_CONTRACTOR}', '${ORG_CONTRACTOR}', 'roofing', DATE '2026-01-01', 'Поставка 1', '${USER_CONTRACTOR}')`,
-  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
-     VALUES ('${REVISION}', '${SUBMISSION}', '${OBJECT}', '${ORG_CONTRACTOR}', 1, 'draft')`,
+     VALUES ('${FOLDER}', '${OBJECT}', '${ORG_CONTRACTOR}', '${ORG_CONTRACTOR}', 'roofing', DATE '2026-01-01', 'Поставка 1', '${USER_CONTRACTOR}')`,
   `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
      VALUES ('${SHA_1}', 'blobs/${SHA_1}', 2048, 'application/pdf')`,
   `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
      VALUES ('${SHA_2}', 'blobs/${SHA_2}', 1024, 'application/pdf')`,
-  `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order, verify_state)
-     VALUES ('${FILE_1}', '${REVISION}', '${SHA_1}', 'АОСР.pdf', 0, 'ok')`,
-  `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order, verify_state)
-     VALUES ('${FILE_2}', '${REVISION}', '${SHA_2}', 'Сертификат.pdf', 1, 'ok')`,
-  `INSERT INTO source_pages (id, revision_id, source_file_id, file_page_index, revision_ordinal, width_px, height_px, rotation)
-     VALUES ('${PAGE_1_0}', '${REVISION}', '${FILE_1}', 0, 0, 595, 842, 0)`,
-  `INSERT INTO source_pages (id, revision_id, source_file_id, file_page_index, revision_ordinal, width_px, height_px, rotation)
-     VALUES ('${PAGE_1_1}', '${REVISION}', '${FILE_1}', 1, 1, 842, 595, 90)`,
-  `INSERT INTO source_pages (id, revision_id, source_file_id, file_page_index, revision_ordinal, width_px, height_px, rotation)
-     VALUES ('${PAGE_2_0}', '${REVISION}', '${FILE_2}', 0, 2, 595, 842, 0)`,
+  `INSERT INTO source_files (id, folder_id, blob_sha256, file_name, sort_order, verify_state)
+     VALUES ('${FILE_1}', '${FOLDER}', '${SHA_1}', 'АОСР.pdf', 0, 'ok')`,
+  `INSERT INTO source_files (id, folder_id, blob_sha256, file_name, sort_order, verify_state)
+     VALUES ('${FILE_2}', '${FOLDER}', '${SHA_2}', 'Сертификат.pdf', 1, 'ok')`,
+  `INSERT INTO source_pages (id, folder_id, source_file_id, file_page_index, folder_ordinal, width_px, height_px, rotation)
+     VALUES ('${PAGE_1_0}', '${FOLDER}', '${FILE_1}', 0, 0, 595, 842, 0)`,
+  `INSERT INTO source_pages (id, folder_id, source_file_id, file_page_index, folder_ordinal, width_px, height_px, rotation)
+     VALUES ('${PAGE_1_1}', '${FOLDER}', '${FILE_1}', 1, 1, 842, 595, 90)`,
+  `INSERT INTO source_pages (id, folder_id, source_file_id, file_page_index, folder_ordinal, width_px, height_px, rotation)
+     VALUES ('${PAGE_2_0}', '${FOLDER}', '${FILE_2}', 0, 2, 595, 842, 0)`,
 
   // Ревизия без файлов: сборка невозможна и обязана сказать почему.
   `INSERT INTO object_contractors (object_id, contractor_id)
        VALUES ('${OBJECT}', '${ORG_CONTRACTOR}') ON CONFLICT DO NOTHING`,
-  `INSERT INTO works
+  `INSERT INTO folders
        (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-     VALUES ('${SUBMISSION_EMPTY}', '${OBJECT}', '${ORG_CONTRACTOR}', '${ORG_CONTRACTOR}', 'roofing', DATE '2026-01-01', 'Поставка пустая', '${USER_CONTRACTOR}')`,
-  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
-     VALUES ('${REVISION_EMPTY}', '${SUBMISSION_EMPTY}', '${OBJECT}', '${ORG_CONTRACTOR}', 1, 'draft')`,
+     VALUES ('${FOLDER_EMPTY}', '${OBJECT}', '${ORG_CONTRACTOR}', '${ORG_CONTRACTOR}', 'roofing', DATE '2026-01-01', 'Поставка пустая', '${USER_CONTRACTOR}')`,
 
   // Ревизия с карантинным файлом.
   `INSERT INTO object_contractors (object_id, contractor_id)
        VALUES ('${OBJECT}', '${ORG_CONTRACTOR}') ON CONFLICT DO NOTHING`,
-  `INSERT INTO works
+  `INSERT INTO folders
        (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-     VALUES ('${SUBMISSION_DIRTY}', '${OBJECT}', '${ORG_CONTRACTOR}', '${ORG_CONTRACTOR}', 'roofing', DATE '2026-01-01', 'Поставка с карантином', '${USER_CONTRACTOR}')`,
-  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
-     VALUES ('${REVISION_DIRTY}', '${SUBMISSION_DIRTY}', '${OBJECT}', '${ORG_CONTRACTOR}', 1, 'draft')`,
+     VALUES ('${FOLDER_DIRTY}', '${OBJECT}', '${ORG_CONTRACTOR}', '${ORG_CONTRACTOR}', 'roofing', DATE '2026-01-01', 'Поставка с карантином', '${USER_CONTRACTOR}')`,
   `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
      VALUES ('${SHA_QUARANTINED}', 'blobs/${SHA_QUARANTINED}', 512, 'application/octet-stream')`,
-  `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order, verify_state, verify_error)
-     VALUES ('${FILE_QUARANTINED}', '${REVISION_DIRTY}', '${SHA_QUARANTINED}', 'битый.pdf', 0,
+  `INSERT INTO source_files (id, folder_id, blob_sha256, file_name, sort_order, verify_state, verify_error)
+     VALUES ('${FILE_QUARANTINED}', '${FOLDER_DIRTY}', '${SHA_QUARANTINED}', 'битый.pdf', 0,
              'quarantined', 'PDF повреждён и не читается')`,
 
   // Чужая поставка с уже собранным рабочим документом.
   `INSERT INTO object_contractors (object_id, contractor_id)
        VALUES ('${OBJECT}', '${ORG_OTHER}') ON CONFLICT DO NOTHING`,
-  `INSERT INTO works
+  `INSERT INTO folders
        (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-     VALUES ('${SUBMISSION_OTHER}', '${OBJECT}', '${ORG_OTHER}', '${ORG_OTHER}', 'roofing', DATE '2026-01-01', 'Поставка чужая', '${USER_OTHER}')`,
-  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
-     VALUES ('${REVISION_OTHER}', '${SUBMISSION_OTHER}', '${OBJECT}', '${ORG_OTHER}', 1, 'draft')`,
+     VALUES ('${FOLDER_OTHER}', '${OBJECT}', '${ORG_OTHER}', '${ORG_OTHER}', 'roofing', DATE '2026-01-01', 'Поставка чужая', '${USER_OTHER}')`,
   `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
      VALUES ('${SHA_OTHER}', 'blobs/${SHA_OTHER}', 700, 'application/pdf')`,
   `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
      VALUES ('${SHA_WORKING_OTHER}', 'bundle/${SHA_WORKING_OTHER}.pdf', 700, 'application/pdf')`,
-  `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order, verify_state)
-     VALUES ('${FILE_OTHER}', '${REVISION_OTHER}', '${SHA_OTHER}', 'Чужой.pdf', 0, 'ok')`,
-  `INSERT INTO source_pages (id, revision_id, source_file_id, file_page_index, revision_ordinal, width_px, height_px, rotation)
-     VALUES ('${PAGE_OTHER_0}', '${REVISION_OTHER}', '${FILE_OTHER}', 0, 0, 595, 842, 0)`,
-  `INSERT INTO processing_bundles (id, revision_id, aggregate_manifest_hash, working_pdf_blob_sha256, builder_version)
-     VALUES ('${BUNDLE_OTHER}', '${REVISION_OTHER}', '${'f'.repeat(64)}', '${SHA_WORKING_OTHER}', 'bundle/1+qpdf')`,
-  `INSERT INTO processing_bundle_pages (bundle_id, revision_id, working_page_index, source_page_id)
-     VALUES ('${BUNDLE_OTHER}', '${REVISION_OTHER}', 0, '${PAGE_OTHER_0}')`,
+  `INSERT INTO source_files (id, folder_id, blob_sha256, file_name, sort_order, verify_state)
+     VALUES ('${FILE_OTHER}', '${FOLDER_OTHER}', '${SHA_OTHER}', 'Чужой.pdf', 0, 'ok')`,
+  `INSERT INTO source_pages (id, folder_id, source_file_id, file_page_index, folder_ordinal, width_px, height_px, rotation)
+     VALUES ('${PAGE_OTHER_0}', '${FOLDER_OTHER}', '${FILE_OTHER}', 0, 0, 595, 842, 0)`,
+  `INSERT INTO processing_bundles (id, folder_id, aggregate_manifest_hash, working_pdf_blob_sha256, builder_version)
+     VALUES ('${BUNDLE_OTHER}', '${FOLDER_OTHER}', '${'f'.repeat(64)}', '${SHA_WORKING_OTHER}', 'bundle/1+qpdf')`,
+  `INSERT INTO processing_bundle_pages (bundle_id, folder_id, working_page_index, source_page_id)
+     VALUES ('${BUNDLE_OTHER}', '${FOLDER_OTHER}', 0, '${PAGE_OTHER_0}')`,
 ];
 
 const STORAGE_DIR = mkdtempSync(join(tmpdir(), 'id-bundles-tests-'));
@@ -285,9 +273,9 @@ interface BuildResponse {
   readonly aggregateManifestHash: string;
 }
 
-async function queuedTypes(revisionId: string): Promise<readonly string[]> {
+async function queuedTypes(folderId: string): Promise<readonly string[]> {
   const rows = await db.query<{ type: string }>(
-    `SELECT type FROM jobs WHERE payload->>'revisionId' = '${revisionId}'`,
+    `SELECT type FROM jobs WHERE payload->>'folderId' = '${folderId}'`,
   );
   return rows.map((row) => row.type);
 }
@@ -298,9 +286,9 @@ async function queuedTypes(revisionId: string): Promise<readonly string[]> {
 
 describe('запрос сборки рабочего документа', () => {
   it('ставит задачу bundle.build в очередь, а не только отвечает 202', async () => {
-    expect(await queuedTypes(REVISION)).toEqual([]);
+    expect(await queuedTypes(FOLDER)).toEqual([]);
 
-    const response = await as(KC.contractor, 'POST', `/api/v1/revisions/${REVISION}/bundle`);
+    const response = await as(KC.contractor, 'POST', `/api/v1/folders/${FOLDER}/bundle`);
     expect(response.statusCode).toBe(202);
 
     const body = response.json<BuildResponse>();
@@ -310,34 +298,34 @@ describe('запрос сборки рабочего документа', () => 
     expect(body.aggregateManifestHash).toMatch(/^[0-9a-f]{64}$/);
 
     // Главное утверждение: работа поставлена, а не задекларирована.
-    expect(await queuedTypes(REVISION)).toEqual(['bundle.build']);
+    expect(await queuedTypes(FOLDER)).toEqual(['bundle.build']);
   });
 
   it('повторный запрос того же состава не создаёт вторую задачу', async () => {
-    const response = await as(KC.contractor, 'POST', `/api/v1/revisions/${REVISION}/bundle`);
+    const response = await as(KC.contractor, 'POST', `/api/v1/folders/${FOLDER}/bundle`);
     expect(response.statusCode).toBe(202);
     expect(response.json<BuildResponse>().created).toBe(false);
-    expect(await queuedTypes(REVISION)).toEqual(['bundle.build']);
+    expect(await queuedTypes(FOLDER)).toEqual(['bundle.build']);
   });
 
   it('ревизия без файлов отвечает 409 сразу, а не задачей, которая упадёт', async () => {
-    const response = await as(KC.contractor, 'POST', `/api/v1/revisions/${REVISION_EMPTY}/bundle`);
+    const response = await as(KC.contractor, 'POST', `/api/v1/folders/${FOLDER_EMPTY}/bundle`);
     expect(response.statusCode).toBe(409);
     expect(response.body).toContain('нет ни одного файла');
-    expect(await queuedTypes(REVISION_EMPTY)).toEqual([]);
+    expect(await queuedTypes(FOLDER_EMPTY)).toEqual([]);
   });
 
   it('карантинный файл назван по имени, и сборка не ставится', async () => {
-    const response = await as(KC.contractor, 'POST', `/api/v1/revisions/${REVISION_DIRTY}/bundle`);
+    const response = await as(KC.contractor, 'POST', `/api/v1/folders/${FOLDER_DIRTY}/bundle`);
     expect(response.statusCode).toBe(409);
     expect(response.body).toContain('битый.pdf');
-    expect(await queuedTypes(REVISION_DIRTY)).toEqual([]);
+    expect(await queuedTypes(FOLDER_DIRTY)).toEqual([]);
   });
 
   it('чужая ревизия неотличима от несуществующей', async () => {
-    const response = await as(KC.other, 'POST', `/api/v1/revisions/${REVISION}/bundle`);
+    const response = await as(KC.other, 'POST', `/api/v1/folders/${FOLDER}/bundle`);
     expect(response.statusCode).toBe(404);
-    expect(await queuedTypes(REVISION)).toEqual(['bundle.build']);
+    expect(await queuedTypes(FOLDER)).toEqual(['bundle.build']);
   });
 });
 
@@ -358,19 +346,19 @@ describe('карта страниц рабочего документа', () => 
          VALUES ('${SHA_WORKING}', 'bundle/${SHA_WORKING}.pdf', 3072, 'application/pdf')`,
     );
     await db.query(
-      `INSERT INTO processing_bundles (id, revision_id, aggregate_manifest_hash, working_pdf_blob_sha256, builder_version)
-         VALUES ('${BUNDLE}', '${REVISION}', '${MANIFEST}', '${SHA_WORKING}', 'bundle/1+qpdf')`,
+      `INSERT INTO processing_bundles (id, folder_id, aggregate_manifest_hash, working_pdf_blob_sha256, builder_version)
+         VALUES ('${BUNDLE}', '${FOLDER}', '${MANIFEST}', '${SHA_WORKING}', 'bundle/1+qpdf')`,
     );
     for (const [index, page] of [PAGE_1_0, PAGE_1_1, PAGE_2_0].entries()) {
       await db.query(
-        `INSERT INTO processing_bundle_pages (bundle_id, revision_id, working_page_index, source_page_id)
-           VALUES ('${BUNDLE}', '${REVISION}', ${index}, '${page}')`,
+        `INSERT INTO processing_bundle_pages (bundle_id, folder_id, working_page_index, source_page_id)
+           VALUES ('${BUNDLE}', '${FOLDER}', ${index}, '${page}')`,
       );
     }
   });
 
   it('список рабочих документов ревизии доступен и считает страницы', async () => {
-    const response = await as(KC.contractor, 'GET', `/api/v1/revisions/${REVISION}/bundles`);
+    const response = await as(KC.contractor, 'GET', `/api/v1/folders/${FOLDER}/bundles`);
     expect(response.statusCode).toBe(200);
 
     const items = response.json<{ items: { id: string; pageCount: number }[] }>().items;
@@ -423,7 +411,7 @@ describe('карта страниц рабочего документа', () => 
       `/api/v1/bundles/${BUNDLE_OTHER}`,
       `/api/v1/bundles/${BUNDLE_OTHER}/pages`,
       `/api/v1/bundles/${BUNDLE_OTHER}/pages/0`,
-      `/api/v1/revisions/${REVISION_OTHER}/bundles`,
+      `/api/v1/folders/${FOLDER_OTHER}/bundles`,
     ]) {
       const response = await as(KC.contractor, 'GET', url);
       expect(response.statusCode).toBe(404);

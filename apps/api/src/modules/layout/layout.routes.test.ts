@@ -50,12 +50,9 @@ const ORG_CONTRACTOR = id(2);
 const ORG_OTHER = id(3);
 const OBJECT = id(4);
 
-const SUBMISSION = id(10);
-const REVISION = id(11);
-const SUBMISSION_OTHER = id(12);
-const REVISION_OTHER = id(13);
-const SUBMISSION_BARE = id(14);
-const REVISION_BARE = id(15);
+const FOLDER = id(11);
+const FOLDER_OTHER = id(13);
+const FOLDER_BARE = id(15);
 
 const USER_CONTRACTOR = id(20);
 const USER_OTHER = id(21);
@@ -111,63 +108,57 @@ const FIXTURE: readonly string[] = [
   // Своя ревизия: рабочий документ собран, три страницы.
   `INSERT INTO object_contractors (object_id, contractor_id)
        VALUES ('${OBJECT}', '${ORG_CONTRACTOR}') ON CONFLICT DO NOTHING`,
-  `INSERT INTO works
+  `INSERT INTO folders
        (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-     VALUES ('${SUBMISSION}', '${OBJECT}', '${ORG_CONTRACTOR}', '${ORG_CONTRACTOR}', 'roofing', DATE '2026-01-01', 'Поставка 1', '${USER_CONTRACTOR}')`,
-  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
-     VALUES ('${REVISION}', '${SUBMISSION}', '${OBJECT}', '${ORG_CONTRACTOR}', 1, 'draft')`,
+     VALUES ('${FOLDER}', '${OBJECT}', '${ORG_CONTRACTOR}', '${ORG_CONTRACTOR}', 'roofing', DATE '2026-01-01', 'Поставка 1', '${USER_CONTRACTOR}')`,
   `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
      VALUES ('${SHA}', 'blobs/${SHA}', 2048, 'application/pdf')`,
   `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
      VALUES ('${SHA_WORKING}', 'blobs/${SHA_WORKING}', 4096, 'application/pdf')`,
-  `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order, verify_state)
-     VALUES ('${FILE}', '${REVISION}', '${SHA}', 'АОСР.pdf', 0, 'ok')`,
-  `INSERT INTO source_pages (id, revision_id, source_file_id, file_page_index, revision_ordinal, width_px, height_px, rotation)
-     VALUES ('${PAGE_0}', '${REVISION}', '${FILE}', 0, 0, 1654, 2339, 0)`,
-  `INSERT INTO source_pages (id, revision_id, source_file_id, file_page_index, revision_ordinal, width_px, height_px, rotation)
-     VALUES ('${PAGE_1}', '${REVISION}', '${FILE}', 1, 1, 1654, 2339, 0)`,
-  `INSERT INTO source_pages (id, revision_id, source_file_id, file_page_index, revision_ordinal, width_px, height_px, rotation)
-     VALUES ('${PAGE_2}', '${REVISION}', '${FILE}', 2, 2, 1654, 2339, 0)`,
-  `INSERT INTO processing_bundles (id, revision_id, aggregate_manifest_hash, working_pdf_blob_sha256, builder_version)
-     VALUES ('${BUNDLE}', '${REVISION}', '${'e'.repeat(64)}', '${SHA_WORKING}', 'bundle/1+pdf-lib')`,
-  `INSERT INTO processing_bundle_pages (bundle_id, revision_id, working_page_index, source_page_id)
-     VALUES ('${BUNDLE}', '${REVISION}', 0, '${PAGE_0}')`,
-  `INSERT INTO processing_bundle_pages (bundle_id, revision_id, working_page_index, source_page_id)
-     VALUES ('${BUNDLE}', '${REVISION}', 1, '${PAGE_1}')`,
-  `INSERT INTO processing_bundle_pages (bundle_id, revision_id, working_page_index, source_page_id)
-     VALUES ('${BUNDLE}', '${REVISION}', 2, '${PAGE_2}')`,
+  `INSERT INTO source_files (id, folder_id, blob_sha256, file_name, sort_order, verify_state)
+     VALUES ('${FILE}', '${FOLDER}', '${SHA}', 'АОСР.pdf', 0, 'ok')`,
+  `INSERT INTO source_pages (id, folder_id, source_file_id, file_page_index, folder_ordinal, width_px, height_px, rotation)
+     VALUES ('${PAGE_0}', '${FOLDER}', '${FILE}', 0, 0, 1654, 2339, 0)`,
+  `INSERT INTO source_pages (id, folder_id, source_file_id, file_page_index, folder_ordinal, width_px, height_px, rotation)
+     VALUES ('${PAGE_1}', '${FOLDER}', '${FILE}', 1, 1, 1654, 2339, 0)`,
+  `INSERT INTO source_pages (id, folder_id, source_file_id, file_page_index, folder_ordinal, width_px, height_px, rotation)
+     VALUES ('${PAGE_2}', '${FOLDER}', '${FILE}', 2, 2, 1654, 2339, 0)`,
+  `INSERT INTO processing_bundles (id, folder_id, aggregate_manifest_hash, working_pdf_blob_sha256, builder_version)
+     VALUES ('${BUNDLE}', '${FOLDER}', '${'e'.repeat(64)}', '${SHA_WORKING}', 'bundle/1+pdf-lib')`,
+  `INSERT INTO processing_bundle_pages (bundle_id, folder_id, working_page_index, source_page_id)
+     VALUES ('${BUNDLE}', '${FOLDER}', 0, '${PAGE_0}')`,
+  `INSERT INTO processing_bundle_pages (bundle_id, folder_id, working_page_index, source_page_id)
+     VALUES ('${BUNDLE}', '${FOLDER}', 1, '${PAGE_1}')`,
+  `INSERT INTO processing_bundle_pages (bundle_id, folder_id, working_page_index, source_page_id)
+     VALUES ('${BUNDLE}', '${FOLDER}', 2, '${PAGE_2}')`,
 
   // Ревизия без рабочего документа: разметку начать нельзя.
   `INSERT INTO object_contractors (object_id, contractor_id)
        VALUES ('${OBJECT}', '${ORG_CONTRACTOR}') ON CONFLICT DO NOTHING`,
-  `INSERT INTO works
+  `INSERT INTO folders
        (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-     VALUES ('${SUBMISSION_BARE}', '${OBJECT}', '${ORG_CONTRACTOR}', '${ORG_CONTRACTOR}', 'roofing', DATE '2026-01-01', 'Поставка без bundle', '${USER_CONTRACTOR}')`,
-  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
-     VALUES ('${REVISION_BARE}', '${SUBMISSION_BARE}', '${OBJECT}', '${ORG_CONTRACTOR}', 1, 'draft')`,
+     VALUES ('${FOLDER_BARE}', '${OBJECT}', '${ORG_CONTRACTOR}', '${ORG_CONTRACTOR}', 'roofing', DATE '2026-01-01', 'Поставка без bundle', '${USER_CONTRACTOR}')`,
 
   // Чужая поставка с уже существующей разметкой.
   `INSERT INTO object_contractors (object_id, contractor_id)
        VALUES ('${OBJECT}', '${ORG_OTHER}') ON CONFLICT DO NOTHING`,
-  `INSERT INTO works
+  `INSERT INTO folders
        (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-     VALUES ('${SUBMISSION_OTHER}', '${OBJECT}', '${ORG_OTHER}', '${ORG_OTHER}', 'roofing', DATE '2026-01-01', 'Поставка чужая', '${USER_OTHER}')`,
-  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
-     VALUES ('${REVISION_OTHER}', '${SUBMISSION_OTHER}', '${OBJECT}', '${ORG_OTHER}', 1, 'draft')`,
+     VALUES ('${FOLDER_OTHER}', '${OBJECT}', '${ORG_OTHER}', '${ORG_OTHER}', 'roofing', DATE '2026-01-01', 'Поставка чужая', '${USER_OTHER}')`,
   `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
      VALUES ('${SHA_OTHER}', 'blobs/${SHA_OTHER}', 700, 'application/pdf')`,
   `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
      VALUES ('${SHA_WORKING_OTHER}', 'blobs/${SHA_WORKING_OTHER}', 700, 'application/pdf')`,
-  `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order, verify_state)
-     VALUES ('${FILE_OTHER}', '${REVISION_OTHER}', '${SHA_OTHER}', 'Чужой.pdf', 0, 'ok')`,
-  `INSERT INTO source_pages (id, revision_id, source_file_id, file_page_index, revision_ordinal, width_px, height_px, rotation)
-     VALUES ('${PAGE_OTHER}', '${REVISION_OTHER}', '${FILE_OTHER}', 0, 0, 1654, 2339, 0)`,
-  `INSERT INTO processing_bundles (id, revision_id, aggregate_manifest_hash, working_pdf_blob_sha256, builder_version)
-     VALUES ('${BUNDLE_OTHER}', '${REVISION_OTHER}', '${'f'.repeat(64)}', '${SHA_WORKING_OTHER}', 'bundle/1+pdf-lib')`,
-  `INSERT INTO processing_bundle_pages (bundle_id, revision_id, working_page_index, source_page_id)
-     VALUES ('${BUNDLE_OTHER}', '${REVISION_OTHER}', 0, '${PAGE_OTHER}')`,
-  `INSERT INTO layout_revisions (id, revision_id, object_id, bundle_id, revision_no, state)
-     VALUES ('${LAYOUT_OTHER}', '${REVISION_OTHER}', '${OBJECT}', '${BUNDLE_OTHER}', 1, 'draft')`,
+  `INSERT INTO source_files (id, folder_id, blob_sha256, file_name, sort_order, verify_state)
+     VALUES ('${FILE_OTHER}', '${FOLDER_OTHER}', '${SHA_OTHER}', 'Чужой.pdf', 0, 'ok')`,
+  `INSERT INTO source_pages (id, folder_id, source_file_id, file_page_index, folder_ordinal, width_px, height_px, rotation)
+     VALUES ('${PAGE_OTHER}', '${FOLDER_OTHER}', '${FILE_OTHER}', 0, 0, 1654, 2339, 0)`,
+  `INSERT INTO processing_bundles (id, folder_id, aggregate_manifest_hash, working_pdf_blob_sha256, builder_version)
+     VALUES ('${BUNDLE_OTHER}', '${FOLDER_OTHER}', '${'f'.repeat(64)}', '${SHA_WORKING_OTHER}', 'bundle/1+pdf-lib')`,
+  `INSERT INTO processing_bundle_pages (bundle_id, folder_id, working_page_index, source_page_id)
+     VALUES ('${BUNDLE_OTHER}', '${FOLDER_OTHER}', 0, '${PAGE_OTHER}')`,
+  `INSERT INTO layout_revisions (id, folder_id, object_id, bundle_id, revision_no, state)
+     VALUES ('${LAYOUT_OTHER}', '${FOLDER_OTHER}', '${OBJECT}', '${BUNDLE_OTHER}', 1, 'draft')`,
 ];
 
 const STORAGE_DIR = mkdtempSync(join(tmpdir(), 'id-layout-tests-'));
@@ -275,9 +266,9 @@ async function as(
   });
 }
 
-async function queuedTypes(revisionId: string): Promise<readonly string[]> {
+async function queuedTypes(folderId: string): Promise<readonly string[]> {
   const rows = await db.query<{ type: string }>(
-    `SELECT type FROM jobs WHERE payload->>'revisionId' = '${revisionId}' ORDER BY type`,
+    `SELECT type FROM jobs WHERE payload->>'folderId' = '${folderId}' ORDER BY type`,
   );
   return rows.map((row) => row.type);
 }
@@ -316,11 +307,11 @@ let layoutId = '';
 
 describe('приём ставит задачи конвейера', () => {
   it('до нажатия кнопки задач разметки в очереди нет', async () => {
-    expect(await queuedTypes(REVISION)).not.toContain('rd.create_run_document');
+    expect(await queuedTypes(FOLDER)).not.toContain('rd.create_run_document');
   });
 
   it('«Разметить файл» создаёт черновик разметки И кладёт строку в jobs', async () => {
-    const response = await as(KC.contractor, 'POST', `/api/v1/revisions/${REVISION}/layout`);
+    const response = await as(KC.contractor, 'POST', `/api/v1/folders/${FOLDER}/layout`);
     expect(response.statusCode).toBe(202);
 
     const body = response.json<StartResponse>();
@@ -331,13 +322,13 @@ describe('приём ставит задачи конвейера', () => {
 
     // Проверяется ТАБЛИЦА, а не код ответа: на S5 маршрут отвечал успехом,
     // а очередь оставалась пустой.
-    expect(await queuedTypes(REVISION)).toContain('rd.create_run_document');
+    expect(await queuedTypes(FOLDER)).toContain('rd.create_run_document');
 
     const payloads = await db.query<{
-      payload: { revisionId: string; bundleId: string; layoutRevisionId: string };
+      payload: { folderId: string; bundleId: string; layoutRevisionId: string };
     }>(
       `SELECT payload FROM jobs WHERE type = 'rd.create_run_document'
-        AND payload->>'revisionId' = '${REVISION}'`,
+        AND payload->>'folderId' = '${FOLDER}'`,
     );
     expect(payloads).toHaveLength(1);
     expect(payloads[0]?.payload.bundleId).toBe(BUNDLE);
@@ -347,7 +338,7 @@ describe('приём ставит задачи конвейера', () => {
   });
 
   it('повторное нажатие не создаёт вторую разметку и вторую задачу', async () => {
-    const response = await as(KC.contractor, 'POST', `/api/v1/revisions/${REVISION}/layout`);
+    const response = await as(KC.contractor, 'POST', `/api/v1/folders/${FOLDER}/layout`);
     expect(response.statusCode).toBe(202);
     const body = response.json<StartResponse>();
     expect(body.created).toBe(false);
@@ -356,20 +347,20 @@ describe('приём ставит задачи конвейера', () => {
 
     const rows = await db.query<{ count: string | number }>(
       `SELECT count(*) AS count FROM jobs WHERE type = 'rd.create_run_document'
-        AND payload->>'revisionId' = '${REVISION}'`,
+        AND payload->>'folderId' = '${FOLDER}'`,
     );
     expect(Number(rows[0]?.count ?? 0)).toBe(1);
 
     const layouts = await db.query<{ count: string | number }>(
-      `SELECT count(*) AS count FROM layout_revisions WHERE revision_id = '${REVISION}'`,
+      `SELECT count(*) AS count FROM layout_revisions WHERE folder_id = '${FOLDER}'`,
     );
     expect(Number(layouts[0]?.count ?? 0)).toBe(1);
   });
 
   it('без собранного рабочего документа разметка не начинается', async () => {
-    const response = await as(KC.contractor, 'POST', `/api/v1/revisions/${REVISION_BARE}/layout`);
+    const response = await as(KC.contractor, 'POST', `/api/v1/folders/${FOLDER_BARE}/layout`);
     expect(response.statusCode).toBe(409);
-    expect(await queuedTypes(REVISION_BARE)).not.toContain('rd.create_run_document');
+    expect(await queuedTypes(FOLDER_BARE)).not.toContain('rd.create_run_document');
   });
 
   it('повторная детекция раскладывается на задачи по пачкам', async () => {
@@ -552,7 +543,7 @@ describe('полностраничный блок — только явным д
     // Проверяется положительный путь: гарда без работающей операции — это
     // защита от несуществующей функции (класс отказа S3/S5). Берётся чужая
     // ревизия чужим пользователем: там разметку ещё никто не правил.
-    const started = await as(KC.other, 'POST', `/api/v1/revisions/${REVISION_OTHER}/layout`);
+    const started = await as(KC.other, 'POST', `/api/v1/folders/${FOLDER_OTHER}/layout`);
     const fresh = started.json<StartResponse>();
 
     const applied = await as(
@@ -615,7 +606,7 @@ describe('полностраничный блок — только явным д
 
 describe('изоляция подрядчиков', () => {
   it('чужая разметка не видна ни списком, ни по прямому идентификатору', async () => {
-    const list = await as(KC.other, 'GET', `/api/v1/revisions/${REVISION}/layouts`);
+    const list = await as(KC.other, 'GET', `/api/v1/folders/${FOLDER}/layouts`);
     expect(list.statusCode).toBe(200);
     expect(list.json<{ items: unknown[] }>().items).toEqual([]);
 
@@ -697,7 +688,7 @@ describe('разметка правится и после отправки на 
 // =====================================================================
 
 interface OrientationView {
-  readonly revisionId: string;
+  readonly folderId: string;
   readonly sourcePageId: string;
   readonly contentRotation: number;
   readonly source: 'probe' | 'user' | null;
@@ -734,7 +725,7 @@ describe('разворот содержимого страницы', () => {
     const saved = await as(
       KC.engineer,
       'PUT',
-      `/api/v1/revisions/${REVISION}/pages/${PAGE_0}/orientation`,
+      `/api/v1/folders/${FOLDER}/pages/${PAGE_0}/orientation`,
       { body: { rotation: 90 } },
     );
     expect(saved.statusCode).toBe(200);
@@ -757,7 +748,7 @@ describe('разворот содержимого страницы', () => {
     const again = await as(
       KC.engineer,
       'PUT',
-      `/api/v1/revisions/${REVISION}/pages/${PAGE_0}/orientation`,
+      `/api/v1/folders/${FOLDER}/pages/${PAGE_0}/orientation`,
       { body: { rotation: 270 } },
     );
     expect(again.statusCode).toBe(200);
@@ -765,7 +756,7 @@ describe('разворот содержимого страницы', () => {
 
     const rows = await db.query<{ count: string }>(
       `SELECT count(*)::text AS count FROM page_orientations
-        WHERE revision_id = '${REVISION}' AND source_page_id = '${PAGE_0}'`,
+        WHERE folder_id = '${FOLDER}' AND source_page_id = '${PAGE_0}'`,
     );
     expect(rows[0]?.count).toBe('1');
   });
@@ -774,7 +765,7 @@ describe('разворот содержимого страницы', () => {
     const refused = await as(
       KC.engineer,
       'PUT',
-      `/api/v1/revisions/${REVISION}/pages/${PAGE_0}/orientation`,
+      `/api/v1/folders/${FOLDER}/pages/${PAGE_0}/orientation`,
       { body: { rotation: 45 } },
     );
     expect(refused.statusCode).toBe(422);
@@ -784,7 +775,7 @@ describe('разворот содержимого страницы', () => {
     const refused = await as(
       KC.engineer,
       'PUT',
-      `/api/v1/revisions/${REVISION}/pages/${PAGE_OTHER}/orientation`,
+      `/api/v1/folders/${FOLDER}/pages/${PAGE_OTHER}/orientation`,
       { body: { rotation: 90 } },
     );
     expect(refused.statusCode).toBe(404);
@@ -798,7 +789,7 @@ describe('разворот содержимого страницы', () => {
     const cleared = await as(
       KC.engineer,
       'DELETE',
-      `/api/v1/revisions/${REVISION}/pages/${PAGE_0}/orientation`,
+      `/api/v1/folders/${FOLDER}/pages/${PAGE_0}/orientation`,
     );
     expect(cleared.statusCode).toBe(200);
     const view = cleared.json<OrientationView>();
@@ -807,7 +798,7 @@ describe('разворот содержимого страницы', () => {
 
     const rows = await db.query<{ count: string }>(
       `SELECT count(*)::text AS count FROM page_orientations
-        WHERE revision_id = '${REVISION}' AND source_page_id = '${PAGE_0}'`,
+        WHERE folder_id = '${FOLDER}' AND source_page_id = '${PAGE_0}'`,
     );
     expect(rows[0]?.count).toBe('0');
   });
@@ -815,13 +806,13 @@ describe('разворот содержимого страницы', () => {
   it('сброс поверх мнения зонда возвращает мнение зонда, а не ноль', async () => {
     await db.query(
       `INSERT INTO page_orientations
-         (revision_id, source_page_id, content_rotation, source, probe_rotation, probe_confidence)
-       VALUES ('${REVISION}', '${PAGE_1}', 180, 'probe', 180, 0.91)`,
+         (folder_id, source_page_id, content_rotation, source, probe_rotation, probe_confidence)
+       VALUES ('${FOLDER}', '${PAGE_1}', 180, 'probe', 180, 0.91)`,
     );
     const overridden = await as(
       KC.engineer,
       'PUT',
-      `/api/v1/revisions/${REVISION}/pages/${PAGE_1}/orientation`,
+      `/api/v1/folders/${FOLDER}/pages/${PAGE_1}/orientation`,
       { body: { rotation: 90 } },
     );
     expect(overridden.statusCode).toBe(200);
@@ -832,7 +823,7 @@ describe('разворот содержимого страницы', () => {
     const cleared = await as(
       KC.engineer,
       'DELETE',
-      `/api/v1/revisions/${REVISION}/pages/${PAGE_1}/orientation`,
+      `/api/v1/folders/${FOLDER}/pages/${PAGE_1}/orientation`,
     );
     expect(cleared.statusCode).toBe(200);
     const view = cleared.json<OrientationView>();
@@ -844,13 +835,13 @@ describe('разворот содержимого страницы', () => {
     const refused = await as(
       KC.engineer,
       'DELETE',
-      `/api/v1/revisions/${REVISION}/pages/${PAGE_1}/orientation`,
+      `/api/v1/folders/${FOLDER}/pages/${PAGE_1}/orientation`,
     );
     expect(refused.statusCode).toBe(404);
   });
 
   it('зонд не перекрывает ручное значение — правило живёт в SQL', async () => {
-    await as(KC.engineer, 'PUT', `/api/v1/revisions/${REVISION}/pages/${PAGE_2}/orientation`, {
+    await as(KC.engineer, 'PUT', `/api/v1/folders/${FOLDER}/pages/${PAGE_2}/orientation`, {
       body: { rotation: 90 },
     });
 
@@ -859,9 +850,9 @@ describe('разворот содержимого страницы', () => {
     // порядком вызовов в обработчике.
     await db.query(
       `INSERT INTO page_orientations
-         (revision_id, source_page_id, content_rotation, source, probe_rotation)
-       VALUES ('${REVISION}', '${PAGE_2}', 0, 'probe', 0)
-       ON CONFLICT (revision_id, source_page_id) DO UPDATE
+         (folder_id, source_page_id, content_rotation, source, probe_rotation)
+       VALUES ('${FOLDER}', '${PAGE_2}', 0, 'probe', 0)
+       ON CONFLICT (folder_id, source_page_id) DO UPDATE
          SET content_rotation = EXCLUDED.content_rotation, source = EXCLUDED.source
        WHERE page_orientations.source <> 'user'`,
     );
@@ -874,28 +865,13 @@ describe('разворот содержимого страницы', () => {
   it('разметка правится в submitted — значит и разворот тоже', async () => {
     // Ровно та проверка, ради которой разворот вынесен в отдельную таблицу:
     // колонка в `source_pages` была бы заперта триггером уже здесь.
-    await db.query(`UPDATE submission_revisions SET status = 'submitted' WHERE id = '${REVISION}'`);
     const saved = await as(
       KC.engineer,
       'PUT',
-      `/api/v1/revisions/${REVISION}/pages/${PAGE_0}/orientation`,
+      `/api/v1/folders/${FOLDER}/pages/${PAGE_0}/orientation`,
       { body: { rotation: 180 } },
     );
     expect(saved.statusCode).toBe(200);
     expect(saved.json<OrientationView>().contentRotation).toBe(180);
-  });
-
-  it('согласованная ревизия разворот не принимает', async () => {
-    await db.query(`UPDATE submission_revisions SET status = 'approved' WHERE id = '${REVISION}'`);
-    const refused = await as(
-      KC.engineer,
-      'PUT',
-      `/api/v1/revisions/${REVISION}/pages/${PAGE_0}/orientation`,
-      { body: { rotation: 90 } },
-    );
-    expect(refused.statusCode).toBe(409);
-    // Обратно в `draft` ревизию не возвращаем: переход запрещён триггером
-    // неизменяемости, и это правильно — согласование не отменяется правкой
-    // статуса. Сценарий стоит последним в файле именно поэтому.
   });
 });

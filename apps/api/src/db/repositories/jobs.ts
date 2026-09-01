@@ -45,17 +45,17 @@
  *
  * У `jobs` нет ни `object_id`, ни `contractor_id`, и добавлять их сюда нечем:
  * задача ссылается на ревизию через payload. Поэтому видимость выражается
- * подзапросом `EXISTS` по `submission_revisions` с тем же `scopeWhere()`, что и
+ * подзапросом `EXISTS` по `folders` с тем же `scopeWhere()`, что и
  * везде. Задача без ревизии (обслуживание) видна только неограниченной области:
  * «показать всем, раз фильтровать не по чему» — это утечка, а не удобство (§16).
  *
- * Писатели (`enqueueSystemJob`, `appendRevisionEvent`, `completeJob`…) области
+ * Писатели (`enqueueSystemJob`, `appendFolderEvent`, `completeJob`…) области
  * не требуют: их вызывает воркер, у которого пользователя нет. Разбор — в
  * комментарии к `enqueueSystemJob()`.
  */
 import { and, desc, eq, inArray, sql, type SQL } from 'drizzle-orm';
 import { z } from 'zod';
-import { jobs, jobRuns, outbox, revisionEvents, submissionRevisions } from '@id/db';
+import { jobs, jobRuns, outbox, folderEvents, folders } from '@id/db';
 import type { JsonValue, ProcessingStage } from '@id/contracts';
 import { isUnrestricted, type AuthScope } from '../../auth/scope.js';
 import { withScope, type ScopeTarget } from '../scoped.js';
@@ -66,7 +66,7 @@ import {
   JOB_TYPES,
   jobTypesOfQueue,
   parseJobPayload,
-  revisionIdOf,
+  folderIdOf,
   stageOf,
   type JobPayloadMap,
   type JobQueue,
@@ -78,15 +78,15 @@ import type { Database } from './users.js';
 /** Исполнитель: сама база либо транзакция вызывающей операции. */
 export type JobExecutor = Pick<Database, 'execute'>;
 
-const REVISION_SCOPE_TARGET: ScopeTarget = {
-  objectId: submissionRevisions.objectId,
-  contractorId: submissionRevisions.contractorId,
+const FOLDER_SCOPE_TARGET: ScopeTarget = {
+  objectId: folders.objectId,
+  contractorId: folders.contractorId,
 };
 
 /**
  * Форма uuid в тексте payload.
  *
- * Приведение `(payload->>'revisionId')::uuid` без этой проверки даёт 22P02 на
+ * Приведение `(payload->>'folderId')::uuid` без этой проверки даёт 22P02 на
  * любой строке с непригодным значением — то есть одна кривая задача роняла бы
  * весь список задач и всю сводку по ревизии. Постановка задачи payload
  * проверяет, но список читается и по данным, записанным старой версией кода.
@@ -104,18 +104,18 @@ const ISO = (expr: string): string =>
 function jobVisibility(scope: AuthScope): SQL {
   const unrestricted = isUnrestricted(scope) ? sql`true` : sql`false`;
   return sql`(
-    (${jobs.payload} ->> 'revisionId' is null and ${unrestricted})
+    (${jobs.payload} ->> 'folderId' is null and ${unrestricted})
     or exists (
-      select 1 from ${submissionRevisions}
-       where ${jobs.payload} ->> 'revisionId' ~ ${UUID_TEXT}
-         and ${submissionRevisions.id} = (${jobs.payload} ->> 'revisionId')::uuid
-         and ${withScope(scope, REVISION_SCOPE_TARGET)}
+      select 1 from ${folders}
+       where ${jobs.payload} ->> 'folderId' ~ ${UUID_TEXT}
+         and ${folders.id} = (${jobs.payload} ->> 'folderId')::uuid
+         and ${withScope(scope, FOLDER_SCOPE_TARGET)}
     )
   )`;
 }
 
-export interface RevisionRef {
-  readonly revisionId: string;
+export interface FolderRef {
+  readonly folderId: string;
   readonly objectId: string;
   readonly contractorId: string;
 }
@@ -126,19 +126,19 @@ export interface RevisionRef {
  * Различать эти случаи наружу нельзя: ответ «есть, но не ваша» сам по себе
  * сообщает о существовании чужой поставки.
  */
-export async function findVisibleRevision(
+export async function findVisibleFolder(
   db: Database,
   scope: AuthScope,
-  revisionId: string,
-): Promise<RevisionRef | null> {
+  folderId: string,
+): Promise<FolderRef | null> {
   const rows = await db
     .select({
-      revisionId: submissionRevisions.id,
-      objectId: submissionRevisions.objectId,
-      contractorId: submissionRevisions.contractorId,
+      folderId: folders.id,
+      objectId: folders.objectId,
+      contractorId: folders.contractorId,
     })
-    .from(submissionRevisions)
-    .where(withScope(scope, REVISION_SCOPE_TARGET, eq(submissionRevisions.id, revisionId)))
+    .from(folders)
+    .where(withScope(scope, FOLDER_SCOPE_TARGET, eq(folders.id, folderId)))
     .limit(1);
   return rows[0] ?? null;
 }
@@ -176,12 +176,12 @@ export async function enqueueJob<K extends JobType>(
   scope: AuthScope,
   input: EnqueueJobInput<K>,
 ): Promise<EnqueueResult> {
-  const revisionId = revisionIdOf(input.payload);
-  if (revisionId !== undefined) {
-    const revision = await findVisibleRevision(db, scope, revisionId);
-    if (revision === null) {
+  const folderId = folderIdOf(input.payload);
+  if (folderId !== undefined) {
+    const folder = await findVisibleFolder(db, scope, folderId);
+    if (folder === null) {
       throw unprocessable(
-        [{ pointer: '/payload/revisionId', code: 'not-visible', message: 'Ревизия недоступна.' }],
+        [{ pointer: '/payload/folderId', code: 'not-visible', message: 'Ревизия недоступна.' }],
         'Задача не поставлена: ревизия недоступна.',
       );
     }
@@ -341,7 +341,7 @@ export interface ClaimedJob {
   readonly attempt: number;
   readonly maxAttempts: number;
   readonly requestId: string | null;
-  readonly revisionId: string | null;
+  readonly folderId: string | null;
 }
 
 export interface ClaimJobsParams {
@@ -379,7 +379,7 @@ export async function claimJobs(
     max_attempts: number;
     run_id: string;
     request_id: string | null;
-    revision_id: string | null;
+    folder_id: string | null;
   }>(sql`
     with candidate as (
       select id from ${jobs}
@@ -403,20 +403,20 @@ export async function claimJobs(
     ),
     run as (
       insert into ${jobRuns} (
-        job_id, job_type, revision_id, request_id, attempt, payload_digest
+        job_id, job_type, folder_id, request_id, attempt, payload_digest
       )
       select c.id,
              c.type,
-             case when c.payload ->> 'revisionId' ~ ${UUID_TEXT}
-                  then (c.payload ->> 'revisionId')::uuid end,
+             case when c.payload ->> 'folderId' ~ ${UUID_TEXT}
+                  then (c.payload ->> 'folderId')::uuid end,
              c.payload ->> 'request_id',
              c.attempts,
              encode(sha256(convert_to(c.payload::text, 'UTF8')), 'hex')
         from claimed c
-      returning id, job_id, request_id, revision_id
+      returning id, job_id, request_id, folder_id
     )
     select c.id, c.type, c.payload, c.attempts, c.max_attempts,
-           r.id as run_id, r.request_id, r.revision_id::text as revision_id
+           r.id as run_id, r.request_id, r.folder_id::text as folder_id
       from claimed c
       join run r on r.job_id = c.id
   `);
@@ -429,7 +429,7 @@ export async function claimJobs(
     attempt: row.attempts,
     maxAttempts: row.max_attempts,
     requestId: row.request_id,
-    revisionId: row.revision_id,
+    folderId: row.folder_id,
   }));
 }
 
@@ -752,7 +752,7 @@ export interface JobView {
   readonly lockedUntil: string | null;
   readonly lastError: string | null;
   readonly dedupeKey: string | null;
-  readonly revisionId: string | null;
+  readonly folderId: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;
   /** Исчерпала попытки и ждёт решения человека. */
@@ -763,7 +763,7 @@ export interface ListJobsParams {
   readonly status?: JobStatus | undefined;
   readonly type?: string | undefined;
   readonly queue?: JobQueue | undefined;
-  readonly revisionId?: string | undefined;
+  readonly folderId?: string | undefined;
   /** Только исчерпавшие попытки: главный экран консоли. */
   readonly deadOnly?: boolean | undefined;
   readonly cursor?: string | undefined;
@@ -790,7 +790,7 @@ const JOB_COLUMNS = sql`
   ${sql.raw(ISO('jobs.locked_until'))} as locked_until,
   ${jobs.lastError} as last_error,
   ${jobs.dedupeKey} as dedupe_key,
-  ${jobs.payload} ->> 'revisionId' as revision_id,
+  ${jobs.payload} ->> 'folderId' as folder_id,
   ${sql.raw(ISO('jobs.created_at'))} as created_at,
   ${sql.raw(ISO('jobs.updated_at'))} as updated_at,
   ${sql.raw('jobs.created_at')} as cursor_at
@@ -816,7 +816,7 @@ interface JobRawRow extends Record<string, unknown> {
   locked_until: string | null;
   last_error: string | null;
   dedupe_key: string | null;
-  revision_id: string | null;
+  folder_id: string | null;
   created_at: string;
   updated_at: string;
   cursor_at: string | Date;
@@ -842,8 +842,8 @@ export async function listJobs(
     const types = jobTypesOfQueue(params.queue);
     conditions.push(types.length === 0 ? sql`false` : inArray(jobs.type, [...types]));
   }
-  if (params.revisionId !== undefined) {
-    conditions.push(sql`${jobs.payload} ->> 'revisionId' = ${params.revisionId}`);
+  if (params.folderId !== undefined) {
+    conditions.push(sql`${jobs.payload} ->> 'folderId' = ${params.folderId}`);
   }
   if (params.deadOnly === true) {
     conditions.push(sql`${jobs.status} = 'failed'`);
@@ -893,7 +893,7 @@ export interface JobRunView {
   readonly id: string;
   readonly jobId: string | null;
   readonly jobType: string;
-  readonly revisionId: string | null;
+  readonly folderId: string | null;
   readonly requestId: string | null;
   readonly attempt: number;
   readonly startedAt: string;
@@ -916,7 +916,7 @@ export async function listJobRuns(
   scope: AuthScope,
   params: {
     readonly jobId?: string | undefined;
-    readonly revisionId?: string | undefined;
+    readonly folderId?: string | undefined;
     readonly limit: number;
   },
 ): Promise<readonly JobRunView[]> {
@@ -929,10 +929,10 @@ export async function listJobRuns(
     conditions.push(eq(jobRuns.jobId, params.jobId));
   }
 
-  if (params.revisionId !== undefined) {
-    const revision = await findVisibleRevision(db, scope, params.revisionId);
-    if (revision === null) return [];
-    conditions.push(eq(jobRuns.revisionId, params.revisionId));
+  if (params.folderId !== undefined) {
+    const folder = await findVisibleFolder(db, scope, params.folderId);
+    if (folder === null) return [];
+    conditions.push(eq(jobRuns.folderId, params.folderId));
   }
 
   if (conditions.length === 0) {
@@ -948,7 +948,7 @@ export async function listJobRuns(
       id: jobRuns.id,
       jobId: jobRuns.jobId,
       jobType: jobRuns.jobType,
-      revisionId: jobRuns.revisionId,
+      folderId: jobRuns.folderId,
       requestId: jobRuns.requestId,
       attempt: jobRuns.attempt,
       startedAt: sql<string>`${sql.raw(ISO('job_runs.started_at'))}`.as('started_at_iso'),
@@ -1011,7 +1011,7 @@ export async function retryJob(
       action: 'job.retried',
       entityType: 'job',
       entityId: jobId,
-      objectId: await objectIdOfRevision(tx, job.revisionId),
+      objectId: await objectIdOfFolder(tx, job.folderId),
       payload: { type: job.type, attempts: job.attempts, previousStatus: job.status },
     });
   });
@@ -1061,7 +1061,7 @@ export async function cancelJob(
       action: 'job.cancelled',
       entityType: 'job',
       entityId: jobId,
-      objectId: await objectIdOfRevision(tx, job.revisionId),
+      objectId: await objectIdOfFolder(tx, job.folderId),
       payload: { type: job.type, previousStatus: job.status },
     });
   });
@@ -1089,7 +1089,7 @@ export async function cancelJob(
  */
 export async function cancelPendingJobsOfStage(
   db: JobExecutor,
-  revisionId: string,
+  folderId: string,
   stage: ProcessingStage,
 ): Promise<number> {
   const types = JOB_TYPES.filter((type) => stageOf(type) === stage);
@@ -1098,7 +1098,7 @@ export async function cancelPendingJobsOfStage(
   const cancelled = await db.execute<{ id: string }>(sql`
     update ${jobs}
        set status = 'cancelled', locked_by = null, locked_until = null, updated_at = now()
-     where ${jobs.payload} ->> 'revisionId' = ${revisionId}
+     where ${jobs.payload} ->> 'folderId' = ${folderId}
        and ${jobs.status} in ('queued', 'running')
        and ${jobs.type} in (${sql.join(
          types.map((type) => sql`${type}`),
@@ -1166,7 +1166,7 @@ export async function listLiveRecognizePageJobs(
 export async function reviveFailedJobs(
   db: JobExecutor,
   params: {
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly stage: ProcessingStage;
     /** Ключ payload, сужающий скоуп: `layoutRevisionId` или `recognitionRunId`. */
     readonly scopeKey: 'layoutRevisionId' | 'recognitionRunId';
@@ -1193,7 +1193,7 @@ export async function reviveFailedJobs(
            locked_by = null,
            locked_until = null,
            updated_at = now()
-     where j.payload ->> 'revisionId' = ${params.revisionId}
+     where j.payload ->> 'folderId' = ${params.folderId}
        and j.payload ->> ${params.scopeKey} = ${params.scopeValue}
        and j.status = 'failed'
        and j.type in (${sql.join(
@@ -1230,9 +1230,9 @@ export async function reviveFailedJobs(
  * (`stageOf` вернул `null`): при полном удалении ревизии не должно остаться
  * ничего, что на неё сошлётся.
  */
-export async function cancelJobsOfRevision(
+export async function cancelJobsOfFolder(
   db: JobExecutor,
-  revisionId: string,
+  folderId: string,
   options: { readonly stages?: readonly ProcessingStage[] | undefined } = {},
 ): Promise<number> {
   const stages = options.stages;
@@ -1250,7 +1250,7 @@ export async function cancelJobsOfRevision(
   const cancelled = await db.execute<{ id: string }>(sql`
     update ${jobs}
        set status = 'cancelled', locked_by = null, locked_until = null, updated_at = now()
-     where ${jobs.payload} ->> 'revisionId' = ${revisionId}
+     where ${jobs.payload} ->> 'folderId' = ${folderId}
        and ${jobs.status} in ('queued', 'running', 'failed')
        ${
          typeFilter === null
@@ -1296,13 +1296,13 @@ export async function cancelJobsOfRevision(
  */
 export async function cancelJobsOfRecognitionRun(
   db: JobExecutor,
-  revisionId: string,
+  folderId: string,
   recognitionRunId: string,
 ): Promise<number> {
   const cancelled = await db.execute<{ id: string }>(sql`
     update ${jobs}
        set status = 'cancelled', locked_by = null, locked_until = null, updated_at = now()
-     where ${jobs.payload} ->> 'revisionId' = ${revisionId}
+     where ${jobs.payload} ->> 'folderId' = ${folderId}
        and ${jobs.payload} ->> 'recognitionRunId' = ${recognitionRunId}
        and ${jobs.status} in ('queued', 'running', 'failed')
     returning id
@@ -1468,7 +1468,7 @@ export interface StageSummary {
  *   с пустыми листами счётчик никогда не дошёл бы до конца. Поэтому считаются
  *   задачи, а не `layout_blocks`;
  * * **завершённые задачи детекции сами по себе.** Черновик разметки у ревизии
- *   один, а `resetPipelineForRevision` намеренно не снимает задачи стадии
+ *   один, а `resetPipelineForFolder` намеренно не снимает задачи стадии
  *   `layout` — `done`-задачи прошлого прогона остаются лежать. Спасает то, что
  *   новый прогон СРАЗУ ставит на каждую страницу свою ждущую задачу: `pending`
  *   перекрывает `done`, и счёт честно начинается с нуля.
@@ -1478,7 +1478,7 @@ export interface StageSummary {
  * попавший ВНУТРЬ раздачи повторного прогона, увидит часть страниц ещё по
  * прошлым `done`-задачам. Окно — десятки миллисекунд против опроса раз в
  * несколько секунд; заводить ради него транзакцию значило бы расширить тип
- * исполнителя во всей цепочке `enqueueJob → findVisibleRevision`.
+ * исполнителя во всей цепочке `enqueueJob → findVisibleFolder`.
  *
  * ## Почему по страницам, а не по задачам
  *
@@ -1498,7 +1498,7 @@ export interface LayoutProgress {
 }
 
 export interface ProcessingStatus {
-  readonly revisionId: string;
+  readonly folderId: string;
   /** Сводная стадия: самая дальняя, где была активность; `failed` при мёртвых задачах. */
   readonly stage: ProcessingStage;
   readonly queued: number;
@@ -1534,10 +1534,10 @@ export interface ProcessingStatus {
 export async function computeProcessingStatus(
   db: Database,
   scope: AuthScope,
-  revisionId: string,
+  folderId: string,
 ): Promise<ProcessingStatus | null> {
-  const revision = await findVisibleRevision(db, scope, revisionId);
-  if (revision === null) return null;
+  const folder = await findVisibleFolder(db, scope, folderId);
+  if (folder === null) return null;
 
   const runRows = await db.execute<{
     job_type: string;
@@ -1575,14 +1575,14 @@ export async function computeProcessingStatus(
            (array_agg(error_message order by started_at desc)
               filter (where outcome = 'failed'))[1] as last_error_message
       from ${jobRuns}
-     where ${jobRuns.revisionId} = ${revisionId}
+     where ${jobRuns.folderId} = ${folderId}
      group by job_type
   `);
 
   const pendingRows = await db.execute<{ type: string; status: string; count: number }>(sql`
     select ${jobs.type} as type, ${jobs.status} as status, count(*)::int as count
       from ${jobs}
-     where ${jobs.payload} ->> 'revisionId' = ${revisionId}
+     where ${jobs.payload} ->> 'folderId' = ${folderId}
        and ${jobs.status} in ('queued', 'running', 'failed')
      group by 1, 2
   `);
@@ -1608,7 +1608,7 @@ export async function computeProcessingStatus(
   // Ход разметки считается только при ИДУЩЕЙ стадии, и число ждущих задач уже
   // посчитано здесь же: второй запрос ради него был бы тем же агрегатом,
   // выполненным заново.
-  const layout = await computeLayoutProgress(db, revisionId, pendingByStage.get('layout') ?? 0);
+  const layout = await computeLayoutProgress(db, folderId, pendingByStage.get('layout') ?? 0);
 
   /**
    * Ключи ОБЪЕДИНЯЮТСЯ, а не берутся из журнала попыток.
@@ -1663,7 +1663,7 @@ export async function computeProcessingStatus(
   const finishedAt = maxIso(jobTypes.map((s) => s.lastFinishedAt));
 
   return {
-    revisionId,
+    folderId,
     stage: summaryStage(stages, dead),
     queued,
     running,
@@ -1721,7 +1721,7 @@ const LAYOUT_HANDOUT_JOB_TYPES = [
  */
 async function computeLayoutProgress(
   db: Database,
-  revisionId: string,
+  folderId: string,
   layoutPending: number,
 ): Promise<LayoutProgress | null> {
   if (layoutPending === 0) return null;
@@ -1736,7 +1736,7 @@ async function computeLayoutProgress(
     with bundle as (
       select b.id
         from processing_bundles b
-       where b.revision_id = ${revisionId}
+       where b.folder_id = ${folderId}
        order by b.created_at desc
        limit 1
     ),
@@ -1751,7 +1751,7 @@ async function computeLayoutProgress(
         cross join lateral jsonb_array_elements_text(
           coalesce(j.payload -> 'pageIndices', '[]'::jsonb)
         ) as idx(value)
-       where j.payload ->> 'revisionId' = ${revisionId}
+       where j.payload ->> 'folderId' = ${folderId}
          and j.type in (${sql.join(
            DETECTION_JOB_TYPES.map((type) => sql`${type}`),
            sql`, `,
@@ -1761,7 +1761,7 @@ async function computeLayoutProgress(
              j.status as status,
              false as detection
         from ${jobs} j
-       where j.payload ->> 'revisionId' = ${revisionId}
+       where j.payload ->> 'folderId' = ${folderId}
          and j.type = 'page.orientation_probe'
          and j.payload ->> 'workingPageIndex' is not null
     ),
@@ -1786,7 +1786,7 @@ async function computeLayoutProgress(
       (select count(*)::int from pages
         where failed and not pending and not detected) as pages_failed,
       (select count(*)::int from ${jobs} j
-        where j.payload ->> 'revisionId' = ${revisionId}
+        where j.payload ->> 'folderId' = ${folderId}
           and j.status in ('queued', 'running')
           and j.type in (${sql.join(
             LAYOUT_HANDOUT_JOB_TYPES.map((type) => sql`${type}`),
@@ -1862,44 +1862,44 @@ export function summaryStage(
  * непротиворечивости экранов, а не удобство: разойдясь, два определения
  * показали бы про один комплект разное на двух экранах подряд.
  */
-export interface RevisionStageSummary {
-  readonly revisionId: string;
+export interface FolderStageSummary {
+  readonly folderId: string;
   readonly stage: ProcessingStage;
   readonly queued: number;
   readonly running: number;
   readonly dead: number;
 }
 
-export async function summarizeRevisionStages(
+export async function summarizeFolderStages(
   db: Database,
-  revisionIds: readonly string[],
-): Promise<readonly RevisionStageSummary[]> {
-  if (revisionIds.length === 0) return [];
+  folderIds: readonly string[],
+): Promise<readonly FolderStageSummary[]> {
+  if (folderIds.length === 0) return [];
 
   // Отбор выражен `inArray`, а не `= any($1)`: связанный МАССИВ приходится
   // объявлять типом на стороне SQL, и типов здесь два — `uuid` у попыток и
   // `text` у выражения над payload. Список идентификаторов ограничен размером
   // страницы (`MAX_PAGE_LIMIT`), поэтому развёрнутый `IN (...)` не растёт.
-  const ids = [...revisionIds];
+  const ids = [...folderIds];
 
   // Первый агрегат: в каких стадиях по ревизии вообще была активность. Индекс
-  // `ix_job_runs_revision` (0007) закрывает отбор.
+  // `ix_job_runs_folder` (0007) закрывает отбор.
   const runRows = await db
     .select({
-      revisionId: jobRuns.revisionId,
+      folderId: jobRuns.folderId,
       jobTypes: sql<string[]>`array_agg(distinct ${jobRuns.jobType})`.as('job_types'),
     })
     .from(jobRuns)
-    .where(inArray(jobRuns.revisionId, ids))
-    .groupBy(jobRuns.revisionId);
+    .where(inArray(jobRuns.folderId, ids))
+    .groupBy(jobRuns.folderId);
 
   // Второй: что ещё стоит в очереди, идёт или умерло. Очередь ссылается на
   // ревизию через payload, без внешнего ключа, поэтому отбор текстовый — его и
-  // закрывает частичный индекс `ix_jobs_revision` (0054).
-  const revisionOfJob = sql<string>`${jobs.payload} ->> 'revisionId'`;
+  // закрывает частичный индекс `ix_jobs_folder` (0054).
+  const folderOfJob = sql<string>`${jobs.payload} ->> 'folderId'`;
   const pendingRows = await db
     .select({
-      revisionId: revisionOfJob.as('revision_id'),
+      folderId: folderOfJob.as('folder_id'),
       status: jobs.status,
       type: jobs.type,
       count: sql<number>`count(*)::int`.as('count'),
@@ -1907,49 +1907,49 @@ export async function summarizeRevisionStages(
     .from(jobs)
     .where(
       and(
-        inArray(revisionOfJob, ids),
+        inArray(folderOfJob, ids),
         inArray(jobs.status, ['queued', 'running', 'failed'] as const),
       ),
     )
-    .groupBy(revisionOfJob, jobs.status, jobs.type);
+    .groupBy(folderOfJob, jobs.status, jobs.type);
 
   const stagesOf = new Map<string, Set<ProcessingStage>>();
-  const add = (revisionId: string, stage: ProcessingStage | null): void => {
+  const add = (folderId: string, stage: ProcessingStage | null): void => {
     if (stage === null) return;
-    const bucket = stagesOf.get(revisionId) ?? new Set<ProcessingStage>();
+    const bucket = stagesOf.get(folderId) ?? new Set<ProcessingStage>();
     bucket.add(stage);
-    stagesOf.set(revisionId, bucket);
+    stagesOf.set(folderId, bucket);
   };
 
   for (const row of runRows) {
-    // `job_runs.revision_id` объявлен nullable (системные задачи ревизии не
+    // `job_runs.folder_id` объявлен nullable (системные задачи ревизии не
     // имеют), но отбор выше оставил только те строки, чей идентификатор в
     // списке. Проверка нужна типу, а не данным.
-    if (row.revisionId === null) continue;
+    if (row.folderId === null) continue;
     for (const jobType of row.jobTypes) {
-      add(row.revisionId, isJobType(jobType) ? stageOf(jobType) : null);
+      add(row.folderId, isJobType(jobType) ? stageOf(jobType) : null);
     }
   }
 
   const counts = new Map<string, { queued: number; running: number; dead: number }>();
   for (const row of pendingRows) {
-    const bucket = counts.get(row.revisionId) ?? { queued: 0, running: 0, dead: 0 };
+    const bucket = counts.get(row.folderId) ?? { queued: 0, running: 0, dead: 0 };
     if (row.status === 'queued') bucket.queued += row.count;
     if (row.status === 'running') bucket.running += row.count;
     if (row.status === 'failed') bucket.dead += row.count;
-    counts.set(row.revisionId, bucket);
+    counts.set(row.folderId, bucket);
     // Ждущая задача — это тоже активность стадии: комплект, у которого
     // распознавание только поставлено в очередь, уже не «на разметке».
     if (row.status !== 'failed') {
-      add(row.revisionId, isJobType(row.type) ? stageOf(row.type) : null);
+      add(row.folderId, isJobType(row.type) ? stageOf(row.type) : null);
     }
   }
 
-  return revisionIds.map((revisionId) => {
-    const bucket = counts.get(revisionId) ?? { queued: 0, running: 0, dead: 0 };
-    const stages = [...(stagesOf.get(revisionId) ?? [])].map((stage) => ({ stage }));
+  return folderIds.map((folderId) => {
+    const bucket = counts.get(folderId) ?? { queued: 0, running: 0, dead: 0 };
+    const stages = [...(stagesOf.get(folderId) ?? [])].map((stage) => ({ stage }));
     return {
-      revisionId,
+      folderId,
       stage: summaryStage(stages, bucket.dead),
       queued: bucket.queued,
       running: bucket.running,
@@ -1962,15 +1962,15 @@ export async function summarizeRevisionStages(
 // События ревизии (§3.8) и outbox
 // =====================================================================
 
-export interface RevisionEventView {
+export interface FolderEventView {
   readonly seq: number;
   readonly eventType: string;
   readonly payload: JsonValue;
   readonly createdAt: string;
 }
 
-export interface AppendRevisionEventInput {
-  readonly revisionId: string;
+export interface AppendFolderEventInput {
+  readonly folderId: string;
   readonly eventType: string;
   readonly payload?: Record<string, unknown> | undefined;
 }
@@ -2006,7 +2006,7 @@ const APPEND_EVENT_MAX_TRIES = 8;
  * `cause` (см. `db/driver-errors.ts`), — так что повтор не срабатывал ни разу.
  *
  * Цена этого молчания видна в проде: запись события `recognition.failed` упала на
- * `revision_events_pkey`, и в журнале задачи осталось «duplicate key» ВМЕСТО
+ * `folder_events_pkey`, и в журнале задачи осталось «duplicate key» ВМЕСТО
  * настоящей причины отказа распознавания. Отчёт об ошибке не имеет права быть тем
  * местом, где ошибка теряется.
  *
@@ -2025,18 +2025,18 @@ const APPEND_EVENT_MAX_TRIES = 8;
  *
  * `max(seq)` считается по ЗАФИКСИРОВАННЫМ строкам, поэтому откат чужой транзакции
  * номер не сжигает и дыр не возникает. Последовательность оставляет дыру на каждом
- * откате, а счётчик в `submission_revisions` ещё и держит блокировку этой строки до
+ * откате, а счётчик в `folders` ещё и держит блокировку этой строки до
  * конца транзакции, то есть заводит взаимоблокировку с любым кодом, который сначала
  * правит ревизию, а потом пишет событие (`workflow.ts`, `navigation.ts` — именно
  * такие). Дыры небезобидны: SSE отличает «пропущенное вне окна хранения» от «ничего
  * нового» сравнением `cursor + 1 < oldestSeq`, и на дырявой ленте это ложный `reset`.
  *
  * Области видимости у писателя нет: события пишет конвейер, у которого
- * пользователя нет. Читатель (`listRevisionEvents`) область проверяет.
+ * пользователя нет. Читатель (`listFolderEvents`) область проверяет.
  */
-export async function appendRevisionEvent(
+export async function appendFolderEvent(
   db: JobExecutor,
-  input: AppendRevisionEventInput,
+  input: AppendFolderEventInput,
 ): Promise<number> {
   const payload = JSON.stringify(input.payload ?? {});
 
@@ -2044,14 +2044,14 @@ export async function appendRevisionEvent(
     // Ошибка драйвера наружу выходит как есть и повтора не получает: отказ записи
     // события обязан быть виден, а не растворён в цикле.
     const inserted = await db.execute<{ seq: string | number }>(sql`
-      insert into ${revisionEvents} (revision_id, seq, event_type, payload)
-      select ${input.revisionId}::uuid,
+      insert into ${folderEvents} (folder_id, seq, event_type, payload)
+      select ${input.folderId}::uuid,
              coalesce(max(seq), 0) + 1,
              ${input.eventType},
              ${payload}::jsonb
-        from ${revisionEvents}
-       where ${revisionEvents.revisionId} = ${input.revisionId}::uuid
-      on conflict (revision_id, seq) do nothing
+        from ${folderEvents}
+       where ${folderEvents.folderId} = ${input.folderId}::uuid
+      on conflict (folder_id, seq) do nothing
       returning seq
     `);
     // Пустой `rows` — это штатный проигрыш гонки, а не сбой: агрегат без `group by`
@@ -2064,13 +2064,13 @@ export async function appendRevisionEvent(
   // механика, и клиенту тут нечего повторять.
   throw internal({
     logDetail:
-      `не удалось назначить seq события ${input.eventType} ревизии ${input.revisionId}: ` +
+      `не удалось назначить seq события ${input.eventType} ревизии ${input.folderId}: ` +
       `${String(APPEND_EVENT_MAX_TRIES)} подряд проигранных гонок за номер`,
   });
 }
 
-export interface RevisionEventWindow {
-  readonly events: readonly RevisionEventView[];
+export interface FolderEventWindow {
+  readonly events: readonly FolderEventView[];
   /** Наименьший сохранённый `seq`. Нужен SSE, чтобы отличить «нет нового» от «уже стёрто». */
   readonly oldestSeq: number | null;
   readonly latestSeq: number | null;
@@ -2083,18 +2083,18 @@ export interface RevisionEventWindow {
  * из четырёх путей обхода изоляции (§16), и «подписаться по прямому id» не
  * должно давать подрядчику чужие события.
  */
-export async function listRevisionEvents(
+export async function listFolderEvents(
   db: Database,
   scope: AuthScope,
   params: {
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly afterSeq?: number | undefined;
     readonly limit: number;
   },
-): Promise<RevisionEventWindow | null> {
-  const revision = await findVisibleRevision(db, scope, params.revisionId);
-  if (revision === null) return null;
-  return readRevisionEvents(db, params);
+): Promise<FolderEventWindow | null> {
+  const folder = await findVisibleFolder(db, scope, params.folderId);
+  if (folder === null) return null;
+  return readFolderEvents(db, params);
 }
 
 /**
@@ -2106,14 +2106,14 @@ export async function listRevisionEvents(
  * области при этом не меняется — ни объект, ни подрядчик у ревизии не
  * переписываются (§3.9).
  */
-export async function readRevisionEvents(
+export async function readFolderEvents(
   db: JobExecutor,
   params: {
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly afterSeq?: number | undefined;
     readonly limit: number;
   },
-): Promise<RevisionEventWindow> {
+): Promise<FolderEventWindow> {
   const afterSeq = params.afterSeq ?? 0;
 
   const rows = await db.execute<{
@@ -2123,9 +2123,9 @@ export async function readRevisionEvents(
     created_at: string;
   }>(sql`
     select seq, event_type, payload, ${sql.raw(ISO('created_at'))} as created_at
-      from ${revisionEvents}
-     where ${revisionEvents.revisionId} = ${params.revisionId}::uuid
-       and ${revisionEvents.seq} > ${afterSeq}
+      from ${folderEvents}
+     where ${folderEvents.folderId} = ${params.folderId}::uuid
+       and ${folderEvents.seq} > ${afterSeq}
      order by seq
      limit ${params.limit}
   `);
@@ -2136,8 +2136,8 @@ export async function readRevisionEvents(
   }>(
     sql`
       select min(seq) as oldest, max(seq) as latest
-        from ${revisionEvents}
-       where ${revisionEvents.revisionId} = ${params.revisionId}::uuid
+        from ${folderEvents}
+       where ${folderEvents.folderId} = ${params.folderId}::uuid
     `,
   );
   const bound = bounds.rows[0];
@@ -2165,7 +2165,7 @@ export interface OutboxRecord {
  * Запись в outbox — из ТОЙ ЖЕ транзакции, что и изменение состояния.
  *
  * Смысл outbox именно в этом: событие и изменение либо оба состоялись, либо оба
- * нет. Публикация (перенос в `revision_events`, а в будущем — во внешние
+ * нет. Публикация (перенос в `folder_events`, а в будущем — во внешние
  * подписки) идёт отдельным проходом `publishOutboxBatch()`, потому что она может
  * не удаться, и тянуть за собой откат бизнес-операции не должна.
  */
@@ -2181,7 +2181,7 @@ export async function appendOutbox(db: JobExecutor, record: OutboxRecord): Promi
   `);
 }
 
-export const OUTBOX_REVISION_AGGREGATE = 'submission_revision';
+export const OUTBOX_FOLDER_AGGREGATE = 'submission_folder';
 
 export interface PublishOutboxResult {
   readonly published: number;
@@ -2192,7 +2192,7 @@ export interface PublishOutboxResult {
  * Перенос неопубликованных записей outbox в события ревизии.
  *
  * Две таблицы не дублируют друг друга: `outbox` — это транзакционная запись
- * «событие произошло», а `revision_events` — упорядоченная лента с `seq`, по
+ * «событие произошло», а `folder_events` — упорядоченная лента с `seq`, по
  * которой SSE умеет replay (§3.8). Записи о других агрегатах помечаются
  * опубликованными без переноса: у них потребителя пока нет, и держать их вечно
  * неопубликованными значило бы, что счётчик отставания outbox всегда красный.
@@ -2221,9 +2221,9 @@ export async function publishOutboxBatch(
 
     let events = 0;
     for (const row of pending.rows) {
-      if (row.aggregate_type === OUTBOX_REVISION_AGGREGATE) {
-        await appendRevisionEvent(tx, {
-          revisionId: row.aggregate_id,
+      if (row.aggregate_type === OUTBOX_FOLDER_AGGREGATE) {
+        await appendFolderEvent(tx, {
+          folderId: row.aggregate_id,
           eventType: row.event_type,
           payload: (row.payload ?? {}) as Record<string, unknown>,
         });
@@ -2260,21 +2260,21 @@ function toJobView(row: JobRawRow): JobView {
     lockedUntil: row.locked_until,
     lastError: row.last_error,
     dedupeKey: row.dedupe_key,
-    revisionId: row.revision_id,
+    folderId: row.folder_id,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     isDead: status === 'failed',
   };
 }
 
-async function objectIdOfRevision(
+async function objectIdOfFolder(
   executor: JobExecutor,
-  revisionId: string | null,
+  folderId: string | null,
 ): Promise<string | null> {
-  if (revisionId === null) return null;
+  if (folderId === null) return null;
   const rows = await executor.execute<{ object_id: string }>(sql`
-    select object_id from ${submissionRevisions}
-     where ${submissionRevisions.id} = ${revisionId}::uuid
+    select object_id from ${folders}
+     where ${folders.id} = ${folderId}::uuid
      limit 1
   `);
   return rows.rows[0]?.object_id ?? null;

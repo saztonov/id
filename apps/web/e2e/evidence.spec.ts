@@ -22,7 +22,7 @@ import { IDS, KC, signIn } from './support/session.js';
 test('замечание ведёт на страницу и выделяет блок, а не печатает идентификатор', async ({
   page,
 }) => {
-  await signIn(page, KC.engineer, `/ids/revisions/${IDS.revisionMarkup}?tab=checks`);
+  await signIn(page, KC.engineer, `/ids/folders/${IDS.folderMarkup}?tab=checks`);
 
   const evidence = page.getByTestId('evidence-AOSR.HDR.022');
   await expect(evidence).toBeVisible();
@@ -43,7 +43,7 @@ test('замечание ведёт на страницу и выделяет б
 });
 
 test('цитата доказательства заменяет удалённый раздел «Реквизиты»', async ({ page }) => {
-  await signIn(page, KC.engineer, `/ids/revisions/${IDS.revisionMarkup}?tab=checks`);
+  await signIn(page, KC.engineer, `/ids/folders/${IDS.folderMarkup}?tab=checks`);
 
   // Раздел «Реквизиты» удалён, и вместе с ним ушёл единственный экран, где было
   // видно, ЧЕМ подтверждается замечание. У фикстурного замечания доказательства
@@ -54,7 +54,7 @@ test('цитата доказательства заменяет удалённ�
 });
 
 test('экран ревизии держится живой лентой событий, а не только опросом', async ({ page }) => {
-  await signIn(page, KC.engineer, `/ids/revisions/${IDS.revisionMarkup}?tab=history`);
+  await signIn(page, KC.engineer, `/ids/folders/${IDS.folderMarkup}?tab=history`);
 
   // Поток открывается на уровне ревизии и переживает переключение вкладок.
   await expect(page.getByTestId('stream-status')).toHaveText('поток событий');

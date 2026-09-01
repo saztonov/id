@@ -975,15 +975,15 @@ function evaluateItem1(graph: CheckGraph): RuleResult {
   return summarize(findings, checked, 'ни в одном акте не извлечён п. 1');
 }
 
-function evaluateRdRevision(graph: CheckGraph, params: RuleParams): RuleResult {
+function evaluateRdFolder(graph: CheckGraph, params: RuleParams): RuleResult {
   const actList = aosrActs(graph);
   if (actList.length === 0) return notApplicable(NO_ACTS);
 
   const raw = params['revisionPattern'];
   const source = typeof raw === 'string' && raw.trim() !== '' ? raw : DEFAULT_REVISION_PATTERN;
-  let revision: RegExp;
+  let folder: RegExp;
   try {
-    revision = new RegExp(source, 'iu');
+    folder = new RegExp(source, 'iu');
   } catch {
     return notApplicable(`параметр revisionPattern «${source}» не является регулярным выражением`);
   }
@@ -1013,7 +1013,7 @@ function evaluateRdRevision(graph: CheckGraph, params: RuleParams): RuleResult {
 
     checked += 1;
     for (const cipher of ciphers) {
-      if (revision.test(cipher)) continue;
+      if (folder.test(cipher)) continue;
 
       findings.push(
         defect({
@@ -1715,14 +1715,14 @@ function evaluateStandardYears(graph: CheckGraph): RuleResult {
 // ---------------------------------------------------------------------------
 
 function evaluateObjectActive(graph: CheckGraph): RuleResult {
-  if (graph.object.id !== graph.revision.objectId) {
+  if (graph.object.id !== graph.folder.objectId) {
     return notApplicable('карточка объекта ревизии не загружена в граф проверки');
   }
   if (graph.object.isActive) return fromFindings([]);
 
   return fromFindings([
     defect({
-      ...anchorOf('revision', graph.revision.id),
+      ...anchorOf('folder', graph.folder.id),
       origin: 'deterministic',
       message: `Объект строительства «${graph.object.name}» (${graph.object.code}) помечен в справочнике как неактивный.`,
       hint: 'Проверьте карточку объекта: комплект подан по объекту, снятому с сопровождения.',
@@ -1739,7 +1739,7 @@ function evaluateCounterpartiesActive(graph: CheckGraph): RuleResult {
     .filter((party) => !party.isActive)
     .map((party) =>
       defect({
-        ...anchorOf('revision', graph.revision.id),
+        ...anchorOf('folder', graph.folder.id),
         origin: 'deterministic',
         message: `Контрагент комплекта «${party.name}»${party.inn === null ? '' : ` (ИНН ${party.inn})`} помечен в справочнике как неактивный.`,
         hint: 'Проверьте карточку контрагента: организация снята с учёта или исключена из списка участников строительства.',
@@ -1776,7 +1776,7 @@ function evaluateDuplicateActs(graph: CheckGraph): RuleResult {
         defect({
           ...anchorOfDocument(duplicate),
           origin: 'deterministic',
-          message: `В комплекте больше одного акта ${actLabel(duplicate)}: документы ${group.map((act) => String(act.ordinal)).join(', ')} при одном объекте «${graph.object.code}», подрядчике и разделе ${graph.revision.sectionCode}.`,
+          message: `В комплекте больше одного акта ${actLabel(duplicate)}: документы ${group.map((act) => String(act.ordinal)).join(', ')} при одном объекте «${graph.object.code}», подрядчике и разделе ${graph.folder.sectionCode}.`,
           hint: `Оставьте в комплекте один акт с этим номером; при исправлении ранее поданного акта подайте новую ревизию, а не второй экземпляр (сравните с документом ${String(first.ordinal)}).`,
         }),
       );
@@ -1799,7 +1799,7 @@ function evaluateDuplicateActs(graph: CheckGraph): RuleResult {
  */
 function unavailableFinding(graph: CheckGraph, subject: string, reason: string): RuleFinding {
   return externalUnavailable({
-    ...anchorOf('revision', graph.revision.id),
+    ...anchorOf('folder', graph.folder.id),
     message: `${subject} автоматически не проверено: требуется ручная проверка — ${reason}.`,
     hint: 'Проверьте сведения по официальному реестру вручную и приложите подтверждение к комплекту.',
   });
@@ -1818,9 +1818,9 @@ function evaluateSro(graph: CheckGraph): RuleResult {
   }
 
   const seen = new Map<string, Anchor>();
-  const contractor = graph.counterparties.find((party) => party.id === graph.revision.contractorId);
+  const contractor = graph.counterparties.find((party) => party.id === graph.folder.contractorId);
   if (contractor?.inn != null && digitsOf(contractor.inn) !== '') {
-    seen.set(digitsOf(contractor.inn), anchorOf('revision', graph.revision.id));
+    seen.set(digitsOf(contractor.inn), anchorOf('folder', graph.folder.id));
   }
   for (const act of aosrActs(graph)) {
     const value = actField(act, AOSR_FIELDS.contractorInn);
@@ -1834,7 +1834,7 @@ function evaluateSro(graph: CheckGraph): RuleResult {
   if (seen.size === 0) {
     return fromFindings([
       unknown({
-        ...anchorOf('revision', graph.revision.id),
+        ...anchorOf('folder', graph.folder.id),
         origin: 'deterministic',
         message: 'ИНН подрядчика не известен — сверить членство в СРО не с чем.',
         hint: 'Заполните ИНН подрядчика в шапке акта или в карточке контрагента.',
@@ -1900,7 +1900,7 @@ function evaluateNrs(graph: CheckGraph, params: RuleParams): RuleResult {
   if (signers.size === 0) {
     return fromFindings([
       unknown({
-        ...anchorOf('revision', graph.revision.id),
+        ...anchorOf('folder', graph.folder.id),
         origin: 'deterministic',
         message:
           'Подписанты акта не распознаны — сверить их с национальным реестром специалистов нечем.',
@@ -2123,7 +2123,7 @@ export const AOSR_RULES: readonly RuleSpec[] = [
     severity: 'warning',
     blocking: false,
     params: { revisionPattern: DEFAULT_REVISION_PATTERN },
-    evaluate: (graph, params) => evaluateRdRevision(graph, params),
+    evaluate: (graph, params) => evaluateRdFolder(graph, params),
   }),
   actRule({
     code: 'AOSR.P2.061',
@@ -2309,7 +2309,7 @@ export const CROSSCHECK_RULES: readonly RuleSpec[] = [
     code: 'REF.120',
     title: 'Объект строительства активен в справочнике',
     docTypeCode: null,
-    level: 'revision',
+    level: 'folder',
     kind: 'reference',
     defaultSeverity: 'warning',
     defaultBlocking: false,
@@ -2323,7 +2323,7 @@ export const CROSSCHECK_RULES: readonly RuleSpec[] = [
     code: 'REF.121',
     title: 'Контрагенты комплекта активны в справочнике',
     docTypeCode: null,
-    level: 'revision',
+    level: 'folder',
     kind: 'reference',
     defaultSeverity: 'warning',
     defaultBlocking: false,
@@ -2337,7 +2337,7 @@ export const CROSSCHECK_RULES: readonly RuleSpec[] = [
     code: 'XS.130',
     title: 'В комплекте нет дубля акта',
     docTypeCode: null,
-    level: 'revision',
+    level: 'folder',
     kind: 'crosscheck',
     defaultSeverity: 'error',
     defaultBlocking: false,
@@ -2355,7 +2355,7 @@ export const EXTERNAL_RULES: readonly RuleSpec[] = [
     code: 'EXT.SRO.140',
     title: 'Членство подрядчика в СРО',
     docTypeCode: null,
-    level: 'revision',
+    level: 'folder',
     kind: 'external',
     defaultSeverity: 'error',
     defaultBlocking: false,
@@ -2369,7 +2369,7 @@ export const EXTERNAL_RULES: readonly RuleSpec[] = [
     code: 'EXT.NRS.141',
     title: 'Подписанты акта в национальном реестре специалистов',
     docTypeCode: null,
-    level: 'revision',
+    level: 'folder',
     kind: 'external',
     defaultSeverity: 'error',
     defaultBlocking: false,
@@ -2383,7 +2383,7 @@ export const EXTERNAL_RULES: readonly RuleSpec[] = [
     code: 'EXT.SCHED.142',
     title: 'Освидетельствованные работы есть в графике строительства',
     docTypeCode: null,
-    level: 'revision',
+    level: 'folder',
     kind: 'external',
     defaultSeverity: 'warning',
     defaultBlocking: false,

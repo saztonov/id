@@ -66,8 +66,7 @@ function id(n: number): string {
 const ORG_CUSTOMER = id(1);
 const ORG_CONTRACTOR = id(2);
 const OBJECT = id(4);
-const SUBMISSION = id(10);
-const REVISION = id(11);
+const FOLDER = id(11);
 const USER_CONTRACTOR = id(20);
 const FILE = id(30);
 
@@ -112,15 +111,13 @@ async function fixtureStatements(sha256: string, sizeBytes: number): Promise<rea
     `INSERT INTO user_roles (user_id, role) VALUES ('${USER_CONTRACTOR}', 'contractor')`,
     `INSERT INTO object_contractors (object_id, contractor_id)
        VALUES ('${OBJECT}', '${ORG_CONTRACTOR}') ON CONFLICT DO NOTHING`,
-    `INSERT INTO works
+    `INSERT INTO folders
        (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-     VALUES ('${SUBMISSION}', '${OBJECT}', '${ORG_CONTRACTOR}', '${ORG_CONTRACTOR}', 'roofing', DATE '2026-01-01', 'Поставка 1', '${USER_CONTRACTOR}')`,
-    `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
-       VALUES ('${REVISION}', '${SUBMISSION}', '${OBJECT}', '${ORG_CONTRACTOR}', 1, 'draft')`,
+     VALUES ('${FOLDER}', '${OBJECT}', '${ORG_CONTRACTOR}', '${ORG_CONTRACTOR}', 'roofing', DATE '2026-01-01', 'Поставка 1', '${USER_CONTRACTOR}')`,
     `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
        VALUES ('${sha256}', 'blobs/${sha256.slice(0, 2)}/${sha256.slice(2, 4)}/${sha256}', ${sizeBytes}, 'application/pdf')`,
-    `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order)
-       VALUES ('${FILE}', '${REVISION}', '${sha256}', 'комплект.pdf', 0)`,
+    `INSERT INTO source_files (id, folder_id, blob_sha256, file_name, sort_order)
+       VALUES ('${FILE}', '${FOLDER}', '${sha256}', 'комплект.pdf', 0)`,
   ];
 }
 
@@ -243,19 +240,19 @@ describe('цепочка «Разметить файл» доводит комп
     for (const type of ['file.verify', 'file.signature_probe'] as const) {
       await enqueueSystemJob(db, {
         type,
-        payload: { revisionId: REVISION, sourceFileId: FILE },
+        payload: { folderId: FOLDER, sourceFileId: FILE },
         dedupeKey: dedupeKeyFor(type, FILE),
       });
     }
     await enqueueSystemJob(db, {
       type: 'bundle.build',
-      payload: { revisionId: REVISION },
-      dedupeKey: dedupeKeyFor('bundle.build', REVISION),
+      payload: { folderId: FOLDER },
+      dedupeKey: dedupeKeyFor('bundle.build', FOLDER),
     });
     await drainQueue();
 
     const bundles = await testDb.query<{ id: string }>(
-      `SELECT id FROM processing_bundles WHERE revision_id = '${REVISION}'`,
+      `SELECT id FROM processing_bundles WHERE folder_id = '${FOLDER}'`,
     );
     const bundleId = bundles[0]?.id ?? '';
     expect(bundleId).not.toBe('');
@@ -264,13 +261,13 @@ describe('цепочка «Разметить файл» доводит комп
     const { layout } = await ensureDraftLayout(
       db,
       { kind: 'admin', userId: USER_CONTRACTOR },
-      { revisionId: REVISION, bundleId },
+      { folderId: FOLDER, bundleId },
     );
     layoutRevisionId = layout.id;
 
     await enqueueSystemJob(db, {
       type: 'rd.create_run_document',
-      payload: { revisionId: REVISION, bundleId, layoutRevisionId: layout.id },
+      payload: { folderId: FOLDER, bundleId, layoutRevisionId: layout.id },
       dedupeKey: dedupeKeyFor('rd.create_run_document', layout.id),
     });
     await drainQueue();
@@ -402,7 +399,7 @@ describe('цепочка «Разметить файл» доводит комп
          LEFT JOIN layout_blocks b
            ON b.working_page_index = bp.working_page_index
           AND b.layout_revision_id = '${layoutRevisionId}'
-        WHERE bp.revision_id = '${REVISION}'
+        WHERE bp.folder_id = '${FOLDER}'
         GROUP BY bp.working_page_index
        HAVING count(b.id) = 0
         ORDER BY bp.working_page_index`,
@@ -413,7 +410,7 @@ describe('цепочка «Разметить файл» доводит комп
       `SELECT bp.working_page_index, sp.attention_flags
          FROM processing_bundle_pages bp
          JOIN source_pages sp ON sp.id = bp.source_page_id
-        WHERE bp.revision_id = '${REVISION}'
+        WHERE bp.folder_id = '${FOLDER}'
           AND array_length(sp.attention_flags, 1) > 0
         ORDER BY bp.working_page_index`,
     );
@@ -430,7 +427,7 @@ describe('цепочка «Разметить файл» доводит комп
     const flagged = await testDb.query<{ attention_flags: string[] }>(
       `SELECT sp.attention_flags FROM processing_bundle_pages bp
          JOIN source_pages sp ON sp.id = bp.source_page_id
-        WHERE bp.revision_id = '${REVISION}'`,
+        WHERE bp.folder_id = '${FOLDER}'`,
     );
     const all = flagged.flatMap((row) => row.attention_flags);
     expect(all).toContain('tiny_block');
@@ -484,12 +481,12 @@ describe('цепочка «Разметить файл» доводит комп
     });
 
     const bundles = await testDb.query<{ id: string }>(
-      `SELECT id FROM processing_bundles WHERE revision_id = '${REVISION}'`,
+      `SELECT id FROM processing_bundles WHERE folder_id = '${FOLDER}'`,
     );
     const bundleId = bundles[0]?.id ?? '';
     await enqueueSystemJob(db, {
       type: 'preview.cache_pages',
-      payload: { revisionId: REVISION, bundleId, layoutRevisionId },
+      payload: { folderId: FOLDER, bundleId, layoutRevisionId },
       dedupeKey: dedupeKeyFor('preview.cache_pages', layoutRevisionId),
     });
 
@@ -524,7 +521,7 @@ describe('цепочка «Разметить файл» доводит комп
 
     await enqueueSystemJob(db, {
       type: 'layout.detect_pages',
-      payload: { revisionId: REVISION, layoutRevisionId },
+      payload: { folderId: FOLDER, layoutRevisionId },
       dedupeKey: dedupeKeyFor('layout.detect_pages', layoutRevisionId, 'repeat'),
     });
     await drainQueue();
@@ -545,7 +542,7 @@ describe('цепочка «Разметить файл» доводит комп
 
     await enqueueSystemJob(db, {
       type: 'layout.detect_pages',
-      payload: { revisionId: REVISION, layoutRevisionId, overwriteExisting: true },
+      payload: { folderId: FOLDER, layoutRevisionId, overwriteExisting: true },
       dedupeKey: dedupeKeyFor('layout.detect_pages', layoutRevisionId, 'repeat-overwrite'),
     });
     await drainQueue();
@@ -586,7 +583,7 @@ describe('цепочка «Разметить файл» доводит комп
     await enqueueSystemJob(db, {
       type: 'layout.detect_pages',
       payload: {
-        revisionId: REVISION,
+        folderId: FOLDER,
         layoutRevisionId,
         pageIndices: [0],
         overwriteExisting: true,

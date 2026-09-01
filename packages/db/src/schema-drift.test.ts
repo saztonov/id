@@ -55,7 +55,7 @@ describe('схема Drizzle сгенерирована из миграций', 
     const expected = [
       'users',
       'construction_objects',
-      'submission_revisions',
+      'folders',
       'source_pages',
       'processing_bundles',
       'layout_blocks',

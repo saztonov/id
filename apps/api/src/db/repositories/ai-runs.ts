@@ -22,16 +22,16 @@
  *
  * ## Область видимости
  *
- * У `ai_runs` есть `revision_id`, но нет ни `object_id`, ни `contractor_id` —
+ * У `ai_runs` есть `folder_id`, но нет ни `object_id`, ни `contractor_id` —
  * они живут на ревизии поставки. Поэтому область применяется соединением с
- * `submission_revisions`, как в `recognition.ts` и `bundles.ts`. Вставка тоже
+ * `folders`, как в `recognition.ts` и `bundles.ts`. Вставка тоже
  * идёт через проверку видимости ревизии: без неё подрядчик, знающий чужой
- * `revision_id`, дописывал бы строки в чужой аудит.
+ * `folder_id`, дописывал бы строки в чужой аудит.
  */
 import { and, desc, eq, sql, type SQL } from 'drizzle-orm';
 import { z } from 'zod';
 
-import { aiRuns, submissionRevisions } from '@id/db';
+import { aiRuns, folders } from '@id/db';
 
 import type { AuthScope } from '../../auth/scope.js';
 import { badRequest, notFound } from '../../lib/problem.js';
@@ -39,9 +39,9 @@ import type { LlmProviderName, LlmStage } from '../../llm/port.js';
 import { withScope, type ScopeTarget } from '../scoped.js';
 import type { Database } from './users.js';
 
-const REVISION_SCOPE: ScopeTarget = {
-  objectId: submissionRevisions.objectId,
-  contractorId: submissionRevisions.contractorId,
+const FOLDER_SCOPE: ScopeTarget = {
+  objectId: folders.objectId,
+  contractorId: folders.contractorId,
 };
 
 /**
@@ -58,7 +58,7 @@ export const MAX_STRUCTURED_RESULT_BYTES = 32_768;
 const HEX64 = /^[0-9a-f]{64}$/;
 
 export interface RecordAiRunInput {
-  readonly revisionId: string;
+  readonly folderId: string;
   readonly stage: LlmStage;
   readonly provider: LlmProviderName;
   readonly model: string;
@@ -87,7 +87,7 @@ export interface RecordAiRunInput {
 
 export interface AiRunView {
   readonly id: string;
-  readonly revisionId: string;
+  readonly folderId: string;
   readonly stage: string;
   readonly provider: string;
   readonly model: string;
@@ -111,7 +111,7 @@ const isoAt = (column: unknown, alias: string) =>
 
 const RUN_SELECTION = {
   id: aiRuns.id,
-  revisionId: aiRuns.revisionId,
+  folderId: aiRuns.folderId,
   stage: aiRuns.stage,
   provider: aiRuns.provider,
   model: aiRuns.model,
@@ -139,7 +139,7 @@ function toView(row: Record<string, unknown>): AiRunView {
   const cost = row.cost;
   return {
     id: row.id as string,
-    revisionId: row.revisionId as string,
+    folderId: row.folderId as string,
     stage: row.stage as string,
     provider: row.provider as string,
     model: row.model as string,
@@ -191,16 +191,16 @@ export async function recordAiRun(
   }
 
   const visible = await db
-    .select({ id: submissionRevisions.id })
-    .from(submissionRevisions)
-    .where(withScope(scope, REVISION_SCOPE, eq(submissionRevisions.id, input.revisionId)))
+    .select({ id: folders.id })
+    .from(folders)
+    .where(withScope(scope, FOLDER_SCOPE, eq(folders.id, input.folderId)))
     .limit(1);
   if (visible[0] === undefined) throw notFound('Ревизия поставки не найдена.');
 
   const rows = await db
     .insert(aiRuns)
     .values({
-      revisionId: input.revisionId,
+      folderId: input.folderId,
       stage: input.stage,
       provider: input.provider,
       model: input.model,
@@ -230,8 +230,8 @@ function runQuery(db: Database, scope: AuthScope, ...conditions: SQL[]) {
   return db
     .select(RUN_SELECTION)
     .from(aiRuns)
-    .innerJoin(submissionRevisions, eq(aiRuns.revisionId, submissionRevisions.id))
-    .where(withScope(scope, REVISION_SCOPE, ...conditions));
+    .innerJoin(folders, eq(aiRuns.folderId, folders.id))
+    .where(withScope(scope, FOLDER_SCOPE, ...conditions));
 }
 
 export async function findAiRun(
@@ -245,7 +245,7 @@ export async function findAiRun(
 }
 
 export interface AiRunListParams {
-  readonly revisionId: string;
+  readonly folderId: string;
   readonly limit: number;
   readonly cursor?: string | null | undefined;
 }
@@ -270,7 +270,7 @@ export async function listAiRuns(
   params: AiRunListParams,
 ): Promise<AiRunPage> {
   const after = decodeCursor(params.cursor);
-  const conditions: SQL[] = [eq(aiRuns.revisionId, params.revisionId)];
+  const conditions: SQL[] = [eq(aiRuns.folderId, params.folderId)];
   if (after !== null) {
     conditions.push(
       sql`(${aiRuns.createdAt}, ${aiRuns.id}) < (${after.at}::timestamptz, ${after.id}::uuid)`,
@@ -312,11 +312,11 @@ export async function monthlyAiSpend(db: Database, scope: AuthScope, at: Date): 
   const rows = await db
     .select({ total: sql<string | null>`coalesce(sum(${aiRuns.cost}), 0)::text` })
     .from(aiRuns)
-    .innerJoin(submissionRevisions, eq(aiRuns.revisionId, submissionRevisions.id))
+    .innerJoin(folders, eq(aiRuns.folderId, folders.id))
     .where(
       withScope(
         scope,
-        REVISION_SCOPE,
+        FOLDER_SCOPE,
         and(
           sql`${aiRuns.createdAt} >= ${from.toISOString()}::timestamptz`,
           sql`${aiRuns.createdAt} < ${to.toISOString()}::timestamptz`,

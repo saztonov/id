@@ -1,7 +1,7 @@
 /**
  * Создание прогона распознавания и постановка его головы.
  *
- * Вынесено из маршрута `POST /revisions/{id}/recognize` по той же причине, что
+ * Вынесено из маршрута `POST /folders/{id}/recognize` по той же причине, что
  * и запуск разметки (`modules/layout/start.ts`): вызывающих стало двое — прежний
  * гранулярный маршрут и кнопка S21 «Проверить». Копия здесь означала бы второе
  * место, где читается `recognition.provider`, проверяется allowlist моделей и
@@ -145,7 +145,7 @@ export async function startRecognition(
   env: Env,
   scope: AuthScope,
   input: {
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly layoutId: string;
     readonly idempotencyKey: string;
     readonly autoContinue: boolean;
@@ -223,7 +223,7 @@ export async function startRecognition(
     // выполняет `vlm.start_recognition`, у ветки RD WEB такого шага нет.
     repairOfRunId: recognition.provider === 'openrouter_vlm' ? (input.repairOfRunId ?? null) : null,
   });
-  if (run.revisionId !== input.revisionId) {
+  if (run.folderId !== input.folderId) {
     // Разметка чужой ревизии в теле запроса. Область её бы пропустила, если
     // ревизии принадлежат одному подрядчику, поэтому сверка явная.
     throw notFound('Ревизия разметки не относится к указанной ревизии поставки.');
@@ -241,7 +241,7 @@ export async function startRecognition(
    * предмет которой уже сменился, и оживлять их этой кнопкой нельзя.
    */
   const revived = await reviveFailedJobs(db, {
-    revisionId: input.revisionId,
+    folderId: input.folderId,
     stage: 'recognition',
     scopeKey: 'recognitionRunId',
     scopeValue: run.id,
@@ -250,7 +250,7 @@ export async function startRecognition(
   const { jobId, created: jobCreated } = await enqueueJob(db, scope, {
     type: firstJobType,
     payload: tracePayload({
-      revisionId: input.revisionId,
+      folderId: input.folderId,
       recognitionRunId: run.id,
       ...(input.autoContinue ? { autoContinue: true } : {}),
     }),

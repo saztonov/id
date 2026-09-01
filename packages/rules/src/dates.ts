@@ -791,8 +791,8 @@ function evaluateAccreditationRegistry(graph: CheckGraph): RuleResult {
       .filter((value): value is string => value !== null);
     return fromFindings([
       externalUnavailable({
-        targetType: 'revision',
-        targetId: graph.revision.id,
+        targetType: 'folder',
+        targetId: graph.folder.id,
         sourcePageId: null,
         blockId: null,
         evidence: [],

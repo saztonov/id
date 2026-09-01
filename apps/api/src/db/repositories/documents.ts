@@ -7,7 +7,7 @@
  * строкой «не привязана»; пересечений и потерь нет. Это non-degradable гейт
  * §1.6, и держат его ДВА независимых рубежа БД, а не аккуратность кода:
  *
- * - `page_assignments_page_uq UNIQUE (revision_id, source_page_id)` — «страница
+ * - `page_assignments_page_uq UNIQUE (folder_id, source_page_id)` — «страница
  *   не в двух местах». Ограничение говорит о строке, которая есть;
  * - представление `v_unaccounted_pages` — «потерь нет». Ограничением это не
  *   выражается вовсе: утверждение о полноте — это утверждение о странице,
@@ -35,7 +35,7 @@
  * ## Область видимости
  *
  * У `logical_documents` есть собственные `object_id` и `contractor_id`, но
- * область всё равно применяется соединением с `submission_revisions` — как в
+ * область всё равно применяется соединением с `folders` — как в
  * `recognition.ts` и `layout.ts`. Причина не в удобстве: у `page_assignments`,
  * `page_classifications` и `registry_rows` своих колонок области нет вовсе, и
  * один способ на весь файл означает, что «забыл область» невозможно по форме
@@ -43,6 +43,7 @@
  */
 import { and, asc, desc, eq, inArray, isNotNull, sql, type SQL } from 'drizzle-orm';
 import {
+  complects,
   docTypes,
   documentRelations,
   fieldValues,
@@ -58,10 +59,11 @@ import {
   registryRowCandidates,
   registryRows,
   sourcePages,
-  submissionRevisions,
+  folders,
   vUnaccountedPages,
 } from '@id/db';
 import type { DocumentRelation, MatchState, PageRoleCode } from '@id/contracts';
+import { planComplects } from '../../segmentation/complects.js';
 import type { AuthScope } from '../../auth/scope.js';
 import {
   conflict,
@@ -85,7 +87,7 @@ import type {
 import { driverField } from '../driver-errors.js';
 import { withScope, type ScopeTarget } from '../scoped.js';
 import { appendAudit, type AuditActor } from './audit.js';
-import { appendRevisionEvent } from './jobs.js';
+import { appendFolderEvent } from './jobs.js';
 import type { Database } from './users.js';
 
 /**
@@ -98,9 +100,9 @@ import type { Database } from './users.js';
  */
 type ReadExecutor = Pick<Database, 'select'>;
 
-const REVISION_SCOPE: ScopeTarget = {
-  objectId: submissionRevisions.objectId,
-  contractorId: submissionRevisions.contractorId,
+const FOLDER_SCOPE: ScopeTarget = {
+  objectId: folders.objectId,
+  contractorId: folders.contractorId,
 };
 
 /**
@@ -111,12 +113,6 @@ const REVISION_SCOPE: ScopeTarget = {
  * продублирован здесь сознательно, как в `layout.ts`: отказ обязан приходить
  * понятным текстом ДО дорогой работы, а не исключением триггера после неё.
  */
-const DOCUMENTS_MUTABLE_STATUSES: ReadonlySet<string> = new Set([
-  'draft',
-  'submitted',
-  'in_review',
-]);
-
 const isoAt = (column: unknown, alias: string) =>
   sql<string | null>`to_char(${column} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`.as(
     alias,
@@ -126,62 +122,41 @@ const isoAt = (column: unknown, alias: string) =>
 // Общая проверка ревизии
 // =====================================================================
 
-interface VisibleRevision {
+interface VisibleFolder {
   readonly id: string;
   readonly objectId: string;
   readonly contractorId: string;
-  readonly status: string;
 }
 
 /**
- * Ревизия поставки в области видимости вызывающего.
+ * Папка в области видимости вызывающего.
  *
- * Одна функция на весь файл: «сначала убедиться, что ревизия видна, затем
+ * Одна функция на весь файл: «сначала убедиться, что папка видна, затем
  * писать» — это и есть второй уровень изоляции (§4.1). Разбросанные по
  * функциям проверки разошлись бы, а пропущенная означала бы запись в чужую
- * поставку по прямому идентификатору.
+ * папку по прямому идентификатору.
+ *
+ * Требования ИЗМЕНЯЕМОСТИ здесь больше нет: статусы подачи сняты вместе с
+ * согласованием (S44), и «терминальной» папки не существует. Видимость —
+ * единственное, что проверяется перед записью.
  */
-async function requireVisibleRevision(
+export async function requireVisibleFolder(
   db: Database,
   scope: AuthScope,
-  revisionId: string,
-): Promise<VisibleRevision> {
+  folderId: string,
+): Promise<VisibleFolder> {
   const rows = await db
     .select({
-      id: submissionRevisions.id,
-      objectId: submissionRevisions.objectId,
-      contractorId: submissionRevisions.contractorId,
-      status: submissionRevisions.status,
+      id: folders.id,
+      objectId: folders.objectId,
+      contractorId: folders.contractorId,
     })
-    .from(submissionRevisions)
-    .where(withScope(scope, REVISION_SCOPE, eq(submissionRevisions.id, revisionId)))
+    .from(folders)
+    .where(withScope(scope, FOLDER_SCOPE, eq(folders.id, folderId)))
     .limit(1);
   const row = rows[0];
-  if (row === undefined) throw notFound('Ревизия поставки не найдена.');
+  if (row === undefined) throw notFound('Папка не найдена.');
   return row;
-}
-
-/**
- * То же плюс требование изменяемости: терминальную ревизию правит только БД-отказ.
- *
- * Экспортируется ради `page-orientation.ts`: разворот содержимого страницы —
- * такое же производное решение конвейера, как классификация, и правило «в каких
- * статусах его можно менять» обязано быть ОДНО. Своя копия проверки там
- * разошлась бы с этой на первой же правке статусов.
- */
-export async function requireMutableRevision(
-  db: Database,
-  scope: AuthScope,
-  revisionId: string,
-): Promise<VisibleRevision> {
-  const revision = await requireVisibleRevision(db, scope, revisionId);
-  if (!DOCUMENTS_MUTABLE_STATUSES.has(revision.status)) {
-    throw conflict(
-      `Документы ревизии в статусе «${revision.status}» неизменяемы: ` +
-        'исправление вносится созданием новой ревизии поставки.',
-    );
-  }
-  return revision;
 }
 
 /**
@@ -272,7 +247,7 @@ export async function guardWrites<TResult>(operation: () => Promise<TResult>): P
 
 export interface PageClassificationView {
   readonly sourcePageId: string;
-  readonly revisionOrdinal: number;
+  readonly folderOrdinal: number;
   readonly label: PageLabel;
   readonly docTypeCode: string | null;
   readonly typeOutcome: TypeOutcome;
@@ -290,7 +265,7 @@ export interface PageClassificationView {
 }
 
 export interface SaveClassificationsInput {
-  readonly revisionId: string;
+  readonly folderId: string;
   readonly classifications: readonly PageClassification[];
 }
 
@@ -316,19 +291,19 @@ export async function savePageClassifications(
   scope: AuthScope,
   input: SaveClassificationsInput,
 ): Promise<SaveClassificationsOutcome> {
-  await requireMutableRevision(db, scope, input.revisionId);
+  await requireVisibleFolder(db, scope, input.folderId);
 
   return guardWrites(() =>
     db.transaction(async (tx) => {
       const removed = await tx
         .delete(pageClassifications)
-        .where(eq(pageClassifications.revisionId, input.revisionId))
+        .where(eq(pageClassifications.folderId, input.folderId))
         .returning({ sourcePageId: pageClassifications.sourcePageId });
 
       let written = 0;
       for (const item of input.classifications) {
         await tx.insert(pageClassifications).values({
-          revisionId: input.revisionId,
+          folderId: input.folderId,
           sourcePageId: item.sourcePageId,
           label: item.label,
           docTypeCode: item.docTypeCode,
@@ -351,8 +326,8 @@ export async function savePageClassifications(
         written += 1;
       }
 
-      await appendRevisionEvent(tx, {
-        revisionId: input.revisionId,
+      await appendFolderEvent(tx, {
+        folderId: input.folderId,
         eventType: 'documents.pages_classified',
         payload: { removed: removed.length, written },
       });
@@ -366,12 +341,12 @@ export async function savePageClassifications(
 export async function listPageClassifications(
   db: Database,
   scope: AuthScope,
-  revisionId: string,
+  folderId: string,
 ): Promise<readonly PageClassificationView[]> {
   const rows = await db
     .select({
       sourcePageId: pageClassifications.sourcePageId,
-      revisionOrdinal: sourcePages.revisionOrdinal,
+      folderOrdinal: sourcePages.folderOrdinal,
       label: pageClassifications.label,
       docTypeCode: pageClassifications.docTypeCode,
       typeOutcome: pageClassifications.typeOutcome,
@@ -392,12 +367,12 @@ export async function listPageClassifications(
       sourcePages,
       and(
         eq(sourcePages.id, pageClassifications.sourcePageId),
-        eq(sourcePages.revisionId, pageClassifications.revisionId),
+        eq(sourcePages.folderId, pageClassifications.folderId),
       ),
     )
-    .innerJoin(submissionRevisions, eq(pageClassifications.revisionId, submissionRevisions.id))
-    .where(withScope(scope, REVISION_SCOPE, eq(pageClassifications.revisionId, revisionId)))
-    .orderBy(asc(sourcePages.revisionOrdinal));
+    .innerJoin(folders, eq(pageClassifications.folderId, folders.id))
+    .where(withScope(scope, FOLDER_SCOPE, eq(pageClassifications.folderId, folderId)))
+    .orderBy(asc(sourcePages.folderOrdinal));
 
   return rows.map((row) => ({
     ...row,
@@ -414,7 +389,7 @@ export async function listPageClassifications(
 // =====================================================================
 
 export interface ManualPageLabelInput {
-  readonly revisionId: string;
+  readonly folderId: string;
   readonly sourcePageId: string;
   readonly label: PageLabel;
   readonly docTypeCode: string | null;
@@ -423,7 +398,7 @@ export interface ManualPageLabelInput {
 }
 
 export interface ManualPageLabelView {
-  readonly revisionId: string;
+  readonly folderId: string;
   readonly sourcePageId: string;
   readonly label: PageLabel;
   readonly docTypeCode: string | null;
@@ -449,7 +424,7 @@ export async function saveManualPageLabel(
   scope: AuthScope,
   input: ManualPageLabelInput,
 ): Promise<ManualPageLabelView> {
-  const revision = await requireMutableRevision(db, scope, input.revisionId);
+  const folder = await requireVisibleFolder(db, scope, input.folderId);
 
   // Совместность полей — то, что CHECK таблицы выразить не может: роль без
   // A-ROLE и тип у служебной страницы дали бы декодеру противоречивый вход.
@@ -466,9 +441,7 @@ export async function saveManualPageLabel(
   const pageRows = await db
     .select({ id: sourcePages.id })
     .from(sourcePages)
-    .where(
-      and(eq(sourcePages.id, input.sourcePageId), eq(sourcePages.revisionId, input.revisionId)),
-    )
+    .where(and(eq(sourcePages.id, input.sourcePageId), eq(sourcePages.folderId, input.folderId)))
     .limit(1);
   if (pageRows[0] === undefined) throw notFound('Страница не принадлежит этой ревизии.');
 
@@ -494,7 +467,7 @@ export async function saveManualPageLabel(
   }
 
   const values = {
-    revisionId: input.revisionId,
+    folderId: input.folderId,
     sourcePageId: input.sourcePageId,
     label: input.label,
     docTypeCode: input.docTypeCode,
@@ -519,7 +492,7 @@ export async function saveManualPageLabel(
         .insert(pageClassifications)
         .values(values)
         .onConflictDoUpdate({
-          target: [pageClassifications.revisionId, pageClassifications.sourcePageId],
+          target: [pageClassifications.folderId, pageClassifications.sourcePageId],
           set: values,
         });
       await appendAudit(tx, scope, {
@@ -527,7 +500,7 @@ export async function saveManualPageLabel(
         action: 'page.manual_label_set',
         entityType: 'source_page',
         entityId: input.sourcePageId,
-        objectId: revision.objectId,
+        objectId: folder.objectId,
         payload: {
           label: input.label,
           docTypeCode: input.docTypeCode,
@@ -538,7 +511,7 @@ export async function saveManualPageLabel(
   );
 
   return {
-    revisionId: input.revisionId,
+    folderId: input.folderId,
     sourcePageId: input.sourcePageId,
     label: input.label,
     docTypeCode: input.docTypeCode,
@@ -559,12 +532,12 @@ export async function deleteManualPageLabel(
   db: Database,
   scope: AuthScope,
   input: {
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly sourcePageId: string;
     readonly actor: AuditActor;
   },
 ): Promise<void> {
-  const revision = await requireMutableRevision(db, scope, input.revisionId);
+  const folder = await requireVisibleFolder(db, scope, input.folderId);
 
   await guardWrites(() =>
     db.transaction(async (tx) => {
@@ -572,7 +545,7 @@ export async function deleteManualPageLabel(
         .delete(pageClassifications)
         .where(
           and(
-            eq(pageClassifications.revisionId, input.revisionId),
+            eq(pageClassifications.folderId, input.folderId),
             eq(pageClassifications.sourcePageId, input.sourcePageId),
             eq(pageClassifications.source, 'manual'),
           ),
@@ -586,7 +559,7 @@ export async function deleteManualPageLabel(
         action: 'page.manual_label_cleared',
         entityType: 'source_page',
         entityId: input.sourcePageId,
-        objectId: revision.objectId,
+        objectId: folder.objectId,
         payload: {},
       });
     }),
@@ -599,7 +572,7 @@ export async function deleteManualPageLabel(
 
 export interface SegmentationPageRow {
   readonly sourcePageId: string;
-  readonly revisionOrdinal: number;
+  readonly folderOrdinal: number;
   readonly sourceFileId: string;
   readonly filePageIndex: number;
   readonly workingPageIndex: number | null;
@@ -654,9 +627,9 @@ export interface SegmentationInput {
 export async function loadSegmentationPages(
   db: Database,
   scope: AuthScope,
-  revisionId: string,
+  folderId: string,
 ): Promise<SegmentationInput> {
-  await requireVisibleRevision(db, scope, revisionId);
+  await requireVisibleFolder(db, scope, folderId);
 
   const runs = await db
     .select({
@@ -665,13 +638,13 @@ export async function loadSegmentationPages(
       bundleId: layoutRevisions.bundleId,
     })
     .from(recognitionRuns)
-    .innerJoin(submissionRevisions, eq(recognitionRuns.revisionId, submissionRevisions.id))
+    .innerJoin(folders, eq(recognitionRuns.folderId, folders.id))
     .innerJoin(layoutRevisions, eq(recognitionRuns.layoutRevisionId, layoutRevisions.id))
     .where(
       withScope(
         scope,
-        REVISION_SCOPE,
-        eq(recognitionRuns.revisionId, revisionId),
+        FOLDER_SCOPE,
+        eq(recognitionRuns.folderId, folderId),
         eq(recognitionRuns.status, 'done'),
         /**
          * Прогон обязан быть ОПУБЛИКОВАННЫМ, а не просто завершённым.
@@ -702,7 +675,7 @@ export async function loadSegmentationPages(
   const rows = await db
     .select({
       sourcePageId: sourcePages.id,
-      revisionOrdinal: sourcePages.revisionOrdinal,
+      folderOrdinal: sourcePages.folderOrdinal,
       sourceFileId: sourcePages.sourceFileId,
       filePageIndex: sourcePages.filePageIndex,
       workingPageIndex: processingBundlePages.workingPageIndex,
@@ -724,7 +697,7 @@ export async function loadSegmentationPages(
       manualPageRoleCode: pageClassifications.pageRoleCode,
     })
     .from(sourcePages)
-    .innerJoin(submissionRevisions, eq(sourcePages.revisionId, submissionRevisions.id))
+    .innerJoin(folders, eq(sourcePages.folderId, folders.id))
     .leftJoin(
       pageTextVersions,
       and(
@@ -745,18 +718,18 @@ export async function loadSegmentationPages(
       pageClassifications,
       and(
         eq(pageClassifications.sourcePageId, sourcePages.id),
-        eq(pageClassifications.revisionId, sourcePages.revisionId),
+        eq(pageClassifications.folderId, sourcePages.folderId),
         eq(pageClassifications.source, 'manual'),
       ),
     )
-    .where(withScope(scope, REVISION_SCOPE, eq(sourcePages.revisionId, revisionId)))
-    .orderBy(asc(sourcePages.revisionOrdinal));
+    .where(withScope(scope, FOLDER_SCOPE, eq(sourcePages.folderId, folderId)))
+    .orderBy(asc(sourcePages.folderOrdinal));
 
   return {
     recognitionRunId: run.id,
     pages: rows.map((row) => ({
       sourcePageId: row.sourcePageId,
-      revisionOrdinal: Number(row.revisionOrdinal),
+      folderOrdinal: Number(row.folderOrdinal),
       sourceFileId: row.sourceFileId,
       filePageIndex: Number(row.filePageIndex),
       workingPageIndex: row.workingPageIndex === null ? null : Number(row.workingPageIndex),
@@ -784,7 +757,7 @@ export async function loadSegmentationPages(
 // =====================================================================
 
 export interface ApplySegmentationInput {
-  readonly revisionId: string;
+  readonly folderId: string;
   readonly documents: readonly DecodedDocument[];
   readonly unassigned: readonly DecodedUnassigned[];
   /** Версия декодера: уходит в событие ревизии, чтобы прогон был объясним. */
@@ -853,7 +826,7 @@ export async function applySegmentation(
   scope: AuthScope,
   input: ApplySegmentationInput,
 ): Promise<ApplySegmentationOutcome> {
-  const revision = await requireMutableRevision(db, scope, input.revisionId);
+  const folder = await requireVisibleFolder(db, scope, input.folderId);
 
   return guardWrites(() =>
     db.transaction(async (tx) => {
@@ -871,7 +844,7 @@ export async function applySegmentation(
         .from(logicalDocuments)
         .where(
           and(
-            eq(logicalDocuments.revisionId, input.revisionId),
+            eq(logicalDocuments.folderId, input.folderId),
             eq(logicalDocuments.isConfirmed, true),
             eq(logicalDocuments.confirmationSource, 'human'),
           ),
@@ -883,7 +856,7 @@ export async function applySegmentation(
           {
             logDetail:
               `applySegmentation отклонена: подтверждённых документов ${confirmed.length} ` +
-              `в ревизии ${input.revisionId}`,
+              `в ревизии ${input.folderId}`,
           },
         );
       }
@@ -892,18 +865,48 @@ export async function applySegmentation(
         .update(registryRows)
         .set({ matchedDocumentId: null, matchScore: null, matchState: 'missing' })
         .where(
-          and(
-            eq(registryRows.revisionId, input.revisionId),
-            isNotNull(registryRows.matchedDocumentId),
-          ),
+          and(eq(registryRows.folderId, input.folderId), isNotNull(registryRows.matchedDocumentId)),
         )
         .returning({ id: registryRows.id });
 
-      await tx.delete(pageAssignments).where(eq(pageAssignments.revisionId, input.revisionId));
+      await tx.delete(pageAssignments).where(eq(pageAssignments.folderId, input.folderId));
       const removed = await tx
         .delete(logicalDocuments)
-        .where(eq(logicalDocuments.revisionId, input.revisionId))
+        .where(eq(logicalDocuments.folderId, input.folderId))
         .returning({ id: logicalDocuments.id });
+
+      // Комплекты снимаются ПОСЛЕ документов: `logical_documents.complect_id`
+      // ссылается на них составным ключом, и обратный порядок отверг бы
+      // удаление внешним ключом посреди транзакции.
+      await tx.delete(complects).where(eq(complects.folderId, input.folderId));
+
+      // Нарезка на комплекты — по тому же правилу «ближайший предшествующий
+      // акт», которым `graph.build` связывает акт с его перечнем приложений.
+      const plan = planComplects(
+        input.documents.map((document) => ({
+          ordinal: document.ordinal,
+          docTypeCode: document.docTypeCode,
+        })),
+      );
+      const complectByDocument = new Map<number, string>();
+      for (const group of plan.groups) {
+        const insertedComplect = await tx
+          .insert(complects)
+          .values({
+            folderId: input.folderId,
+            objectId: folder.objectId,
+            contractorId: folder.contractorId,
+            ordinal: group.ordinal,
+          })
+          .returning({ id: complects.id });
+        const complectId = insertedComplect[0]?.id;
+        if (complectId === undefined) {
+          throw internal({ logDetail: 'INSERT комплекта не вернул строку' });
+        }
+        for (const documentOrdinal of group.documentOrdinals) {
+          complectByDocument.set(documentOrdinal, complectId);
+        }
+      }
 
       const documentIds: string[] = [];
       let pagesAssigned = 0;
@@ -911,15 +914,20 @@ export async function applySegmentation(
         const inserted = await tx
           .insert(logicalDocuments)
           .values({
-            revisionId: input.revisionId,
-            objectId: revision.objectId,
-            contractorId: revision.contractorId,
+            folderId: input.folderId,
+            objectId: folder.objectId,
+            contractorId: folder.contractorId,
             docTypeCode: document.docTypeCode,
             ordinal: document.ordinal,
             title: document.title,
             typeConfidence: document.typeConfidence,
             boundaryConfidence: document.boundaryConfidence,
             needsReview: document.needsReview,
+            // `null` — документ вне комплектов (опись, титул, всё до первого
+            // акта). Составной ключ при `MATCH SIMPLE` такую строку не
+            // проверяет, и это ровно тот случай, ради которого колонка
+            // необязательна.
+            complectId: complectByDocument.get(document.ordinal) ?? null,
           })
           .returning({ id: logicalDocuments.id });
         const documentId = inserted[0]?.id;
@@ -930,7 +938,7 @@ export async function applySegmentation(
 
         for (const page of document.pages) {
           await tx.insert(pageAssignments).values({
-            revisionId: input.revisionId,
+            folderId: input.folderId,
             sourcePageId: page.sourcePageId,
             documentId,
             sortOrder: page.sortOrder,
@@ -944,7 +952,7 @@ export async function applySegmentation(
       let pagesUnassigned = 0;
       for (const page of input.unassigned) {
         await tx.insert(pageAssignments).values({
-          revisionId: input.revisionId,
+          folderId: input.folderId,
           sourcePageId: page.sourcePageId,
           // Причина обязательна: `page_assignments_state_chk` не примет строку
           // без неё, и это верно — «не привязана почему-то» бесполезно на экране.
@@ -979,7 +987,7 @@ export async function applySegmentation(
           confirmedBy: null,
           confirmedAt: sql`now()`,
         })
-        .where(eq(logicalDocuments.revisionId, input.revisionId));
+        .where(eq(logicalDocuments.folderId, input.folderId));
 
       // НЕ ДЕГРАДИРУЕМЫЙ РУБЕЖ §1.6. Проверка идёт по представлению и внутри
       // транзакции: за её пределами это было бы наблюдением за уже сохранённой
@@ -987,7 +995,7 @@ export async function applySegmentation(
       const unaccounted = await tx
         .select({ sourcePageId: vUnaccountedPages.sourcePageId })
         .from(vUnaccountedPages)
-        .where(eq(vUnaccountedPages.revisionId, input.revisionId));
+        .where(eq(vUnaccountedPages.folderId, input.folderId));
       if (unaccounted.length > 0) {
         throw conflict(
           `Сегментация не учла ${unaccounted.length} страниц(ы) ревизии: ` +
@@ -996,13 +1004,13 @@ export async function applySegmentation(
           {
             logDetail:
               `v_unaccounted_pages вернул ${unaccounted.length} строк(и) после применения ` +
-              `сегментации ревизии ${input.revisionId}`,
+              `сегментации ревизии ${input.folderId}`,
           },
         );
       }
 
-      await appendRevisionEvent(tx, {
-        revisionId: input.revisionId,
+      await appendFolderEvent(tx, {
+        folderId: input.folderId,
         eventType: 'documents.segmented',
         payload: {
           documentsCreated: documentIds.length,
@@ -1032,13 +1040,14 @@ export async function applySegmentation(
 
 export interface LogicalDocumentView {
   readonly id: string;
-  readonly revisionId: string;
+  readonly folderId: string;
   readonly objectId: string;
   readonly contractorId: string;
   readonly docTypeCode: string | null;
   readonly ordinal: number;
   readonly title: string | null;
-  readonly folderGroup: string | null;
+  /** Комплект (акт со своими приложениями); `null` — документ вне комплектов. */
+  readonly complectId: string | null;
   readonly typeConfidence: number | null;
   readonly boundaryConfidence: number | null;
   readonly needsReview: boolean;
@@ -1060,13 +1069,13 @@ export interface LogicalDocumentView {
 
 const DOCUMENT_SELECTION = {
   id: logicalDocuments.id,
-  revisionId: logicalDocuments.revisionId,
+  folderId: logicalDocuments.folderId,
   objectId: logicalDocuments.objectId,
   contractorId: logicalDocuments.contractorId,
   docTypeCode: logicalDocuments.docTypeCode,
   ordinal: logicalDocuments.ordinal,
   title: logicalDocuments.title,
-  folderGroup: logicalDocuments.folderGroup,
+  complectId: logicalDocuments.complectId,
   typeConfidence: logicalDocuments.typeConfidence,
   boundaryConfidence: logicalDocuments.boundaryConfidence,
   needsReview: logicalDocuments.needsReview,
@@ -1084,8 +1093,8 @@ function documentQuery(db: ReadExecutor, scope: AuthScope, ...conditions: SQL[])
   return db
     .select(DOCUMENT_SELECTION)
     .from(logicalDocuments)
-    .innerJoin(submissionRevisions, eq(logicalDocuments.revisionId, submissionRevisions.id))
-    .where(withScope(scope, REVISION_SCOPE, ...conditions));
+    .innerJoin(folders, eq(logicalDocuments.folderId, folders.id))
+    .where(withScope(scope, FOLDER_SCOPE, ...conditions));
 }
 
 function toDocumentView(row: Record<string, unknown>): LogicalDocumentView {
@@ -1098,9 +1107,9 @@ function toDocumentView(row: Record<string, unknown>): LogicalDocumentView {
 export async function listLogicalDocuments(
   db: ReadExecutor,
   scope: AuthScope,
-  revisionId: string,
+  folderId: string,
 ): Promise<readonly LogicalDocumentView[]> {
-  const rows = await documentQuery(db, scope, eq(logicalDocuments.revisionId, revisionId)).orderBy(
+  const rows = await documentQuery(db, scope, eq(logicalDocuments.folderId, folderId)).orderBy(
     asc(logicalDocuments.ordinal),
   );
   return rows.map(toDocumentView);
@@ -1124,7 +1133,7 @@ export async function findLogicalDocument(
  * ради защиты: превышение обязано быть названо вслух вызывающим, поэтому
  * функция не режет молча, а бросает.
  */
-export const MAX_REVISIONS_PER_READ = 200;
+export const MAX_FOLDERS_PER_READ = 200;
 
 /**
  * Документы НЕСКОЛЬКИХ ревизий сразу — первое в проекте чтение через границу
@@ -1134,28 +1143,28 @@ export const MAX_REVISIONS_PER_READ = 200;
  * ревизии, либо по конкретному документу. Сверка описи спрашивает иначе: опись
  * описывает всю папку, и сравнивать её надо со всеми комплектами сразу.
  * Поэтому область здесь обязательна и применяется тем же `withScope` по
- * `submission_revisions`: расширение вопроса не расширяет прав.
+ * `folders`: расширение вопроса не расширяет прав.
  *
  * Пустой список — ранний выход, а не запрос: `inArray` с пустым массивом в
  * ряде построителей вырождается в условие, которое ничего не ограничивает.
  */
-export async function listDocumentsOfRevisions(
+export async function listDocumentsOfFolders(
   db: Database,
   scope: AuthScope,
-  revisionIds: readonly string[],
+  folderIds: readonly string[],
 ): Promise<readonly LogicalDocumentView[]> {
-  if (revisionIds.length === 0) return [];
-  if (revisionIds.length > MAX_REVISIONS_PER_READ) {
+  if (folderIds.length === 0) return [];
+  if (folderIds.length > MAX_FOLDERS_PER_READ) {
     throw internal({
-      logDetail: `запрошены документы ${revisionIds.length} ревизий при потолке ${MAX_REVISIONS_PER_READ}`,
+      logDetail: `запрошены документы ${folderIds.length} ревизий при потолке ${MAX_FOLDERS_PER_READ}`,
     });
   }
 
   const rows = await documentQuery(
     db,
     scope,
-    inArray(logicalDocuments.revisionId, [...revisionIds]),
-  ).orderBy(asc(logicalDocuments.revisionId), asc(logicalDocuments.ordinal));
+    inArray(logicalDocuments.folderId, [...folderIds]),
+  ).orderBy(asc(logicalDocuments.folderId), asc(logicalDocuments.ordinal));
 
   return rows.map(toDocumentView);
 }
@@ -1163,7 +1172,7 @@ export async function listDocumentsOfRevisions(
 /** Реквизит документа в межревизионном чтении: только то, что нужно сверке. */
 export interface DocumentFieldValue {
   readonly documentId: string;
-  readonly revisionId: string;
+  readonly folderId: string;
   readonly fieldCode: string;
   readonly valueText: string | null;
   readonly valueDate: string | null;
@@ -1179,34 +1188,34 @@ export interface DocumentFieldValue {
  * вызывающий раскладывает её по документам сам, а группировка в SQL заставила
  * бы читать `jsonb` там, где нужен один `text`.
  */
-export async function listFieldValuesOfRevisions(
+export async function listFieldValuesOfFolders(
   db: ReadExecutor,
   scope: AuthScope,
-  revisionIds: readonly string[],
+  folderIds: readonly string[],
   fieldCodes: readonly string[],
 ): Promise<readonly DocumentFieldValue[]> {
-  if (revisionIds.length === 0 || fieldCodes.length === 0) return [];
-  if (revisionIds.length > MAX_REVISIONS_PER_READ) {
+  if (folderIds.length === 0 || fieldCodes.length === 0) return [];
+  if (folderIds.length > MAX_FOLDERS_PER_READ) {
     throw internal({
-      logDetail: `запрошены реквизиты ${revisionIds.length} ревизий при потолке ${MAX_REVISIONS_PER_READ}`,
+      logDetail: `запрошены реквизиты ${folderIds.length} ревизий при потолке ${MAX_FOLDERS_PER_READ}`,
     });
   }
 
   return db
     .select({
       documentId: fieldValues.documentId,
-      revisionId: fieldValues.revisionId,
+      folderId: fieldValues.folderId,
       fieldCode: fieldValues.fieldCode,
       valueText: fieldValues.valueText,
       valueDate: fieldValues.valueDate,
     })
     .from(fieldValues)
-    .innerJoin(submissionRevisions, eq(fieldValues.revisionId, submissionRevisions.id))
+    .innerJoin(folders, eq(fieldValues.folderId, folders.id))
     .where(
       withScope(
         scope,
-        REVISION_SCOPE,
-        inArray(fieldValues.revisionId, [...revisionIds]),
+        FOLDER_SCOPE,
+        inArray(fieldValues.folderId, [...folderIds]),
         inArray(fieldValues.fieldCode, [...fieldCodes]),
       ),
     );
@@ -1214,7 +1223,7 @@ export async function listFieldValuesOfRevisions(
 
 export interface PageAssignmentView {
   readonly sourcePageId: string;
-  readonly revisionOrdinal: number;
+  readonly folderOrdinal: number;
   readonly documentId: string | null;
   readonly sortOrder: number | null;
   readonly pageRoleCode: PageRoleCode | null;
@@ -1226,12 +1235,12 @@ export interface PageAssignmentView {
 export async function listPageAssignments(
   db: ReadExecutor,
   scope: AuthScope,
-  revisionId: string,
+  folderId: string,
 ): Promise<readonly PageAssignmentView[]> {
   const rows = await db
     .select({
       sourcePageId: pageAssignments.sourcePageId,
-      revisionOrdinal: sourcePages.revisionOrdinal,
+      folderOrdinal: sourcePages.folderOrdinal,
       documentId: pageAssignments.documentId,
       sortOrder: pageAssignments.sortOrder,
       pageRoleCode: pageAssignments.pageRoleCode,
@@ -1243,12 +1252,12 @@ export async function listPageAssignments(
       sourcePages,
       and(
         eq(sourcePages.id, pageAssignments.sourcePageId),
-        eq(sourcePages.revisionId, pageAssignments.revisionId),
+        eq(sourcePages.folderId, pageAssignments.folderId),
       ),
     )
-    .innerJoin(submissionRevisions, eq(pageAssignments.revisionId, submissionRevisions.id))
-    .where(withScope(scope, REVISION_SCOPE, eq(pageAssignments.revisionId, revisionId)))
-    .orderBy(asc(sourcePages.revisionOrdinal));
+    .innerJoin(folders, eq(pageAssignments.folderId, folders.id))
+    .where(withScope(scope, FOLDER_SCOPE, eq(pageAssignments.folderId, folderId)))
+    .orderBy(asc(sourcePages.folderOrdinal));
 
   return rows.map((row) => ({ ...row, pageRoleCode: row.pageRoleCode as PageRoleCode | null }));
 }
@@ -1256,7 +1265,7 @@ export async function listPageAssignments(
 export interface UnaccountedPageView {
   readonly sourcePageId: string;
   readonly sourceFileId: string;
-  readonly revisionOrdinal: number;
+  readonly folderOrdinal: number;
 }
 
 /**
@@ -1269,23 +1278,23 @@ export interface UnaccountedPageView {
 export async function listUnaccountedPages(
   db: Database,
   scope: AuthScope,
-  revisionId: string,
+  folderId: string,
 ): Promise<readonly UnaccountedPageView[]> {
   const rows = await db
     .select({
       sourcePageId: vUnaccountedPages.sourcePageId,
       sourceFileId: vUnaccountedPages.sourceFileId,
-      revisionOrdinal: vUnaccountedPages.revisionOrdinal,
+      folderOrdinal: vUnaccountedPages.folderOrdinal,
     })
     .from(vUnaccountedPages)
-    .innerJoin(submissionRevisions, eq(vUnaccountedPages.revisionId, submissionRevisions.id))
-    .where(withScope(scope, REVISION_SCOPE, eq(vUnaccountedPages.revisionId, revisionId)))
-    .orderBy(asc(vUnaccountedPages.revisionOrdinal));
+    .innerJoin(folders, eq(vUnaccountedPages.folderId, folders.id))
+    .where(withScope(scope, FOLDER_SCOPE, eq(vUnaccountedPages.folderId, folderId)))
+    .orderBy(asc(vUnaccountedPages.folderOrdinal));
 
   return rows.map((row) => ({
     sourcePageId: row.sourcePageId ?? '',
     sourceFileId: row.sourceFileId ?? '',
-    revisionOrdinal: Number(row.revisionOrdinal ?? 0),
+    folderOrdinal: Number(row.folderOrdinal ?? 0),
   }));
 }
 
@@ -1311,7 +1320,7 @@ export interface FieldValueView {
 }
 
 export interface SaveFieldValuesInput {
-  readonly revisionId: string;
+  readonly folderId: string;
   readonly documentId: string;
   readonly fields: readonly ExtractedField[];
   readonly extractorVersion: string;
@@ -1349,14 +1358,30 @@ export async function saveFieldValues(
   scope: AuthScope,
   input: SaveFieldValuesInput,
 ): Promise<SaveFieldValuesOutcome> {
-  await requireMutableRevision(db, scope, input.revisionId);
+  await requireVisibleFolder(db, scope, input.folderId);
   const document = await findLogicalDocument(db, scope, input.documentId);
-  if (document === null || document.revisionId !== input.revisionId) {
+  if (document === null || document.folderId !== input.folderId) {
     throw notFound('Логический документ не найден.');
   }
 
   return guardWrites(() =>
     db.transaction(async (tx) => {
+      /**
+       * Замок строки документа — первым действием транзакции.
+       *
+       * `DELETE` + `INSERT` ниже идемпотентны по отдельности, но от КОНКУРЕНТА
+       * не защищены: в READ COMMITTED две перекрывающиеся попытки удаляют
+       * каждая то, что видит, и вставляют своё — итог тройные копии реквизитов
+       * одного документа. Ровно это и наблюдалось на боевом прогоне, где
+       * сторож оборвал попытку по аренде, а обход документов продолжился.
+       *
+       * Отмена (`ctx.signal`) перекрытие сокращает, но не исключает:
+       * кооперативный сигнал доходит между шагами, а транзакция уже начата.
+       * Поэтому писателей сериализует БД, а не договорённость.
+       */
+      await tx.execute(sql`select id from logical_documents where id = ${input.documentId}::uuid
+                            for update`);
+
       const preserved = await tx
         .select({ id: fieldValues.id })
         .from(fieldValues)
@@ -1383,7 +1408,7 @@ export async function saveFieldValues(
       let written = 0;
       for (const field of input.fields) {
         await tx.insert(fieldValues).values({
-          revisionId: input.revisionId,
+          folderId: input.folderId,
           documentId: input.documentId,
           fieldCode: field.fieldCode,
           valueText: field.valueText,
@@ -1431,8 +1456,8 @@ export async function listFieldValues(
       extractedBy: fieldValues.extractedBy,
     })
     .from(fieldValues)
-    .innerJoin(submissionRevisions, eq(fieldValues.revisionId, submissionRevisions.id))
-    .where(withScope(scope, REVISION_SCOPE, eq(fieldValues.documentId, documentId)))
+    .innerJoin(folders, eq(fieldValues.folderId, folders.id))
+    .where(withScope(scope, FOLDER_SCOPE, eq(fieldValues.documentId, documentId)))
     .orderBy(asc(fieldValues.fieldCode));
 
   return rows.map((row) => ({
@@ -1448,7 +1473,7 @@ export async function listFieldValues(
 
 export interface RegistryRowView {
   readonly id: string;
-  readonly revisionId: string;
+  readonly folderId: string;
   readonly documentId: string;
   /** Сквозной порядок строки в реестре (миграция 0015). */
   readonly ordinal: number;
@@ -1477,7 +1502,7 @@ export interface RegistryRowView {
 }
 
 export interface SaveRegistryRowsInput {
-  readonly revisionId: string;
+  readonly folderId: string;
   readonly documentId: string;
   readonly rows: readonly ParsedRegistryRow[];
 }
@@ -1495,9 +1520,9 @@ export async function saveRegistryRows(
   scope: AuthScope,
   input: SaveRegistryRowsInput,
 ): Promise<{ readonly removed: number; readonly written: number }> {
-  await requireMutableRevision(db, scope, input.revisionId);
+  await requireVisibleFolder(db, scope, input.folderId);
   const document = await findLogicalDocument(db, scope, input.documentId);
-  if (document === null || document.revisionId !== input.revisionId) {
+  if (document === null || document.folderId !== input.folderId) {
     throw notFound('Документ-реестр не найден.');
   }
 
@@ -1511,7 +1536,7 @@ export async function saveRegistryRows(
       let written = 0;
       for (const [index, row] of input.rows.entries()) {
         await tx.insert(registryRows).values({
-          revisionId: input.revisionId,
+          folderId: input.folderId,
           documentId: input.documentId,
           // Сквозной порядок строки, а не напечатанный номер: подрядчик
           // нумерует каждый раздел реестра с единицы (миграция 0015), поэтому
@@ -1570,17 +1595,17 @@ export interface RegistryMatch {
 export async function saveRegistryMatches(
   db: Database,
   scope: AuthScope,
-  input: { readonly revisionId: string; readonly matches: readonly RegistryMatch[] },
+  input: { readonly folderId: string; readonly matches: readonly RegistryMatch[] },
 ): Promise<{ readonly updated: number; readonly skipped: number }> {
-  await requireMutableRevision(db, scope, input.revisionId);
+  await requireVisibleFolder(db, scope, input.folderId);
 
   const known = new Set(
     (
       await db
         .select({ id: registryRows.id })
         .from(registryRows)
-        .innerJoin(submissionRevisions, eq(registryRows.revisionId, submissionRevisions.id))
-        .where(withScope(scope, REVISION_SCOPE, eq(registryRows.revisionId, input.revisionId)))
+        .innerJoin(folders, eq(registryRows.folderId, folders.id))
+        .where(withScope(scope, FOLDER_SCOPE, eq(registryRows.folderId, input.folderId)))
     ).map((row) => row.id),
   );
 
@@ -1616,7 +1641,7 @@ export async function saveRegistryMatches(
         if (match.candidates.length > 0) {
           await tx.insert(registryRowCandidates).values(
             match.candidates.map((candidate) => ({
-              revisionId: input.revisionId,
+              folderId: input.folderId,
               registryRowId: match.registryRowId,
               documentId: candidate.documentId,
               basis: candidate.basis,
@@ -1633,12 +1658,12 @@ export async function saveRegistryMatches(
 export async function listRegistryRows(
   db: ReadExecutor,
   scope: AuthScope,
-  revisionId: string,
+  folderId: string,
 ): Promise<readonly RegistryRowView[]> {
   const rows = await db
     .select({
       id: registryRows.id,
-      revisionId: registryRows.revisionId,
+      folderId: registryRows.folderId,
       documentId: registryRows.documentId,
       ordinal: registryRows.ordinal,
       rowNo: registryRows.rowNo,
@@ -1656,8 +1681,8 @@ export async function listRegistryRows(
       matchState: registryRows.matchState,
     })
     .from(registryRows)
-    .innerJoin(submissionRevisions, eq(registryRows.revisionId, submissionRevisions.id))
-    .where(withScope(scope, REVISION_SCOPE, eq(registryRows.revisionId, revisionId)))
+    .innerJoin(folders, eq(registryRows.folderId, folders.id))
+    .where(withScope(scope, FOLDER_SCOPE, eq(registryRows.folderId, folderId)))
     // Сортировка по сквозному порядку, а не по напечатанному номеру: разделы
     // реестра нумеруются с единицы каждый, и `rowNo` перемешал бы их между
     // собой (миграция 0015).
@@ -1670,7 +1695,7 @@ export async function listRegistryRows(
       score: registryRowCandidates.score,
     })
     .from(registryRowCandidates)
-    .where(eq(registryRowCandidates.revisionId, revisionId))
+    .where(eq(registryRowCandidates.folderId, folderId))
     // По убыванию силы основания: первый кандидат — самый вероятный.
     .orderBy(desc(registryRowCandidates.score));
 
@@ -1711,17 +1736,17 @@ export interface DocumentRelationInput {
 export async function saveDocumentRelations(
   db: Database,
   scope: AuthScope,
-  input: { readonly revisionId: string; readonly relations: readonly DocumentRelationInput[] },
+  input: { readonly folderId: string; readonly relations: readonly DocumentRelationInput[] },
 ): Promise<{ readonly removed: number; readonly written: number; readonly skipped: number }> {
-  await requireMutableRevision(db, scope, input.revisionId);
+  await requireVisibleFolder(db, scope, input.folderId);
 
-  const known = new Set((await listLogicalDocuments(db, scope, input.revisionId)).map((d) => d.id));
+  const known = new Set((await listLogicalDocuments(db, scope, input.folderId)).map((d) => d.id));
 
   return guardWrites(() =>
     db.transaction(async (tx) => {
       const removed = await tx
         .delete(documentRelations)
-        .where(eq(documentRelations.revisionId, input.revisionId))
+        .where(eq(documentRelations.folderId, input.folderId))
         .returning({ relation: documentRelations.relation });
 
       let written = 0;
@@ -1738,7 +1763,7 @@ export async function saveDocumentRelations(
         await tx
           .insert(documentRelations)
           .values({
-            revisionId: input.revisionId,
+            folderId: input.folderId,
             parentDocumentId: edge.parentDocumentId,
             childDocumentId: edge.childDocumentId,
             relation: edge.relation,
@@ -1754,7 +1779,7 @@ export async function saveDocumentRelations(
 export async function listDocumentRelations(
   db: Database,
   scope: AuthScope,
-  revisionId: string,
+  folderId: string,
 ): Promise<readonly DocumentRelationInput[]> {
   const rows = await db
     .select({
@@ -1763,8 +1788,8 @@ export async function listDocumentRelations(
       relation: documentRelations.relation,
     })
     .from(documentRelations)
-    .innerJoin(submissionRevisions, eq(documentRelations.revisionId, submissionRevisions.id))
-    .where(withScope(scope, REVISION_SCOPE, eq(documentRelations.revisionId, revisionId)))
+    .innerJoin(folders, eq(documentRelations.folderId, folders.id))
+    .where(withScope(scope, FOLDER_SCOPE, eq(documentRelations.folderId, folderId)))
     .orderBy(asc(documentRelations.parentDocumentId), asc(documentRelations.childDocumentId));
 
   return rows.map((row) => ({ ...row, relation: row.relation as DocumentRelation }));
@@ -1804,7 +1829,7 @@ export async function confirmDocument(
 ): Promise<LogicalDocumentView> {
   const document = await findLogicalDocument(db, scope, input.documentId);
   if (document === null) throw notFound('Логический документ не найден.');
-  await requireMutableRevision(db, scope, document.revisionId);
+  await requireVisibleFolder(db, scope, document.folderId);
 
   await guardWrites(() =>
     db.transaction(async (tx) => {
@@ -1854,8 +1879,8 @@ export async function confirmDocument(
         },
       });
 
-      await appendRevisionEvent(tx, {
-        revisionId: document.revisionId,
+      await appendFolderEvent(tx, {
+        folderId: document.folderId,
         eventType: 'documents.confirmed',
         payload: { documentId: input.documentId, docTypeCode: input.docTypeCode ?? null },
       });
@@ -1905,7 +1930,7 @@ export async function unconfirmDocument(
 ): Promise<LogicalDocumentView> {
   const document = await findLogicalDocument(db, scope, input.documentId);
   if (document === null) throw notFound('Логический документ не найден.');
-  await requireMutableRevision(db, scope, document.revisionId);
+  await requireVisibleFolder(db, scope, document.folderId);
 
   await guardWrites(() =>
     db.transaction(async (tx) => {
@@ -1951,8 +1976,8 @@ export async function unconfirmDocument(
         },
       });
 
-      await appendRevisionEvent(tx, {
-        revisionId: document.revisionId,
+      await appendFolderEvent(tx, {
+        folderId: document.folderId,
         eventType: 'documents.unconfirmed',
         payload: { documentId: input.documentId },
       });
@@ -1971,22 +1996,22 @@ export async function unconfirmDocument(
  * убедиться, что работают со СВОЕЙ ревизией: `inArray` без области видимости в
  * обработчике был бы четвёртым путём в обход §4.1.
  */
-export async function filterDocumentsOfRevision(
+export async function filterDocumentsOfFolder(
   db: Database,
   scope: AuthScope,
-  revisionId: string,
+  folderId: string,
   documentIds: readonly string[],
 ): Promise<readonly string[]> {
   if (documentIds.length === 0) return [];
   const rows = await db
     .select({ id: logicalDocuments.id })
     .from(logicalDocuments)
-    .innerJoin(submissionRevisions, eq(logicalDocuments.revisionId, submissionRevisions.id))
+    .innerJoin(folders, eq(logicalDocuments.folderId, folders.id))
     .where(
       withScope(
         scope,
-        REVISION_SCOPE,
-        eq(logicalDocuments.revisionId, revisionId),
+        FOLDER_SCOPE,
+        eq(logicalDocuments.folderId, folderId),
         inArray(logicalDocuments.id, [...documentIds]),
       ),
     );

@@ -30,7 +30,7 @@ import { retryAfterMsOf } from './problem.js';
  * Поток отклонён ответом сервера.
  *
  * Отдельный класс, а не `Error` с текстом: политика переподключения живёт в
- * экране (`features/revision/stream.tsx`), и решать «ждать названную паузу или
+ * экране (`features/folder/stream.tsx`), и решать «ждать названную паузу или
  * считать попытку неудачной» он обязан по коду ответа, а не разбором строки.
  */
 export class StreamRejected extends Error {

@@ -55,10 +55,8 @@ const OBJECT_B = id(2);
 const ORG_CONTRACTOR_A = id(4);
 const ORG_CONTRACTOR_B = id(5);
 const USER = id(6);
-const SUBMISSION_A = id(14);
-const SUBMISSION_B = id(15);
-const REVISION_A = id(16);
-const REVISION_B = id(17);
+const FOLDER_A = id(16);
+const FOLDER_B = id(17);
 
 const ADMIN: AuthScope = { kind: 'admin', userId: USER };
 const CONTRACTOR_A: AuthScope = {
@@ -95,18 +93,14 @@ const FIXTURE: readonly string[] = [
        VALUES ('${OBJECT_B}', 'roofing') ON CONFLICT DO NOTHING`,
   `INSERT INTO object_contractors (object_id, contractor_id)
        VALUES ('${OBJECT_A}', '${ORG_CONTRACTOR_A}') ON CONFLICT DO NOTHING`,
-  `INSERT INTO works
-       (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-     VALUES ('${SUBMISSION_A}', '${OBJECT_A}', '${ORG_CONTRACTOR_A}', '${ORG_CONTRACTOR_A}', 'roofing', DATE '2026-01-01', 'Поставка А', '${USER}')`,
   `INSERT INTO object_contractors (object_id, contractor_id)
        VALUES ('${OBJECT_B}', '${ORG_CONTRACTOR_B}') ON CONFLICT DO NOTHING`,
-  `INSERT INTO works
+  `INSERT INTO folders
        (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-     VALUES ('${SUBMISSION_B}', '${OBJECT_B}', '${ORG_CONTRACTOR_B}', '${ORG_CONTRACTOR_B}', 'roofing', DATE '2026-01-01', 'Поставка Б', '${USER}')`,
-  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
-     VALUES ('${REVISION_A}', '${SUBMISSION_A}', '${OBJECT_A}', '${ORG_CONTRACTOR_A}', 1, 'draft')`,
-  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
-     VALUES ('${REVISION_B}', '${SUBMISSION_B}', '${OBJECT_B}', '${ORG_CONTRACTOR_B}', 1, 'draft')`,
+     VALUES ('${FOLDER_A}', '${OBJECT_A}', '${ORG_CONTRACTOR_A}', '${ORG_CONTRACTOR_A}', 'roofing', DATE '2026-01-01', 'Поставка А', '${USER}')`,
+  `INSERT INTO folders
+       (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
+     VALUES ('${FOLDER_B}', '${OBJECT_B}', '${ORG_CONTRACTOR_B}', '${ORG_CONTRACTOR_B}', 'roofing', DATE '2026-01-01', 'Поставка Б', '${USER}')`,
 ];
 
 let testDb: TestDatabase;
@@ -132,7 +126,7 @@ const HASH_OUT = 'b'.repeat(64);
 
 function inputOf(overrides: Partial<Parameters<typeof recordAiRun>[2]> = {}) {
   return {
-    revisionId: REVISION_A,
+    folderId: FOLDER_A,
     stage: 'page_classify' as const,
     provider: 'recorded' as const,
     model: 'recorded-model',
@@ -191,7 +185,7 @@ describe('требование D: чувствительного payload в ai_r
 
     const completion = await provider.complete(request);
     const run = await recordAiRun(db, ADMIN, {
-      revisionId: REVISION_A,
+      folderId: FOLDER_A,
       stage: request.stage,
       provider: completion.provider,
       model: completion.model,
@@ -248,7 +242,7 @@ describe('recordAiRun', () => {
   it('записывает прогон и возвращает его в разобранном виде', async () => {
     const run = await recordAiRun(db, ADMIN, inputOf({ requestId: 'req-basic' }));
 
-    expect(run.revisionId).toBe(REVISION_A);
+    expect(run.folderId).toBe(FOLDER_A);
     expect(run.stage).toBe('page_classify');
     expect(run.provider).toBe('recorded');
     expect(run.tokensIn).toBe(100);
@@ -282,28 +276,24 @@ describe('recordAiRun', () => {
 describe('listAiRuns', () => {
   it('изоляция: подрядчик не видит чужие прогоны ни списком, ни по прямому id', async () => {
     const own = await recordAiRun(db, ADMIN, inputOf({ requestId: 'req-own' }));
-    const alien = await recordAiRun(
-      db,
-      ADMIN,
-      inputOf({ revisionId: REVISION_B, requestId: 'req-b' }),
-    );
+    const alien = await recordAiRun(db, ADMIN, inputOf({ folderId: FOLDER_B, requestId: 'req-b' }));
 
-    const mine = await listAiRuns(db, CONTRACTOR_A, { revisionId: REVISION_A, limit: 100 });
+    const mine = await listAiRuns(db, CONTRACTOR_A, { folderId: FOLDER_A, limit: 100 });
     expect(mine.items.map((item) => item.id)).toContain(own.id);
 
-    const foreign = await listAiRuns(db, CONTRACTOR_A, { revisionId: REVISION_B, limit: 100 });
+    const foreign = await listAiRuns(db, CONTRACTOR_A, { folderId: FOLDER_B, limit: 100 });
     expect(foreign.items).toStrictEqual([]);
     expect(await findAiRun(db, CONTRACTOR_A, alien.id)).toBeNull();
     expect(await findAiRun(db, CONTRACTOR_B, alien.id)).not.toBeNull();
 
     // Инженер видит обе ревизии: изоляция режет подрядчика, а не его.
-    const engineer = await listAiRuns(db, ENGINEER, { revisionId: REVISION_B, limit: 100 });
+    const engineer = await listAiRuns(db, ENGINEER, { folderId: FOLDER_B, limit: 100 });
     expect(engineer.items.map((item) => item.id)).toContain(alien.id);
   });
 
   it('листается курсором без пропусков и без повторов', async () => {
-    const revision = REVISION_A;
-    const before = await listAiRuns(db, ADMIN, { revisionId: revision, limit: 1000 });
+    const folder = FOLDER_A;
+    const before = await listAiRuns(db, ADMIN, { folderId: folder, limit: 1000 });
     for (let i = 0; i < 3; i += 1) {
       await recordAiRun(db, ADMIN, inputOf({ requestId: `req-page-${i}` }));
     }
@@ -313,7 +303,7 @@ describe('listAiRuns', () => {
     let cursor: string | null = null;
     do {
       const page: Awaited<ReturnType<typeof listAiRuns>> = await listAiRuns(db, ADMIN, {
-        revisionId: revision,
+        folderId: folder,
         limit: 2,
         cursor,
       });
@@ -327,7 +317,7 @@ describe('listAiRuns', () => {
 
   it('повреждённый курсор — отказ, а не молчаливый возврат к первой странице', async () => {
     await expect(
-      listAiRuns(db, ADMIN, { revisionId: REVISION_A, limit: 2, cursor: 'не-курсор' }),
+      listAiRuns(db, ADMIN, { folderId: FOLDER_A, limit: 2, cursor: 'не-курсор' }),
     ).rejects.toThrow(/Курсор/);
   });
 });
@@ -341,20 +331,20 @@ describe('monthlyAiSpend', () => {
 
   beforeAll(async () => {
     const rows: readonly [string, string, string | null][] = [
-      // [revision, created_at, cost]
-      [REVISION_A, '2026-04-30T23:59:59.000Z', '10.0000'],
-      [REVISION_A, '2026-05-01T00:00:00.000Z', '1.5000'],
-      [REVISION_A, '2026-05-31T23:59:59.999Z', '2.2500'],
-      [REVISION_A, '2026-06-01T00:00:00.000Z', '100.0000'],
+      // [folder, created_at, cost]
+      [FOLDER_A, '2026-04-30T23:59:59.000Z', '10.0000'],
+      [FOLDER_A, '2026-05-01T00:00:00.000Z', '1.5000'],
+      [FOLDER_A, '2026-05-31T23:59:59.999Z', '2.2500'],
+      [FOLDER_A, '2026-06-01T00:00:00.000Z', '100.0000'],
       // Стоимость не сообщена: в сумму не входит — ноль означал бы «бесплатно».
-      [REVISION_A, '2026-05-10T00:00:00.000Z', null],
+      [FOLDER_A, '2026-05-10T00:00:00.000Z', null],
       // Чужая ревизия: видна администратору, но не подрядчику А.
-      [REVISION_B, '2026-05-10T00:00:00.000Z', '7.0000'],
+      [FOLDER_B, '2026-05-10T00:00:00.000Z', '7.0000'],
     ];
-    for (const [revision, at, cost] of rows) {
+    for (const [folder, at, cost] of rows) {
       await testDb.query(
-        `INSERT INTO ai_runs (revision_id, stage, provider, model, cost, created_at)
-           VALUES ('${revision}', 'summary', 'proxy_llm', 'gw/model-a',
+        `INSERT INTO ai_runs (folder_id, stage, provider, model, cost, created_at)
+           VALUES ('${folder}', 'summary', 'proxy_llm', 'gw/model-a',
                    ${cost === null ? 'NULL' : `'${cost}'`}, '${at}')`,
       );
     }

@@ -69,7 +69,7 @@ const filtersShape = {
   promptVersion: z.coerce.number().int().positive().optional(),
   model: z.string().min(1).max(200).optional(),
   docTypeCode: z.string().min(1).max(120).optional(),
-  revisionId: uuidSchema.optional(),
+  folderId: uuidSchema.optional(),
   from: isoDateTimeSchema.optional(),
   to: isoDateTimeSchema.optional(),
 };
@@ -124,7 +124,7 @@ const eventSchema = z.object({
   feedbackType: z.string(),
   reasonCode: z.string(),
   severity: z.string(),
-  revisionId: uuidSchema.nullable(),
+  folderId: uuidSchema.nullable(),
   recognitionRunId: uuidSchema.nullable(),
   sourcePageId: uuidSchema.nullable(),
   workingPageIndex: z.int().nullable(),

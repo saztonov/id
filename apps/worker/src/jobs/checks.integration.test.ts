@@ -85,8 +85,7 @@ const ORG_CUSTOMER = id(1);
 const ORG_CONTRACTOR = id(2);
 const OBJECT = id(4);
 const RD_DOCUMENT = id(7);
-const SUBMISSION = id(10);
-const REVISION = id(11);
+const FOLDER = id(11);
 const USER_CONTRACTOR = id(20);
 const USER_ADMIN = id(21);
 const SOURCE_FILE = id(30);
@@ -356,14 +355,12 @@ function catalogStatements(): readonly string[] {
     `INSERT INTO user_roles (user_id, role) VALUES ('${USER_ADMIN}', 'admin')`,
     `INSERT INTO object_contractors (object_id, contractor_id)
        VALUES ('${OBJECT}', '${ORG_CONTRACTOR}') ON CONFLICT DO NOTHING`,
-    `INSERT INTO works
-       (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-     VALUES ('${SUBMISSION}', '${OBJECT}', '${ORG_CONTRACTOR}', '${ORG_CONTRACTOR}', 'roofing', DATE '2026-01-01', ${lit('Поставка 1')}, '${USER_CONTRACTOR}')`,
     // Ревизия заводится черновиком: класс содержимого `source` (файлы, страницы,
     // рабочий документ) заперт триггером 0008 уже в `in_review`. В боевом пути
     // они и появляются до подачи; статус переводится ниже, перед прогоном.
-    `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
-       VALUES ('${REVISION}', '${SUBMISSION}', '${OBJECT}', '${ORG_CONTRACTOR}', 1, 'draft')`,
+    `INSERT INTO folders
+       (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
+     VALUES ('${FOLDER}', '${OBJECT}', '${ORG_CONTRACTOR}', '${ORG_CONTRACTOR}', 'roofing', DATE '2026-01-01', ${lit('Поставка 1')}, '${USER_CONTRACTOR}')`,
   ];
 }
 
@@ -374,23 +371,23 @@ function sourceStatements(): readonly string[] {
        VALUES ('${HASH_A}', 'blobs/aa/aa/${HASH_A}', 1024, 'application/pdf')`,
     `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
        VALUES ('${HASH_B}', 'blobs/bb/bb/${HASH_B}', 2048, 'application/pdf')`,
-    `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order, verify_state)
-       VALUES ('${SOURCE_FILE}', '${REVISION}', '${HASH_A}', ${lit('комплект.pdf')}, 0, 'ok')`,
-    `INSERT INTO processing_bundles (id, revision_id, aggregate_manifest_hash,
+    `INSERT INTO source_files (id, folder_id, blob_sha256, file_name, sort_order, verify_state)
+       VALUES ('${SOURCE_FILE}', '${FOLDER}', '${HASH_A}', ${lit('комплект.pdf')}, 0, 'ok')`,
+    `INSERT INTO processing_bundles (id, folder_id, aggregate_manifest_hash,
                                      working_pdf_blob_sha256, builder_version)
-       VALUES ('${BUNDLE}', '${REVISION}', '${HASH_C}', '${HASH_B}', 'test-1')`,
+       VALUES ('${BUNDLE}', '${FOLDER}', '${HASH_C}', '${HASH_B}', 'test-1')`,
   ];
 
   DOCUMENTS.forEach((_document, index) => {
     statements.push(
-      `INSERT INTO source_pages (id, revision_id, source_file_id, file_page_index,
-                                 revision_ordinal, width_px, height_px)
-         VALUES ('${pageId(index)}', '${REVISION}', '${SOURCE_FILE}', ${String(index)},
+      `INSERT INTO source_pages (id, folder_id, source_file_id, file_page_index,
+                                 folder_ordinal, width_px, height_px)
+         VALUES ('${pageId(index)}', '${FOLDER}', '${SOURCE_FILE}', ${String(index)},
                  ${String(index)}, 1240, 1754)`,
     );
     statements.push(
-      `INSERT INTO processing_bundle_pages (bundle_id, revision_id, working_page_index, source_page_id)
-         VALUES ('${BUNDLE}', '${REVISION}', ${String(index)}, '${pageId(index)}')`,
+      `INSERT INTO processing_bundle_pages (bundle_id, folder_id, working_page_index, source_page_id)
+         VALUES ('${BUNDLE}', '${FOLDER}', ${String(index)}, '${pageId(index)}')`,
     );
   });
 
@@ -407,13 +404,13 @@ function sourceStatements(): readonly string[] {
  */
 function layoutStatements(): readonly string[] {
   const statements: string[] = [
-    `INSERT INTO layout_revisions (id, revision_id, object_id, bundle_id, revision_no, state)
-       VALUES ('${LAYOUT}', '${REVISION}', '${OBJECT}', '${BUNDLE}', 1, 'draft')`,
+    `INSERT INTO layout_revisions (id, folder_id, object_id, bundle_id, revision_no, state)
+       VALUES ('${LAYOUT}', '${FOLDER}', '${OBJECT}', '${BUNDLE}', 1, 'draft')`,
     `INSERT INTO rd_run_documents (id, layout_revision_id, rd_document_id, rd_project_id)
        VALUES ('${RD_RUN_DOCUMENT}', '${LAYOUT}', 'rd-doc-1', 'prj-portal')`,
-    `INSERT INTO recognition_runs (id, revision_id, layout_revision_id, rd_run_document_id,
+    `INSERT INTO recognition_runs (id, folder_id, layout_revision_id, rd_run_document_id,
                                    local_layout_hash, working_pdf_sha256, status, finished_at)
-       VALUES ('${RECOGNITION_RUN}', '${REVISION}', '${LAYOUT}', '${RD_RUN_DOCUMENT}',
+       VALUES ('${RECOGNITION_RUN}', '${FOLDER}', '${LAYOUT}', '${RD_RUN_DOCUMENT}',
                '${HASH_C}', '${HASH_B}', 'done', now())`,
     `INSERT INTO artifact_versions (id, recognition_run_id, kind, s3_key, artifact_sha256, byte_size)
        VALUES ('${ARTIFACT}', '${RECOGNITION_RUN}', 'md', 'artifacts/md', '${HASH_D}', 512)`,
@@ -421,27 +418,27 @@ function layoutStatements(): readonly string[] {
 
   DOCUMENTS.forEach((document, index) => {
     statements.push(
-      `INSERT INTO layout_blocks (id, layout_revision_id, revision_id, bundle_id, source_page_id,
+      `INSERT INTO layout_blocks (id, layout_revision_id, folder_id, bundle_id, source_page_id,
                                   working_page_index, object_id, block_type, shape_type,
                                   x0, y0, x1, y1, sort_order, source, detector_provenance)
-         VALUES ('${textBlockId(index)}', '${LAYOUT}', '${REVISION}', '${BUNDLE}',
+         VALUES ('${textBlockId(index)}', '${LAYOUT}', '${FOLDER}', '${BUNDLE}',
                  '${pageId(index)}', ${String(index)}, '${OBJECT}', 'text', 'rectangle',
                  0, 0, 1, 1, 0, 'auto', 'full_page')`,
     );
     if (document.fields.some((value) => value.stamp === true)) {
       statements.push(
-        `INSERT INTO layout_blocks (id, layout_revision_id, revision_id, bundle_id, source_page_id,
+        `INSERT INTO layout_blocks (id, layout_revision_id, folder_id, bundle_id, source_page_id,
                                     working_page_index, object_id, block_type, shape_type,
                                     x0, y0, x1, y1, sort_order, source, detector_provenance)
-           VALUES ('${stampBlockId(index)}', '${LAYOUT}', '${REVISION}', '${BUNDLE}',
+           VALUES ('${stampBlockId(index)}', '${LAYOUT}', '${FOLDER}', '${BUNDLE}',
                    '${pageId(index)}', ${String(index)}, '${OBJECT}', 'stamp', 'rectangle',
                    0.6, 0.8, 0.9, 0.95, 1, 'auto', 'rf_detr')`,
       );
     }
     statements.push(
-      `INSERT INTO page_text_versions (id, revision_id, source_page_id, recognition_run_id,
+      `INSERT INTO page_text_versions (id, folder_id, source_page_id, recognition_run_id,
                                        artifact_version_id, text_md, text_sha256)
-         VALUES ('${textVersionId(index)}', '${REVISION}', '${pageId(index)}',
+         VALUES ('${textVersionId(index)}', '${FOLDER}', '${pageId(index)}',
                  '${RECOGNITION_RUN}', '${ARTIFACT}', ${lit(document.title)}, '${HASH_D}')`,
     );
   });
@@ -456,15 +453,15 @@ function graphStatements(): readonly string[] {
 
   DOCUMENTS.forEach((document, index) => {
     statements.push(
-      `INSERT INTO logical_documents (id, revision_id, object_id, contractor_id, doc_type_code,
+      `INSERT INTO logical_documents (id, folder_id, object_id, contractor_id, doc_type_code,
                                       ordinal, title, type_confidence, boundary_confidence,
                                       needs_review)
-         VALUES ('${docId(document.key)}', '${REVISION}', '${OBJECT}', '${ORG_CONTRACTOR}',
+         VALUES ('${docId(document.key)}', '${FOLDER}', '${OBJECT}', '${ORG_CONTRACTOR}',
                  '${document.typeCode}', ${String(index)}, ${lit(document.title)}, 0.95, 0.95, false)`,
     );
     statements.push(
-      `INSERT INTO page_assignments (revision_id, source_page_id, document_id, sort_order)
-         VALUES ('${REVISION}', '${pageId(index)}', '${docId(document.key)}', 0)`,
+      `INSERT INTO page_assignments (folder_id, source_page_id, document_id, sort_order)
+         VALUES ('${FOLDER}', '${pageId(index)}', '${docId(document.key)}', 0)`,
     );
 
     for (const value of document.fields) {
@@ -472,11 +469,11 @@ function graphStatements(): readonly string[] {
       const blockId = value.stamp === true ? stampBlockId(index) : textBlockId(index);
       const quote = value.text ?? value.date ?? String(value.num ?? value.json?.[0] ?? '');
       statements.push(
-        `INSERT INTO field_values (id, revision_id, document_id, field_code, value_text, value_date,
+        `INSERT INTO field_values (id, folder_id, document_id, field_code, value_text, value_date,
                                    value_num, value_json, confidence, is_verified, extractor_version,
                                    page_text_version_id, source_block_id, char_span, quote,
                                    extracted_by)
-           VALUES ('${id(300 + fieldSeq)}', '${REVISION}', '${docId(document.key)}',
+           VALUES ('${id(300 + fieldSeq)}', '${FOLDER}', '${docId(document.key)}',
                    '${value.code}',
                    ${value.text === undefined ? 'NULL' : lit(value.text)},
                    ${value.date === undefined ? 'NULL' : `'${value.date}'::date`},
@@ -494,8 +491,8 @@ function graphStatements(): readonly string[] {
   for (const document of DOCUMENTS) {
     if (document.key === 'act' || document.key === 'act-stamp') continue;
     statements.push(
-      `INSERT INTO document_relations (parent_document_id, child_document_id, relation, revision_id)
-         VALUES ('${docId('act')}', '${docId(document.key)}', 'annex', '${REVISION}')`,
+      `INSERT INTO document_relations (parent_document_id, child_document_id, relation, folder_id)
+         VALUES ('${docId('act')}', '${docId(document.key)}', 'annex', '${FOLDER}')`,
     );
   }
 
@@ -506,10 +503,10 @@ function graphStatements(): readonly string[] {
   ];
   registryEntries.forEach(([key, name, number], index) => {
     statements.push(
-      `INSERT INTO registry_rows (id, revision_id, document_id, row_no, ordinal, doc_name_raw,
+      `INSERT INTO registry_rows (id, folder_id, document_id, row_no, ordinal, doc_name_raw,
                                   doc_no_raw, doc_no_norm, doc_no_folded, org_raw,
                                   matched_document_id, match_score, match_state)
-         VALUES ('${id(500 + index)}', '${REVISION}', '${docId('registry')}',
+         VALUES ('${id(500 + index)}', '${FOLDER}', '${docId('registry')}',
                  ${String(index + 1)}, ${String(index)}, ${lit(name)}, ${lit(number)},
                  ${lit(number.toUpperCase())}, ${lit(number.toUpperCase())},
                  ${lit('ООО «Подрядчик»')}, '${docId(key)}', 1, 'matched')`,
@@ -614,12 +611,6 @@ beforeAll(async () => {
   ]) {
     await testDb.query(statement);
   }
-
-  // Содержимое класса `derived` в `in_review` изменяемо — это и есть предмет
-  // проверки (0008). Прогон проверок пишет именно его.
-  await testDb.query(
-    `UPDATE submission_revisions SET status = 'in_review' WHERE id = '${REVISION}'`,
-  );
 
   db = createDatabase(createTestPool(testDb) as unknown as Pool);
 
@@ -741,7 +732,7 @@ async function findingsOf(validationRunId: string): Promise<readonly FindingRow[
 
 async function latestRunId(): Promise<string> {
   const rows = await testDb.query<{ id: string }>(
-    `SELECT id FROM validation_runs WHERE revision_id = '${REVISION}'
+    `SELECT id FROM validation_runs WHERE folder_id = '${FOLDER}'
       ORDER BY started_at DESC, id DESC LIMIT 1`,
   );
   const value = rows[0]?.id;
@@ -762,8 +753,8 @@ describe('задачи 20–21 действительно исполняются
 
     await enqueueSystemJob(db, {
       type: 'checks.run',
-      payload: { revisionId: REVISION },
-      dedupeKey: `checks.run:${REVISION}:first`,
+      payload: { folderId: FOLDER },
+      dedupeKey: `checks.run:${FOLDER}:first`,
     });
 
     const rows = await testDb.query<{ type: string; status: string }>(
@@ -789,7 +780,7 @@ describe('задачи 20–21 действительно исполняются
       finished_at: string | null;
     }>(
       `SELECT id, ruleset_version_id, section_profile_id, finished_at
-         FROM validation_runs WHERE revision_id = '${REVISION}'`,
+         FROM validation_runs WHERE folder_id = '${FOLDER}'`,
     );
     expect(runs).toHaveLength(1);
     firstRunId = runs[0]?.id ?? '';
@@ -984,8 +975,8 @@ describe('троичная логика на сквозном прогоне', (
 
     beforeAll(async () => {
       await testDb.query(
-        `INSERT INTO validation_runs (id, revision_id, ruleset_version_id)
-           VALUES ('${CHECK_RUN}', '${REVISION}', '${RULESET_VERSION}')`,
+        `INSERT INTO validation_runs (id, folder_id, ruleset_version_id)
+           VALUES ('${CHECK_RUN}', '${FOLDER}', '${RULESET_VERSION}')`,
       );
     });
 
@@ -1000,14 +991,14 @@ describe('троичная логика на сквозном прогоне', (
       isBlocking: boolean,
       confirmedBy: string | null,
     ): string {
-      return `INSERT INTO findings (id, validation_run_id, revision_id, object_id, contractor_id,
+      return `INSERT INTO findings (id, validation_run_id, folder_id, object_id, contractor_id,
                                     rule_code, severity, state, origin, is_blocking,
                                     confirmed_by, confirmed_at, target_type, target_id, message)
-         VALUES ('${findingId}', '${CHECK_RUN}', '${REVISION}', '${OBJECT}', '${ORG_CONTRACTOR}',
+         VALUES ('${findingId}', '${CHECK_RUN}', '${FOLDER}', '${OBJECT}', '${ORG_CONTRACTOR}',
                  'AOSR.HDR.022', 'error', 'open', '${origin}', ${String(isBlocking)},
                  ${confirmedBy === null ? 'NULL' : `'${confirmedBy}'`},
                  ${confirmedBy === null ? 'NULL' : 'now()'},
-                 'revision', '${REVISION}', ${lit('Испытание ограничения БД')})`;
+                 'folder', '${FOLDER}', ${lit('Испытание ограничения БД')})`;
     }
 
     /** Вставка с гарантированной уборкой: строка не должна пережить тест. */
@@ -1093,19 +1084,17 @@ describe('троичная логика на сквозном прогоне', (
 describe('материалы и партии выведены и записаны', () => {
   it('materials, batches и material_documents непусты', async () => {
     expect(
-      await count(`SELECT count(*) AS count FROM materials WHERE revision_id = '${REVISION}'`),
+      await count(`SELECT count(*) AS count FROM materials WHERE folder_id = '${FOLDER}'`),
     ).toBeGreaterThan(0);
     expect(
       await count(
         `SELECT count(*) AS count FROM batches b
            JOIN materials m ON m.id = b.material_id
-          WHERE m.revision_id = '${REVISION}'`,
+          WHERE m.folder_id = '${FOLDER}'`,
       ),
     ).toBeGreaterThan(0);
     expect(
-      await count(
-        `SELECT count(*) AS count FROM material_documents WHERE revision_id = '${REVISION}'`,
-      ),
+      await count(`SELECT count(*) AS count FROM material_documents WHERE folder_id = '${FOLDER}'`),
     ).toBeGreaterThan(0);
   });
 
@@ -1154,15 +1143,15 @@ describe('материалы и партии выведены и записан�
 describe('повтор задачи 20 безопасен', () => {
   it('второй прогон не трогает первый и не задваивает материалы', async () => {
     const materialsBefore = await count(
-      `SELECT count(*) AS count FROM materials WHERE revision_id = '${REVISION}'`,
+      `SELECT count(*) AS count FROM materials WHERE folder_id = '${FOLDER}'`,
     );
     const firstFindings = await findingsOf(firstRunId);
     const firstCodes = [...new Set(firstFindings.map((row) => row.rule_code))].sort();
 
     await enqueueSystemJob(db, {
       type: 'checks.run',
-      payload: { revisionId: REVISION },
-      dedupeKey: `checks.run:${REVISION}:repeat`,
+      payload: { folderId: FOLDER },
+      dedupeKey: `checks.run:${FOLDER}:repeat`,
     });
     await drainQueue();
 
@@ -1174,7 +1163,7 @@ describe('повтор задачи 20 безопасен', () => {
     expect(firstAgain).toEqual(firstFindings);
 
     expect(
-      await count(`SELECT count(*) AS count FROM materials WHERE revision_id = '${REVISION}'`),
+      await count(`SELECT count(*) AS count FROM materials WHERE folder_id = '${FOLDER}'`),
     ).toBe(materialsBefore);
 
     const secondCodes = [
@@ -1216,8 +1205,8 @@ describe('enabled_rule_codes профиля ограничивает прого�
 
     await enqueueSystemJob(db, {
       type: 'checks.run',
-      payload: { revisionId: REVISION },
-      dedupeKey: `checks.run:${REVISION}:narrow-profile`,
+      payload: { folderId: FOLDER },
+      dedupeKey: `checks.run:${FOLDER}:narrow-profile`,
     });
     await drainQueue();
 
@@ -1254,29 +1243,29 @@ describe('enabled_rule_codes профиля ограничивает прого�
 describe('задача честно отказывает вместо «замечаний нет»', () => {
   it('без активной версии набора правил прогон не начинается', async () => {
     const runsBefore = await count(
-      `SELECT count(*) AS count FROM validation_runs WHERE revision_id = '${REVISION}'`,
+      `SELECT count(*) AS count FROM validation_runs WHERE folder_id = '${FOLDER}'`,
     );
     const findingsBefore = await count(`SELECT count(*) AS count FROM findings`);
 
     await testDb.query(`DELETE FROM app_settings WHERE key = 'ruleset.active_version_id'`);
     await enqueueSystemJob(db, {
       type: 'checks.run',
-      payload: { revisionId: REVISION },
-      dedupeKey: `checks.run:${REVISION}:no-ruleset`,
+      payload: { folderId: FOLDER },
+      dedupeKey: `checks.run:${FOLDER}:no-ruleset`,
     });
     await drainQueue();
 
     const runsOfJob = await testDb.query<{ outcome: string | null; error_message: string | null }>(
       `SELECT r.outcome, r.error_message FROM job_runs r
          JOIN jobs j ON j.id = r.job_id
-        WHERE j.dedupe_key = 'checks.run:${REVISION}:no-ruleset'`,
+        WHERE j.dedupe_key = 'checks.run:${FOLDER}:no-ruleset'`,
     );
     expect(runsOfJob.length).toBeGreaterThan(0);
     for (const row of runsOfJob) expect(row.outcome).not.toBe('succeeded');
     expect(runsOfJob[0]?.error_message ?? '').toContain('Активная версия набора правил');
 
     const job = await testDb.query<{ status: string; last_error: string | null }>(
-      `SELECT status, last_error FROM jobs WHERE dedupe_key = 'checks.run:${REVISION}:no-ruleset'`,
+      `SELECT status, last_error FROM jobs WHERE dedupe_key = 'checks.run:${FOLDER}:no-ruleset'`,
     );
     // Повтор ничего не изменит, пока администратор не опубликует набор.
     expect(job[0]?.status).toBe('failed');
@@ -1284,9 +1273,7 @@ describe('задача честно отказывает вместо «заме
 
     // Отказ, оставивший после себя прогон или замечания, был бы хуже успеха.
     expect(
-      await count(
-        `SELECT count(*) AS count FROM validation_runs WHERE revision_id = '${REVISION}'`,
-      ),
+      await count(`SELECT count(*) AS count FROM validation_runs WHERE folder_id = '${FOLDER}'`),
     ).toBe(runsBefore);
     expect(await count(`SELECT count(*) AS count FROM findings`)).toBe(findingsBefore);
 
@@ -1300,7 +1287,7 @@ describe('задача честно отказывает вместо «заме
 
   it('расхождение реестра правил и реализаций ловится в боевом пути', async () => {
     const runsBefore = await count(
-      `SELECT count(*) AS count FROM validation_runs WHERE revision_id = '${REVISION}'`,
+      `SELECT count(*) AS count FROM validation_runs WHERE folder_id = '${FOLDER}'`,
     );
 
     // Правило, включённое администратором и не имеющее реализации, молча не
@@ -1313,24 +1300,22 @@ describe('задача честно отказывает вместо «заме
 
     await enqueueSystemJob(db, {
       type: 'checks.run',
-      payload: { revisionId: REVISION },
-      dedupeKey: `checks.run:${REVISION}:phantom`,
+      payload: { folderId: FOLDER },
+      dedupeKey: `checks.run:${FOLDER}:phantom`,
     });
     await drainQueue();
 
     const runsOfJob = await testDb.query<{ outcome: string | null; error_message: string | null }>(
       `SELECT r.outcome, r.error_message FROM job_runs r
          JOIN jobs j ON j.id = r.job_id
-        WHERE j.dedupe_key = 'checks.run:${REVISION}:phantom'`,
+        WHERE j.dedupe_key = 'checks.run:${FOLDER}:phantom'`,
     );
     expect(runsOfJob.length).toBeGreaterThan(0);
     for (const row of runsOfJob) expect(row.outcome).not.toBe('succeeded');
     expect(runsOfJob[0]?.error_message ?? '').toContain('реестр правил разошёлся с реализациями');
 
     expect(
-      await count(
-        `SELECT count(*) AS count FROM validation_runs WHERE revision_id = '${REVISION}'`,
-      ),
+      await count(`SELECT count(*) AS count FROM validation_runs WHERE folder_id = '${FOLDER}'`),
     ).toBe(runsBefore);
 
     await testDb.query(`DELETE FROM rule_definitions WHERE code = 'PHANTOM.999'`);

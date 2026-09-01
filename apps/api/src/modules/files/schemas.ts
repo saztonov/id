@@ -48,10 +48,10 @@ export const fileNameSchema = z
   })
   .refine((value) => value.length > 0, 'Имя файла не может быть пустым');
 
-export const revisionIdParamSchema = z.object({ revisionId: uuidSchema });
+export const folderIdParamSchema = z.object({ folderId: uuidSchema });
 export const fileIdParamSchema = z.object({ fileId: uuidSchema });
-export const revisionFileParamSchema = z.object({
-  revisionId: uuidSchema,
+export const folderFileParamSchema = z.object({
+  folderId: uuidSchema,
   fileId: uuidSchema,
 });
 
@@ -78,7 +78,7 @@ export const uploadInitBodySchema = z.object({
  * ДРУГОЙ маршрут, который никуда не делся (комплект без файла заводится им
  * по-прежнему — например, файл описи реестра).
  */
-export const createWorkWithFileBodySchema = z.object({
+export const createFolderWithFileBodySchema = z.object({
   objectId: uuidSchema,
   sectionCode: z.string().min(1).max(64),
   // Месяца здесь нет намеренно (S30) — см. `createWorkBodySchema`.
@@ -109,9 +109,8 @@ export const uploadCompleteBodySchema = z.object({
  * `complete`, и предел размера, чтобы отказ по лимиту пришёл до заливки. Форма
  * та же, что у `uploadInitResponseSchema`, — второго вида талона в портале нет.
  */
-export const createdWorkWithFileSchema = z.object({
-  workId: uuidSchema,
-  revisionId: uuidSchema,
+export const createdFolderWithFileSchema = z.object({
+  folderId: uuidSchema,
   upload: uploadInitResponseSchema,
 });
 

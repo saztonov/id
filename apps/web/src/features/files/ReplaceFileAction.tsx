@@ -23,7 +23,7 @@
 import { useRef, useState, type ReactNode } from 'react';
 import { App as AntApp, Modal, Typography } from 'antd';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { layoutKeys, revisionKeys } from '../../api/keys.js';
+import { layoutKeys, folderKeys } from '../../api/keys.js';
 import { describeError } from '../../api/problem.js';
 import type { SourceFile } from '../../api/types.js';
 import { IconAction } from '../../shared/RowActions.js';
@@ -31,7 +31,7 @@ import { ReplaceIcon } from '../../shared/icons.js';
 import { replaceFile } from './upload.js';
 
 export interface ReplaceFileActionProps {
-  readonly revisionId: string;
+  readonly folderId: string;
   readonly file: SourceFile;
   readonly disabled: boolean;
   /** Почему нельзя, если нельзя: выключенная кнопка без причины читается как поломка. */
@@ -46,7 +46,7 @@ export function ReplaceFileAction(props: ReplaceFileActionProps): ReactNode {
 
   const replace = useMutation({
     mutationFn: (picked: File) =>
-      replaceFile(props.revisionId, props.file.id, picked, (attempt, total) => {
+      replaceFile(props.folderId, props.file.id, picked, (attempt, total) => {
         // Кнопка показывает только «идёт»: без этой строки повтор после отказа
         // хранилища выглядит как зависшая замена на несколько секунд.
         message.warning(
@@ -55,10 +55,10 @@ export function ReplaceFileAction(props: ReplaceFileActionProps): ReactNode {
       }),
     onSuccess: async (stored) => {
       message.success(`Файл заменён на «${stored.fileName}». Проверка сброшена.`);
-      await queryClient.invalidateQueries({ queryKey: revisionKeys.files(props.revisionId) });
-      await queryClient.invalidateQueries({ queryKey: revisionKeys.bundles(props.revisionId) });
-      await queryClient.invalidateQueries({ queryKey: revisionKeys.findings(props.revisionId) });
-      await queryClient.invalidateQueries({ queryKey: layoutKeys.revisions(props.revisionId) });
+      await queryClient.invalidateQueries({ queryKey: folderKeys.files(props.folderId) });
+      await queryClient.invalidateQueries({ queryKey: folderKeys.bundles(props.folderId) });
+      await queryClient.invalidateQueries({ queryKey: folderKeys.findings(props.folderId) });
+      await queryClient.invalidateQueries({ queryKey: layoutKeys.folders(props.folderId) });
     },
     onError: (error) => message.error(describeError(error)),
   });
@@ -115,8 +115,8 @@ export function ReplaceFileAction(props: ReplaceFileActionProps): ReactNode {
           найденные ошибки: они описывали прежний файл и к новому не относятся.
         </Typography.Paragraph>
         <Typography.Paragraph>
-          Ревизий портал при этом не заводит — комплект остаётся тем же. После замены:
-          «1. Выделить блоки», затем «2. Распознать».
+          Ревизий портал при этом не заводит — комплект остаётся тем же. После замены: «1. Выделить
+          блоки», затем «2. Распознать».
         </Typography.Paragraph>
       </Modal>
     </>

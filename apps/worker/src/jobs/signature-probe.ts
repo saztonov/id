@@ -54,7 +54,7 @@ export interface SignatureProbeDeps {
   readonly saveProbe?:
     | ((input: {
         readonly fileId: string;
-        readonly revisionId: string;
+        readonly folderId: string;
         readonly probe: StoredSignatureProbe;
       }) => Promise<{ readonly written: boolean; readonly reason?: string | undefined }>)
     | undefined;
@@ -74,17 +74,17 @@ export function createSignatureProbeHandler(
   const now = deps.now ?? ((): Date => new Date());
 
   return async (ctx: JobContext<'file.signature_probe'>): Promise<void> => {
-    const { revisionId, sourceFileId } = ctx.payload;
-    const file = await deps.loadFile({ revisionId, sourceFileId });
+    const { folderId, sourceFileId } = ctx.payload;
+    const file = await deps.loadFile({ folderId, sourceFileId });
     if (file === null) {
       throw new SignatureProbeError(
         `Файл ${sourceFileId} не найден или недоступен в области видимости задачи.`,
       );
     }
-    if (file.revisionId !== revisionId) {
+    if (file.folderId !== folderId) {
       throw new SignatureProbeError(
-        `Файл ${sourceFileId} принадлежит ревизии ${file.revisionId}, а задача поставлена ` +
-          `для ревизии ${revisionId}.`,
+        `Файл ${sourceFileId} принадлежит ревизии ${file.folderId}, а задача поставлена ` +
+          `для ревизии ${folderId}.`,
       );
     }
 
@@ -93,7 +93,7 @@ export function createSignatureProbeHandler(
     const saved =
       deps.saveProbe === undefined
         ? { written: false, reason: 'запись зонда не подключена' }
-        : await deps.saveProbe({ fileId: file.fileId, revisionId, probe });
+        : await deps.saveProbe({ fileId: file.fileId, folderId, probe });
 
     const fields = {
       event: 'signature_probed',

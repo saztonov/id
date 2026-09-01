@@ -61,9 +61,9 @@ import {
   type ReactNode,
 } from 'react';
 import { useQueryClient, type QueryClient } from '@tanstack/react-query';
-import { revisionEvents } from '../../api/endpoints.js';
+import { folderEvents } from '../../api/endpoints.js';
 import { readEventStream, StreamRejected } from '../../api/stream.js';
-import { layoutKeys, navigationKeys, revisionKeys } from '../../api/keys.js';
+import { layoutKeys, navigationKeys, folderKeys } from '../../api/keys.js';
 import { describeError } from '../../api/problem.js';
 
 export type StreamStatus =
@@ -76,7 +76,7 @@ export type StreamStatus =
   /** Попытки исчерпаны: свежесть держится только опросом. */
   | 'lost';
 
-export interface RevisionStreamState {
+export interface FolderStreamState {
   readonly status: StreamStatus;
   /** Номер последнего принятого события: он же уходит в `Last-Event-ID`. */
   readonly lastEventId: number | null;
@@ -116,21 +116,21 @@ const MAX_ATTEMPTS = 5;
  */
 function invalidateFor(
   schedule: (queryKey: readonly unknown[]) => void,
-  revisionId: string,
+  folderId: string,
   eventType: string,
 ): void {
   const invalidate = schedule;
 
   // Сводка стадий — производная от `job_runs`, и её меняет практически любое
   // событие конвейера. Поэтому она обновляется всегда, а не по своей группе.
-  invalidate(revisionKeys.processingStatus(revisionId));
+  invalidate(folderKeys.processingStatus(folderId));
 
   const area = eventType.split('.')[0] ?? '';
   switch (area) {
     case 'file':
     case 'bundle':
-      invalidate(revisionKeys.files(revisionId));
-      invalidate(revisionKeys.bundles(revisionId));
+      invalidate(folderKeys.files(folderId));
+      invalidate(folderKeys.bundles(folderId));
       break;
     case 'layout':
       // Обновляется СПИСОК ревизий разметки, но НЕ блоки открытого черновика.
@@ -146,36 +146,36 @@ function invalidateFor(
       // экран перечитывает набор и показывает расхождение, а решение —
       // принять серверную версию или применить свою заново — принимает человек.
       // Поток события лишь дублировал бы его и при этом отключал.
-      invalidate(layoutKeys.revisions(revisionId));
+      invalidate(layoutKeys.folders(folderId));
       break;
     case 'recognition':
-      invalidate(revisionKeys.recognitionRuns(revisionId));
+      invalidate(folderKeys.recognitionRuns(folderId));
       break;
     case 'documents':
-      invalidate(revisionKeys.documents(revisionId));
-      invalidate(revisionKeys.pages(revisionId));
-      invalidate(revisionKeys.registry(revisionId));
-      invalidate(revisionKeys.classifications(revisionId));
+      invalidate(folderKeys.documents(folderId));
+      invalidate(folderKeys.pages(folderId));
+      invalidate(folderKeys.registry(folderId));
+      invalidate(folderKeys.classifications(folderId));
       // Отчёт о составе — это те же документы и те же строки реестра, только
       // сложенные вместе. Пересегментация меняет его целиком, и без этой
       // строки экран показывал бы прежнюю нарезку как актуальную.
-      invalidate(revisionKeys.checkReport(revisionId));
+      invalidate(folderKeys.checkReport(folderId));
       break;
     case 'checks':
-      invalidate(revisionKeys.checkRuns(revisionId));
-      invalidate(revisionKeys.findings(revisionId));
-      invalidate(revisionKeys.checkReport(revisionId));
+      invalidate(folderKeys.checkRuns(folderId));
+      invalidate(folderKeys.findings(folderId));
+      invalidate(folderKeys.checkReport(folderId));
       // Блокеры согласования читают ТУ ЖЕ таблицу прогонов: «по ревизии не
       // завершён ни один прогон проверок» снимается окончанием проверки и
       // никаким другим событием. Без этой строки карточка согласования
       // продолжала требовать прогон, который только что закончился, до
       // перезагрузки страницы.
-      invalidate(revisionKeys.workflow(revisionId));
+      invalidate(folderKeys.workflow(folderId));
       break;
     case 'workflow':
-    case 'revision':
-      invalidate(revisionKeys.workflow(revisionId));
-      invalidate(revisionKeys.archive(revisionId));
+    case 'folder':
+      invalidate(folderKeys.workflow(folderId));
+      invalidate(folderKeys.archive(folderId));
       break;
     case 'job':
       // Жизненный цикл задачи меняет только сводку — она уже обесценена выше.
@@ -201,7 +201,7 @@ function invalidateFor(
     default:
       // Незнакомая область: перечитывается вся ветка ревизии. Пропустить её
       // значило бы показать устаревший экран как актуальный.
-      invalidate(['revisions', revisionId]);
+      invalidate(['folders', folderId]);
       break;
   }
 }
@@ -212,7 +212,7 @@ const COALESCE_MS = 1_000;
 /**
  * Планировщик инвалидаций: копит ключи и сбрасывает их пачкой.
  *
- * Ключ сравнивается по сериализации, а не по ссылке: `revisionKeys.files(id)`
+ * Ключ сравнивается по сериализации, а не по ссылке: `folderKeys.files(id)`
  * возвращает НОВЫЙ массив на каждый вызов, и `Set` по ссылкам не схлопнул бы
  * ничего.
  *
@@ -263,16 +263,16 @@ function useInvalidationBatch(client: QueryClient): (queryKey: readonly unknown[
   );
 }
 
-const StreamContext = createContext<RevisionStreamState | null>(null);
+const StreamContext = createContext<FolderStreamState | null>(null);
 
-export function RevisionStreamProvider({
-  revisionId,
+export function FolderStreamProvider({
+  folderId,
   children,
 }: {
-  revisionId: string;
+  folderId: string;
   children: ReactNode;
 }): ReactNode {
-  const value = useRevisionEventStream(revisionId);
+  const value = useFolderEventStream(folderId);
   return <StreamContext.Provider value={value}>{children}</StreamContext.Provider>;
 }
 
@@ -282,7 +282,7 @@ export function RevisionStreamProvider({
  * Вне провайдера возвращает `null`, а не бросает: вкладка обязана работать и
  * тогда, когда её открыли отдельно, — REST остаётся источником состояния.
  */
-export function useRevisionStream(): RevisionStreamState | null {
+export function useFolderStream(): FolderStreamState | null {
   return useContext(StreamContext);
 }
 
@@ -293,12 +293,12 @@ export function useRevisionStream(): RevisionStreamState | null {
  * пока поток жив, опроса нет вовсе; как только он потерян — интервал возвращается.
  */
 export function usePollingInterval(fallbackMs: number = FALLBACK_POLL_MS): number | false {
-  const stream = useRevisionStream();
+  const stream = useFolderStream();
   if (stream === null) return fallbackMs;
   return stream.pollingIntervalMs;
 }
 
-function useRevisionEventStream(revisionId: string): RevisionStreamState {
+function useFolderEventStream(folderId: string): FolderStreamState {
   const queryClient = useQueryClient();
   const scheduleInvalidate = useInvalidationBatch(queryClient);
 
@@ -320,7 +320,7 @@ function useRevisionEventStream(revisionId: string): RevisionStreamState {
   useEffect(() => {
     cursor.current = null;
     retryHint.current = BASE_RETRY_MS;
-  }, [revisionId]);
+  }, [folderId]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -339,7 +339,7 @@ function useRevisionEventStream(revisionId: string): RevisionStreamState {
       while (!stopped) {
         setStatus(failures === 0 ? 'connecting' : 'reconnecting');
         try {
-          const base = revisionEvents.streamUrl(revisionId);
+          const base = folderEvents.streamUrl(folderId);
           const seq = cursor.current;
           await readEventStream({
             // Номер дублируется и в запросе: заголовок `Last-Event-ID` теряется
@@ -368,9 +368,9 @@ function useRevisionEventStream(revisionId: string): RevisionStreamState {
                 // редакторе показывает сравнение версий §7.2, а не фоновое
                 // обновление, которое это сравнение и отменяет.
                 setTruncated(true);
-                void queryClient.invalidateQueries({ queryKey: ['revisions', revisionId] });
+                void queryClient.invalidateQueries({ queryKey: ['folders', folderId] });
                 void queryClient.invalidateQueries({
-                  queryKey: layoutKeys.revisions(revisionId),
+                  queryKey: layoutKeys.folders(folderId),
                 });
                 return;
               }
@@ -384,7 +384,7 @@ function useRevisionEventStream(revisionId: string): RevisionStreamState {
               }
               setLastEventType(frame.event);
               setReceived((count) => count + 1);
-              invalidateFor(scheduleInvalidate, revisionId, frame.event);
+              invalidateFor(scheduleInvalidate, folderId, frame.event);
             },
           });
 
@@ -439,7 +439,7 @@ function useRevisionEventStream(revisionId: string): RevisionStreamState {
       if (timer !== null) clearTimeout(timer);
       controller.abort();
     };
-  }, [revisionId, restartToken, queryClient, scheduleInvalidate]);
+  }, [folderId, restartToken, queryClient, scheduleInvalidate]);
 
   const reconnect = useCallback(() => {
     setError(null);
@@ -447,7 +447,7 @@ function useRevisionEventStream(revisionId: string): RevisionStreamState {
     setRestartToken((token) => token + 1);
   }, []);
 
-  return useMemo<RevisionStreamState>(
+  return useMemo<FolderStreamState>(
     () => ({
       status,
       lastEventId,

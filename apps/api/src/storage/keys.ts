@@ -177,7 +177,7 @@ export function documentPdfKey(documentId: string): string {
 const ARCHIVE_PREFIX = 'archive';
 
 /**
- * Ключ архива: `archive/{revisionId}/rev{N}-approved.zip` (§13).
+ * Ключ архива: `archive/{folderId}/rev{N}-approved.zip` (§13).
  *
  * §13 рисует имя `rev{N}-approved.zip` внутри поддерева ревизии; поддерево у
  * нас выражено идентификатором ревизии, потому что код объекта и номер поставки
@@ -185,14 +185,14 @@ const ARCHIVE_PREFIX = 'archive';
  * не является сведением об участниках, зато делает выгруженный файл узнаваемым
  * без обращения к порталу — ровно то, ради чего §13 его и называет.
  */
-export function archiveKey(revisionId: string, revisionNo: number): string {
-  if (!UUID_PATTERN.test(revisionId)) {
+export function archiveKey(folderId: string, revisionNo: number): string {
+  if (!UUID_PATTERN.test(folderId)) {
     throw new InvalidStorageKeyError('Идентификатор ревизии поставки обязан быть uuid');
   }
   if (!Number.isInteger(revisionNo) || revisionNo <= 0) {
     throw new InvalidStorageKeyError('Номер ревизии обязан быть положительным целым');
   }
-  return `${ARCHIVE_PREFIX}/${revisionId}/rev${revisionNo}-approved.zip`;
+  return `${ARCHIVE_PREFIX}/${folderId}/rev${revisionNo}-approved.zip`;
 }
 
 /** Модель локальной детекции RF-DETR (ADR-0008). */

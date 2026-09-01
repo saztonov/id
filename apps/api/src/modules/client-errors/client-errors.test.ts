@@ -297,7 +297,7 @@ describe('телу запроса не верят', () => {
     await post(
       report({
         message: `Не удалось загрузить: token=${secret}`,
-        url: `https://id.example.test/ids/revisions/7f00?token=${secret}&q=Иванов`,
+        url: `https://id.example.test/ids/folders/7f00?token=${secret}&q=Иванов`,
       }),
     );
     await flush();
@@ -310,14 +310,14 @@ describe('телу запроса не верят', () => {
       'секрет из отчёта браузера доехал до журнала: сообщение обязано проходить ' +
         'нормализацию, а адрес — срез строки запроса',
     ).not.toContain(secret);
-    expect(row?.route).toBe('https://id.example.test/ids/revisions/7f00');
+    expect(row?.route).toBe('https://id.example.test/ids/folders/7f00');
   });
 
   it('нормализует хэш сборки в кадрах стека', async () => {
     const stackOf = (hash: string): string =>
       [
         'TypeError: Cannot read properties of null',
-        `    at renderRevision (https://id.example.test/assets/index-${hash}.js:12:34)`,
+        `    at renderFolder (https://id.example.test/assets/index-${hash}.js:12:34)`,
       ].join('\n');
 
     await post(report({ stack: stackOf('a1b2c3d4') }));

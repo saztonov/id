@@ -54,13 +54,13 @@ import { requirePermission } from '../../middleware/require-permission.js';
 import { tracePayload, updateContext } from '../../observability/context.js';
 import { assertPlanBuildable, listBundles, loadBundlePlan } from '../../db/repositories/bundles.js';
 import { listLogicalDocuments } from '../../db/repositories/documents.js';
-import { findRevisionForFiles } from '../../db/repositories/files.js';
+import { findFolderForFiles } from '../../db/repositories/files.js';
 import {
   cancelPendingJobsOfStage,
   computeProcessingStatus,
   enqueueJob,
 } from '../../db/repositories/jobs.js';
-import { resetPipelineForRevision } from '../../db/repositories/purge.js';
+import { resetPipelineForFolder } from '../../db/repositories/purge.js';
 import {
   applyTextCoverageFallback,
   FALLBACK_LAYOUT_THRESHOLDS,
@@ -88,7 +88,7 @@ import {
   checkRequestSchema,
   checkResponseSchema,
   recognitionProgressSchema,
-  revisionIdParamSchema,
+  folderIdParamSchema,
   runIdParamSchema,
   startMarkupPipelineResponseSchema,
 } from './schemas.js';
@@ -119,21 +119,21 @@ export function registerPipelineRoutes(app: AppInstance): void {
  */
 function registerMarkupRoute(app: AppInstance): void {
   app.post(
-    `${PREFIX}/revisions/:revisionId/markup`,
+    `${PREFIX}/folders/:folderId/markup`,
     {
       preHandler: runPipeline,
       schema: {
-        params: revisionIdParamSchema,
+        params: folderIdParamSchema,
         response: { 202: startMarkupPipelineResponseSchema },
       },
     },
     async (request, reply) => {
       const { scope } = currentAuth(request);
-      const { revisionId } = request.params;
+      const { folderId } = request.params;
 
-      const plan = await loadBundlePlan(app.db, scope, revisionId);
+      const plan = await loadBundlePlan(app.db, scope, folderId);
       if (plan === null) throw notFound('Ревизия поставки не найдена.');
-      updateContext({ revisionId, objectId: plan.objectId });
+      updateContext({ folderId, objectId: plan.objectId });
 
       // Препятствия проверяются ДО очереди: «файл в карантине» — это ответ
       // пользователю сейчас, а не задача, которая через минуту упадёт в консоли
@@ -153,7 +153,7 @@ function registerMarkupRoute(app: AppInstance): void {
       // после сборки — обещать точность там, где данных нет, хуже.
       const detectionSkipReason = detectionUnavailableReason(await readDetectionSettings(app.db));
 
-      const bundles = await listBundles(app.db, scope, revisionId);
+      const bundles = await listBundles(app.db, scope, folderId);
       const bundle = bundles[bundles.length - 1];
 
       // «Тот же состав» — это совпадение манифеста. Собранный документ ДРУГОГО
@@ -161,7 +161,7 @@ function registerMarkupRoute(app: AppInstance): void {
       // именно ради него.
       if (bundle !== undefined && bundle.aggregateManifestHash === plan.aggregateManifestHash) {
         const started = await startMarkupOnBundle(app.db, scope, {
-          revisionId,
+          folderId,
           bundleId: bundle.id,
           previewCached: app.env.PREVIEW_MODE === 'cached',
           logger: request.log as unknown as Logger,
@@ -180,7 +180,7 @@ function registerMarkupRoute(app: AppInstance): void {
       // Постановка — общей функцией с приёмом файла нового комплекта: обе двери
       // ведут к одной задаче, и разойтись ключам идемпотентности негде.
       const { jobId, created } = await enqueueMarkupBuild(app.db, scope, {
-        revisionId,
+        folderId,
         aggregateManifestHash: plan.aggregateManifestHash,
         logger: request.log as unknown as Logger,
       });
@@ -207,18 +207,18 @@ function registerMarkupRoute(app: AppInstance): void {
 
 function registerCheckRoute(app: AppInstance): void {
   app.post(
-    `${PREFIX}/revisions/:revisionId/check`,
+    `${PREFIX}/folders/:folderId/check`,
     {
       preHandler: runPipeline,
       schema: {
-        params: revisionIdParamSchema,
+        params: folderIdParamSchema,
         body: checkRequestSchema,
         response: { 202: checkResponseSchema },
       },
     },
     async (request, reply) => {
       const { scope } = currentAuth(request);
-      const { revisionId } = request.params;
+      const { folderId } = request.params;
       const idempotencyKey = requireIdempotencyKey(request);
       /**
        * Режим повторного нажатия (S40).
@@ -234,16 +234,16 @@ function registerCheckRoute(app: AppInstance): void {
       // состоянии данных, которых спрашивающий видеть не вправе. Область
       // отдаёт пустой список разметок одинаково и для чужой ревизии, и для
       // неразмеченной, и различить их без этого чтения нечем.
-      const revision = await findRevisionForFiles(app.db, scope, revisionId);
-      if (revision === null) throw notFound('Ревизия поставки не найдена.');
-      updateContext({ revisionId, objectId: revision.objectId });
+      const folder = await findFolderForFiles(app.db, scope, folderId);
+      if (folder === null) throw notFound('Ревизия поставки не найдена.');
+      updateContext({ folderId, objectId: folder.objectId });
 
       // Строгий режим (ADR-0015). Читается один раз на нажатие: два чтения по
       // ходу обработки могли бы застать разные значения, и одно нажатие повело бы
       // себя наполовину строго, наполовину мягко.
       const enforceGates = await readImmutabilityEnforced(app.db);
 
-      const layouts = await listLayoutRevisions(app.db, scope, revisionId);
+      const layouts = await listLayoutRevisions(app.db, scope, folderId);
       const layout = latestUsableLayout(layouts);
       if (layout === null) {
         throw conflict(
@@ -253,7 +253,7 @@ function registerCheckRoute(app: AppInstance): void {
       }
 
       // 1. Нет завершённого распознавания по ЭТОЙ разметке — начинаем с него.
-      const runs = await listRecognitionRuns(app.db, scope, revisionId);
+      const runs = await listRecognitionRuns(app.db, scope, folderId);
       const runOfLayout = runs.filter((run) => run.layoutRevisionId === layout.id);
       const active = runOfLayout.find((run) => run.status === 'running');
       if (active !== undefined) {
@@ -276,7 +276,7 @@ function registerCheckRoute(app: AppInstance): void {
           reason: 'заменён новым запуском распознавания',
         });
         request.log.info(
-          { event: 'recognition_run_superseded', revision_id: revisionId, run_id: active.id },
+          { event: 'recognition_run_superseded', folder_id: folderId, run_id: active.id },
           'идущий прогон распознавания закрыт нажатием «Распознать»',
         );
       }
@@ -311,7 +311,7 @@ function registerCheckRoute(app: AppInstance): void {
       const retryPages =
         mode === 'errors'
           ? await listPagesToRerecognize(app.db, scope, {
-              revisionId,
+              folderId,
               layoutRevisionId: layout.id,
               parentRunId: parentRun?.id ?? null,
             })
@@ -322,7 +322,7 @@ function registerCheckRoute(app: AppInstance): void {
         !rerecognize &&
         enforceGates &&
         (await hasPublishedRecognition(app.db, scope, {
-          revisionId,
+          folderId,
           layoutRevisionId: layout.id,
         }));
       if (!done) {
@@ -346,7 +346,7 @@ function registerCheckRoute(app: AppInstance): void {
          * Стадия, а не список типов задач: типов детекции больше одного, и
          * четвёртый добавили бы, не вспомнив про это место.
          */
-        const status = await computeProcessingStatus(app.db, scope, revisionId);
+        const status = await computeProcessingStatus(app.db, scope, folderId);
         const layoutStage = status?.stages.find((summary) => summary.stage === 'layout');
         // `pending` не считает мёртвые задачи: исчерпавшая попытки детекция не
         // имеет права запереть кнопку навсегда.
@@ -358,9 +358,9 @@ function registerCheckRoute(app: AppInstance): void {
                 'блоков не попадёт в прогон.',
             );
           }
-          const cancelled = await cancelPendingJobsOfStage(app.db, revisionId, 'layout');
+          const cancelled = await cancelPendingJobsOfStage(app.db, folderId, 'layout');
           request.log.info(
-            { event: 'detection_cancelled_by_check', revision_id: revisionId, cancelled },
+            { event: 'detection_cancelled_by_check', folder_id: folderId, cancelled },
             'остаток выделения блоков снят с очереди нажатием «Распознать»',
           );
         }
@@ -428,10 +428,10 @@ function registerCheckRoute(app: AppInstance): void {
           // Прежние результаты по этой разметке больше не описывают то, что
           // получится сейчас: сносим их до старта, а не «поверх». На пути
           // восстановления сброса нет — он снёс бы ровно то, что переносится.
-          await resetPipelineForRevision(app.db, revisionId);
+          await resetPipelineForFolder(app.db, folderId);
         }
         const started = await startRecognition(app.db, app.env, scope, {
-          revisionId,
+          folderId,
           layoutId: layout.id,
           idempotencyKey,
           autoContinue: true,
@@ -449,12 +449,12 @@ function registerCheckRoute(app: AppInstance): void {
       }
 
       // 2. Распознано, но документов нет — начинаем с анализа.
-      const documents = await listLogicalDocuments(app.db, scope, revisionId);
+      const documents = await listLogicalDocuments(app.db, scope, folderId);
       if (documents.length === 0) {
         const { jobId, created } = await enqueueJob(app.db, scope, {
           type: 'doc.classify_pages',
-          payload: tracePayload({ revisionId, autoContinue: true }),
-          dedupeKey: dedupeKeyFor('doc.classify_pages', revisionId, idempotencyKey),
+          payload: tracePayload({ folderId, autoContinue: true }),
+          dedupeKey: dedupeKeyFor('doc.classify_pages', folderId, idempotencyKey),
         });
         return reply.code(202).send({
           stage: 'analysis',
@@ -469,8 +469,8 @@ function registerCheckRoute(app: AppInstance): void {
       //    правки реквизитов: прогон правил дёшев и детерминирован.
       const { jobId, created } = await enqueueJob(app.db, scope, {
         type: 'checks.run',
-        payload: tracePayload({ revisionId }),
-        dedupeKey: dedupeKeyFor('checks.run', revisionId, idempotencyKey),
+        payload: tracePayload({ folderId }),
+        dedupeKey: dedupeKeyFor('checks.run', folderId, idempotencyKey),
       });
       return reply.code(202).send({
         stage: 'checks',
@@ -540,7 +540,7 @@ function registerProgressRoute(app: AppInstance): void {
 
       const run = await findRecognitionRun(app.db, scope, runId);
       if (run === null) throw notFound('Прогон распознавания не найден.');
-      updateContext({ revisionId: run.revisionId, objectId: run.objectId });
+      updateContext({ folderId: run.folderId, objectId: run.objectId });
 
       const pages = await listRunPages(app.db, scope, runId);
       const sum = (pick: (page: (typeof pages)[number]) => number): number =>

@@ -45,8 +45,7 @@ const USER_ADMIN = id(601);
 const USER_ENGINEER = id(602);
 const ORG_CUSTOMER = id(610);
 const OBJECT_A = id(611);
-const SUBMISSION_A = id(614);
-const REVISION_A = id(615);
+const FOLDER_A = id(615);
 const BLOCK_A = id(620);
 
 const KC = { admin: 'kc-feedback-admin', engineer: 'kc-feedback-engineer' } as const;
@@ -73,12 +72,9 @@ const FIXTURE: readonly string[] = [
 
   `INSERT INTO object_contractors (object_id, contractor_id)
        VALUES ('${OBJECT_A}', '${ORG_CUSTOMER}') ON CONFLICT DO NOTHING`,
-  `INSERT INTO works
+  `INSERT INTO folders
        (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-     VALUES ('${SUBMISSION_A}', '${OBJECT_A}', '${ORG_CUSTOMER}', '${ORG_CUSTOMER}', 'roofing', DATE '2026-01-01', 'Комплект',
-             '${USER_ADMIN}')`,
-  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
-     VALUES ('${REVISION_A}', '${SUBMISSION_A}', '${OBJECT_A}', '${ORG_CUSTOMER}', 1, 'draft')`,
+     VALUES ('${FOLDER_A}', '${OBJECT_A}', '${ORG_CUSTOMER}', '${ORG_CUSTOMER}', 'roofing', DATE '2026-01-01', 'Комплект', '${USER_ADMIN}')`,
 ];
 
 const TEST_ENV = loadEnv({
@@ -121,9 +117,9 @@ beforeEach(async () => {
   // Десять вызовов модели одной комбинацией промта и версии — знаменатель.
   for (let i = 0; i < 10; i += 1) {
     await db.query(
-      `INSERT INTO ai_runs (revision_id, stage, provider, model, prompt_code, prompt_version)
+      `INSERT INTO ai_runs (folder_id, stage, provider, model, prompt_code, prompt_version)
          VALUES ($1, 'recognize', 'proxy_llm', $2, $3, 1)`,
-      [REVISION_A, MODEL, PROMPT_CODE],
+      [FOLDER_A, MODEL, PROMPT_CODE],
     );
   }
 
@@ -132,12 +128,12 @@ beforeEach(async () => {
   for (let i = 0; i < 3; i += 1) {
     await db.query(
       `INSERT INTO processing_feedback
-         (feedback_type, reason_code, severity, revision_id, layout_block_id,
+         (feedback_type, reason_code, severity, folder_id, layout_block_id,
           pipeline_stage, provider, model, prompt_code, prompt_version, observed)
        VALUES ('recognition_failure', 'vlm.schema_mismatch', 'warn', $1, $2,
                'recognition', 'proxy_llm', $3, $4, 1, $5::jsonb)`,
       [
-        REVISION_A,
+        FOLDER_A,
         BLOCK_A,
         MODEL,
         PROMPT_CODE,
@@ -149,10 +145,10 @@ beforeEach(async () => {
   // Дефект стадии, у которой вызова модели нет вовсе: знаменатель неизвестен.
   await db.query(
     `INSERT INTO processing_feedback
-       (feedback_type, reason_code, severity, revision_id, pipeline_stage,
+       (feedback_type, reason_code, severity, folder_id, pipeline_stage,
         detector_model_version, score)
      VALUES ('recognition_failure', 'detect.no_blocks', 'warn', $1, 'detect', 'rf-detr-1.2', 0.1)`,
-    [REVISION_A],
+    [FOLDER_A],
   );
 });
 

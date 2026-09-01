@@ -26,7 +26,6 @@ import type {
   ShapeType,
   UserRole,
   VerifyState,
-  WorkflowStatus,
 } from '@id/contracts';
 
 // =====================================================================
@@ -102,7 +101,7 @@ export interface RegistrationRequest {
 
 export interface SourceFile {
   id: string;
-  revisionId: string;
+  folderId: string;
   blobSha256: string;
   fileName: string;
   sortOrder: number;
@@ -126,7 +125,7 @@ export interface UploadTicket {
 
 export interface Bundle {
   id: string;
-  revisionId: string;
+  folderId: string;
   aggregateManifestHash: string;
   workingPdfBlobSha256: string;
   builderVersion: string;
@@ -172,7 +171,7 @@ export interface BundlePage {
 
 /** Ответ маршрутов разворота страницы. */
 export interface PageOrientation {
-  revisionId: string;
+  folderId: string;
   sourcePageId: string;
   contentRotation: 0 | 90 | 180 | 270;
   /** `null` — решения нет вовсе: строку разворота никто не заводил. */
@@ -195,7 +194,7 @@ export interface BundleBuildResult {
 
 export interface LayoutRevision {
   id: string;
-  revisionId: string;
+  folderId: string;
   bundleId: string;
   revisionNo: number;
   state: LayoutRevisionState;
@@ -288,7 +287,7 @@ export interface RecognitionWarning {
 
 export interface RecognitionRun {
   id: string;
-  revisionId: string;
+  folderId: string;
   layoutRevisionId: string;
   rdJobId: string | null;
   localLayoutHash: string;
@@ -353,11 +352,11 @@ export interface BlockResult {
 
 export interface LogicalDocument {
   id: string;
-  revisionId: string;
+  folderId: string;
   docTypeCode: string | null;
   ordinal: number;
   title: string | null;
-  folderGroup: string | null;
+  complectId: string | null;
   typeConfidence: number | null;
   boundaryConfidence: number | null;
   needsReview: boolean;
@@ -370,7 +369,7 @@ export interface LogicalDocument {
 
 export interface DocumentPage {
   sourcePageId: string;
-  revisionOrdinal: number;
+  folderOrdinal: number;
   sortOrder: number | null;
   pageRoleCode: string | null;
   needsReview: boolean;
@@ -401,14 +400,14 @@ export interface FieldValue {
 export interface PageAccounting {
   items: {
     sourcePageId: string;
-    revisionOrdinal: number;
+    folderOrdinal: number;
     documentId: string | null;
     sortOrder: number | null;
     pageRoleCode: string | null;
     reason: string | null;
     needsReview: boolean;
   }[];
-  unaccounted: { sourcePageId: string; sourceFileId: string; revisionOrdinal: number }[];
+  unaccounted: { sourcePageId: string; sourceFileId: string; folderOrdinal: number }[];
   counts: { assigned: number; unassigned: number; unaccounted: number };
 }
 
@@ -432,7 +431,7 @@ export interface RegistryRow {
 
 export interface PageClassification {
   sourcePageId: string;
-  revisionOrdinal: number;
+  folderOrdinal: number;
   label: string;
   docTypeCode: string | null;
   typeOutcome: string;
@@ -451,7 +450,7 @@ export interface PageClassification {
 
 /** Метка страницы, поставленная инженером вручную (§8.2, фаза 3). */
 export interface ManualPageLabel {
-  revisionId: string;
+  folderId: string;
   sourcePageId: string;
   label: string;
   docTypeCode: string | null;
@@ -465,7 +464,7 @@ export interface ManualPageLabel {
 
 export interface ValidationRun {
   id: string;
-  revisionId: string;
+  folderId: string;
   rulesetVersionId: string;
   sectionProfileId: string | null;
   objectRuleProfileId: string | null;
@@ -500,7 +499,7 @@ export interface FindingDocument {
 
 /** Объект замечания: документ, материал, партия, строка реестра, комплект. */
 export interface FindingTarget {
-  kind: 'document' | 'material' | 'batch' | 'registry_row' | 'page' | 'field' | 'revision' | 'gone';
+  kind: 'document' | 'material' | 'batch' | 'registry_row' | 'page' | 'field' | 'folder' | 'gone';
   label: string;
   detail: string | null;
 }
@@ -653,67 +652,6 @@ export interface RuleCatalogEntry {
 }
 
 // =====================================================================
-// Согласование
-// =====================================================================
-
-export interface RevisionWorkflow {
-  id: string;
-  workId: string;
-  revisionNo: number;
-  status: WorkflowStatus;
-  parentRevisionId: string | null;
-  aggregateManifestHash: string | null;
-  version: number;
-  submittedAt: string | null;
-  decidedAt: string | null;
-  returnReason: string | null;
-}
-
-export interface WorkflowState {
-  revision: RevisionWorkflow;
-  readiness: {
-    fileCount: number;
-    filesNotOk: number;
-    hasBundle: boolean;
-    documentCount: number;
-    unconfirmedDocuments: number;
-    unmaterializedDocuments: number;
-    openBlockingFindings: number;
-    finishedValidationRuns: number;
-  };
-  submitBlockers: string[];
-  approveBlockers: string[];
-  actions: {
-    id: string;
-    revisionId: string;
-    actorUserId: string;
-    action: string;
-    comment: string | null;
-    at: string;
-  }[];
-}
-
-export interface WorkflowResult {
-  revision: RevisionWorkflow;
-  nextRevisionId: string | null;
-  manifestMatchesParent: boolean | null;
-  jobId: string | null;
-  jobCreated: boolean;
-}
-
-export interface ArchiveState {
-  revisionId: string;
-  state: 'absent' | 'pending' | 'ready';
-  archive: {
-    sha256: string;
-    byteSize: number;
-    entryCount: number;
-    builderVersion: string;
-    createdAt: string;
-  } | null;
-}
-
-// =====================================================================
 // Наблюдаемость ревизии
 // =====================================================================
 
@@ -730,7 +668,7 @@ export interface StageSummary {
 }
 
 export interface ProcessingStatus {
-  revisionId: string;
+  folderId: string;
   stage: ProcessingStage;
   queued: number;
   running: number;
@@ -858,7 +796,7 @@ export interface DocTypeCandidate {
   occurrences: number;
   firstSeenAt: string;
   lastSeenAt: string;
-  sampleRevisionId: string | null;
+  sampleFolderId: string | null;
   sampleSourcePageId: string | null;
   status: 'new' | 'reviewing' | 'mapped' | 'ignored';
   mappedDocTypeCode: string | null;
@@ -1032,7 +970,7 @@ export interface JobView {
   lockedUntil: string | null;
   lastError: string | null;
   dedupeKey: string | null;
-  revisionId: string | null;
+  folderId: string | null;
   createdAt: string;
   updatedAt: string;
   isDead: boolean;
@@ -1042,7 +980,7 @@ export interface JobRunView {
   id: string;
   jobId: string | null;
   jobType: string;
-  revisionId: string | null;
+  folderId: string | null;
   requestId: string | null;
   attempt: number;
   startedAt: string;
@@ -1135,7 +1073,7 @@ export interface ErrorSample {
   statusCode: number | null;
   errorCode: string | null;
   objectId: string | null;
-  revisionId: string | null;
+  folderId: string | null;
   jobId: string | null;
   jobType: string | null;
   attempt: number | null;
@@ -1259,7 +1197,7 @@ export interface PipelineFeedbackEvent {
   feedbackType: string;
   reasonCode: string;
   severity: string;
-  revisionId: string | null;
+  folderId: string | null;
   recognitionRunId: string | null;
   sourcePageId: string | null;
   workingPageIndex: number | null;

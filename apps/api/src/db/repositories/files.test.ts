@@ -59,8 +59,7 @@ function id(n: number): string {
 const OBJECT = id(1);
 const ORG_CONTRACTOR = id(2);
 const USER = id(3);
-const WORK = id(4);
-const REVISION = id(5);
+const FOLDER = id(5);
 
 /** Файл в состоянии «после загрузки»: страницы записаны синхронным приёмом. */
 const FILE_UPLOADED = id(10);
@@ -100,12 +99,9 @@ const FIXTURE: readonly string[] = [
      VALUES ('${OBJECT}', 'roofing') ON CONFLICT DO NOTHING`,
   `INSERT INTO object_contractors (object_id, contractor_id)
      VALUES ('${OBJECT}', '${ORG_CONTRACTOR}') ON CONFLICT DO NOTHING`,
-  `INSERT INTO works
+  `INSERT INTO folders
        (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-     VALUES ('${WORK}', '${OBJECT}', '${ORG_CONTRACTOR}', '${ORG_CONTRACTOR}', 'roofing',
-             DATE '2026-08-01', 'Комплект', '${USER}')`,
-  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
-     VALUES ('${REVISION}', '${WORK}', '${OBJECT}', '${ORG_CONTRACTOR}', 1, 'draft')`,
+     VALUES ('${FOLDER}', '${OBJECT}', '${ORG_CONTRACTOR}', '${ORG_CONTRACTOR}', 'roofing', DATE '2026-08-01', 'Комплект', '${USER}')`,
 
   `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
      VALUES ('${SHA_UPLOADED}', 'blobs/${SHA_UPLOADED}', 2048, 'application/pdf')`,
@@ -114,17 +110,17 @@ const FIXTURE: readonly string[] = [
 
   // Состояние `pending` — то, в котором файл ждёт задачу: приём записал его
   // синхронно, но вердикт по объекту хранилища ещё не вынесен.
-  `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order, verify_state)
-     VALUES ('${FILE_UPLOADED}', '${REVISION}', '${SHA_UPLOADED}', 'akt.pdf', 0, 'pending')`,
-  `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order, verify_state)
-     VALUES ('${FILE_BARE}', '${REVISION}', '${SHA_BARE}', 'sertifikat.pdf', 1, 'pending')`,
+  `INSERT INTO source_files (id, folder_id, blob_sha256, file_name, sort_order, verify_state)
+     VALUES ('${FILE_UPLOADED}', '${FOLDER}', '${SHA_UPLOADED}', 'akt.pdf', 0, 'pending')`,
+  `INSERT INTO source_files (id, folder_id, blob_sha256, file_name, sort_order, verify_state)
+     VALUES ('${FILE_BARE}', '${FOLDER}', '${SHA_BARE}', 'sertifikat.pdf', 1, 'pending')`,
 
   `INSERT INTO source_pages
-       (id, revision_id, source_file_id, file_page_index, revision_ordinal, width_px, height_px, rotation)
-     VALUES ('${PAGE_UPLOADED_0}', '${REVISION}', '${FILE_UPLOADED}', 0, 0, 595, 842, 0)`,
+       (id, folder_id, source_file_id, file_page_index, folder_ordinal, width_px, height_px, rotation)
+     VALUES ('${PAGE_UPLOADED_0}', '${FOLDER}', '${FILE_UPLOADED}', 0, 0, 595, 842, 0)`,
   `INSERT INTO source_pages
-       (id, revision_id, source_file_id, file_page_index, revision_ordinal, width_px, height_px, rotation)
-     VALUES ('${PAGE_UPLOADED_1}', '${REVISION}', '${FILE_UPLOADED}', 1, 1, 842, 595, 90)`,
+       (id, folder_id, source_file_id, file_page_index, folder_ordinal, width_px, height_px, rotation)
+     VALUES ('${PAGE_UPLOADED_1}', '${FOLDER}', '${FILE_UPLOADED}', 1, 1, 842, 595, 90)`,
 ];
 
 let testDb: TestDatabase;
@@ -148,14 +144,14 @@ afterAll(async () => {
 async function pagesOf(fileId: string): Promise<{ index: number; ordinal: number }[]> {
   const rows = await testDb.query<{
     file_page_index: number | string;
-    revision_ordinal: number | string;
+    folder_ordinal: number | string;
   }>(
-    `SELECT file_page_index, revision_ordinal FROM source_pages
+    `SELECT file_page_index, folder_ordinal FROM source_pages
       WHERE source_file_id = '${fileId}' ORDER BY file_page_index`,
   );
   return rows.map((row) => ({
     index: Number(row.file_page_index),
-    ordinal: Number(row.revision_ordinal),
+    ordinal: Number(row.folder_ordinal),
   }));
 }
 
@@ -170,7 +166,7 @@ describe('saveFileVerdict у файла, страницы которого уж�
   it('записывает вердикт, а не падает на дубликате ключа страниц', async () => {
     const outcome = await saveFileVerdict(db, ADMIN, {
       fileId: FILE_UPLOADED,
-      revisionId: REVISION,
+      folderId: FOLDER,
       verifyState: 'ok',
       verifyError: null,
       signatureProbe: PROBE,
@@ -193,7 +189,7 @@ describe('saveFileVerdict у файла, страницы которого уж�
   it('повтор задачи ничего не ломает и не меняет', async () => {
     const outcome = await saveFileVerdict(db, ADMIN, {
       fileId: FILE_UPLOADED,
-      revisionId: REVISION,
+      folderId: FOLDER,
       verifyState: 'ok',
       verifyError: null,
       signatureProbe: PROBE,
@@ -210,7 +206,7 @@ describe('saveFileVerdict у файла без страниц', () => {
   it('записывает геометрию сам и встраивает её в нумерацию ревизии', async () => {
     const outcome = await saveFileVerdict(db, ADMIN, {
       fileId: FILE_BARE,
-      revisionId: REVISION,
+      folderId: FOLDER,
       verifyState: 'ok',
       verifyError: null,
       signatureProbe: PROBE,
@@ -231,7 +227,7 @@ describe('saveFileVerdict у файла без страниц', () => {
   });
 
   it('счётчик страниц файла виден чтением состава', async () => {
-    const files = await listSourceFiles(db, ADMIN, REVISION);
+    const files = await listSourceFiles(db, ADMIN, FOLDER);
     expect(files.map((file) => [file.fileName, file.pageCount])).toEqual([
       ['akt.pdf', 2],
       ['sertifikat.pdf', 2],
@@ -264,7 +260,7 @@ describe('replaceSourceFile', () => {
       db,
       ADMIN,
       {
-        revisionId: REVISION,
+        folderId: FOLDER,
         replacedFileId: fileId,
         fileName,
         sha256: SHA_NEW,
@@ -287,11 +283,8 @@ describe('replaceSourceFile', () => {
     expect(stored.fileName).toBe('akt-ispravlennyj.pdf');
     expect(stored.sortOrder).toBe(0);
 
-    const files = await listSourceFiles(db, ADMIN, REVISION);
-    expect(files.map((file) => file.fileName)).toEqual([
-      'akt-ispravlennyj.pdf',
-      'sertifikat.pdf',
-    ]);
+    const files = await listSourceFiles(db, ADMIN, FOLDER);
+    expect(files.map((file) => file.fileName)).toEqual(['akt-ispravlennyj.pdf', 'sertifikat.pdf']);
 
     // Страницы пересчитаны по всей ревизии: у нового файла одна страница,
     // и страницы второго файла сдвинулись за ней.
@@ -306,16 +299,16 @@ describe('replaceSourceFile', () => {
     // Замена — одно намерение пользователя. Разложенная на два действия, она
     // в журнале читается как случайное совпадение по времени.
     await testDb.query(
-      `INSERT INTO logical_documents (id, revision_id, object_id, contractor_id, ordinal,
+      `INSERT INTO logical_documents (id, folder_id, object_id, contractor_id, ordinal,
                                       is_confirmed, confirmation_source, confirmed_by, confirmed_at)
-         VALUES ('${id(90)}', '${REVISION}', '${OBJECT}', '${ORG_CONTRACTOR}', 0,
+         VALUES ('${id(90)}', '${FOLDER}', '${OBJECT}', '${ORG_CONTRACTOR}', 0,
                  true, 'human', '${USER}', now())`,
     );
 
     const stored = await replaceOne(FILE_BARE, 'sertifikat-novyj.pdf');
 
     const documents = await testDb.query<{ n: number | string }>(
-      `SELECT count(*)::int AS n FROM logical_documents WHERE revision_id = '${REVISION}'`,
+      `SELECT count(*)::int AS n FROM logical_documents WHERE folder_id = '${FOLDER}'`,
     );
     expect(Number(documents[0]?.n)).toBe(0);
 
@@ -336,7 +329,7 @@ describe('replaceSourceFile', () => {
         db,
         ADMIN,
         {
-          revisionId: REVISION,
+          folderId: FOLDER,
           replacedFileId: id(777),
           fileName: 'chuzhoj.pdf',
           sha256: 'd'.repeat(64),

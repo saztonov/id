@@ -9,7 +9,7 @@
  */
 import { z } from 'zod';
 
-export const revisionIdParamSchema = z.object({ revisionId: z.uuid() });
+export const folderIdParamSchema = z.object({ folderId: z.uuid() });
 
 export const runChecksResponseSchema = z.object({
   jobId: z.uuid().nullable(),
@@ -18,7 +18,7 @@ export const runChecksResponseSchema = z.object({
 
 export const validationRunSchema = z.object({
   id: z.uuid(),
-  revisionId: z.uuid(),
+  folderId: z.uuid(),
   rulesetVersionId: z.uuid(),
   sectionProfileId: z.uuid().nullable(),
   objectRuleProfileId: z.uuid().nullable(),
@@ -65,7 +65,7 @@ export const findingTargetSchema = z.object({
     'registry_row',
     'page',
     'field',
-    'revision',
+    'folder',
     'gone',
   ]),
   label: z.string(),

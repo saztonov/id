@@ -71,8 +71,7 @@ export interface BundlePlanFile {
 }
 
 export interface BundlePlan {
-  readonly revisionId: string;
-  readonly status: string;
+  readonly folderId: string;
   readonly files: readonly BundlePlanFile[];
   readonly aggregateManifestHash: string;
   /** Пусто — можно собирать; иначе перечень причин, почему нельзя. */
@@ -116,42 +115,19 @@ export interface BundleRef {
   readonly pageCount: number;
 }
 
-/** Рабочий документ ревизии-предка, пригодный к переиспользованию (§3). */
-export interface ReusableWorkingPdf {
-  readonly revisionId: string;
-  readonly workingPdfBlobSha256: string;
-  readonly sizeBytes: number;
-  readonly s3Key: string;
-  readonly pageCount: number;
-}
-
 export interface BundleBuildDeps {
-  readonly loadPlan: (revisionId: string) => Promise<BundlePlan | null>;
+  readonly loadPlan: (folderId: string) => Promise<BundlePlan | null>;
   readonly findExistingBundle: (target: {
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly aggregateManifestHash: string;
     readonly builderVersion: string;
   }) => Promise<BundleRef | null>;
-  /**
-   * Рабочий документ предыдущей ревизии с тем же составом (§3).
-   *
-   * `null` — переиспользовать нечего, собираем заново. Это единственное место,
-   * где план разрешает переиспользование результатов прошлой ревизии, и условие
-   * у него ровно одно: совпадение `aggregate_manifest_hash`.
-   */
-  readonly findReusableWorkingPdf: (target: {
-    readonly revisionId: string;
-    readonly aggregateManifestHash: string;
-    readonly builderVersion: string;
-  }) => Promise<ReusableWorkingPdf | null>;
-  /** Есть ли объект в хранилище: строка в БД не доказывает наличие байтов. */
-  readonly workingPdfExists: (storageKey: string) => Promise<boolean>;
   /** Выкладывает оригинал из хранилища во временный файл. */
   readonly fetchOriginal: (storageKey: string, destinationPath: string) => Promise<void>;
   /** Кладёт собранный документ в хранилище; хэш и ключ считает адаптер. */
   readonly storeWorkingPdf: (localPath: string) => Promise<StoredWorkingPdf>;
   readonly createBundle: (input: {
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly aggregateManifestHash: string;
     readonly builderVersion: string;
     readonly workingPdf: StoredWorkingPdf;
@@ -166,12 +142,12 @@ export interface BundleBuildDeps {
 }
 
 export class BundleBuildError extends Error {
-  readonly revisionId: string;
+  readonly folderId: string;
 
-  constructor(message: string, revisionId: string) {
+  constructor(message: string, folderId: string) {
     super(message);
     this.name = 'BundleBuildError';
-    this.revisionId = revisionId;
+    this.folderId = folderId;
   }
 }
 
@@ -188,21 +164,21 @@ async function continueWithMarkup(ctx: JobContext<'bundle.build'>): Promise<void
   if (ctx.payload.startMarkup !== true) return;
   await ctx.enqueue({
     type: 'layout.start',
-    payload: { revisionId: ctx.payload.revisionId },
-    dedupeKey: `layout.start:${ctx.payload.revisionId}`,
+    payload: { folderId: ctx.payload.folderId },
+    dedupeKey: `layout.start:${ctx.payload.folderId}`,
   });
 }
 
 export function createBundleBuildHandler(deps: BundleBuildDeps): JobHandler<'bundle.build'> {
   return async (ctx: JobContext<'bundle.build'>): Promise<void> => {
-    const { revisionId } = ctx.payload;
+    const { folderId } = ctx.payload;
     const builderVersion = `${BUNDLE_BUILDER}+${deps.toolkit.kind}`;
 
-    const plan = await deps.loadPlan(revisionId);
+    const plan = await deps.loadPlan(folderId);
     if (plan === null) {
       throw new BundleBuildError(
-        `Ревизия ${revisionId} не найдена или недоступна в области видимости задачи.`,
-        revisionId,
+        `Ревизия ${folderId} не найдена или недоступна в области видимости задачи.`,
+        folderId,
       );
     }
     if (plan.blockers.length > 0) {
@@ -210,12 +186,12 @@ export function createBundleBuildHandler(deps: BundleBuildDeps): JobHandler<'bun
       // трафик и время сборки незачем.
       throw new BundleBuildError(
         `Рабочий документ собрать нельзя: ${plan.blockers.join('; ')}.`,
-        revisionId,
+        folderId,
       );
     }
 
     const existing = await deps.findExistingBundle({
-      revisionId,
+      folderId,
       aggregateManifestHash: plan.aggregateManifestHash,
       builderVersion,
     });
@@ -239,75 +215,19 @@ export function createBundleBuildHandler(deps: BundleBuildDeps): JobHandler<'bun
     }
 
     const files = [...plan.files].sort((a, b) => a.sortOrder - b.sortOrder);
-    const pageIds = indexPages(files, revisionId);
+    const pageIds = indexPages(files, folderId);
     const startedAt = Date.now();
 
-    // §3: результаты предыдущей ревизии переиспользуются ТОЛЬКО при совпадении
-    // `aggregate_manifest_hash`. Совпал — значит подрядчик подал те же файлы в
-    // том же порядке, и склейка дала бы побайтово тот же документ (сборка
-    // детерминирована обеими реализациями). Тогда 86 МБ не качаются и не
-    // склеиваются заново; своя строка `processing_bundles` и своя карта страниц
-    // ревизии всё равно создаются — идентификаторы страниц у неё свои.
-    const map = planPages(files);
-    const reusable = await deps.findReusableWorkingPdf({
-      revisionId,
-      aggregateManifestHash: plan.aggregateManifestHash,
-      builderVersion,
-    });
-
-    if (reusable !== null && reusable.pageCount === map.length) {
-      // Строка в БД не доказывает наличие байтов: объект мог быть удалён
-      // сборкой мусора. Проверка дешёвая, а её отсутствие означало бы bundle,
-      // ссылающийся в пустоту, — и выяснилось бы это только в RD WEB.
-      if (await deps.workingPdfExists(reusable.s3Key)) {
-        const pages = map.map((entry) => ({
-          workingPageIndex: entry.workingPageIndex,
-          sourcePageId: pageIdOf(pageIds, entry, revisionId),
-        }));
-        const { bundle, created } = await deps.createBundle({
-          revisionId,
-          aggregateManifestHash: plan.aggregateManifestHash,
-          builderVersion,
-          workingPdf: {
-            sha256: reusable.workingPdfBlobSha256,
-            sizeBytes: reusable.sizeBytes,
-            s3Key: reusable.s3Key,
-          },
-          pages,
-        });
-
-        ctx.logger.info(
-          {
-            event: 'bundle_reused_from_parent',
-            bundle_id: bundle.id,
-            source_revision_id: reusable.revisionId,
-            page_count: map.length,
-            created,
-          },
-          'состав совпал с предыдущей ревизией: рабочий документ переиспользован',
-        );
-        await ctx.emit('bundle.ready', {
-          bundleId: bundle.id,
-          pageCount: map.length,
-          fileCount: files.length,
-          reused: true,
-          reusedFromRevisionId: reusable.revisionId,
-        });
-        await continueWithMarkup(ctx);
-        return;
-      }
-
-      ctx.logger.warn(
-        { event: 'bundle_reuse_skipped', source_revision_id: reusable.revisionId },
-        'рабочий документ предыдущей ревизии числится в БД, но отсутствует в хранилище',
-      );
-    }
+    // Переиспользование рабочего документа ПРЕДЫДУЩЕЙ ревизии снято вместе с
+    // ревизиями (S44): цепочки `parent_folder_id`, по которой искался предок,
+    // больше нет. Повторная сборка той же папки с тем же манифестом отсекается
+    // раньше — `findExistingBundle` возвращает уже собранный документ.
 
     const workDir = await mkdtemp(join(deps.workDirBase ?? tmpdir(), 'id-bundle-'));
     try {
       const parts: WorkingPdfPart[] = [];
       for (const [position, file] of files.entries()) {
-        throwIfAborted(ctx, revisionId);
+        throwIfAborted(ctx, folderId);
         // Имя временного файла строится из позиции и идентификатора: имя,
         // данное пользователем, в путь файловой системы не попадает (§13).
         const path = join(workDir, `${String(position).padStart(4, '0')}-${file.sourceFileId}.pdf`);
@@ -320,7 +240,7 @@ export function createBundleBuildHandler(deps: BundleBuildDeps): JobHandler<'bun
         });
       }
 
-      throwIfAborted(ctx, revisionId);
+      throwIfAborted(ctx, folderId);
       const outputPath = join(workDir, 'working.pdf');
       const built = await deps.toolkit.buildWorkingPdf({
         parts,
@@ -336,12 +256,12 @@ export function createBundleBuildHandler(deps: BundleBuildDeps): JobHandler<'bun
       // мусора за одну неудачу.
       const pages = built.map.map((entry) => ({
         workingPageIndex: entry.workingPageIndex,
-        sourcePageId: pageIdOf(pageIds, entry, revisionId),
+        sourcePageId: pageIdOf(pageIds, entry, folderId),
       }));
       const workingPdf = await deps.storeWorkingPdf(outputPath);
 
       const { bundle, created } = await deps.createBundle({
-        revisionId,
+        folderId,
         aggregateManifestHash: plan.aggregateManifestHash,
         builderVersion,
         workingPdf,
@@ -378,31 +298,8 @@ export function createBundleBuildHandler(deps: BundleBuildDeps): JobHandler<'bun
   };
 }
 
-/**
- * Карта страниц по составу и порядку файлов, без обращения к инструменту.
- *
- * Та же величина, что возвращает `planWorkingPdf()` в `toolkit.ts`, но
- * считаемая из плана ревизии. Нужна пути переиспользования: там сборки не
- * происходит вовсе, а карта ревизии обязана появиться. Расхождение с реальным
- * документом закрыто сверкой числа страниц с переиспользуемым bundle.
- */
-function planPages(files: readonly BundlePlanFile[]): readonly WorkingPageMapping[] {
-  const map: WorkingPageMapping[] = [];
-  for (const file of files) {
-    const pages = [...file.pages].sort((a, b) => a.filePageIndex - b.filePageIndex);
-    for (const page of pages) {
-      map.push({
-        workingPageIndex: map.length,
-        sourceFileId: file.sourceFileId,
-        filePageIndex: page.filePageIndex,
-      });
-    }
-  }
-  return map;
-}
-
 /** Соответствие «файл + страница в файле» → идентификатор строки `source_pages`. */
-function indexPages(files: readonly BundlePlanFile[], revisionId: string): Map<string, string> {
+function indexPages(files: readonly BundlePlanFile[], folderId: string): Map<string, string> {
   const index = new Map<string, string>();
   for (const file of files) {
     for (const page of file.pages) {
@@ -410,7 +307,7 @@ function indexPages(files: readonly BundlePlanFile[], revisionId: string): Map<s
       if (index.has(key)) {
         throw new BundleBuildError(
           `У файла «${file.fileName}» две страницы с индексом ${page.filePageIndex}.`,
-          revisionId,
+          folderId,
         );
       }
       index.set(key, page.sourcePageId);
@@ -433,14 +330,14 @@ function pageKey(sourceFileId: string, filePageIndex: number): string {
 function pageIdOf(
   index: ReadonlyMap<string, string>,
   entry: WorkingPageMapping,
-  revisionId: string,
+  folderId: string,
 ): string {
   const id = index.get(pageKey(entry.sourceFileId, entry.filePageIndex));
   if (id === undefined) {
     throw new BundleBuildError(
       `Странице ${entry.workingPageIndex} рабочего документа не найдено соответствие ` +
         `(файл ${entry.sourceFileId}, страница ${entry.filePageIndex}).`,
-      revisionId,
+      folderId,
     );
   }
   return id;
@@ -453,11 +350,11 @@ function pageIdOf(
  * работу библиотеки сигнал всё равно не может, а вот не начинать скачивание
  * следующих 80 МБ при остановке воркера — может.
  */
-function throwIfAborted(ctx: JobContext<'bundle.build'>, revisionId: string): void {
+function throwIfAborted(ctx: JobContext<'bundle.build'>, folderId: string): void {
   if (ctx.signal.aborted) {
     throw new BundleBuildError(
       'Сборка рабочего документа прервана: воркер останавливается или истекла аренда задачи.',
-      revisionId,
+      folderId,
     );
   }
 }

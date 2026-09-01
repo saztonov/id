@@ -69,16 +69,11 @@ const ORG_CONTRACTOR = id(2);
 const ORG_OTHER = id(3);
 const OBJECT = id(4);
 
-const SUBMISSION = id(10);
-const REVISION_DRAFT = id(11);
-const SUBMISSION_SUBMITTED = id(12);
-const REVISION_SUBMITTED = id(13);
-const SUBMISSION_OTHER = id(14);
-const REVISION_OTHER = id(15);
-const SUBMISSION_ORDER = id(16);
-const REVISION_ORDER = id(17);
-const SUBMISSION_PIPELINE = id(18);
-const REVISION_PIPELINE = id(19);
+const FOLDER_DRAFT = id(11);
+const FOLDER_SUBMITTED = id(13);
+const FOLDER_OTHER = id(15);
+const FOLDER_ORDER = id(17);
+const FOLDER_PIPELINE = id(19);
 
 const USER_CONTRACTOR = id(20);
 const USER_OTHER_CONTRACTOR = id(21);
@@ -117,47 +112,37 @@ const FIXTURE: readonly string[] = [
 
   `INSERT INTO object_contractors (object_id, contractor_id)
        VALUES ('${OBJECT}', '${ORG_CONTRACTOR}') ON CONFLICT DO NOTHING`,
-  `INSERT INTO works
+  `INSERT INTO folders
        (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-     VALUES ('${SUBMISSION}', '${OBJECT}', '${ORG_CONTRACTOR}', '${ORG_CONTRACTOR}', 'roofing', DATE '2026-01-01', 'Поставка 1', '${USER_CONTRACTOR}')`,
-  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
-     VALUES ('${REVISION_DRAFT}', '${SUBMISSION}', '${OBJECT}', '${ORG_CONTRACTOR}', 1, 'draft')`,
+     VALUES ('${FOLDER_DRAFT}', '${OBJECT}', '${ORG_CONTRACTOR}', '${ORG_CONTRACTOR}', 'roofing', DATE '2026-01-01', 'Поставка 1', '${USER_CONTRACTOR}')`,
 
   `INSERT INTO object_contractors (object_id, contractor_id)
        VALUES ('${OBJECT}', '${ORG_CONTRACTOR}') ON CONFLICT DO NOTHING`,
-  `INSERT INTO works
+  `INSERT INTO folders
        (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-     VALUES ('${SUBMISSION_SUBMITTED}', '${OBJECT}', '${ORG_CONTRACTOR}', '${ORG_CONTRACTOR}', 'roofing', DATE '2026-01-01', 'Поставка 2', '${USER_CONTRACTOR}')`,
-  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
-     VALUES ('${REVISION_SUBMITTED}', '${SUBMISSION_SUBMITTED}', '${OBJECT}', '${ORG_CONTRACTOR}', 1, 'submitted')`,
+     VALUES ('${FOLDER_SUBMITTED}', '${OBJECT}', '${ORG_CONTRACTOR}', '${ORG_CONTRACTOR}', 'roofing', DATE '2026-01-01', 'Поставка 2', '${USER_CONTRACTOR}')`,
 
   `INSERT INTO object_contractors (object_id, contractor_id)
        VALUES ('${OBJECT}', '${ORG_OTHER}') ON CONFLICT DO NOTHING`,
-  `INSERT INTO works
+  `INSERT INTO folders
        (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-     VALUES ('${SUBMISSION_OTHER}', '${OBJECT}', '${ORG_OTHER}', '${ORG_OTHER}', 'roofing', DATE '2026-01-01', 'Поставка чужая', '${USER_OTHER_CONTRACTOR}')`,
-  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
-     VALUES ('${REVISION_OTHER}', '${SUBMISSION_OTHER}', '${OBJECT}', '${ORG_OTHER}', 1, 'draft')`,
+     VALUES ('${FOLDER_OTHER}', '${OBJECT}', '${ORG_OTHER}', '${ORG_OTHER}', 'roofing', DATE '2026-01-01', 'Поставка чужая', '${USER_OTHER_CONTRACTOR}')`,
 
   // Отдельная поставка для проверки «порядок меняется до подачи и не меняется
   // после»: она проводится по статусам, поэтому не должна мешать остальным.
   `INSERT INTO object_contractors (object_id, contractor_id)
        VALUES ('${OBJECT}', '${ORG_CONTRACTOR}') ON CONFLICT DO NOTHING`,
-  `INSERT INTO works
+  `INSERT INTO folders
        (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-     VALUES ('${SUBMISSION_ORDER}', '${OBJECT}', '${ORG_CONTRACTOR}', '${ORG_CONTRACTOR}', 'roofing', DATE '2026-01-01', 'Поставка 3', '${USER_CONTRACTOR}')`,
-  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
-     VALUES ('${REVISION_ORDER}', '${SUBMISSION_ORDER}', '${OBJECT}', '${ORG_CONTRACTOR}', 1, 'draft')`,
+     VALUES ('${FOLDER_ORDER}', '${OBJECT}', '${ORG_CONTRACTOR}', '${ORG_CONTRACTOR}', 'roofing', DATE '2026-01-01', 'Поставка 3', '${USER_CONTRACTOR}')`,
 
   // Поставка для проверки постановки задач конвейера: очередь по ней считается
   // целиком, поэтому чужие загрузки в неё попадать не должны.
   `INSERT INTO object_contractors (object_id, contractor_id)
        VALUES ('${OBJECT}', '${ORG_CONTRACTOR}') ON CONFLICT DO NOTHING`,
-  `INSERT INTO works
+  `INSERT INTO folders
        (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-     VALUES ('${SUBMISSION_PIPELINE}', '${OBJECT}', '${ORG_CONTRACTOR}', '${ORG_CONTRACTOR}', 'roofing', DATE '2026-01-01', 'Поставка 4', '${USER_CONTRACTOR}')`,
-  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
-     VALUES ('${REVISION_PIPELINE}', '${SUBMISSION_PIPELINE}', '${OBJECT}', '${ORG_CONTRACTOR}', 1, 'draft')`,
+     VALUES ('${FOLDER_PIPELINE}', '${OBJECT}', '${ORG_CONTRACTOR}', '${ORG_CONTRACTOR}', 'roofing', DATE '2026-01-01', 'Поставка 4', '${USER_CONTRACTOR}')`,
 ];
 
 const STORAGE_DIR = mkdtempSync(join(tmpdir(), 'id-files-tests-'));
@@ -290,11 +275,11 @@ interface UploadOutcome {
  */
 async function upload(
   kcSub: string,
-  revisionId: string,
+  folderId: string,
   fileName: string,
   content: Buffer,
 ): Promise<UploadOutcome> {
-  const init = await as(kcSub, 'POST', `/api/v1/revisions/${revisionId}/files/upload/init`, {
+  const init = await as(kcSub, 'POST', `/api/v1/folders/${folderId}/files/upload/init`, {
     fileName,
     sizeBytes: content.byteLength,
   });
@@ -311,12 +296,9 @@ async function upload(
     payload: content,
   });
 
-  const complete = await as(
-    kcSub,
-    'POST',
-    `/api/v1/revisions/${revisionId}/files/upload/complete`,
-    { uploadId: ticket.uploadId },
-  );
+  const complete = await as(kcSub, 'POST', `/api/v1/folders/${folderId}/files/upload/complete`, {
+    uploadId: ticket.uploadId,
+  });
   return { init, put, complete };
 }
 
@@ -333,8 +315,8 @@ interface FileView {
   readonly signatureProbe: { result: string } | null;
 }
 
-async function listFiles(kcSub: string, revisionId: string): Promise<readonly FileView[]> {
-  const response = await as(kcSub, 'GET', `/api/v1/revisions/${revisionId}/files`);
+async function listFiles(kcSub: string, folderId: string): Promise<readonly FileView[]> {
+  const response = await as(kcSub, 'GET', `/api/v1/folders/${folderId}/files`);
   expect(response.statusCode).toBe(200);
   return response.json<{ items: FileView[] }>().items;
 }
@@ -351,7 +333,7 @@ async function countRows(sql: string): Promise<number> {
 describe('приём файлов', () => {
   it('проходит три шага и разбирает страницы загруженного PDF', async () => {
     const content = fixture('multipage');
-    const outcome = await upload(KC.contractor, REVISION_DRAFT, 'АОСР № 01-TEST.pdf', content);
+    const outcome = await upload(KC.contractor, FOLDER_DRAFT, 'АОСР № 01-TEST.pdf', content);
 
     expect(outcome.init.statusCode).toBe(201);
     expect(outcome.put.statusCode).toBe(200);
@@ -366,11 +348,11 @@ describe('приём файлов', () => {
     // Имя пользователя живёт в БД и в ответе, но не в ключе объекта (§13).
     expect(file.fileName).toBe('АОСР № 01-TEST.pdf');
 
-    const pages = await db.query<{ revision_ordinal: number; file_page_index: number }>(
-      `SELECT revision_ordinal, file_page_index FROM source_pages
+    const pages = await db.query<{ folder_ordinal: number; file_page_index: number }>(
+      `SELECT folder_ordinal, file_page_index FROM source_pages
         WHERE source_file_id = '${file.id}' ORDER BY file_page_index`,
     );
-    expect(pages.map((p) => Number(p.revision_ordinal))).toEqual([0, 1, 2, 3]);
+    expect(pages.map((p) => Number(p.folder_ordinal))).toEqual([0, 1, 2, 3]);
   });
 
   it('ключ объекта строится из sha256 и не содержит имени файла', async () => {
@@ -391,7 +373,7 @@ describe('приём файлов', () => {
     const before = await countRows(`SELECT count(*) AS count FROM stored_blobs`);
     const outcome = await upload(
       KC.contractor,
-      REVISION_DRAFT,
+      FOLDER_DRAFT,
       'Тот же файл под другим именем.pdf',
       fixture('multipage'),
     );
@@ -402,14 +384,14 @@ describe('приём файлов', () => {
 
     // Две строки файлов на один блоб: дубликат в ревизии не запрещён
     // ограничением, он выявляется правилом (§3.3).
-    const files = await listFiles(KC.contractor, REVISION_DRAFT);
+    const files = await listFiles(KC.contractor, FOLDER_DRAFT);
     const sameBlob = files.filter((f) => f.fileName.includes('.pdf'));
     expect(sameBlob.length).toBeGreaterThanOrEqual(2);
     expect(new Set(files.map((f) => f.blobSha256)).size).toBe(1);
   });
 
   it('сохраняет повороты и хранит размеры в пост-поворотном фрейме', async () => {
-    const outcome = await upload(KC.contractor, REVISION_DRAFT, 'Схемы.pdf', fixture('rotated'));
+    const outcome = await upload(KC.contractor, FOLDER_DRAFT, 'Схемы.pdf', fixture('rotated'));
     expect(outcome.complete.statusCode).toBe(201);
     const file = outcome.complete.json<FileView>();
 
@@ -431,19 +413,14 @@ describe('приём файлов', () => {
   });
 
   it('находит признаки встроенной подписи и не объявляет её проверенной', async () => {
-    const outcome = await upload(
-      KC.contractor,
-      REVISION_DRAFT,
-      'Подписанный.pdf',
-      fixture('signed'),
-    );
+    const outcome = await upload(KC.contractor, FOLDER_DRAFT, 'Подписанный.pdf', fixture('signed'));
     expect(outcome.complete.statusCode).toBe(201);
     const file = outcome.complete.json<FileView>();
     expect(file.signatureProbe?.result).toBe('detected_unverified');
   });
 
   it('обычный PDF даёт «подписи не обнаружено», а не «неизвестно»', async () => {
-    const files = await listFiles(KC.contractor, REVISION_DRAFT);
+    const files = await listFiles(KC.contractor, FOLDER_DRAFT);
     const plain = files.find((f) => f.fileName === 'Схемы.pdf');
     expect(plain?.signatureProbe?.result).toBe('none_detected');
   });
@@ -451,7 +428,7 @@ describe('приём файлов', () => {
 
 describe('карантин', () => {
   it('повреждённый PDF сохраняется с причиной, а не удаляется', async () => {
-    const outcome = await upload(KC.contractor, REVISION_DRAFT, 'Битый.pdf', fixture('malformed'));
+    const outcome = await upload(KC.contractor, FOLDER_DRAFT, 'Битый.pdf', fixture('malformed'));
     expect(outcome.complete.statusCode).toBe(201);
 
     const file = outcome.complete.json<FileView>();
@@ -461,14 +438,14 @@ describe('карантин', () => {
 
     // Подрядчик видит отвергнутый файл в списке — иначе «загрузка не удалась»
     // остаётся без объяснения.
-    const files = await listFiles(KC.contractor, REVISION_DRAFT);
+    const files = await listFiles(KC.contractor, FOLDER_DRAFT);
     expect(files.some((f) => f.id === file.id)).toBe(true);
   });
 
   it('не-PDF отвергается по магическим байтам, а не по имени', async () => {
     const outcome = await upload(
       KC.contractor,
-      REVISION_DRAFT,
+      FOLDER_DRAFT,
       'Совсем не pdf.pdf',
       fixture('not-a-pdf'),
     );
@@ -487,7 +464,7 @@ describe('карантин', () => {
       'latin1',
     );
 
-    const outcome = await upload(KC.contractor, REVISION_DRAFT, 'Под паролем.pdf', encrypted);
+    const outcome = await upload(KC.contractor, FOLDER_DRAFT, 'Под паролем.pdf', encrypted);
     expect(outcome.complete.statusCode).toBe(201);
     const file = outcome.complete.json<FileView>();
     expect(file.verifyState).toBe('quarantined');
@@ -495,7 +472,7 @@ describe('карантин', () => {
   });
 
   it('содержимое карантинного файла не раздаётся', async () => {
-    const files = await listFiles(KC.contractor, REVISION_DRAFT);
+    const files = await listFiles(KC.contractor, FOLDER_DRAFT);
     const quarantined = files.find((f) => f.verifyState === 'quarantined');
     expect(quarantined).toBeDefined();
 
@@ -506,7 +483,7 @@ describe('карантин', () => {
 
 describe('выдача содержимого', () => {
   it('отдаёт байты сама, а не редиректом в хранилище', async () => {
-    const files = await listFiles(KC.contractor, REVISION_DRAFT);
+    const files = await listFiles(KC.contractor, FOLDER_DRAFT);
     const target = files.find((f) => f.verifyState === 'ok');
     expect(target).toBeDefined();
 
@@ -520,7 +497,7 @@ describe('выдача содержимого', () => {
   });
 
   it('человекочитаемое имя подставляется в Content-Disposition', async () => {
-    const files = await listFiles(KC.contractor, REVISION_DRAFT);
+    const files = await listFiles(KC.contractor, FOLDER_DRAFT);
     const target = files.find((f) => f.fileName === 'АОСР № 01-TEST.pdf');
     const response = await as(KC.contractor, 'GET', `/api/v1/files/${target?.id}/content`);
 
@@ -530,7 +507,7 @@ describe('выдача содержимого', () => {
   });
 
   it('поддерживает диапазон байтов', async () => {
-    const files = await listFiles(KC.contractor, REVISION_DRAFT);
+    const files = await listFiles(KC.contractor, FOLDER_DRAFT);
     const target = files.find((f) => f.verifyState === 'ok');
 
     const partial = await as(
@@ -577,7 +554,7 @@ describe('выдача содержимого', () => {
   });
 
   it('отвечает 416 на диапазон за пределами файла', async () => {
-    const files = await listFiles(KC.contractor, REVISION_DRAFT);
+    const files = await listFiles(KC.contractor, FOLDER_DRAFT);
     const target = files.find((f) => f.verifyState === 'ok');
 
     const response = await as(
@@ -594,15 +571,12 @@ describe('выдача содержимого', () => {
 
 describe('порядок файлов', () => {
   it('задаётся пользователем и пересчитывает позиции страниц ревизии', async () => {
-    const before = await listFiles(KC.contractor, REVISION_DRAFT);
+    const before = await listFiles(KC.contractor, FOLDER_DRAFT);
     const reversed = [...before].reverse().map((f) => f.id);
 
-    const response = await as(
-      KC.contractor,
-      'PUT',
-      `/api/v1/revisions/${REVISION_DRAFT}/files/order`,
-      { fileIds: reversed },
-    );
+    const response = await as(KC.contractor, 'PUT', `/api/v1/folders/${FOLDER_DRAFT}/files/order`, {
+      fileIds: reversed,
+    });
     expect(response.statusCode).toBe(200);
 
     const after = response.json<{ items: FileView[] }>().items;
@@ -611,41 +585,38 @@ describe('порядок файлов', () => {
 
     // Позиция страницы в ревизии — функция от порядка файлов, иначе «страница 5
     // ревизии» перестала бы означать то, что видит человек.
-    const pages = await db.query<{ id: string; revision_ordinal: number; sort_order: number }>(
-      `SELECT sp.id, sp.revision_ordinal, sf.sort_order
+    const pages = await db.query<{ id: string; folder_ordinal: number; sort_order: number }>(
+      `SELECT sp.id, sp.folder_ordinal, sf.sort_order
          FROM source_pages sp JOIN source_files sf ON sf.id = sp.source_file_id
-        WHERE sp.revision_id = '${REVISION_DRAFT}'
-        ORDER BY sp.revision_ordinal`,
+        WHERE sp.folder_id = '${FOLDER_DRAFT}'
+        ORDER BY sp.folder_ordinal`,
     );
-    expect(pages.map((p) => Number(p.revision_ordinal))).toEqual(pages.map((_p, index) => index));
+    expect(pages.map((p) => Number(p.folder_ordinal))).toEqual(pages.map((_p, index) => index));
     const orders = pages.map((p) => Number(p.sort_order));
     expect([...orders].sort((a, b) => a - b)).toEqual(orders);
   });
 
   it('отвергает неполный список', async () => {
-    const files = await listFiles(KC.contractor, REVISION_DRAFT);
-    const response = await as(
-      KC.contractor,
-      'PUT',
-      `/api/v1/revisions/${REVISION_DRAFT}/files/order`,
-      { fileIds: [files[0]?.id] },
-    );
+    const files = await listFiles(KC.contractor, FOLDER_DRAFT);
+    const response = await as(KC.contractor, 'PUT', `/api/v1/folders/${FOLDER_DRAFT}/files/order`, {
+      fileIds: [files[0]?.id],
+    });
     expect(response.statusCode).toBe(422);
   });
 
   it('удаление файла уплотняет порядок и позиции страниц', async () => {
-    const before = await listFiles(KC.contractor, REVISION_DRAFT);
+    const before = await listFiles(KC.contractor, FOLDER_DRAFT);
     const victim = before.find((f) => f.verifyState === 'quarantined');
     expect(victim).toBeDefined();
 
     const response = await as(
       KC.contractor,
       'DELETE',
-      `/api/v1/revisions/${REVISION_DRAFT}/files/${victim?.id}`,
+      `/api/v1/folders/${FOLDER_DRAFT}/files/${victim?.id}`,
     );
     expect(response.statusCode).toBe(204);
 
-    const after = await listFiles(KC.contractor, REVISION_DRAFT);
+    const after = await listFiles(KC.contractor, FOLDER_DRAFT);
     expect(after.length).toBe(before.length - 1);
     expect(after.map((f) => f.sortOrder)).toEqual(after.map((_f, index) => index));
 
@@ -656,38 +627,20 @@ describe('порядок файлов', () => {
   });
 });
 
-describe('состав поданной ревизии неизменяем', () => {
-  it('загрузка в submitted-ревизию отвергается с объяснением', async () => {
-    const response = await as(
-      KC.contractor,
-      'POST',
-      `/api/v1/revisions/${REVISION_SUBMITTED}/files/upload/init`,
-      { fileName: 'Догрузка.pdf', sizeBytes: 1024 },
-    );
-    expect(response.statusCode).toBe(409);
-    expect(response.json<{ detail?: string }>().detail).toMatch(/неизменяем/i);
-  });
-});
-
 describe('изоляция подрядчиков', () => {
   it('чужая ревизия не видна ни списком, ни на загрузке', async () => {
-    const list = await as(KC.other, 'GET', `/api/v1/revisions/${REVISION_DRAFT}/files`);
+    const list = await as(KC.other, 'GET', `/api/v1/folders/${FOLDER_DRAFT}/files`);
     expect(list.statusCode).toBe(404);
 
-    const init = await as(
-      KC.other,
-      'POST',
-      `/api/v1/revisions/${REVISION_DRAFT}/files/upload/init`,
-      {
-        fileName: 'Подсадка.pdf',
-        sizeBytes: 1024,
-      },
-    );
+    const init = await as(KC.other, 'POST', `/api/v1/folders/${FOLDER_DRAFT}/files/upload/init`, {
+      fileName: 'Подсадка.pdf',
+      sizeBytes: 1024,
+    });
     expect(init.statusCode).toBe(404);
   });
 
   it('чужой файл не отдаётся по прямому идентификатору', async () => {
-    const files = await listFiles(KC.contractor, REVISION_DRAFT);
+    const files = await listFiles(KC.contractor, FOLDER_DRAFT);
     const target = files.find((f) => f.verifyState === 'ok');
 
     const response = await as(KC.other, 'GET', `/api/v1/files/${target?.id}/content`);
@@ -703,7 +656,7 @@ describe('изоляция подрядчиков', () => {
    * содержимого, а не одного заголовка.
    */
   it('Range к чужому файлу даёт 404, а не 206', async () => {
-    const files = await listFiles(KC.contractor, REVISION_DRAFT);
+    const files = await listFiles(KC.contractor, FOLDER_DRAFT);
     const target = files.find((f) => f.verifyState === 'ok');
     expect(target).toBeDefined();
 
@@ -733,12 +686,12 @@ describe('изоляция подрядчиков', () => {
    * Поэтому здесь настоящий файл кладёт подрядчик Б, а забрать его пытается А.
    */
   it('подрядчик А не получает у Б ни файла, ни его метаданных', async () => {
-    const uploaded = await upload(KC.other, REVISION_OTHER, 'Чужой скан.pdf', fixture('single-3'));
+    const uploaded = await upload(KC.other, FOLDER_OTHER, 'Чужой скан.pdf', fixture('single-3'));
     expect(uploaded.complete.statusCode).toBe(201);
     const foreign = uploaded.complete.json<FileView>();
 
     // Список чужой ревизии.
-    const list = await as(KC.contractor, 'GET', `/api/v1/revisions/${REVISION_OTHER}/files`);
+    const list = await as(KC.contractor, 'GET', `/api/v1/folders/${FOLDER_OTHER}/files`);
     expect(list.statusCode).toBe(404);
 
     // Метаданные и содержимое по прямому идентификатору — включая Range.
@@ -755,26 +708,21 @@ describe('изоляция подрядчиков', () => {
 
     // Тот же блоб лежит и у А (дедупликация по sha256 общая на портал), но
     // строка файла принадлежит Б: общее хранилище не должно делать общим доступ.
-    const own = await upload(KC.contractor, REVISION_DRAFT, 'Свой скан.pdf', fixture('single-3'));
+    const own = await upload(KC.contractor, FOLDER_DRAFT, 'Свой скан.pdf', fixture('single-3'));
     expect(own.complete.statusCode).toBe(201);
     expect(own.complete.json<FileView>().blobSha256).toBe(foreign.blobSha256);
     expect(own.complete.json<FileView>().id).not.toBe(foreign.id);
 
     // И порядок в чужой ревизии не переставляется.
-    const order = await as(
-      KC.contractor,
-      'PUT',
-      `/api/v1/revisions/${REVISION_OTHER}/files/order`,
-      {
-        fileIds: [foreign.id],
-      },
-    );
+    const order = await as(KC.contractor, 'PUT', `/api/v1/folders/${FOLDER_OTHER}/files/order`, {
+      fileIds: [foreign.id],
+    });
     expect(order.statusCode).toBe(404);
   });
 
   it('файлы ревизии видны любому инженеру', async () => {
     for (const kc of [KC.engineer, KC.engineerBlank]) {
-      const response = await as(kc, 'GET', `/api/v1/revisions/${REVISION_DRAFT}/files`);
+      const response = await as(kc, 'GET', `/api/v1/folders/${FOLDER_DRAFT}/files`);
       expect([kc, response.statusCode]).toEqual([kc, 200]);
       expect(response.json<{ items: FileView[] }>().items.length).toBeGreaterThan(0);
     }
@@ -788,7 +736,7 @@ describe('изоляция подрядчиков', () => {
     const response = await as(
       KC.engineer,
       'POST',
-      `/api/v1/revisions/${REVISION_DRAFT}/files/upload/init`,
+      `/api/v1/folders/${FOLDER_DRAFT}/files/upload/init`,
       { fileName: 'Правка инженера.pdf', sizeBytes: 1024 },
     );
     expect(response.statusCode).toBe(201);
@@ -800,7 +748,7 @@ describe('изоляция подрядчиков', () => {
     const response = await as(
       KC.engineerBlank,
       'POST',
-      `/api/v1/revisions/00000000-0000-4000-8000-00000000dead/files/upload/init`,
+      `/api/v1/folders/00000000-0000-4000-8000-00000000dead/files/upload/init`,
       { fileName: 'Правка.pdf', sizeBytes: 1024 },
     );
     expect(response.statusCode).toBe(404);
@@ -810,7 +758,7 @@ describe('изоляция подрядчиков', () => {
     const init = await as(
       KC.contractor,
       'POST',
-      `/api/v1/revisions/${REVISION_DRAFT}/files/upload/init`,
+      `/api/v1/folders/${FOLDER_DRAFT}/files/upload/init`,
       { fileName: 'Перехваченный.pdf', sizeBytes: 1024 },
     );
     expect(init.statusCode).toBe(201);
@@ -819,7 +767,7 @@ describe('изоляция подрядчиков', () => {
     const stolen = await as(
       KC.other,
       'POST',
-      `/api/v1/revisions/${REVISION_DRAFT}/files/upload/complete`,
+      `/api/v1/folders/${FOLDER_DRAFT}/files/upload/complete`,
       { uploadId: ticket.uploadId },
     );
     // Область видимости срабатывает раньше сверки талона: чужая ревизия для
@@ -854,7 +802,7 @@ describe('приём байтов драйвером local', () => {
     const init = await as(
       KC.contractor,
       'POST',
-      `/api/v1/revisions/${REVISION_DRAFT}/files/upload/init`,
+      `/api/v1/folders/${FOLDER_DRAFT}/files/upload/init`,
       { fileName: 'с-cookie.pdf', sizeBytes: fixture('single-2').byteLength },
     );
     expect(init.statusCode).toBe(201);
@@ -871,7 +819,7 @@ describe('приём байтов драйвером local', () => {
 
   it('события ревизии пишутся вместе с файлом', async () => {
     const events = await db.query<{ event_type: string }>(
-      `SELECT event_type FROM revision_events WHERE revision_id = '${REVISION_DRAFT}' ORDER BY seq`,
+      `SELECT event_type FROM folder_events WHERE folder_id = '${FOLDER_DRAFT}' ORDER BY seq`,
     );
     const types = events.map((e) => e.event_type);
     expect(types).toContain('file.uploaded');
@@ -881,7 +829,7 @@ describe('приём байтов драйвером local', () => {
 
   it('изменения состава оставляют след в журнале аудита', async () => {
     const actions = await db.query<{ action: string }>(
-      `SELECT DISTINCT action FROM audit_log WHERE entity_type IN ('source_file', 'submission_revision')`,
+      `SELECT DISTINCT action FROM audit_log WHERE entity_type IN ('source_file', 'submission_folder')`,
     );
     const names = actions.map((a) => a.action);
     expect(names).toContain('source_file.uploaded');
@@ -907,52 +855,47 @@ describe('приём байтов драйвером local', () => {
  * `enqueueJob` написан, а то, что после загрузки в `jobs` появились строки.
  */
 describe('приём ставит задачи конвейера', () => {
-  const PIPELINE_REVISION = REVISION_PIPELINE;
+  const PIPELINE_FOLDER = FOLDER_PIPELINE;
 
-  async function jobsOf(revisionId: string): Promise<readonly string[]> {
+  async function jobsOf(folderId: string): Promise<readonly string[]> {
     const rows = await db.query<{ type: string }>(
-      `SELECT type FROM jobs WHERE payload->>'revisionId' = '${revisionId}' ORDER BY type`,
+      `SELECT type FROM jobs WHERE payload->>'folderId' = '${folderId}' ORDER BY type`,
     );
     return rows.map((row) => row.type);
   }
 
   it('после complete в очереди есть file.verify и file.signature_probe', async () => {
-    const before = await jobsOf(PIPELINE_REVISION);
+    const before = await jobsOf(PIPELINE_FOLDER);
     expect(before).not.toContain('file.verify');
 
     const outcome = await upload(
       KC.contractor,
-      PIPELINE_REVISION,
+      PIPELINE_FOLDER,
       'конвейер.pdf',
       fixture('multipage'),
     );
     expect(outcome.complete.statusCode).toBe(201);
     const file = outcome.complete.json<FileView>();
 
-    const after = await jobsOf(PIPELINE_REVISION);
+    const after = await jobsOf(PIPELINE_FOLDER);
     expect(after).toContain('file.verify');
     expect(after).toContain('file.signature_probe');
 
     // Задача адресует и ревизию, и файл: без ревизии в payload область
     // видимости задачи не определяется, без файла нечего проверять.
-    const payloads = await db.query<{ payload: { revisionId: string; sourceFileId: string } }>(
+    const payloads = await db.query<{ payload: { folderId: string; sourceFileId: string } }>(
       `SELECT payload FROM jobs WHERE type = 'file.verify'
         AND payload->>'sourceFileId' = '${file.id}'`,
     );
     expect(payloads).toHaveLength(1);
-    expect(payloads[0]?.payload.revisionId).toBe(PIPELINE_REVISION);
+    expect(payloads[0]?.payload.folderId).toBe(PIPELINE_FOLDER);
   });
 
   it('карантинный файл тоже проверяется задачей: вердикт не «пропустить»', async () => {
     // Карантин ставит синхронный путь, но задача обязана быть поставлена и здесь:
     // она сверяет содержимое ХРАНИЛИЩА, а не поток от клиента, и «отвергнут при
     // загрузке» не означает «в бакете лежит то же самое».
-    const outcome = await upload(
-      KC.contractor,
-      PIPELINE_REVISION,
-      'битый.pdf',
-      fixture('malformed'),
-    );
+    const outcome = await upload(KC.contractor, PIPELINE_FOLDER, 'битый.pdf', fixture('malformed'));
     expect(outcome.complete.statusCode).toBe(201);
     const file = outcome.complete.json<FileView>();
     expect(file.verifyState).toBe('quarantined');
@@ -981,7 +924,7 @@ describe('приём ставит задачи конвейера', () => {
  * Автозапуск привязан к ТАЛОНУ, и проверяется именно это.
  *
  * Признак «довести до разметки» едет внутри подписи талона, который выдаёт
- * только `POST /works/with-file`. Привязка к самому факту загрузки была бы
+ * только `POST /folders/with-file`. Привязка к самому факту загрузки была бы
  * дефектом: `startMarkupOnBundle` в мягком режиме сносит распознавание и всё
  * производное ниже разметки, а обычная догрузка идёт и в комплект, который уже
  * разобран. Плюс автосборка после первого файла закрыла бы приём остальных —
@@ -990,7 +933,7 @@ describe('приём ставит задачи конвейера', () => {
 describe('заведение комплекта с файлом доводит его до разметки', () => {
   interface CreatedWork {
     readonly workId: string;
-    readonly revisionId: string;
+    readonly folderId: string;
     readonly upload: { readonly uploadId: string; readonly uploadUrl: string };
   }
 
@@ -999,7 +942,7 @@ describe('заведение комплекта с файлом доводит �
     title: string,
     content: Buffer,
   ): Promise<{ readonly work: CreatedWork; readonly complete: LightMyRequestResponse }> {
-    const created = await as(KC.engineer, 'POST', '/api/v1/works/with-file', {
+    const created = await as(KC.engineer, 'POST', '/api/v1/folders/with-file', {
       objectId: OBJECT,
       sectionCode: 'roofing',
       title,
@@ -1024,16 +967,16 @@ describe('заведение комплекта с файлом доводит �
     const complete = await as(
       KC.engineer,
       'POST',
-      `/api/v1/revisions/${work.revisionId}/files/upload/complete`,
+      `/api/v1/folders/${work.folderId}/files/upload/complete`,
       { uploadId: work.upload.uploadId },
     );
     return { work, complete };
   }
 
-  async function buildJobsOf(revisionId: string): Promise<readonly { startMarkup?: boolean }[]> {
+  async function buildJobsOf(folderId: string): Promise<readonly { startMarkup?: boolean }[]> {
     const rows = await db.query<{ payload: { startMarkup?: boolean } }>(
       `SELECT payload FROM jobs
-        WHERE type = 'bundle.build' AND payload->>'revisionId' = '${revisionId}'`,
+        WHERE type = 'bundle.build' AND payload->>'folderId' = '${folderId}'`,
     );
     return rows.map((row) => row.payload);
   }
@@ -1043,7 +986,7 @@ describe('заведение комплекта с файлом доводит �
     expect(complete.statusCode).toBe(201);
     expect(complete.json<FileView>().verifyState).toBe('ok');
 
-    const builds = await buildJobsOf(work.revisionId);
+    const builds = await buildJobsOf(work.folderId);
     expect(builds).toHaveLength(1);
     // Признак — единственное, что отличает эту сборку от «Собрать рабочий
     // документ»: по нему обработчик поставит `layout.start`, и разметка пойдёт
@@ -1056,22 +999,17 @@ describe('заведение комплекта с файлом доводит �
     expect(complete.statusCode).toBe(201);
     expect(complete.json<FileView>().verifyState).toBe('quarantined');
 
-    expect(await buildJobsOf(work.revisionId)).toEqual([]);
+    expect(await buildJobsOf(work.folderId)).toEqual([]);
   });
 
   it('обычная догрузка файла разметку не запускает', async () => {
     // Талон `upload/init` признака не несёт, и это не забывчивость: комплект из
     // нескольких файлов человек дособерёт, а собранный рабочий документ закрыл
     // бы приём остальных.
-    const outcome = await upload(
-      KC.contractor,
-      REVISION_DRAFT,
-      'догрузка.pdf',
-      fixture('multipage'),
-    );
+    const outcome = await upload(KC.contractor, FOLDER_DRAFT, 'догрузка.pdf', fixture('multipage'));
     expect(outcome.complete.statusCode).toBe(201);
 
-    expect(await buildJobsOf(REVISION_DRAFT)).toEqual([]);
+    expect(await buildJobsOf(FOLDER_DRAFT)).toEqual([]);
   });
 });
 
@@ -1146,13 +1084,13 @@ describe('presigned URL не появляется в ответах API', () => 
   });
 
   it('ни один ответ приёма и выдачи файлов не несёт подписанного адреса', async () => {
-    const files = await listFiles(KC.contractor, REVISION_DRAFT);
+    const files = await listFiles(KC.contractor, FOLDER_DRAFT);
     const target = files.find((f) => f.verifyState === 'ok');
     expect(target).toBeDefined();
 
     const fresh = await upload(
       KC.contractor,
-      REVISION_DRAFT,
+      FOLDER_DRAFT,
       'Ещё один скан.pdf',
       fixture('single-3'),
     );
@@ -1160,13 +1098,10 @@ describe('presigned URL не появляется в ответах API', () => 
     const responses: readonly (readonly [string, LightMyRequestResponse])[] = [
       ['init', fresh.init],
       ['complete', fresh.complete],
-      [
-        'список файлов',
-        await as(KC.contractor, 'GET', `/api/v1/revisions/${REVISION_DRAFT}/files`),
-      ],
+      ['список файлов', await as(KC.contractor, 'GET', `/api/v1/folders/${FOLDER_DRAFT}/files`)],
       [
         'список файлов инженера',
-        await as(KC.engineer, 'GET', `/api/v1/revisions/${REVISION_DRAFT}/files`),
+        await as(KC.engineer, 'GET', `/api/v1/folders/${FOLDER_DRAFT}/files`),
       ],
       ['содержимое', await as(KC.contractor, 'GET', `/api/v1/files/${target?.id}/content`)],
       [
@@ -1177,7 +1112,7 @@ describe('presigned URL не появляется в ответах API', () => 
       ],
       [
         'сводка обработки',
-        await as(KC.contractor, 'GET', `/api/v1/revisions/${REVISION_DRAFT}/processing-status`),
+        await as(KC.contractor, 'GET', `/api/v1/folders/${FOLDER_DRAFT}/processing-status`),
       ],
     ];
 
@@ -1210,7 +1145,7 @@ describe('presigned URL не появляется в ответах API', () => 
     const init = await as(
       KC.contractor,
       'POST',
-      `/api/v1/revisions/${REVISION_DRAFT}/files/upload/init`,
+      `/api/v1/folders/${FOLDER_DRAFT}/files/upload/init`,
       { fileName: 'Проверка адреса.pdf', sizeBytes: 1024 },
     );
     expect(init.statusCode).toBe(201);
@@ -1227,98 +1162,42 @@ describe('presigned URL не появляется в ответах API', () => 
 });
 
 // =====================================================================
-// Порядок файлов запирается подачей
+// Порядок файлов запирается собранным рабочим документом
 // =====================================================================
-
-describe('порядок файлов до и после подачи', () => {
-  it('меняется в черновике и не меняется после submit', async () => {
-    await upload(KC.contractor, REVISION_ORDER, 'Первый.pdf', fixture('single-1'));
-    await upload(KC.contractor, REVISION_ORDER, 'Второй.pdf', fixture('single-2'));
-
-    const draft = await listFiles(KC.contractor, REVISION_ORDER);
-    expect(draft.map((f) => f.fileName)).toEqual(['Первый.pdf', 'Второй.pdf']);
-    const reversed = [...draft].reverse().map((f) => f.id);
-
-    const beforeSubmit = await as(
-      KC.contractor,
-      'PUT',
-      `/api/v1/revisions/${REVISION_ORDER}/files/order`,
-      { fileIds: reversed },
-    );
-    expect(beforeSubmit.statusCode).toBe(200);
-    expect(beforeSubmit.json<{ items: FileView[] }>().items.map((f) => f.fileName)).toEqual([
-      'Второй.pdf',
-      'Первый.pdf',
-    ]);
-
-    // Подача: собственного маршрута у неё пока нет (S5 — приём файлов), а
-    // проверяется здесь именно запрет после подачи, поэтому статус ставится
-    // напрямую.
-    await db.query(
-      `UPDATE submission_revisions SET status = 'submitted' WHERE id = '${REVISION_ORDER}'`,
-    );
-
-    const afterSubmit = await as(
-      KC.contractor,
-      'PUT',
-      `/api/v1/revisions/${REVISION_ORDER}/files/order`,
-      { fileIds: [...reversed].reverse() },
-    );
-    expect(afterSubmit.statusCode).toBe(409);
-    expect(afterSubmit.json<{ detail?: string }>().detail).toMatch(/неизменяем/i);
-
-    // Запрет держит БД, а не только проверка в репозитории: прямой UPDATE в
-    // обход приложения тоже отвергается. Порядок файлов входит в
-    // `aggregate_manifest_hash`, поэтому его правка после подачи означала бы
-    // манифест, не описывающий состав.
-    await expect(
-      db.query(
-        `UPDATE source_files SET sort_order = sort_order + 10 WHERE revision_id = '${REVISION_ORDER}'`,
-      ),
-    ).rejects.toThrow(/ревизия поставки в статусе/i);
-
-    const after = await listFiles(KC.contractor, REVISION_ORDER);
-    expect(after.map((f) => f.fileName)).toEqual(['Второй.pdf', 'Первый.pdf']);
-    expect(after.map((f) => f.sortOrder)).toEqual([0, 1]);
-  });
-});
 
 describe('состав черновика фиксируется собранным рабочим документом', () => {
   /**
    * Регрессия дефекта, найденного на S10.
    *
-   * `RevisionForFiles.hasBundle` вычислялся коррелирующим подзапросом, в котором
-   * ссылка на внешнюю таблицу шла через `${submissionRevisions.id}`. В запросе
+   * `FolderForFiles.hasBundle` вычислялся коррелирующим подзапросом, в котором
+   * ссылка на внешнюю таблицу шла через `${folders.id}`. В запросе
    * БЕЗ джойнов Drizzle рендерит колонку без имени таблицы, поэтому условие
-   * превращалось в `pb.revision_id = "id"` и связывалось с `pb.id` — то есть
+   * превращалось в `pb.folder_id = "id"` и связывалось с `pb.id` — то есть
    * было ложным ВСЕГДА. Следствие: запрет «состав и порядок зафиксированы
    * разметкой» (§3.3) не срабатывал ни разу, и подрядчик мог переставить файлы
    * уже после того, как рабочий документ уехал в RD WEB, — при неизменном
    * `aggregate_manifest_hash` рабочего документа.
    */
   it('после сборки рабочего документа порядок файлов не переставляется', async () => {
-    const files = await listFiles(KC.contractor, REVISION_DRAFT);
+    const files = await listFiles(KC.contractor, FOLDER_DRAFT);
     expect(files.length).toBeGreaterThan(1);
 
     const blobs = await db.query<{ sha256: string }>(`SELECT sha256 FROM stored_blobs LIMIT 1`);
     const blobSha = blobs[0]?.sha256;
     expect(blobSha).toBeDefined();
     await db.query(
-      `INSERT INTO processing_bundles (revision_id, aggregate_manifest_hash, working_pdf_blob_sha256, builder_version)
-         VALUES ('${REVISION_DRAFT}', '${'f'.repeat(64)}', '${blobSha}', 'bundle/1+pdf-lib')`,
+      `INSERT INTO processing_bundles (folder_id, aggregate_manifest_hash, working_pdf_blob_sha256, builder_version)
+         VALUES ('${FOLDER_DRAFT}', '${'f'.repeat(64)}', '${blobSha}', 'bundle/1+pdf-lib')`,
     );
 
-    const response = await as(
-      KC.contractor,
-      'PUT',
-      `/api/v1/revisions/${REVISION_DRAFT}/files/order`,
-      { fileIds: [...files].reverse().map((file) => file.id) },
-    );
+    const response = await as(KC.contractor, 'PUT', `/api/v1/folders/${FOLDER_DRAFT}/files/order`, {
+      fileIds: [...files].reverse().map((file) => file.id),
+    });
     expect(response.statusCode).toBe(409);
     expect(response.json<{ detail?: string }>().detail).toMatch(/рабочий документ/i);
 
     // Порядок не изменился: отказ обязан быть настоящим, а не косметическим.
-    const after = await listFiles(KC.contractor, REVISION_DRAFT);
+    const after = await listFiles(KC.contractor, FOLDER_DRAFT);
     expect(after.map((file) => file.id)).toEqual(files.map((file) => file.id));
   });
 });
@@ -1330,7 +1209,7 @@ describe('состав черновика фиксируется собранн�
 /**
  * Регрессия дефекта, на который указал заказчик.
  *
- * `DELETE /revisions/{id}/files/{fileId}` отвечал 409 в ЧЕРНОВИКЕ — потому что у
+ * `DELETE /folders/{id}/files/{fileId}` отвечал 409 в ЧЕРНОВИКЕ — потому что у
  * ревизии уже был собран рабочий документ. Формулировка отказа («состав и
  * порядок файлов зафиксированы разметкой») звучала как неизменяемость §3.9 и
  * отправляла искать причину не туда: ревизия была черновиком, а мешала сборка.
@@ -1345,7 +1224,7 @@ describe('состав черновика фиксируется собранн�
  */
 describe('удаление файла из черновика с собранным рабочим документом', () => {
   it('проходит и уносит с собой рабочий документ вместе с разметкой', async () => {
-    const before = await listFiles(KC.contractor, REVISION_DRAFT);
+    const before = await listFiles(KC.contractor, FOLDER_DRAFT);
     expect(before.length).toBeGreaterThan(1);
     const victim = before[0];
     expect(victim).toBeDefined();
@@ -1353,30 +1232,30 @@ describe('удаление файла из черновика с собранн�
     // Рабочий документ мог остаться от соседнего набора: он и есть условие,
     // которое раньше делало удаление невозможным.
     const existing = await db.query<{ n: number }>(
-      `SELECT count(*)::int AS n FROM processing_bundles WHERE revision_id = '${REVISION_DRAFT}'`,
+      `SELECT count(*)::int AS n FROM processing_bundles WHERE folder_id = '${FOLDER_DRAFT}'`,
     );
     if ((existing[0]?.n ?? 0) === 0) {
       const blobs = await db.query<{ sha256: string }>(`SELECT sha256 FROM stored_blobs LIMIT 1`);
       await db.query(
-        `INSERT INTO processing_bundles (revision_id, aggregate_manifest_hash, working_pdf_blob_sha256, builder_version)
-           VALUES ('${REVISION_DRAFT}', '${'e'.repeat(64)}', '${blobs[0]?.sha256 ?? ''}', 'bundle/1+pdf-lib')`,
+        `INSERT INTO processing_bundles (folder_id, aggregate_manifest_hash, working_pdf_blob_sha256, builder_version)
+           VALUES ('${FOLDER_DRAFT}', '${'e'.repeat(64)}', '${blobs[0]?.sha256 ?? ''}', 'bundle/1+pdf-lib')`,
       );
     }
 
     const response = await as(
       KC.contractor,
       'DELETE',
-      `/api/v1/revisions/${REVISION_DRAFT}/files/${victim?.id ?? ''}`,
+      `/api/v1/folders/${FOLDER_DRAFT}/files/${victim?.id ?? ''}`,
     );
     expect(response.statusCode).toBe(204);
 
     // Файла нет, а рабочий документ обесценен целиком: оставить его значило бы
     // хранить карту страниц, половина которой указывает в никуда.
-    const after = await listFiles(KC.contractor, REVISION_DRAFT);
+    const after = await listFiles(KC.contractor, FOLDER_DRAFT);
     expect(after.map((file) => file.id)).not.toContain(victim?.id);
 
     const bundles = await db.query<{ n: number }>(
-      `SELECT count(*)::int AS n FROM processing_bundles WHERE revision_id = '${REVISION_DRAFT}'`,
+      `SELECT count(*)::int AS n FROM processing_bundles WHERE folder_id = '${FOLDER_DRAFT}'`,
     );
     expect(bundles[0]?.n).toBe(0);
 

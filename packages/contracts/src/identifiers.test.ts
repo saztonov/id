@@ -31,6 +31,24 @@ describe('normalizeDocNo', () => {
     expect(normalizeDocNo('ru.mcc.240.445.38406').normalized).toBe('RU.MCC.240.445.38406');
   });
 
+  it('срезает приставку «номер», в том числе прочитанную буквами', () => {
+    // Боевой комплект: 35 строк перечней приложений пришли с «Не» вместо «№».
+    // Без среза строка реестра «Не 6846» не сходилась с документом «6846», и
+    // портал объявлял отсутствующим документ, который в комплекте лежит.
+    expect(normalizeDocNo('Не 6846').normalized).toBe('6846');
+    expect(normalizeDocNo('Не RU.СМИК.001.Н.00270').normalized).toBe('RU.СМИК.001.Н.00270');
+    expect(normalizeDocNo('No 123').normalized).toBe('123');
+    expect(normalizeDocNo('N 123').normalized).toBe('123');
+  });
+
+  it('не трогает приставку там, где она часть номера', () => {
+    // Закрытый список форм и требование остатка: `НД` — обозначение
+    // нормативного документа, а `NO` целиком — законный номер сам по себе.
+    expect(normalizeDocNo('НД-45').normalized).toBe('НД-45');
+    expect(normalizeDocNo('NO').normalized).toBe('NO');
+    expect(normalizeDocNo('АБВ-Не-12').normalized).toBe('АБВ-НЕ-12');
+  });
+
   it('приводит тире всех начертаний к дефису', () => {
     const forms = ['ГИ‑77', 'ГИ–77', 'ГИ—77', 'ГИ−77', 'ГИ-77'];
     const normalized = new Set(forms.map((form) => normalizeDocNo(form).normalized));

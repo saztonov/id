@@ -81,7 +81,7 @@ export const PERMISSIONS = {
    * загрузить в него файлы и запустить конвейер (`submission.upload`,
    * `pipeline.run`), то есть создать разметку он мог и раньше — не мог только
    * поправить её результат. Решения о самом документе это не касается:
-   * `document.edit`, `checks.run` и `revision.approve` у администратора
+   * `document.edit`, `checks.run` и `folder.approve` у администратора
    * по-прежнему нет, и приёмку он не подписывает.
    */
   'markup.edit': ['contractor', 'general_contractor', 'engineer', 'admin'],
@@ -108,8 +108,8 @@ export const PERMISSIONS = {
    * («важна информация о том, есть ли ошибки в документе»), а загружать вправе
    * все пять ролей — значит и прогнать загруженное тоже.
    *
-   * Право покрывает обе кнопки S21 (`POST /revisions/{id}/markup` и
-   * `POST /revisions/{id}/check`) целиком, включая подготовку разметки внутри
+   * Право покрывает обе кнопки S21 (`POST /folders/{id}/markup` и
+   * `POST /folders/{id}/check`) целиком, включая подготовку разметки внутри
    * второй: единое действие авторизуется один раз, иначе «Проверить» была бы
    * склейкой четырёх проверок прав, у которой на каждом шаге свой ответ.
    * Гранулярные маршруты (`/layout`, `/freeze`, `/recognize`, `/segment`,
@@ -131,15 +131,15 @@ export const PERMISSIONS = {
    *
    * Это сторона заказчика, а не генподрядчика: тот, кто передал, не принимает
    * сам у себя. `admin` здесь отсутствует по той же причине, что и в
-   * `revision.approve` (§4.1).
+   * `folder.approve` (§4.1).
    */
   'registry.accept': ['engineer', 'manager'],
 
   // Бизнес-согласование. `admin` здесь намеренно отсутствует (§4.1).
-  'revision.approve': ['engineer', 'manager'],
-  'revision.return': ['engineer', 'manager'],
+  'folder.approve': ['engineer', 'manager'],
+  'folder.return': ['engineer', 'manager'],
   /** Обоснованный отказ от результата проверки — только руководитель. */
-  'revision.override': ['manager'],
+  'folder.override': ['manager'],
 
   'archive.download': ['contractor', 'general_contractor', 'engineer', 'manager', 'admin'],
 

@@ -48,7 +48,7 @@ async function collect(chunks: readonly string[]): Promise<{
   vi.stubGlobal('fetch', fetchStub);
 
   await readEventStream({
-    url: '/api/v1/revisions/r1/events',
+    url: '/api/v1/folders/r1/events',
     lastEventId: '17',
     signal: new AbortController().signal,
     onFrame: (frame) => frames.push(frame),
@@ -123,7 +123,7 @@ describe('readEventStream', () => {
 
     await expect(
       readEventStream({
-        url: '/api/v1/revisions/r1/events',
+        url: '/api/v1/folders/r1/events',
         lastEventId: null,
         signal: new AbortController().signal,
         onFrame: () => undefined,

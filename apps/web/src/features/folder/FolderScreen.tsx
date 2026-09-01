@@ -20,15 +20,13 @@
  * (`stream.tsx`).
  */
 import { useEffect, useState, type ReactNode } from 'react';
-import { Alert, App as AntApp, Button, Modal, Tabs, Tag, Typography } from 'antd';
+import { Alert, App as AntApp, Button, Modal, Tabs, Typography } from 'antd';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { workflow } from '../../api/endpoints.js';
-import { navigationKeys, revisionKeys } from '../../api/keys.js';
-import { deleteRevision, getWork } from '../../api/navigation.js';
+import { navigationKeys } from '../../api/keys.js';
+import { deleteFolder, getFolder } from '../../api/navigation.js';
 import { describeError } from '../../api/problem.js';
 import { useSession } from '../../app/session.js';
 import { ErrorState, LoadingState, ScreenHeading } from '../../shared/ui.js';
-import { WORK_KIND_LABELS, WORKFLOW_STATUS_LABELS, labelOf } from '../../shared/labels.js';
 import { Link, useNavigate, useQueryParam } from '../../app/router.js';
 import { periodLabel } from '../ids/pipelineState.js';
 import { FilesTab } from '../files/FilesTab.js';
@@ -36,7 +34,7 @@ import { MarkupScreen } from '../markup/MarkupScreen.js';
 import { ChecksTab } from '../checks/ChecksTab.js';
 import { HistoryTab } from '../history/HistoryTab.js';
 import { PipelineBar } from './PipelineBar.js';
-import { RevisionStreamProvider } from './stream.js';
+import { FolderStreamProvider } from './stream.js';
 import { StreamIndicator } from './StreamIndicator.js';
 
 const TABS = ['files', 'markup', 'checks', 'history'] as const;
@@ -57,9 +55,6 @@ type TabKey = (typeof TABS)[number];
  */
 const REMOVED_TABS: readonly string[] = ['documents', 'fields'];
 
-/** Терминальные состояния: производное содержимое заперто (§3.9). */
-const TERMINAL = ['returned', 'approved', 'superseded'];
-
 /**
  * Подзаголовок: чем этот комплект является и куда он попадёт.
  *
@@ -75,14 +70,14 @@ const TERMINAL = ['returned', 'approved', 'superseded'];
  * два ответа, которые меняются по разным поводам. Ключ запроса тот же, что у
  * заголовка, — react-query объединяет их в один вызов, а не ходит дважды.
  */
-function WorkLine({ workId }: { workId: string }): ReactNode {
-  const work = useQuery({
-    queryKey: navigationKeys.work(workId),
-    queryFn: () => getWork(workId),
+function FolderLine({ folderId }: { folderId: string }): ReactNode {
+  const folder = useQuery({
+    queryKey: navigationKeys.folder(folderId),
+    queryFn: () => getFolder(folderId),
   });
 
-  if (work.data === undefined || work.data.kind !== 'available') return null;
-  const data = work.data.data;
+  if (folder.data === undefined || folder.data.kind !== 'available') return null;
+  const data = folder.data.data;
 
   // Подчёркивание задано явно: ссылка внутри абзаца текста обязана отличаться
   // от него не только цветом (WCAG 1.4.1, правило axe `link-in-text-block`).
@@ -90,20 +85,10 @@ function WorkLine({ workId }: { workId: string }): ReactNode {
 
   return (
     <Typography.Paragraph type="secondary" style={{ marginTop: -8 }}>
-      {labelOf(WORK_KIND_LABELS, data.kind)} · {periodLabel(data.period)} ·{' '}
+      Папка ИД · {periodLabel(data.period)} ·{' '}
       <Link to={`/ids/objects/${data.objectId}`} style={inline}>
         объект
       </Link>
-      {data.registryId === null ? (
-        ' · в реестр не включён'
-      ) : (
-        <>
-          {' · '}
-          <Link to={`/ids/registries/${data.registryId}`} style={inline}>
-            реестр
-          </Link>
-        </>
-      )}
     </Typography.Paragraph>
   );
 }
@@ -122,33 +107,27 @@ function WorkLine({ workId }: { workId: string }): ReactNode {
  * у комплекта он оправдан — там за одной строкой прячется вся работа, — а здесь
  * человек уже стоит на экране этой самой ревизии и видит её содержимое вкладками.
  */
-function DeleteRevisionAction({
-  revisionId,
-  workId,
-}: {
-  revisionId: string;
-  workId: string;
-}): ReactNode {
+function DeleteFolderAction({ folderId }: { folderId: string }): ReactNode {
   const { can } = useSession();
   const { message } = AntApp.useApp();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
 
-  const work = useQuery({
-    queryKey: navigationKeys.work(workId),
-    queryFn: () => getWork(workId),
+  const folder = useQuery({
+    queryKey: navigationKeys.folder(folderId),
+    queryFn: () => getFolder(folderId),
   });
 
   const remove = useMutation({
-    mutationFn: () => deleteRevision(revisionId),
+    mutationFn: () => deleteFolder(folderId),
     onSuccess: async () => {
-      message.success('Ревизия удалена вместе со всем производным');
+      message.success('Папка удалена вместе со всем содержимым');
       setOpen(false);
       await queryClient.invalidateQueries({ queryKey: navigationKeys.root });
-      // Экран удалённой ревизии показывать нечего — уходим к объекту, откуда в
-      // комплект и заходят.
-      const objectId = work.data?.kind === 'available' ? work.data.data.objectId : null;
+      // Экран удалённой папки показывать нечего — уходим к объекту, откуда в
+      // папку и заходят.
+      const objectId = folder.data?.kind === 'available' ? folder.data.data.objectId : null;
       navigate(objectId === null ? '/ids' : `/ids/objects/${objectId}`);
     },
     onError: (error) => message.error(describeError(error)),
@@ -158,7 +137,7 @@ function DeleteRevisionAction({
 
   return (
     <>
-      <Button danger size="small" onClick={() => setOpen(true)} data-testid="delete-revision">
+      <Button danger size="small" onClick={() => setOpen(true)} data-testid="delete-folder">
         Удалить ревизию
       </Button>
       <Modal
@@ -181,17 +160,16 @@ function DeleteRevisionAction({
   );
 }
 
-export function RevisionScreen({ revisionId }: { revisionId: string }): ReactNode {
+export function FolderScreen({ folderId }: { folderId: string }): ReactNode {
   return (
-    <RevisionStreamProvider revisionId={revisionId}>
-      <RevisionWorkspace revisionId={revisionId} />
-    </RevisionStreamProvider>
+    <FolderStreamProvider folderId={folderId}>
+      <FolderWorkspace folderId={folderId} />
+    </FolderStreamProvider>
   );
 }
 
-function RevisionWorkspace({ revisionId }: { revisionId: string }): ReactNode {
+function FolderWorkspace({ folderId }: { folderId: string }): ReactNode {
   const navigate = useNavigate();
-  const { immutabilityEnforced } = useSession();
   const requested = useQueryParam('tab');
   const { message } = AntApp.useApp();
   const moved = requested !== null && REMOVED_TABS.includes(requested);
@@ -206,40 +184,25 @@ function RevisionWorkspace({ revisionId }: { revisionId: string }): ReactNode {
   // копирование ссылки из адресной строки воспроизводило бы устаревший вид.
   useEffect(() => {
     if (!moved) return;
-    navigate(`/ids/revisions/${revisionId}?tab=checks`, { replace: true });
+    navigate(`/ids/folders/${folderId}?tab=checks`, { replace: true });
     message.info(
       'Разделы «Документы» и «Реквизиты» удалены: портал больше не просит собирать документы вручную.',
     );
-  }, [message, moved, navigate, revisionId]);
+  }, [message, moved, navigate, folderId]);
 
-  const state = useQuery({
-    queryKey: revisionKeys.workflow(revisionId),
-    queryFn: () => workflow.state(revisionId),
+  const folderQuery = useQuery({
+    queryKey: navigationKeys.folder(folderId),
+    queryFn: () => getFolder(folderId),
   });
+  const folderTitle = folderQuery.data?.kind === 'available' ? folderQuery.data.data.title : null;
 
-  // Тот же ключ, что у `WorkLine`: react-query объединит их в один запрос, а не
-  // сходит на сервер дважды за одной карточкой.
-  const work = useQuery({
-    queryKey: navigationKeys.work(state.data?.revision.workId ?? 'none'),
-    queryFn: () => getWork(state.data?.revision.workId ?? ''),
-    enabled: state.data !== undefined,
-  });
-  const workTitle = work.data?.kind === 'available' ? work.data.data.title : null;
+  if (folderQuery.isPending) return <LoadingState label="Загрузка папки…" />;
+  if (folderQuery.isError) return <ErrorState error={folderQuery.error} title="Папка недоступна" />;
 
-  if (state.isPending) return <LoadingState label="Загрузка комплекта…" />;
-  if (state.isError) return <ErrorState error={state.error} title="Комплект недоступен" />;
-
-  const revision = state.data.revision;
-  /**
-   * Что правится, решает не только статус.
-   *
-   * В режиме тестирования (`core.enforce_immutability = false`, ADR-0015) сервер
-   * состав поданной ревизии править РАЗРЕШАЕТ, а экран всё равно гасил вкладку
-   * «Файлы» — то есть запрещал то, что портал уже разрешил, и человек упирался в
-   * серую кнопку без объяснения. Условие здесь теперь совпадает с серверным.
-   */
-  const sourceEditable = revision.status === 'draft' || !immutabilityEnforced;
-  const derivedEditable = !TERMINAL.includes(revision.status) || !immutabilityEnforced;
+  // Статусов подачи больше нет (S44): править можно всё и всегда, а границу
+  // «состав зафиксирован разметкой» держит сервер (`requireEditableFolder`).
+  const sourceEditable = true;
+  const derivedEditable = true;
 
   return (
     <>
@@ -253,63 +216,47 @@ function RevisionWorkspace({ revisionId }: { revisionId: string }): ReactNode {
         то, чего нет в заголовке, и названия не повторяет.
       */}
       <ScreenHeading
-        title={workTitle ?? 'Комплект работ'}
+        title={folderTitle ?? 'Комплект работ'}
         extra={
           <>
-            <Tag data-testid="revision-status-badge">
-              {labelOf(WORKFLOW_STATUS_LABELS, revision.status)}
-            </Tag>
             <StreamIndicator />
-            <DeleteRevisionAction revisionId={revisionId} workId={revision.workId} />
+            <DeleteFolderAction folderId={folderId} />
           </>
         }
       />
-      <WorkLine workId={revision.workId} />
+      <FolderLine folderId={folderId} />
 
       {/*
         Две кнопки конвейера стоят НАД вкладками: они относятся к ревизии
         целиком, и «Проверить» с вкладки «Файлы» делает ровно то же, что с
         вкладки «Проверка». Внутри вкладки их пришлось бы искать.
       */}
-      <PipelineBar revisionId={revisionId} editable={derivedEditable} />
-
-      {!sourceEditable && (
-        <Alert
-          type="info"
-          showIcon
-          style={{ marginBottom: 12 }}
-          message="Состав ревизии заперт"
-          description={
-            'Файлы и страницы поданной ревизии неизменяемы: они входят в хэш состава. ' +
-            'Исправление состава — новая ревизия после возврата.'
-          }
-        />
-      )}
+      <PipelineBar folderId={folderId} editable={derivedEditable} />
 
       <Tabs
         activeKey={tab}
-        onChange={(key) => navigate(`/ids/revisions/${revisionId}?tab=${key}`)}
+        onChange={(key) => navigate(`/ids/folders/${folderId}?tab=${key}`)}
         destroyOnHidden
         items={[
           {
             key: 'files',
             label: 'Файлы',
-            children: <FilesTab revisionId={revisionId} editable={sourceEditable} />,
+            children: <FilesTab folderId={folderId} editable={sourceEditable} />,
           },
           {
             key: 'markup',
             label: 'Разметка',
-            children: <MarkupScreen revisionId={revisionId} />,
+            children: <MarkupScreen folderId={folderId} />,
           },
           {
             key: 'checks',
             label: 'Проверка',
-            children: <ChecksTab revisionId={revisionId} />,
+            children: <ChecksTab folderId={folderId} />,
           },
           {
             key: 'history',
             label: 'История',
-            children: <HistoryTab revisionId={revisionId} />,
+            children: <HistoryTab folderId={folderId} />,
           },
         ]}
       />

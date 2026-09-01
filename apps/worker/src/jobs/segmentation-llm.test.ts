@@ -33,7 +33,7 @@ import {
   type SegmentationDeps,
 } from './segmentation.js';
 
-const REVISION = '00000000-0000-4000-8000-000000000001';
+const FOLDER = '00000000-0000-4000-8000-000000000001';
 const HASH = 'a'.repeat(64);
 
 const PROMPT: PublishedPrompt = {
@@ -50,7 +50,7 @@ function pagesWithoutSignal(count: number): SegmentationInput {
     recognitionRunId: '00000000-0000-4000-8000-0000000000ff',
     pages: Array.from({ length: count }, (_, index) => ({
       sourcePageId: `page-${index}`,
-      revisionOrdinal: index,
+      folderOrdinal: index,
       sourceFileId: 'file-1',
       filePageIndex: index,
       pageTextVersionId: `ptv-${index}`,
@@ -81,7 +81,7 @@ function harness(behaviour: (index: number) => Promise<LlmCallResult>, pageCount
     },
     listPageClassifications: () => Promise.resolve([]),
     // Месяц комплекта в этом наборе не выводится: набор про ступень модели.
-    fillWorkPeriod: () => Promise.resolve(false),
+    fillFolderPeriod: () => Promise.resolve(false),
     replaceAssumedContractor: () => Promise.resolve(false),
     rememberContractorRaw: () => Promise.resolve(false),
     listMatchableContractors: () => Promise.resolve([]),
@@ -116,7 +116,10 @@ function harness(behaviour: (index: number) => Promise<LlmCallResult>, pageCount
   const emitted: { type: string; payload: Record<string, unknown> | undefined }[] = [];
   const enqueued: string[] = [];
   const ctx = {
-    payload: { revisionId: REVISION },
+    payload: { folderId: FOLDER },
+    // Обход страниц и документов слушает отмену (S44): без сигнала подставной
+    // контекст падал бы на первой же проверке.
+    signal: AbortSignal.any([]),
     logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
     emit: (type: string, payload?: Record<string, unknown>) => {
       emitted.push({ type, payload });

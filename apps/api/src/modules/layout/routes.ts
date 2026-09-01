@@ -72,7 +72,7 @@ import {
   orientationResponseSchema,
   pageParamSchema,
   pageQuerySchema,
-  revisionIdParamSchema,
+  folderIdParamSchema,
   startMarkupResponseSchema,
   versionResponseSchema,
 } from './schemas.js';
@@ -107,7 +107,7 @@ function auditActor(app: AppInstance, request: FastifyRequest): AuditActor {
 function toView(layout: LayoutRevisionView) {
   return {
     id: layout.id,
-    revisionId: layout.revisionId,
+    folderId: layout.folderId,
     bundleId: layout.bundleId,
     revisionNo: layout.revisionNo,
     state: layout.state as 'draft' | 'superseded',
@@ -130,39 +130,39 @@ function withVersion(reply: FastifyReply, version: number): FastifyReply {
 
 function registerStartRoute(app: AppInstance): void {
   app.post(
-    `${PREFIX}/revisions/:revisionId/layout`,
+    `${PREFIX}/folders/:folderId/layout`,
     {
       preHandler: editMarkup,
       schema: {
-        params: revisionIdParamSchema,
+        params: folderIdParamSchema,
         response: { 202: startMarkupResponseSchema },
       },
     },
     async (request, reply) => {
       const { scope } = currentAuth(request);
-      const { revisionId } = request.params;
+      const { folderId } = request.params;
 
       // Рабочий документ обязан существовать: разметка ложится на его страницы,
       // а не на исходные файлы. Отсутствие bundle — это ответ пользователю
       // сейчас («сначала соберите рабочий документ»), а не задача, которая
       // упадёт через минуту с тем же текстом.
       //
-      // Кнопка S21 «Разметить» (`POST /revisions/{id}/markup`) этого отказа не
+      // Кнопка S21 «Разметить» (`POST /folders/{id}/markup`) этого отказа не
       // видит: она сама ставит сборку и продолжает разметкой. Здесь он остаётся
       // потому, что это ГРАНУЛЯРНЫЙ маршрут ручного пути — он делает ровно то,
       // что назвали, и молча делать за пользователя ещё и сборку не должен.
-      const bundles = await listBundles(app.db, scope, revisionId);
+      const bundles = await listBundles(app.db, scope, folderId);
       const bundle = bundles[bundles.length - 1];
       if (bundle === undefined) {
         throw conflict(
           'Разметку нельзя начать: рабочий документ ревизии ещё не собран ' +
-            '(POST /revisions/{id}/bundle).',
+            '(POST /folders/{id}/bundle).',
         );
       }
-      updateContext({ revisionId });
+      updateContext({ folderId });
 
       const started = await startMarkupOnBundle(app.db, scope, {
-        revisionId,
+        folderId,
         bundleId: bundle.id,
         previewCached: app.env.PREVIEW_MODE === 'cached',
         logger: request.log as unknown as Logger,
@@ -189,14 +189,14 @@ function registerStartRoute(app: AppInstance): void {
 
 function registerReadRoutes(app: AppInstance): void {
   app.get(
-    `${PREFIX}/revisions/:revisionId/layouts`,
+    `${PREFIX}/folders/:folderId/layouts`,
     {
       preHandler: readMarkup,
-      schema: { params: revisionIdParamSchema, response: { 200: layoutListSchema } },
+      schema: { params: folderIdParamSchema, response: { 200: layoutListSchema } },
     },
     async (request, reply) => {
       const { scope } = currentAuth(request);
-      const items = await listLayoutRevisions(app.db, scope, request.params.revisionId);
+      const items = await listLayoutRevisions(app.db, scope, request.params.folderId);
       return reply.code(200).send({ items: items.map(toView) });
     },
   );
@@ -211,7 +211,7 @@ function registerReadRoutes(app: AppInstance): void {
       const { scope } = currentAuth(request);
       const layout = await findLayoutRevision(app.db, scope, request.params.layoutId);
       if (layout === null) throw notFound('Ревизия разметки не найдена.');
-      updateContext({ revisionId: layout.revisionId, objectId: layout.objectId });
+      updateContext({ folderId: layout.folderId, objectId: layout.objectId });
 
       const [flags, blocks] = await Promise.all([
         listPageAttentionFlags(app.db, scope, layout.bundleId),
@@ -463,7 +463,7 @@ function registerPageRoutes(app: AppInstance): void {
           );
         }
         const restarted = await startMarkupOnBundle(app.db, scope, {
-          revisionId: layout.revisionId,
+          folderId: layout.folderId,
           bundleId: layout.bundleId,
           previewCached: app.env.PREVIEW_MODE === 'cached',
           logger: request.log as unknown as Logger,
@@ -487,7 +487,7 @@ function registerPageRoutes(app: AppInstance): void {
       const detection = await readDetectionSettings(app.db);
       const batch = {
         layoutRevisionId: layout.id,
-        revisionId: layout.revisionId,
+        folderId: layout.folderId,
         pages,
         logger: request.log as unknown as Logger,
       };
@@ -512,7 +512,7 @@ function registerPageRoutes(app: AppInstance): void {
 /**
  * Почему разворот живёт в модуле разметки, а не документов.
  *
- * Ручная метка вида ИД адресуется той же парой `revisionId/sourcePageId` и
+ * Ручная метка вида ИД адресуется той же парой `folderId/sourcePageId` и
  * лежит в соседнем модуле, поэтому соблазн положить разворот рядом с ней
  * велик. Но метка отвечает на вопрос «что это за документ» и правится правом
  * `document.edit`, а разворот отвечает на вопрос «как эту страницу читать» и
@@ -525,7 +525,7 @@ function registerPageRoutes(app: AppInstance): void {
  */
 function registerOrientationRoutes(app: AppInstance): void {
   app.put(
-    `${PREFIX}/revisions/:revisionId/pages/:sourcePageId/orientation`,
+    `${PREFIX}/folders/:folderId/pages/:sourcePageId/orientation`,
     {
       preHandler: editMarkup,
       schema: {
@@ -536,11 +536,11 @@ function registerOrientationRoutes(app: AppInstance): void {
     },
     async (request, reply) => {
       const { scope } = currentAuth(request);
-      const { revisionId, sourcePageId } = request.params;
-      updateContext({ revisionId });
+      const { folderId, sourcePageId } = request.params;
+      updateContext({ folderId });
 
       const view = await saveManualPageOrientation(app.db, scope, {
-        revisionId,
+        folderId,
         sourcePageId,
         rotation: request.body.rotation,
         actor: auditActor(app, request),
@@ -549,7 +549,7 @@ function registerOrientationRoutes(app: AppInstance): void {
       request.log.info(
         {
           event: 'page_orientation_set',
-          revision_id: revisionId,
+          folder_id: folderId,
           source_page_id: sourcePageId,
           content_rotation: view.contentRotation,
           probe_rotation: view.probeRotation,
@@ -562,7 +562,7 @@ function registerOrientationRoutes(app: AppInstance): void {
   );
 
   app.delete(
-    `${PREFIX}/revisions/:revisionId/pages/:sourcePageId/orientation`,
+    `${PREFIX}/folders/:folderId/pages/:sourcePageId/orientation`,
     {
       preHandler: editMarkup,
       schema: {
@@ -572,11 +572,11 @@ function registerOrientationRoutes(app: AppInstance): void {
     },
     async (request, reply) => {
       const { scope } = currentAuth(request);
-      const { revisionId, sourcePageId } = request.params;
-      updateContext({ revisionId });
+      const { folderId, sourcePageId } = request.params;
+      updateContext({ folderId });
 
       const view = await clearManualPageOrientation(app.db, scope, {
-        revisionId,
+        folderId,
         sourcePageId,
         actor: auditActor(app, request),
       });
@@ -584,7 +584,7 @@ function registerOrientationRoutes(app: AppInstance): void {
       request.log.info(
         {
           event: 'page_orientation_cleared',
-          revision_id: revisionId,
+          folder_id: folderId,
           source_page_id: sourcePageId,
           content_rotation: view.contentRotation,
         },
@@ -596,7 +596,7 @@ function registerOrientationRoutes(app: AppInstance): void {
   );
 
   app.get(
-    `${PREFIX}/revisions/:revisionId/pages/:sourcePageId/orientation`,
+    `${PREFIX}/folders/:folderId/pages/:sourcePageId/orientation`,
     {
       preHandler: readMarkup,
       schema: {
@@ -606,10 +606,10 @@ function registerOrientationRoutes(app: AppInstance): void {
     },
     async (request, reply) => {
       const { scope: _scope } = currentAuth(request);
-      const { revisionId, sourcePageId } = request.params;
-      updateContext({ revisionId });
+      const { folderId, sourcePageId } = request.params;
+      updateContext({ folderId });
 
-      const view = await findPageOrientation(app.db, revisionId, sourcePageId);
+      const view = await findPageOrientation(app.db, folderId, sourcePageId);
       if (view === null) throw notFound('Разворот этой страницы не задавали.');
       return reply.code(200).send(view);
     },

@@ -30,13 +30,13 @@ import {
 } from '../../db/repositories/checks.js';
 import { buildCheckReport } from '../../db/repositories/check-report.js';
 import { enqueueJob } from '../../db/repositories/jobs.js';
-import { findRevisionForFiles } from '../../db/repositories/files.js';
+import { findFolderForFiles } from '../../db/repositories/files.js';
 import { dedupeKeyFor } from '../../jobs/types.js';
 import {
   checkReportSchema,
   findingListSchema,
   findingQuerySchema,
-  revisionIdParamSchema,
+  folderIdParamSchema,
   ruleCatalogListSchema,
   runChecksResponseSchema,
   validationRunListSchema,
@@ -50,29 +50,29 @@ const readCatalog = requirePermission('rules.publish');
 
 export function registerCheckRoutes(app: AppInstance): void {
   app.post(
-    `${PREFIX}/revisions/:revisionId/checks`,
+    `${PREFIX}/folders/:folderId/checks`,
     {
       preHandler: runChecks,
       schema: {
-        params: revisionIdParamSchema,
+        params: folderIdParamSchema,
         response: { 202: runChecksResponseSchema },
       },
     },
     async (request, reply) => {
       const { scope } = currentAuth(request);
-      const { revisionId } = request.params;
+      const { folderId } = request.params;
 
-      const revision = await findRevisionForFiles(app.db, scope, revisionId);
-      if (revision === null) throw notFound('Ревизия поставки не найдена.');
-      updateContext({ revisionId, objectId: revision.objectId });
+      const folder = await findFolderForFiles(app.db, scope, folderId);
+      if (folder === null) throw notFound('Ревизия поставки не найдена.');
+      updateContext({ folderId, objectId: folder.objectId });
 
       const header = request.headers['idempotency-key'];
       const key = Array.isArray(header) ? header[0] : header;
 
       const { jobId, created } = await enqueueJob(app.db, scope, {
         type: 'checks.run',
-        payload: tracePayload({ revisionId }),
-        dedupeKey: dedupeKeyFor('checks.run', revisionId, key ?? 'default'),
+        payload: tracePayload({ folderId }),
+        dedupeKey: dedupeKeyFor('checks.run', folderId, key ?? 'default'),
       });
 
       return reply.code(202).send({ jobId, created });
@@ -80,39 +80,39 @@ export function registerCheckRoutes(app: AppInstance): void {
   );
 
   app.get(
-    `${PREFIX}/revisions/:revisionId/checks`,
+    `${PREFIX}/folders/:folderId/checks`,
     {
       preHandler: readChecks,
       schema: {
-        params: revisionIdParamSchema,
+        params: folderIdParamSchema,
         response: { 200: validationRunListSchema },
       },
     },
     async (request) => {
       const { scope } = currentAuth(request);
-      const items = await listValidationRuns(app.db, scope, request.params.revisionId);
+      const items = await listValidationRuns(app.db, scope, request.params.folderId);
       return { items: items.map((item) => ({ ...item })) };
     },
   );
 
   app.get(
-    `${PREFIX}/revisions/:revisionId/findings`,
+    `${PREFIX}/folders/:folderId/findings`,
     {
       preHandler: readChecks,
       schema: {
-        params: revisionIdParamSchema,
+        params: folderIdParamSchema,
         querystring: findingQuerySchema,
         response: { 200: findingListSchema },
       },
     },
     async (request) => {
       const { scope } = currentAuth(request);
-      const { revisionId } = request.params;
+      const { folderId } = request.params;
       const view = await listFindingsView(app.db, scope, {
-        revisionId,
+        folderId,
         validationRunId: request.query.validationRunId,
       });
-      const coverage = await loadChecksCoverage(app.db, scope, revisionId);
+      const coverage = await loadChecksCoverage(app.db, scope, folderId);
 
       // Счётчики считаются по уже загруженному списку, а не отдельным запросом:
       // второй запрос считал бы то же самое в другой момент, и число в сводке
@@ -146,16 +146,16 @@ export function registerCheckRoutes(app: AppInstance): void {
    * одного замечания.
    */
   app.get(
-    `${PREFIX}/revisions/:revisionId/check-report`,
+    `${PREFIX}/folders/:folderId/check-report`,
     {
       preHandler: readChecks,
-      schema: { params: revisionIdParamSchema, response: { 200: checkReportSchema } },
+      schema: { params: folderIdParamSchema, response: { 200: checkReportSchema } },
     },
     async (request) => {
       const { scope } = currentAuth(request);
-      const { revisionId } = request.params;
-      updateContext({ revisionId });
-      const report = await buildCheckReport(app.db, scope, revisionId);
+      const { folderId } = request.params;
+      updateContext({ folderId });
+      const report = await buildCheckReport(app.db, scope, folderId);
       return {
         runId: report.runId,
         sections: report.sections.map((section) => ({

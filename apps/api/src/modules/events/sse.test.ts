@@ -42,9 +42,9 @@ import { NoopErrorReporter } from '../../observability/errors.js';
 import { createLogger } from '../../observability/logger.js';
 import { createMetrics } from '../../observability/metrics.js';
 import {
-  appendRevisionEvent,
+  appendFolderEvent,
   enqueueSystemJob,
-  readRevisionEvents,
+  readFolderEvents,
 } from '../../db/repositories/jobs.js';
 import { JobRegistry, type JobContext } from '../../jobs/registry.js';
 import { JobRunner } from '../../jobs/runner.js';
@@ -73,18 +73,15 @@ const ORG_CONTRACTOR_B = id(3);
 const OBJECT_A = id(4);
 const OBJECT_B = id(5);
 
-const SUBMISSION_A = id(10);
 /** Лента подрядчика А: порядок кадров и возобновление. */
-const REVISION_A = id(11);
-const SUBMISSION_B = id(12);
+const FOLDER_A = id(11);
 /** Лента подрядчика Б: цель проверок изоляции. */
-const REVISION_B = id(13);
-const SUBMISSION_P = id(14);
+const FOLDER_B = id(13);
 /** Отдельная ревизия под обрыв соединения: её лента пуста до самого теста. */
-const REVISION_P = id(15);
+const FOLDER_P = id(15);
 
 /** Существующий по форме, но отсутствующий идентификатор: эталон ответа 404. */
-const REVISION_MISSING = id(99);
+const FOLDER_MISSING = id(99);
 
 const USER_CONTRACTOR_A = id(20);
 const USER_CONTRACTOR_B = id(21);
@@ -98,7 +95,7 @@ const KC = {
 
 /** Типы событий ленты: порядок значим — по нему проверяется порядок кадров. */
 const SEEDED_EVENTS: readonly string[] = [
-  'revision.created',
+  'folder.created',
   'file.uploaded',
   'bundle.created',
   'layout.detected',
@@ -134,25 +131,19 @@ const FIXTURE: readonly string[] = [
 
   `INSERT INTO object_contractors (object_id, contractor_id)
        VALUES ('${OBJECT_A}', '${ORG_CONTRACTOR_A}') ON CONFLICT DO NOTHING`,
-  `INSERT INTO works
+  `INSERT INTO folders
        (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-     VALUES ('${SUBMISSION_A}', '${OBJECT_A}', '${ORG_CONTRACTOR_A}', '${ORG_CONTRACTOR_A}', 'roofing', DATE '2026-01-01', 'Комплект А', '${USER_CONTRACTOR_A}')`,
-  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no)
-     VALUES ('${REVISION_A}', '${SUBMISSION_A}', '${OBJECT_A}', '${ORG_CONTRACTOR_A}', 1)`,
+     VALUES ('${FOLDER_A}', '${OBJECT_A}', '${ORG_CONTRACTOR_A}', '${ORG_CONTRACTOR_A}', 'roofing', DATE '2026-01-01', 'Комплект А', '${USER_CONTRACTOR_A}')`,
   `INSERT INTO object_contractors (object_id, contractor_id)
        VALUES ('${OBJECT_B}', '${ORG_CONTRACTOR_B}') ON CONFLICT DO NOTHING`,
-  `INSERT INTO works
+  `INSERT INTO folders
        (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-     VALUES ('${SUBMISSION_B}', '${OBJECT_B}', '${ORG_CONTRACTOR_B}', '${ORG_CONTRACTOR_B}', 'roofing', DATE '2026-01-01', 'Комплект Б', '${USER_CONTRACTOR_B}')`,
-  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no)
-     VALUES ('${REVISION_B}', '${SUBMISSION_B}', '${OBJECT_B}', '${ORG_CONTRACTOR_B}', 1)`,
+     VALUES ('${FOLDER_B}', '${OBJECT_B}', '${ORG_CONTRACTOR_B}', '${ORG_CONTRACTOR_B}', 'roofing', DATE '2026-01-01', 'Комплект Б', '${USER_CONTRACTOR_B}')`,
   `INSERT INTO object_contractors (object_id, contractor_id)
        VALUES ('${OBJECT_A}', '${ORG_CONTRACTOR_A}') ON CONFLICT DO NOTHING`,
-  `INSERT INTO works
+  `INSERT INTO folders
        (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-     VALUES ('${SUBMISSION_P}', '${OBJECT_A}', '${ORG_CONTRACTOR_A}', '${ORG_CONTRACTOR_A}', 'roofing', DATE '2026-01-01', 'Комплект А-2', '${USER_CONTRACTOR_A}')`,
-  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no)
-     VALUES ('${REVISION_P}', '${SUBMISSION_P}', '${OBJECT_A}', '${ORG_CONTRACTOR_A}', 1)`,
+     VALUES ('${FOLDER_P}', '${OBJECT_A}', '${ORG_CONTRACTOR_A}', '${ORG_CONTRACTOR_A}', 'roofing', DATE '2026-01-01', 'Комплект А-2', '${USER_CONTRACTOR_A}')`,
 ];
 
 const TEST_ENV = loadEnv({
@@ -190,8 +181,8 @@ beforeAll(async () => {
   baseUrl = `http://127.0.0.1:${address.port}`;
 
   for (const eventType of SEEDED_EVENTS) {
-    await appendRevisionEvent(app.db, {
-      revisionId: REVISION_A,
+    await appendFolderEvent(app.db, {
+      folderId: FOLDER_A,
       eventType,
       payload: { eventType },
     });
@@ -404,8 +395,8 @@ function parseFrames(raw: string): SseEventFrame[] {
   return frames;
 }
 
-function eventsPath(revisionId: string): string {
-  return `/api/v1/revisions/${revisionId}/events`;
+function eventsPath(folderId: string): string {
+  return `/api/v1/folders/${folderId}/events`;
 }
 
 function pause(ms: number): Promise<void> {
@@ -427,7 +418,7 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 10_000): Promise<
 describe('лента событий ревизии', () => {
   it('отдаёт события в порядке seq, и id кадра равен seq события', async () => {
     const contractor = await sessionFor(KC.contractorA);
-    const stream = await readStream(eventsPath(REVISION_A), {
+    const stream = await readStream(eventsPath(FOLDER_A), {
       cookie: contractor.cookie,
       wantFrames: SEEDED_EVENTS.length,
     });
@@ -446,13 +437,13 @@ describe('лента событий ревизии', () => {
     expect(stream.frames.map((frame) => frame.data.seq)).toEqual(ids);
     expect(stream.frames.every((frame) => typeof frame.data.createdAt === 'string')).toBe(true);
 
-    const stored = await readRevisionEvents(app.db, { revisionId: REVISION_A, limit: 100 });
+    const stored = await readFolderEvents(app.db, { folderId: FOLDER_A, limit: 100 });
     expect(stored.events.map((event) => event.seq)).toEqual(ids);
   }, 30_000);
 
   it('Last-Event-ID отдаёт пропущенное, а не начало ленты', async () => {
     const contractor = await sessionFor(KC.contractorA);
-    const stream = await readStream(eventsPath(REVISION_A), {
+    const stream = await readStream(eventsPath(FOLDER_A), {
       cookie: contractor.cookie,
       lastEventIdHeader: '2',
       wantFrames: 3,
@@ -471,7 +462,7 @@ describe('лента событий ревизии', () => {
     const contractor = await sessionFor(KC.contractorA);
     // Клиенты, которым нечем поставить заголовок (например, EventSource в
     // обёртке без доступа к заголовкам), обязаны иметь тот же способ.
-    const stream = await readStream(eventsPath(REVISION_A), {
+    const stream = await readStream(eventsPath(FOLDER_A), {
       cookie: contractor.cookie,
       query: '?lastEventId=4',
       wantFrames: 1,
@@ -483,7 +474,7 @@ describe('лента событий ревизии', () => {
 
   it('заголовок сильнее параметра: EventSource всегда шлёт свой', async () => {
     const contractor = await sessionFor(KC.contractorA);
-    const stream = await readStream(eventsPath(REVISION_A), {
+    const stream = await readStream(eventsPath(FOLDER_A), {
       cookie: contractor.cookie,
       lastEventIdHeader: '4',
       query: '?lastEventId=0',
@@ -505,14 +496,14 @@ describe('изоляция потока событий', () => {
 
     // Контроль: своя ревизия открывается. Без него проверка ниже была бы
     // зелёной и от того, что маршрут сломан для всех.
-    const own = await readStream(eventsPath(REVISION_A), {
+    const own = await readStream(eventsPath(FOLDER_A), {
       cookie: contractorA.cookie,
       wantFrames: 1,
     });
     expect(own.status).toBe(200);
 
     // Подстановка чужого идентификатора — прямой путь обхода изоляции (§16).
-    const crossed = await readStream(eventsPath(REVISION_B), {
+    const crossed = await readStream(eventsPath(FOLDER_B), {
       cookie: contractorA.cookie,
       wantFrames: 1,
     });
@@ -521,13 +512,13 @@ describe('изоляция потока событий', () => {
     expect(crossed.raw).not.toContain('text/event-stream');
 
     // И обратная сторона: у Б своя лента есть, но чужая ему тоже закрыта.
-    const mirrored = await readStream(eventsPath(REVISION_A), {
+    const mirrored = await readStream(eventsPath(FOLDER_A), {
       cookie: contractorB.cookie,
       wantFrames: 1,
     });
     expect(mirrored.status).toBe(404);
 
-    const ownB = await readStream(eventsPath(REVISION_B), {
+    const ownB = await readStream(eventsPath(FOLDER_B), {
       cookie: contractorB.cookie,
       wantFrames: 1,
       timeoutMs: 4_000,
@@ -543,12 +534,12 @@ describe('изоляция потока событий', () => {
 
     const foreign = await app.inject({
       method: 'GET',
-      url: eventsPath(REVISION_B),
+      url: eventsPath(FOLDER_B),
       headers: { cookie: contractorA.cookie },
     });
     const missing = await app.inject({
       method: 'GET',
-      url: eventsPath(REVISION_MISSING),
+      url: eventsPath(FOLDER_MISSING),
       headers: { cookie: contractorA.cookie },
     });
 
@@ -571,14 +562,14 @@ describe('изоляция потока событий', () => {
 
     const own = await app.inject({
       method: 'GET',
-      url: `/api/v1/revisions/${REVISION_A}/processing-status`,
+      url: `/api/v1/folders/${FOLDER_A}/processing-status`,
       headers: { cookie: contractorA.cookie },
     });
     expect(own.statusCode).toBe(200);
 
     const crossed = await app.inject({
       method: 'GET',
-      url: `/api/v1/revisions/${REVISION_B}/processing-status`,
+      url: `/api/v1/folders/${FOLDER_B}/processing-status`,
       headers: { cookie: contractorA.cookie },
     });
     expect(crossed.statusCode).toBe(404);
@@ -588,7 +579,7 @@ describe('изоляция потока событий', () => {
     // подрядчик, и она проверена парой выше.
     const byEngineer = await app.inject({
       method: 'GET',
-      url: `/api/v1/revisions/${REVISION_A}/processing-status`,
+      url: `/api/v1/folders/${FOLDER_A}/processing-status`,
       headers: { cookie: engineer.cookie },
     });
     expect(byEngineer.statusCode).toBe(200);
@@ -596,7 +587,7 @@ describe('изоляция потока событий', () => {
     // Поток читается `readStream`, а не `inject`: открытое соединение
     // `inject` не завершает, и утверждение о коде ответа повисло бы до
     // таймаута.
-    const engineerStream = await readStream(eventsPath(REVISION_A), {
+    const engineerStream = await readStream(eventsPath(FOLDER_A), {
       cookie: engineer.cookie,
       wantFrames: 1,
     });
@@ -604,7 +595,7 @@ describe('изоляция потока событий', () => {
   }, 30_000);
 
   it('без сессии поток не открывается вовсе', async () => {
-    const response = await fetch(`${baseUrl}${eventsPath(REVISION_A)}`, {
+    const response = await fetch(`${baseUrl}${eventsPath(FOLDER_A)}`, {
       headers: { accept: 'text/event-stream' },
     });
     await response.text();
@@ -621,12 +612,12 @@ describe('обрыв соединения', () => {
     const contractor = await sessionFor(KC.contractorA);
 
     // Лента ревизии пуста: всё, что появится дальше, произведено конвейером.
-    const before = await readRevisionEvents(app.db, { revisionId: REVISION_P, limit: 100 });
+    const before = await readFolderEvents(app.db, { folderId: FOLDER_P, limit: 100 });
     expect(before.events).toEqual([]);
 
     const enqueued = await enqueueSystemJob(app.db, {
       type: 'graph.build',
-      payload: { revisionId: REVISION_P },
+      payload: { folderId: FOLDER_P },
     });
 
     let entered = false;
@@ -642,7 +633,7 @@ describe('обрыв соединения', () => {
 
     // Клиент подписывается ДО постановки работы: иначе проверялся бы повтор
     // уже записанного, а не живое соединение поверх идущего конвейера.
-    const livePromise = readStream(eventsPath(REVISION_P), {
+    const livePromise = readStream(eventsPath(FOLDER_P), {
       cookie: contractor.cookie,
       wantFrames: 1,
       keepOpen: true,
@@ -679,7 +670,7 @@ describe('обрыв соединения', () => {
     expect(runs.map((row) => row.outcome)).toEqual(['succeeded']);
 
     // 2. События, произошедшие после обрыва, записаны в ленту.
-    const after = await readRevisionEvents(app.db, { revisionId: REVISION_P, limit: 100 });
+    const after = await readFolderEvents(app.db, { folderId: FOLDER_P, limit: 100 });
     expect(after.events.map((event) => event.eventType)).toEqual([
       'job.started',
       'graph.built',
@@ -688,7 +679,7 @@ describe('обрыв соединения', () => {
 
     // 3. Следующий клиент продолжает с того места, где оборвался предыдущий, —
     //    ни дубликатов, ни дыры.
-    const resumed = await readStream(eventsPath(REVISION_P), {
+    const resumed = await readStream(eventsPath(FOLDER_P), {
       cookie: contractor.cookie,
       lastEventIdHeader: '1',
       wantFrames: 2,
@@ -702,7 +693,7 @@ describe('обрыв соединения', () => {
     //    клиенту, который поток потерял целиком (§3.8).
     const status = await app.inject({
       method: 'GET',
-      url: `/api/v1/revisions/${REVISION_P}/processing-status`,
+      url: `/api/v1/folders/${FOLDER_P}/processing-status`,
       headers: { cookie: contractor.cookie },
     });
     expect(status.statusCode).toBe(200);
@@ -717,13 +708,13 @@ describe('обрыв соединения', () => {
 
     const enqueued = await enqueueSystemJob(app.db, {
       type: 'graph.build',
-      payload: { revisionId: REVISION_P },
+      payload: { folderId: FOLDER_P },
     });
     behaviours.set(enqueued.jobId, (ctx) => ctx.emit('graph.rebuilt', { nodes: 4 }));
 
     // Подписка открыта ДО постановки работы: проверяется цикл опроса, а не
     // повтор уже записанного.
-    const streamPromise = readStream(eventsPath(REVISION_P), {
+    const streamPromise = readStream(eventsPath(FOLDER_P), {
       cookie: contractor.cookie,
       lastEventIdHeader: '3',
       wantFrames: 3,

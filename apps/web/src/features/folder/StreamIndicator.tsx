@@ -14,7 +14,7 @@
 import { type ReactNode } from 'react';
 import { Button, Space, Tooltip } from 'antd';
 import { ToneTag, type Tone } from '../../shared/tags.js';
-import { useRevisionStream, type StreamStatus } from './stream.js';
+import { useFolderStream, type StreamStatus } from './stream.js';
 
 const LABELS: Record<StreamStatus, string> = {
   connecting: 'поток подключается',
@@ -35,7 +35,7 @@ const TONES: Record<StreamStatus, Tone> = {
 };
 
 export function StreamIndicator(): ReactNode {
-  const stream = useRevisionStream();
+  const stream = useFolderStream();
   if (stream === null) return null;
 
   const hint =

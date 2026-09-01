@@ -11,7 +11,7 @@
  *
  * ## Last-Event-ID и повтор пропущенного
  *
- * `revision_events.seq` монотонен внутри ревизии (миграция 0007), поэтому
+ * `folder_events.seq` монотонен внутри ревизии (миграция 0007), поэтому
  * реконнект с `Last-Event-ID` отдаёт ровно пропущенное. Отдельно различается
  * случай, когда пропущенное уже вне окна хранения: клиент получает событие
  * `reset` и обязан перечитать состояние по REST. Молча начать с текущего
@@ -29,7 +29,7 @@
  *
  * Слушатель `NOTIFY` требует ВЫДЕЛЕННОГО соединения на процесс и не переживает
  * обрыв без своей логики переподключения, а на pglite (гейты этапов) его нет
- * вовсе. Опрос раз в секунду по первичному ключу `(revision_id, seq)` стоит
+ * вовсе. Опрос раз в секунду по первичному ключу `(folder_id, seq)` стоит
  * одного index scan и даёт то же ощущение живого экрана.
  */
 import type { FastifyRequest } from 'fastify';
@@ -42,11 +42,11 @@ import { currentAuth } from '../../middleware/require-auth.js';
 import { requirePermission } from '../../middleware/require-permission.js';
 import {
   computeProcessingStatus,
-  findVisibleRevision,
-  readRevisionEvents,
+  findVisibleFolder,
+  readFolderEvents,
 } from '../../db/repositories/jobs.js';
 
-const PREFIX = '/api/v1/revisions';
+const PREFIX = '/api/v1/folders';
 
 /** Интервал опроса ленты событий. */
 const POLL_INTERVAL_MS = 1_000;
@@ -65,7 +65,7 @@ const MAX_CONNECTION_MS = 30 * 60_000;
 /** Пауза перед повтором подключения на стороне клиента. */
 const CLIENT_RETRY_MS = 3_000;
 
-const revisionParamsSchema = z.object({ revisionId: z.uuid() });
+const folderParamsSchema = z.object({ folderId: z.uuid() });
 
 const eventsQuerySchema = z.object({
   /** Дубль `Last-Event-ID` для клиентов, которым нечем поставить заголовок. */
@@ -104,7 +104,7 @@ const jobTypeSummarySchema = z.object({
 });
 
 const processingStatusSchema = z.object({
-  revisionId: z.uuid(),
+  folderId: z.uuid(),
   stage: processingStageSchema,
   queued: z.int(),
   running: z.int(),
@@ -136,7 +136,7 @@ const processingStatusSchema = z.object({
     .nullable(),
 });
 
-export function registerRevisionEventRoutes(app: AppInstance): void {
+export function registerFolderEventRoutes(app: AppInstance): void {
   /**
    * Открытые потоки процесса.
    *
@@ -157,19 +157,19 @@ export function registerRevisionEventRoutes(app: AppInstance): void {
   });
 
   app.get(
-    `${PREFIX}/:revisionId/events`,
+    `${PREFIX}/:folderId/events`,
     {
       preHandler: requirePermission('submission.read'),
-      schema: { params: revisionParamsSchema, querystring: eventsQuerySchema },
+      schema: { params: folderParamsSchema, querystring: eventsQuerySchema },
     },
     async (request, reply) => {
-      const { revisionId } = request.params;
+      const { folderId } = request.params;
       const auth = currentAuth(request);
 
       // Принадлежность ревизии — до открытия потока. 404, а не 403: «ревизия
       // есть, но не ваша» само по себе сообщает о существовании чужой поставки.
-      const revision = await findVisibleRevision(app.db, auth.scope, revisionId);
-      if (revision === null) throw notFound('Ревизия не найдена.');
+      const folder = await findVisibleFolder(app.db, auth.scope, folderId);
+      if (folder === null) throw notFound('Ревизия не найдена.');
 
       const startSeq = lastEventIdOf(request, request.query.lastEventId);
 
@@ -196,7 +196,7 @@ export function registerRevisionEventRoutes(app: AppInstance): void {
 
       try {
         await pumpEvents(app, stream, {
-          revisionId,
+          folderId,
           startSeq,
           isClosed: () => closed || stream.writableEnded,
         });
@@ -216,14 +216,14 @@ export function registerRevisionEventRoutes(app: AppInstance): void {
    * отвечает «вот что именно», и она же остаётся ответом, когда поток потерян.
    */
   app.get(
-    `${PREFIX}/:revisionId/processing-status`,
+    `${PREFIX}/:folderId/processing-status`,
     {
       preHandler: requirePermission('submission.read'),
-      schema: { params: revisionParamsSchema, response: { 200: processingStatusSchema } },
+      schema: { params: folderParamsSchema, response: { 200: processingStatusSchema } },
     },
     async (request) => {
       const auth = currentAuth(request);
-      const status = await computeProcessingStatus(app.db, auth.scope, request.params.revisionId);
+      const status = await computeProcessingStatus(app.db, auth.scope, request.params.folderId);
       if (status === null) throw notFound('Ревизия не найдена.');
       // Копии массивов: репозиторий отдаёт `readonly`, схема ответа ждёт
       // изменяемый — тот же приём, что в остальных маршрутах со списками.
@@ -233,7 +233,7 @@ export function registerRevisionEventRoutes(app: AppInstance): void {
 }
 
 interface PumpOptions {
-  readonly revisionId: string;
+  readonly folderId: string;
   readonly startSeq: number;
   readonly isClosed: () => boolean;
 }
@@ -257,8 +257,8 @@ async function pumpEvents(
   let checkedGap = false;
 
   while (!options.isClosed() && Date.now() < deadline) {
-    const window = await readRevisionEvents(app.db, {
-      revisionId: options.revisionId,
+    const window = await readFolderEvents(app.db, {
+      folderId: options.folderId,
       afterSeq: cursor,
       limit: BATCH_LIMIT,
     });
@@ -318,7 +318,7 @@ function writeEvent(stream: ServerResponse, frame: SseFrame): void {
 /**
  * Имя события — одна строка без управляющих символов.
  *
- * Имя приходит из `revision_events.event_type`, то есть из БД, а перевод строки
+ * Имя приходит из `folder_events.event_type`, то есть из БД, а перевод строки
  * в нём разорвал бы кадр SSE и позволил бы подделать соседнее событие.
  */
 function sanitizeField(value: string): string {

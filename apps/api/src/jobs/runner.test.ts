@@ -88,15 +88,12 @@ const ORG_CONTRACTOR_A = id(2);
 const ORG_CONTRACTOR_B = id(3);
 const OBJECT = id(4);
 
-const SUBMISSION_A = id(10);
 /** Основная ревизия: очередь, повторы, dead, reaper, ручной повтор. */
-const REVISION_A = id(11);
-const SUBMISSION_B = id(12);
+const FOLDER_A = id(11);
 /** Ревизия чужого подрядчика: изоляция сводки обработки. */
-const REVISION_B = id(13);
-const SUBMISSION_C = id(14);
+const FOLDER_B = id(13);
 /** Отдельная ревизия под сводку: её ленту задач не засоряют прочие тесты. */
-const REVISION_C = id(15);
+const FOLDER_C = id(15);
 
 const USER_ADMIN = id(20);
 const USER_CONTRACTOR_A = id(21);
@@ -125,25 +122,19 @@ const FIXTURE: readonly string[] = [
 
   `INSERT INTO object_contractors (object_id, contractor_id)
        VALUES ('${OBJECT}', '${ORG_CONTRACTOR_A}') ON CONFLICT DO NOTHING`,
-  `INSERT INTO works
+  `INSERT INTO folders
        (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-     VALUES ('${SUBMISSION_A}', '${OBJECT}', '${ORG_CONTRACTOR_A}', '${ORG_CONTRACTOR_A}', 'roofing', DATE '2026-01-01', 'Комплект А', '${USER_CONTRACTOR_A}')`,
-  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no)
-     VALUES ('${REVISION_A}', '${SUBMISSION_A}', '${OBJECT}', '${ORG_CONTRACTOR_A}', 1)`,
+     VALUES ('${FOLDER_A}', '${OBJECT}', '${ORG_CONTRACTOR_A}', '${ORG_CONTRACTOR_A}', 'roofing', DATE '2026-01-01', 'Комплект А', '${USER_CONTRACTOR_A}')`,
   `INSERT INTO object_contractors (object_id, contractor_id)
        VALUES ('${OBJECT}', '${ORG_CONTRACTOR_B}') ON CONFLICT DO NOTHING`,
-  `INSERT INTO works
+  `INSERT INTO folders
        (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-     VALUES ('${SUBMISSION_B}', '${OBJECT}', '${ORG_CONTRACTOR_B}', '${ORG_CONTRACTOR_B}', 'roofing', DATE '2026-01-01', 'Комплект Б', '${USER_ADMIN}')`,
-  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no)
-     VALUES ('${REVISION_B}', '${SUBMISSION_B}', '${OBJECT}', '${ORG_CONTRACTOR_B}', 1)`,
+     VALUES ('${FOLDER_B}', '${OBJECT}', '${ORG_CONTRACTOR_B}', '${ORG_CONTRACTOR_B}', 'roofing', DATE '2026-01-01', 'Комплект Б', '${USER_ADMIN}')`,
   `INSERT INTO object_contractors (object_id, contractor_id)
        VALUES ('${OBJECT}', '${ORG_CONTRACTOR_A}') ON CONFLICT DO NOTHING`,
-  `INSERT INTO works
+  `INSERT INTO folders
        (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-     VALUES ('${SUBMISSION_C}', '${OBJECT}', '${ORG_CONTRACTOR_A}', '${ORG_CONTRACTOR_A}', 'roofing', DATE '2026-01-01', 'Комплект А-2', '${USER_CONTRACTOR_A}')`,
-  `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no)
-     VALUES ('${REVISION_C}', '${SUBMISSION_C}', '${OBJECT}', '${ORG_CONTRACTOR_A}', 1)`,
+     VALUES ('${FOLDER_C}', '${OBJECT}', '${ORG_CONTRACTOR_A}', '${ORG_CONTRACTOR_A}', 'roofing', DATE '2026-01-01', 'Комплект А-2', '${USER_CONTRACTOR_A}')`,
 ];
 
 const TEST_ENV = loadEnv({
@@ -347,7 +338,7 @@ describe('исполнение задачи', () => {
   it('пишет попытку с номером, длительностью и сквозным request_id', async () => {
     const enqueued = await enqueueSystemJob(app.db, {
       type: 'graph.build',
-      payload: { revisionId: REVISION_A, request_id: 'req-runner-ok' },
+      payload: { folderId: FOLDER_A, request_id: 'req-runner-ok' },
     });
 
     let seenAttempt = 0;
@@ -377,22 +368,22 @@ describe('исполнение задачи', () => {
     // Сквозной идентификатор доехал от постановщика до журнала попыток (§11).
     expect(runs[0]?.['request_id']).toBe('req-runner-ok');
     expect(runs[0]?.['payload_digest']).toMatch(/^[0-9a-f]{64}$/);
-    expect(runs[0]?.['revision_id']).toBe(REVISION_A);
+    expect(runs[0]?.['folder_id']).toBe(FOLDER_A);
 
     await drainQueue();
   });
 
   it('повторная постановка с тем же dedupe_key не создаёт вторую задачу', async () => {
-    const key = dedupeKeyFor('graph.build', REVISION_A, 'dedupe');
+    const key = dedupeKeyFor('graph.build', FOLDER_A, 'dedupe');
 
     const first = await enqueueSystemJob(app.db, {
       type: 'graph.build',
-      payload: { revisionId: REVISION_A },
+      payload: { folderId: FOLDER_A },
       dedupeKey: key,
     });
     const second = await enqueueSystemJob(app.db, {
       type: 'graph.build',
-      payload: { revisionId: REVISION_A },
+      payload: { folderId: FOLDER_A },
       dedupeKey: key,
     });
 
@@ -414,7 +405,7 @@ describe('исполнение задачи', () => {
 
     const third = await enqueueSystemJob(app.db, {
       type: 'graph.build',
-      payload: { revisionId: REVISION_A },
+      payload: { folderId: FOLDER_A },
       dedupeKey: key,
     });
     expect(third.created).toBe(true);
@@ -432,7 +423,7 @@ describe('повторы упавшей задачи', () => {
   it('переносит попытку с экспоненциально растущей задержкой', async () => {
     const enqueued = await enqueueSystemJob(app.db, {
       type: 'checks.run',
-      payload: { revisionId: REVISION_A },
+      payload: { folderId: FOLDER_A },
       maxAttempts: 4,
     });
     behaviours.set(enqueued.jobId, () => Promise.reject(new Error('внешний сервис не ответил')));
@@ -474,7 +465,7 @@ describe('повторы упавшей задачи', () => {
   it('после max_attempts уходит в dead и больше не берётся', async () => {
     const enqueued = await enqueueSystemJob(app.db, {
       type: 'checks.run',
-      payload: { revisionId: REVISION_A },
+      payload: { folderId: FOLDER_A },
       maxAttempts: 2,
     });
     behaviours.set(enqueued.jobId, () => Promise.reject(new Error('внешний сервис не ответил')));
@@ -526,17 +517,15 @@ describe('повторы упавшей задачи', () => {
   it('причина ошибки БД доходит до журнала из-под обёртки Drizzle', async () => {
     const failing = await enqueueSystemJob(app.db, {
       type: 'checks.run',
-      payload: { revisionId: REVISION_A },
+      payload: { folderId: FOLDER_A },
       maxAttempts: 1,
     });
 
     // Форма ровно как у настоящей обёртки: длинный запрос сверху, отказ снизу.
     const query = `insert into "source_pages" (${'"col", '.repeat(40)}"last")`;
     const driverError = Object.assign(
-      new Error(
-        'duplicate key value violates unique constraint "source_pages_revision_ordinal_uq"',
-      ),
-      { code: '23505', constraint: 'source_pages_revision_ordinal_uq' },
+      new Error('duplicate key value violates unique constraint "source_pages_folder_ordinal_uq"'),
+      { code: '23505', constraint: 'source_pages_folder_ordinal_uq' },
     );
     const wrapper = new Error(
       `Failed query: ${query}
@@ -555,7 +544,7 @@ params: 1,2,3`,
     // Имя ограничения сохраняется целиком: `normalizeErrorMessage()` бережёт
     // идентификатор схемы после слова `constraint`, и это тот случай, ради
     // которого исключение и заведено.
-    expect(recorded).toContain('source_pages_revision_ordinal_uq');
+    expect(recorded).toContain('source_pages_folder_ordinal_uq');
     expect(recorded).toContain('unique constraint');
     // Причина стоит ПЕРВОЙ: усечение режет хвост, и порядок здесь — не вкус.
     expect(recorded.indexOf('unique constraint')).toBeLessThan(
@@ -565,7 +554,7 @@ params: 1,2,3`,
     );
 
     const runs = await runsOf(failing.jobId);
-    expect(String(runs[0]?.['error_message'])).toContain('source_pages_revision_ordinal_uq');
+    expect(String(runs[0]?.['error_message'])).toContain('source_pages_folder_ordinal_uq');
 
     await drainQueue();
   });
@@ -578,7 +567,7 @@ params: 1,2,3`,
   it('4xx от RD WEB уходит в dead с первой попытки, 5xx повторяется', async () => {
     const denied = await enqueueSystemJob(app.db, {
       type: 'checks.run',
-      payload: { revisionId: REVISION_A },
+      payload: { folderId: FOLDER_A },
       maxAttempts: 5,
     });
     behaviours.set(denied.jobId, () =>
@@ -602,7 +591,7 @@ params: 1,2,3`,
     // ремонт превратил бы минутную недоступность в отказ поставки.
     const flaky = await enqueueSystemJob(app.db, {
       type: 'checks.run',
-      payload: { revisionId: REVISION_A },
+      payload: { folderId: FOLDER_A },
       maxAttempts: 5,
     });
     behaviours.set(flaky.jobId, () =>
@@ -702,7 +691,7 @@ describe('отложенная задача', () => {
   it('пишет попытку исходом deferred и не оставляет текста ошибки', async () => {
     const enqueued = await enqueueSystemJob(app.db, {
       type: 'checks.run',
-      payload: { revisionId: REVISION_A },
+      payload: { folderId: FOLDER_A },
       maxAttempts: 5,
     });
     behaviours.set(enqueued.jobId, () =>
@@ -736,7 +725,7 @@ describe('отложенная задача', () => {
     // «не дождались»: по нему обработчики закрывают свой прогон.
     const enqueued = await enqueueSystemJob(app.db, {
       type: 'checks.run',
-      payload: { revisionId: REVISION_A },
+      payload: { folderId: FOLDER_A },
       maxAttempts: 2,
     });
     behaviours.set(enqueued.jobId, () =>
@@ -798,7 +787,7 @@ describe('предохранитель очереди', () => {
   async function enqueueFailing(): Promise<string> {
     const job = await enqueueSystemJob(app.db, {
       type: 'doc.classify_pages',
-      payload: { revisionId: REVISION_A },
+      payload: { folderId: FOLDER_A },
       dedupeKey: `breaker:${randomUUID()}`,
     });
     behaviours.set(job.jobId, () => Promise.reject(new GatewayDown()));
@@ -845,7 +834,7 @@ describe('предохранитель очереди', () => {
     // говорит о задачах, которые к нему не ходят.
     const neighbour = await enqueueSystemJob(app.db, {
       type: 'graph.build',
-      payload: { revisionId: REVISION_A },
+      payload: { folderId: FOLDER_A },
       dedupeKey: `breaker-neighbour:${randomUUID()}`,
     });
     let neighbourRan = false;
@@ -874,7 +863,7 @@ describe('предохранитель очереди', () => {
 
     const good = await enqueueSystemJob(app.db, {
       type: 'doc.classify_pages',
-      payload: { revisionId: REVISION_A },
+      payload: { folderId: FOLDER_A },
       dedupeKey: `breaker-ok:${randomUUID()}`,
     });
     behaviours.set(good.jobId, () => Promise.resolve());
@@ -911,7 +900,7 @@ describe('предохранитель очереди', () => {
     await drainQueue();
     const job = await enqueueSystemJob(app.db, {
       type: 'doc.classify_pages',
-      payload: { revisionId: REVISION_A },
+      payload: { folderId: FOLDER_A },
       dedupeKey: `retry-after:${randomUUID()}`,
     });
     behaviours.set(job.jobId, () => Promise.reject(new RateLimited()));
@@ -945,7 +934,7 @@ describe('оживление мёртвых задач стадии', () => {
     const deadOf = async (layoutRevisionId: string): Promise<string> => {
       const job = await enqueueSystemJob(app.db, {
         type: 'layout.detect_local',
-        payload: { revisionId: REVISION_A, layoutRevisionId },
+        payload: { folderId: FOLDER_A, layoutRevisionId },
         dedupeKey: `revive:${layoutRevisionId}:${randomUUID()}`,
       });
       await db.query(
@@ -961,7 +950,7 @@ describe('оживление мёртвых задач стадии', () => {
     const other = await deadOf(LAYOUT_OTHER);
 
     const revived = await reviveFailedJobs(app.db, {
-      revisionId: REVISION_A,
+      folderId: FOLDER_A,
       stage: 'layout',
       scopeKey: 'layoutRevisionId',
       scopeValue: LAYOUT_MINE,
@@ -1007,7 +996,7 @@ describe('сторож памяти', () => {
 
     const job = await enqueueSystemJob(app.db, {
       type: 'graph.build',
-      payload: { revisionId: REVISION_A },
+      payload: { folderId: FOLDER_A },
       dedupeKey: `memory:${randomUUID()}`,
     });
 
@@ -1030,7 +1019,7 @@ describe('reaper', () => {
     await drainQueue();
     const enqueued = await enqueueSystemJob(app.db, {
       type: 'graph.build',
-      payload: { revisionId: REVISION_A },
+      payload: { folderId: FOLDER_A },
     });
 
     /**
@@ -1047,9 +1036,9 @@ describe('reaper', () => {
       [enqueued.jobId],
     );
     await db.query(
-      `INSERT INTO job_runs (job_id, job_type, revision_id, attempt, started_at)
+      `INSERT INTO job_runs (job_id, job_type, folder_id, attempt, started_at)
        VALUES ($1, 'graph.build', $2, 1, now() - interval '2 minutes')`,
-      [enqueued.jobId, REVISION_A],
+      [enqueued.jobId, FOLDER_A],
     );
 
     // До освобождения задача не берётся никем: статус `running` — это чужая
@@ -1120,7 +1109,7 @@ describe('reaper', () => {
     // ошибкой» и «пять раз убивает процесс» чинятся разным.
     const enqueued = await enqueueSystemJob(app.db, {
       type: 'graph.build',
-      payload: { revisionId: REVISION_A },
+      payload: { folderId: FOLDER_A },
       dedupeKey: `poison:${Date.now()}`,
     });
 
@@ -1151,7 +1140,7 @@ describe('консоль задач', () => {
   it('ручной повтор возвращает dead-задачу в очередь, и она исполняется', async () => {
     const enqueued = await enqueueSystemJob(app.db, {
       type: 'checks.run',
-      payload: { revisionId: REVISION_A },
+      payload: { folderId: FOLDER_A },
       maxAttempts: 1,
     });
     behaviours.set(enqueued.jobId, () => Promise.reject(new Error('внешний сервис не ответил')));
@@ -1202,7 +1191,7 @@ describe('консоль задач', () => {
   it('повтор недоступен подрядчику и не находит чужую задачу', async () => {
     const enqueued = await enqueueSystemJob(app.db, {
       type: 'graph.build',
-      payload: { revisionId: REVISION_B },
+      payload: { folderId: FOLDER_B },
     });
 
     const contractor = await sessionFor(KC.contractorA);
@@ -1224,25 +1213,25 @@ describe('консоль задач', () => {
 // Вычисляемая сводка обработки (§3.8)
 // =====================================================================
 
-describe('processing_status ревизии', () => {
-  /** Ревизия до первой задачи: значения запоминаются, чтобы сверить неизменность. */
-  let revisionBefore: Record<string, unknown>;
+describe('processing_status папки', () => {
+  /** Папка до первой задачи: значения запоминаются, чтобы сверить неизменность. */
+  let folderBefore: Record<string, unknown>;
 
   beforeAll(async () => {
     await drainQueue();
     const rows = await db.query<Record<string, unknown>>(
-      `SELECT version, updated_at, status FROM submission_revisions WHERE id = $1`,
-      [REVISION_C],
+      `SELECT version, updated_at FROM folders WHERE id = $1`,
+      [FOLDER_C],
     );
     const row = rows[0];
-    if (row === undefined) throw new Error('ревизия фикстуры не найдена');
-    revisionBefore = row;
+    if (row === undefined) throw new Error('папка фикстуры не найдена');
+    folderBefore = row;
   });
 
-  it('в submission_revisions нет колонки processing_status', async () => {
+  it('в folders нет колонки processing_status', async () => {
     const columns = await db.query<{ column_name: string }>(
       `SELECT column_name FROM information_schema.columns
-        WHERE table_name = 'submission_revisions' AND column_name = 'processing_status'`,
+        WHERE table_name = 'folders' AND column_name = 'processing_status'`,
     );
     expect(columns).toHaveLength(0);
   });
@@ -1251,7 +1240,7 @@ describe('processing_status ревизии', () => {
     // 1. «Готово»: стадия uploaded отработала успешно.
     const ready = await enqueueSystemJob(app.db, {
       type: 'bundle.build',
-      payload: { revisionId: REVISION_C },
+      payload: { folderId: FOLDER_C },
     });
     behaviours.set(ready.jobId, () => Promise.resolve());
     await runner.runOnce();
@@ -1260,7 +1249,7 @@ describe('processing_status ревизии', () => {
     // 2. «Упало»: стадия checks исчерпала единственную попытку.
     const broken = await enqueueSystemJob(app.db, {
       type: 'checks.run',
-      payload: { revisionId: REVISION_C },
+      payload: { folderId: FOLDER_C },
       maxAttempts: 1,
     });
     behaviours.set(broken.jobId, () => Promise.reject(new Error('правило не отработало')));
@@ -1271,7 +1260,7 @@ describe('processing_status ревизии', () => {
     //    этом настоящая — строка `job_runs` открыта, аренда взята.
     const running = await enqueueSystemJob(app.db, {
       type: 'graph.build',
-      payload: { revisionId: REVISION_C },
+      payload: { folderId: FOLDER_C },
     });
     let entered = false;
     let release = (): void => {};
@@ -1286,7 +1275,7 @@ describe('processing_status ревизии', () => {
     const pumping = runner.runOnce();
     await waitUntil(() => entered);
 
-    const inFlight = await computeProcessingStatus(app.db, ADMIN_SCOPE, REVISION_C);
+    const inFlight = await computeProcessingStatus(app.db, ADMIN_SCOPE, FOLDER_C);
     expect(inFlight).not.toBeNull();
     if (inFlight === null) return;
 
@@ -1317,7 +1306,7 @@ describe('processing_status ревизии', () => {
     release();
     await pumping;
 
-    const afterRelease = await computeProcessingStatus(app.db, ADMIN_SCOPE, REVISION_C);
+    const afterRelease = await computeProcessingStatus(app.db, ADMIN_SCOPE, FOLDER_C);
     expect(afterRelease?.running).toBe(0);
     expect(
       afterRelease?.jobTypes.find((summary) => summary.jobType === 'graph.build'),
@@ -1327,20 +1316,20 @@ describe('processing_status ревизии', () => {
     expect(Number(afterRelease?.totalDurationMs)).toBeGreaterThan(0);
 
     // Убрали мёртвую задачу — сводка немедленно перестала быть `failed`, хотя в
-    // `submission_revisions` не записано ни байта. Дальняя стадия с активностью
+    // `folders` не записано ни байта. Дальняя стадия с активностью
     // — `checks`: её попытка в `job_runs` осталась, и это верно.
     await db.query(`UPDATE jobs SET status = 'cancelled' WHERE id = $1`, [broken.jobId]);
-    const afterCancel = await computeProcessingStatus(app.db, ADMIN_SCOPE, REVISION_C);
+    const afterCancel = await computeProcessingStatus(app.db, ADMIN_SCOPE, FOLDER_C);
     expect(afterCancel?.dead).toBe(0);
     expect(afterCancel?.stage).toBe('checks');
 
     // Ни одна из четырёх сводок не потребовала записи в ревизию: сводка — это
     // ВЫЧИСЛЕНИЕ над job_runs, а не хранимое поле.
-    const revisionAfter = await db.query<Record<string, unknown>>(
-      `SELECT version, updated_at, status FROM submission_revisions WHERE id = $1`,
-      [REVISION_C],
+    const folderAfter = await db.query<Record<string, unknown>>(
+      `SELECT version, updated_at FROM folders WHERE id = $1`,
+      [FOLDER_C],
     );
-    expect(revisionAfter[0]).toEqual(revisionBefore);
+    expect(folderAfter[0]).toEqual(folderBefore);
 
     await drainQueue();
   }, 30_000);
@@ -1361,7 +1350,7 @@ describe('processing_status ревизии', () => {
   it('«последняя ошибка» — только настоящий отказ, а мёртвый тип назван всегда', async () => {
     const dead = await enqueueSystemJob(app.db, {
       type: 'doc.classify_pages',
-      payload: { revisionId: REVISION_C },
+      payload: { folderId: FOLDER_C },
       maxAttempts: 1,
     });
     behaviours.set(dead.jobId, () => Promise.reject(new Error('модель отвергла страницу')));
@@ -1370,15 +1359,15 @@ describe('processing_status ревизии', () => {
     // Поверх настоящего отказа ложатся две попытки, отказом не являющиеся:
     // сорванная аренда с её текстом и отсрочка.
     await db.query(
-      `INSERT INTO job_runs (job_type, revision_id, attempt, outcome, error_class, error_message, finished_at)
+      `INSERT INTO job_runs (job_type, folder_id, attempt, outcome, error_class, error_message, finished_at)
          VALUES ('doc.classify_pages', $1, 2, 'lease_expired', 'LeaseExpired',
                  'аренда истекла: воркер не завершил задачу', now())`,
-      [REVISION_C],
+      [FOLDER_C],
     );
     await db.query(
-      `INSERT INTO job_runs (job_type, revision_id, attempt, outcome, finished_at)
+      `INSERT INTO job_runs (job_type, folder_id, attempt, outcome, finished_at)
          VALUES ('doc.classify_pages', $1, 3, 'deferred', now())`,
-      [REVISION_C],
+      [FOLDER_C],
     );
 
     // Мёртвая задача БЕЗ единой попытки: так уходят в failed непригодный
@@ -1386,10 +1375,10 @@ describe('processing_status ревизии', () => {
     await db.query(
       `INSERT INTO jobs (type, payload, status, attempts, max_attempts, last_error)
          VALUES ('doc.extract_fields', $1::jsonb, 'failed', 0, 3, 'payload не прошёл схему')`,
-      [JSON.stringify({ revisionId: REVISION_C })],
+      [JSON.stringify({ folderId: FOLDER_C })],
     );
 
-    const status = await computeProcessingStatus(app.db, ADMIN_SCOPE, REVISION_C);
+    const status = await computeProcessingStatus(app.db, ADMIN_SCOPE, FOLDER_C);
     const byType = new Map((status?.jobTypes ?? []).map((row) => [row.jobType, row]));
 
     const classify = byType.get('doc.classify_pages');
@@ -1402,21 +1391,21 @@ describe('processing_status ревизии', () => {
     // Тип есть в сводке, хотя попыток у него ноль.
     expect(byType.get('doc.extract_fields')).toMatchObject({ attempts: 0, dead: 1 });
 
-    await db.query(`UPDATE jobs SET status = 'cancelled' WHERE payload->>'revisionId' = $1`, [
-      REVISION_C,
+    await db.query(`UPDATE jobs SET status = 'cancelled' WHERE payload->>'folderId' = $1`, [
+      FOLDER_C,
     ]);
     await drainQueue();
   });
 
   it('не отдаётся за пределы области видимости', async () => {
-    expect(await computeProcessingStatus(app.db, CONTRACTOR_A_SCOPE, REVISION_C)).not.toBeNull();
+    expect(await computeProcessingStatus(app.db, CONTRACTOR_A_SCOPE, FOLDER_C)).not.toBeNull();
     // Подстановка чужого идентификатора: `null` — это 404 на маршруте, а не
     // «есть, но не ваша» (§16).
-    expect(await computeProcessingStatus(app.db, CONTRACTOR_A_SCOPE, REVISION_B)).toBeNull();
+    expect(await computeProcessingStatus(app.db, CONTRACTOR_A_SCOPE, FOLDER_B)).toBeNull();
     // Инженеру же состояние конвейера видно на любой ревизии: областей по
     // объектам больше нет (S37).
     const engineer: AuthScope = { kind: 'engineer', userId: USER_ADMIN };
-    expect(await computeProcessingStatus(app.db, engineer, REVISION_C)).not.toBeNull();
+    expect(await computeProcessingStatus(app.db, engineer, FOLDER_C)).not.toBeNull();
   });
 });
 
@@ -1435,7 +1424,7 @@ describe('processing_status ревизии', () => {
  * оставляя дефект.
  *
  * Задачи взяты без ревизии (`storage.gc`): фикстура поставки для этой проверки
- * не нужна, а лента `revision_events` с её назначением `seq` внесла бы вторую
+ * не нужна, а лента `folder_events` с её назначением `seq` внесла бы вторую
  * точку соперничества и размыла бы предмет теста.
  */
 describe.skipIf(!hasRealPostgres())('конкурентный захват двумя воркерами', () => {
