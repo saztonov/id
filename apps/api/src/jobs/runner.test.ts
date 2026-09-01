@@ -23,6 +23,7 @@
  * проверяющим — то есть хуже пропущенного. Такой тест вынесен в отдельный
  * `describe.skipIf` и исполняется только при заданном `TEST_DATABASE_URL`.
  */
+import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -266,6 +267,9 @@ async function makeRunnable(jobId: string): Promise<void> {
 /** Все ожидающие задачи снимаются: следующий тест начинает с чистой очереди. */
 async function drainQueue(): Promise<void> {
   await db.query(`UPDATE jobs SET status = 'cancelled' WHERE status IN ('queued', 'running')`);
+  // И пауза предохранителя тоже: она живёт в памяти раннера, а раннер у файла
+  // один — иначе очередь, остановленная одним тестом, молчала бы у соседнего.
+  runner.resumeQueues();
 }
 
 function pause(ms: number): Promise<void> {
@@ -769,8 +773,157 @@ describe('отложенная задача', () => {
 // Освобождение просроченной аренды
 // =====================================================================
 
+describe('предохранитель очереди', () => {
+  /**
+   * Недоступность шлюза глазами задачи: повторяемый отказ с серверным статусом.
+   *
+   * Класс объявлен формой, а не импортом: движок читает `retriable` и `status`,
+   * и тест обязан проверять именно этот контракт, а не знакомство с классом.
+   */
+  class GatewayDown extends Error {
+    readonly retriable = true;
+    readonly status = 503;
+    constructor() {
+      super('Шлюз LLM ответил 503');
+      this.name = 'LlmTransportError';
+    }
+  }
+
+  /** Задача очереди `llm`, падающая недоступностью шлюза. */
+  async function enqueueFailing(): Promise<string> {
+    const job = await enqueueSystemJob(app.db, {
+      type: 'doc.classify_pages',
+      payload: { revisionId: REVISION_A },
+      dedupeKey: `breaker:${randomUUID()}`,
+    });
+    behaviours.set(job.jobId, () => Promise.reject(new GatewayDown()));
+    return job.jobId;
+  }
+
+  /** Проход раннера с немедленным возвратом отложенных задач в очередь. */
+  async function pass(): Promise<void> {
+    await runner.runOnce();
+    await db.query(`UPDATE jobs SET next_run_at = now() WHERE status = 'queued'`);
+  }
+
+  /**
+   * Снять ожидающие задачи, НЕ трогая состояние предохранителя.
+   *
+   * Отличие от `drainQueue`, которое здесь и существенно: та снимает и паузу,
+   * то есть обнулила бы ровно то, что проверяется.
+   */
+  async function cancelPending(): Promise<void> {
+    await db.query(`UPDATE jobs SET status = 'cancelled' WHERE status IN ('queued', 'running')`);
+  }
+
+  it('серия транспортных отказов останавливает очередь, соседнюю не трогая', async () => {
+    // Пока шлюз лежал, очередь llm брала страницу за страницей и тратила на
+    // каждую по попытке: минута недоступности превращалась в десятки сожжённых
+    // попыток по всему прогону. Экспоненциальный откат этому не мешал — он у
+    // каждой задачи свой, а задач много. Лечится это на уровне очереди.
+    await drainQueue();
+    await enqueueFailing();
+    await enqueueFailing();
+    await enqueueFailing();
+
+    // Сколько отказов придётся на проход, решает параллелизм очереди;
+    // завязываться на это число значило бы проверять настройку, а не поведение.
+    for (let attempt = 0; attempt < 3; attempt += 1) await pass();
+
+    // Очередь молчит: следующая задача даже не захватывается, и её попытка не
+    // тратится на заведомо лежащий шлюз.
+    const spared = await enqueueFailing();
+    expect(await runner.runOnce()).toBe(0);
+    expect((await rawJob(spared))['attempts']).toBe(0);
+
+    // Соседняя очередь при этом работает: недоступность шлюза модели ничего не
+    // говорит о задачах, которые к нему не ходят.
+    const neighbour = await enqueueSystemJob(app.db, {
+      type: 'graph.build',
+      payload: { revisionId: REVISION_A },
+      dedupeKey: `breaker-neighbour:${randomUUID()}`,
+    });
+    let neighbourRan = false;
+    behaviours.set(neighbour.jobId, () => {
+      neighbourRan = true;
+      return Promise.resolve();
+    });
+    await runner.runOnce();
+    expect(neighbourRan).toBe(true);
+
+    await drainQueue();
+  });
+
+  it('успешная задача снимает накопленную серию', async () => {
+    // Одна прошедшая задача — доказательство того, что сторона отвечает.
+    // Без сброса серия дожила бы до порога на отказах, разнесённых по часам, и
+    // очередь встала бы на исправном шлюзе.
+    await drainQueue();
+    await enqueueFailing();
+    await enqueueFailing();
+    await pass();
+
+    // Падающие задачи убираются с дороги: очередь берёт по две за проход, и
+    // успешная задача иначе конкурировала бы за слот со своими же отказами.
+    await cancelPending();
+
+    const good = await enqueueSystemJob(app.db, {
+      type: 'doc.classify_pages',
+      payload: { revisionId: REVISION_A },
+      dedupeKey: `breaker-ok:${randomUUID()}`,
+    });
+    behaviours.set(good.jobId, () => Promise.resolve());
+    await pass();
+    expect((await rawJob(good.jobId))['status']).toBe('done');
+
+    // Ещё два отказа: серия начата заново, до порога не дотягивает — очередь
+    // обязана продолжать брать задачи.
+    await enqueueFailing();
+    await enqueueFailing();
+    await pass();
+    await cancelPending();
+
+    const next = await enqueueFailing();
+    await pass();
+    expect((await rawJob(next))['attempts']).toBeGreaterThan(0);
+
+    await drainQueue();
+  });
+
+  it('пауза, названная стороной, длиннее собственного отката', async () => {
+    // Шлюз знает, когда откроется окно, а откат гадает по номеру попытки:
+    // повтор раньше названного срока получит те же 429 и потратит попытку зря.
+    class RateLimited extends Error {
+      readonly retriable = true;
+      readonly status = 429;
+      readonly retryAfterMs = 45_000;
+      constructor() {
+        super('Шлюз LLM ответил 429');
+        this.name = 'LlmRateLimitError';
+      }
+    }
+
+    await drainQueue();
+    const job = await enqueueSystemJob(app.db, {
+      type: 'doc.classify_pages',
+      payload: { revisionId: REVISION_A },
+      dedupeKey: `retry-after:${randomUUID()}`,
+    });
+    behaviours.set(job.jobId, () => Promise.reject(new RateLimited()));
+
+    await runner.runOnce();
+
+    // Собственный откат теста — 200 мс; названная стороной пауза на два порядка
+    // больше и обязана победить.
+    expect(await retryDelayMsOf(job.jobId)).toBeGreaterThanOrEqual(45_000);
+
+    await drainQueue();
+  });
+});
+
 describe('reaper', () => {
   it('освобождает аренду убитого воркера, и задача снова исполняется', async () => {
+    await drainQueue();
     const enqueued = await enqueueSystemJob(app.db, {
       type: 'graph.build',
       payload: { revisionId: REVISION_A },

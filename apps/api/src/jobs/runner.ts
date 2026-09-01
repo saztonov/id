@@ -89,6 +89,19 @@ const DEFAULT_OUTBOX_INTERVAL_MS = 2_000;
  * нечего делать. Реже — хвост растёт заметными скачками.
  */
 const DEFAULT_PRUNE_INTERVAL_MS = 3_600_000;
+
+/**
+ * Предохранитель очереди: сколько транспортных отказов подряд её останавливают.
+ *
+ * Три, а не один: единичный сбой сети — норма, и вставать из-за него значило бы
+ * тормозить конвейер на ровном месте. Три подряд — это уже недоступность
+ * стороны, а не совпадение.
+ */
+const TRANSIENT_STREAK_LIMIT = 3;
+/** Первая пауза очереди; дальше удваивается на каждый следующий отказ. */
+const QUEUE_PAUSE_BASE_MS = 60_000;
+/** Потолок паузы: дольше десяти минут очередь не молчит — сторона могла вернуться. */
+const QUEUE_PAUSE_CAP_MS = 600_000;
 /**
  * Сколько ждать текущие задачи при остановке, если срок не задан снаружи.
  *
@@ -231,6 +244,49 @@ function statusSuffix(error: unknown): string {
  * `LlmTimeoutError` и `LlmRateLimitError` — `true` (внешняя и преходящая
  * причина). Повторять их одинаково было бы неверно в обе стороны.
  */
+/** Отказ, у которого сторона назвала паузу (`Retry-After` при 429). */
+interface RetryAfterBearingFailure {
+  readonly retryAfterMs: number | undefined;
+}
+
+/**
+ * Пауза, названная самой стороной, если она есть.
+ *
+ * Читается формой поля — тем же приёмом и по той же причине, что `retriable` и
+ * `deferred`: классы ошибок живут в другом пакете, и `instanceof` через границу
+ * пакетов ломается молча. Сторона знает, когда откроется окно, а откат только
+ * гадает по номеру попытки.
+ */
+function retryAfterMsOf(error: unknown): number | null {
+  if (typeof error !== 'object' || error === null) return null;
+  const value = (error as Partial<RetryAfterBearingFailure>).retryAfterMs;
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null;
+}
+
+/**
+ * Транспортный отказ: недоступна сторона, а не плох запрос.
+ *
+ * Различать это нужно предохранителю очереди. «Шлюз ответил 503» означает, что
+ * и следующая задача получит то же самое, а «модель ответила не по схеме» о
+ * соседних блоках не говорит ничего — останавливать из-за второго целую очередь
+ * значило бы лечить прикладной дефект простоем.
+ *
+ * Признак структурный, как и всё в этом файле: повторяемый отказ с серверным
+ * статусом либо без ответа вовсе. Потолок попытки (`JobTimeout`) считается
+ * транспортным только в очереди `llm`: там он почти всегда означает молчащий
+ * шлюз, тогда как в `cpu` это своя тяжёлая страница, и соседние страницы
+ * ни при чём.
+ */
+function isTransientOutage(error: unknown, queue: JobQueue | undefined): boolean {
+  if (retriabilityOf(error) === true) {
+    const suffix = statusSuffix(error);
+    if (suffix === ':network') return true;
+    const status = Number(suffix.slice(1));
+    if (Number.isFinite(status) && (status >= 500 || status === 429)) return true;
+  }
+  return queue === 'llm' && errorClassOf(error) === 'JobTimeout';
+}
+
 export function classifyFailure(error: unknown): {
   readonly errorClass: string;
   readonly permanent: boolean;
@@ -292,6 +348,17 @@ interface QueueState {
   readonly concurrency: number;
   inFlight: number;
   timer: NodeJS.Timeout | null;
+  /**
+   * Транспортные отказы подряд и пауза захвата (S41).
+   *
+   * Пока шлюз лежал, очередь `llm` продолжала брать страницу за страницей и
+   * тратить на каждую по попытке: минута недоступности превращалась в десятки
+   * сожжённых попыток по всему прогону, и экспоненциальный откат отдельной
+   * задачи этому не мешал — задач было много, а откат у каждой свой. Пауза
+   * берётся один раз на очередь и снимается первым же успехом.
+   */
+  transientStreak: number;
+  pausedUntil: number;
 }
 
 /**
@@ -333,6 +400,8 @@ export class JobRunner {
         concurrency: clampConcurrency(queue, options.concurrency?.[queue]),
         inFlight: 0,
         timer: null,
+        transientStreak: 0,
+        pausedUntil: 0,
       });
     }
   }
@@ -450,6 +519,21 @@ export class JobRunner {
     return claimed;
   }
 
+  /**
+   * Снять паузу предохранителя немедленно.
+   *
+   * Пауза рассчитана на то, что сторона недоступна ещё какое-то время, но это
+   * догадка: шлюз мог вернуться через секунду после того, как очередь встала.
+   * Ручка нужна тем, кто это знает точно — прогонам обслуживания и тестам,
+   * которым иначе пришлось бы ждать настоящую минуту молчания.
+   */
+  resumeQueues(): void {
+    for (const state of this.#queues.values()) {
+      state.transientStreak = 0;
+      state.pausedUntil = 0;
+    }
+  }
+
   /** Проход обслуживания вне таймеров: reaper и публикация outbox. */
   async runMaintenanceOnce(): Promise<void> {
     await this.#reapOnce();
@@ -498,6 +582,15 @@ export class JobRunner {
     const free = state.concurrency - state.inFlight;
     if (free <= 0) return 0;
 
+    /**
+     * Очередь на паузе после серии транспортных отказов (S41).
+     *
+     * Возврат нуля означает «ничего не захвачено», и цикл сам заснёт на обычный
+     * интервал опроса — отдельного таймера пробуждения не нужно, а лишний
+     * заход в БД во время недоступности шлюза ничего не стоит.
+     */
+    if (state.pausedUntil > Date.now()) return 0;
+
     const types = this.#options.registry.typesOfQueue(queue);
     if (types.length === 0) return 0;
 
@@ -540,6 +633,44 @@ export class JobRunner {
     }
 
     return claimed.length;
+  }
+
+  /**
+   * Исход попытки глазами предохранителя очереди.
+   *
+   * Успех снимает серию немедленно и без условий: одна прошедшая задача —
+   * доказательство того, что сторона отвечает, и держать паузу после неё
+   * значило бы простаивать на исправном шлюзе.
+   */
+  #noteOutcome(queue: JobQueue | undefined, outage: boolean, logger: Logger): void {
+    if (queue === undefined) return;
+    const state = this.#queues.get(queue);
+    if (state === undefined) return;
+
+    if (!outage) {
+      state.transientStreak = 0;
+      state.pausedUntil = 0;
+      return;
+    }
+
+    state.transientStreak += 1;
+    if (state.transientStreak < TRANSIENT_STREAK_LIMIT) return;
+
+    // Пауза растёт с каждым следующим отказом сверх порога: недоступность на
+    // минуту и недоступность на час лечатся одинаково, но стоить должны разного.
+    const overflow = state.transientStreak - TRANSIENT_STREAK_LIMIT;
+    const pauseMs = Math.min(QUEUE_PAUSE_CAP_MS, QUEUE_PAUSE_BASE_MS * 2 ** overflow);
+    state.pausedUntil = Date.now() + pauseMs;
+
+    logger.warn(
+      {
+        event: 'queue_paused',
+        queue,
+        transient_streak: state.transientStreak,
+        pause_ms: pauseMs,
+      },
+      'очередь приостановлена: сторона недоступна, попытки задач не тратятся впустую',
+    );
   }
 
   #scheduleReaper(): void {
@@ -754,6 +885,9 @@ export class JobRunner {
             return;
           }
 
+          // Сторона отвечает: серия транспортных отказов очереди снимается.
+          this.#noteOutcome(definition.queue, false, logger);
+
           logger.info({ event: 'job_done', duration_ms: durationMs }, 'задача выполнена');
           await this.#emitLifecycle(job, logger, 'job.succeeded', { durationMs });
         } catch (error) {
@@ -943,7 +1077,17 @@ export class JobRunner {
   ): Promise<void> {
     const durationMs = Date.now() - startedAt;
     const nextAttempt = job.attempt + 1;
-    const retryDelayMs = backoffDelayMs(job.attempt, this.#backoff);
+    /**
+     * Пауза перед повтором: своя или названная стороной — что больше (S41).
+     *
+     * Свой откат гадает по номеру попытки, `Retry-After` знает: повтор раньше
+     * названного срока получит те же 429 и потратит попытку впустую. Меньшее из
+     * двух брать нельзя ни в какую сторону, поэтому именно максимум.
+     */
+    const retryDelayMs = Math.max(
+      backoffDelayMs(job.attempt, this.#backoff),
+      retryAfterMsOf(failure.error) ?? 0,
+    );
 
     const result = await failJob(this.#options.db, {
       jobId: job.jobId,
@@ -955,6 +1099,13 @@ export class JobRunner {
       retryDelayMs,
       permanent: failure.permanent,
     });
+
+    const definitionOfJob = isJobType(job.type) ? jobDefinition(job.type) : undefined;
+    this.#noteOutcome(
+      definitionOfJob?.queue,
+      isTransientOutage(failure.error, definitionOfJob?.queue),
+      logger,
+    );
 
     const timedOut = failure.errorClass === 'JobTimeout';
     this.#options.metrics.observeJobRun({
@@ -970,7 +1121,7 @@ export class JobRunner {
     // Разбор имени ошибся бы молча на `layout.reconcile` (стадия распознавания,
     // а не разметки) и устаревал бы при каждом новом типе — то есть ровно так,
     // как это уже случилось с классификацией отказов (см. `classifyFailure`).
-    const definition = isJobType(job.type) ? jobDefinition(job.type) : undefined;
+    const definition = definitionOfJob;
     void this.#options.errorReporter.report(failure.error, {
       jobType: job.type,
       jobId: job.jobId,
