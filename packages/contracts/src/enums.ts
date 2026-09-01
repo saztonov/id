@@ -235,6 +235,40 @@ export type DetectionProviderSetting = z.infer<typeof detectionProviderSettingSc
 export const detectionInferenceModeSettingSchema = z.enum(['auto', 'tiles', 'whole_page']);
 export type DetectionInferenceModeSetting = z.infer<typeof detectionInferenceModeSettingSchema>;
 
+/**
+ * Стратегия разметки по формату листа (`detection.sheet_strategy`).
+ *
+ * `detect_all` — прежнее поведение: детектор идёт по каждой странице и три его
+ * класса попадают в разметку как есть. `sheet_aware` — правило форматов: лист
+ * A4 и мельче размечается одним текстовым блоком на всю страницу без запуска
+ * модели вовсе, а на листе крупнее A4 остаётся только штамп (и, если включена,
+ * зона номера листа рядом с ним).
+ *
+ * Настройка действует на НОВЫЕ ревизии разметки: значение запинывается в
+ * `layout_revisions.markup_policy` при создании черновика, и уже начатая
+ * разметка переключение не видит. Разбор пина — `parseMarkupPolicy`
+ * в `sheet-format.ts`.
+ */
+export const detectionSheetStrategySchema = z.enum(['sheet_aware', 'detect_all']);
+export type DetectionSheetStrategy = z.infer<typeof detectionSheetStrategySchema>;
+
+/**
+ * Как искать собственный номер листа на крупном формате
+ * (`detection.large_sheet_number_zone`).
+ *
+ * У исполнительной схемы нет текста, кроме штампа, а в штампе стоит
+ * «Обозначение» проекта — общее у всех листов раздела. Номер, которым лист
+ * назван в реестре приложений, напечатан ОТДЕЛЬНОЙ мелкой ячейкой рядом со
+ * штампом или над ним, то есть вне прямоугольника штампа.
+ *
+ * `near_stamp` — оставлять на крупном листе, кроме штампа, те текстовые
+ * кандидаты детектора, что попали в околоштамповую зону: их текст доедет до
+ * страницы, и номер найдёт то же правило `№ …`, которым портал уже пользуется.
+ * `off` — только штамп; номер листа тогда придётся обводить вручную.
+ */
+export const largeSheetNumberZoneSchema = z.enum(['near_stamp', 'off']);
+export type LargeSheetNumberZone = z.infer<typeof largeSheetNumberZoneSchema>;
+
 // --- Документы и реквизиты (§3.6, §8) ---
 
 /** Связь между логическими документами (`document_relations.relation`). */

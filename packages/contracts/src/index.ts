@@ -26,3 +26,9 @@ export * from './catalog-import.js';
  * молча (см. заголовок `identifiers.ts`).
  */
 export * from './identifiers.js';
+/**
+ * Формат листа и режим его разметки. Здесь, а не в API: правило считают воркер,
+ * API и браузер, а браузер импортировать из `apps/api` не может вовсе
+ * (см. заголовок `sheet-format.ts`).
+ */
+export * from './sheet-format.js';
