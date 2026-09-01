@@ -285,6 +285,9 @@ function deps(overrides: Partial<VlmRecognitionDeps> = {}): VlmRecognitionDeps {
     // тесты, проверяющие сквозной прогон, задают его признаком в payload.
     readAutoContinue: async () => null,
     loadRun: async () => runTarget(),
+    // По умолчанию за каждой непройденной страницей стоит живая задача: тесты,
+    // проверяющие ожидание финализации, описывают именно этот случай.
+    livePageJobs: async () => new Set([0, 1, 2, 3]),
     scheduleRecoveryRound: unexpected('scheduleRecoveryRound') as never,
     loadFrozenBlocks: async () => DEFAULT_FROZEN,
     loadPageGeometry: async () => GEOMETRY,
@@ -1399,6 +1402,91 @@ describe('createVlmFinalizeHandler', () => {
 
     await expect(handler(ctx)).rejects.toThrow(VlmRecognitionPendingError);
     expect(finishCalls).toHaveLength(0);
+  });
+
+  it('страница без живой задачи помечается отказом, а не ждёт четыре часа', async () => {
+    /**
+     * Так выглядела «заморозка распознавания» боевого инцидента.
+     *
+     * Воркер умер от нехватки памяти, задачи страниц исчерпали попытки, и
+     * финализация ждала их двести сорок отсрочек — около четырёх часов — с
+     * пустым журналом и застывшим счётчиком на экране. Различия между
+     * «страница считается» и «страницу считать некому» у неё не было.
+     */
+    const marked: Record<string, unknown>[] = [];
+    let pages: VlmRunPageState[] = [
+      donePage(),
+      { ...donePage({ workingPageIndex: 1 }), status: 'pending', blocksRecognized: 0 },
+    ];
+    const { fn: finishRun, calls: finishCalls } = idempotentFinishRun();
+    const d = deps({
+      listRunPages: async () => pages,
+      // Задачи страницы 1 больше нет: она умерла вместе с воркером.
+      livePageJobs: async () => new Set<number>(),
+      markRunPage: async (input) => {
+        marked.push(input as unknown as Record<string, unknown>);
+        pages = pages.map((page) =>
+          page.workingPageIndex === input.workingPageIndex
+            ? { ...page, status: 'failed' as const }
+            : page,
+        );
+      },
+      listBlockEnvelopes: async () => [envelope(frozenBlock())],
+      finishRun,
+    });
+    const sink = makeSink();
+    const handler = createVlmFinalizeHandler(d);
+    const ctx = makeContext(
+      'vlm.finalize_run',
+      { revisionId: REVISION, recognitionRunId: RUN },
+      sink,
+      { attempt: 1, maxAttempts: 60 },
+    );
+
+    /**
+     * Ожидание закончилось, и прогон пошёл своим обычным путём.
+     *
+     * Здесь это честный отказ по покрытию: страница осталась нераспознанной, и
+     * прогон закрывается с названной причиной. Важно не то, каким именно
+     * исходом он кончился, а то, что он кончился, — до S41 на этом месте были
+     * четыре часа молчания.
+     */
+    await expect(handler(ctx)).rejects.toThrow(VlmRecognitionCoverageError);
+    expect(marked).toHaveLength(1);
+    expect(marked[0]).toMatchObject({ workingPageIndex: 1, status: 'failed' });
+    expect(finishCalls).toHaveLength(1);
+    expect(finishCalls[0]?.['status']).toBe('failed');
+
+    // Уже распознанные блоки страницы не теряются: счётчики переносятся как есть.
+    expect(marked[0]?.['blocksRecognized']).toBe(0);
+  });
+
+  it('страница с живой задачей по-прежнему ждёт, а не объявляется отказом', async () => {
+    // Обратная сторона: пока задача в очереди или выполняется, отсрочка —
+    // единственный правильный ответ. Иначе финализация обгоняла бы работу и
+    // закрывала прогон посреди распознавания.
+    const marked: unknown[] = [];
+    const d = deps({
+      listRunPages: async () => [
+        donePage(),
+        { ...donePage({ workingPageIndex: 1 }), status: 'pending' },
+      ],
+      livePageJobs: async () => new Set([1]),
+      markRunPage: async (input) => {
+        marked.push(input);
+      },
+    });
+    const sink = makeSink();
+    const handler = createVlmFinalizeHandler(d);
+    const ctx = makeContext(
+      'vlm.finalize_run',
+      { revisionId: REVISION, recognitionRunId: RUN },
+      sink,
+      { attempt: 1, maxAttempts: 60 },
+    );
+
+    await expect(handler(ctx)).rejects.toThrow(VlmRecognitionPendingError);
+    expect(marked).toHaveLength(0);
   });
 
   it('покрытие неполно (меньше конвертов, чем блоков) — failed', async () => {

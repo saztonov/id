@@ -53,6 +53,7 @@ import {
   computeProcessingStatus,
   enqueueSystemJob,
   findJob,
+  reviveFailedJobs,
 } from '../db/repositories/jobs.js';
 import { RdWebError } from '../integrations/rdweb/port.js';
 import {
@@ -920,6 +921,64 @@ describe('предохранитель очереди', () => {
     // Собственный откат теста — 200 мс; названная стороной пауза на два порядка
     // больше и обязана победить.
     expect(await retryDelayMsOf(job.jobId)).toBeGreaterThanOrEqual(45_000);
+
+    await drainQueue();
+  });
+});
+
+describe('оживление мёртвых задач стадии', () => {
+  it('кнопка стадии возвращает мертвецов своего скоупа и не трогает чужих', async () => {
+    /**
+     * Так выглядела «разметка сбросилась до нуля и не восстановилась».
+     *
+     * Мёртвая задача держит ключ дедупликации — и правильно делает: мертвеца
+     * разбирает человек. Но нажатие кнопки стадии И ЕСТЬ решение человека, а
+     * конвейер трактовал его как очередную автоматическую постановку: страницы
+     * с мёртвыми задачами не получали ничего, `enqueueJob` возвращал
+     * существующего мертвеца, и комплект оставался недоразмеченным без единой
+     * ошибки на экране.
+     */
+    await drainQueue();
+    const LAYOUT_MINE = id(30);
+    const LAYOUT_OTHER = id(31);
+
+    const deadOf = async (layoutRevisionId: string): Promise<string> => {
+      const job = await enqueueSystemJob(app.db, {
+        type: 'layout.detect_local',
+        payload: { revisionId: REVISION_A, layoutRevisionId },
+        dedupeKey: `revive:${layoutRevisionId}:${randomUUID()}`,
+      });
+      await db.query(
+        `UPDATE jobs SET status = 'failed', attempts = 3, max_attempts = 3,
+                lease_expiries = 2, last_error = 'аренда истекла'
+          WHERE id = $1`,
+        [job.jobId],
+      );
+      return job.jobId;
+    };
+
+    const mine = await deadOf(LAYOUT_MINE);
+    const other = await deadOf(LAYOUT_OTHER);
+
+    const revived = await reviveFailedJobs(app.db, {
+      revisionId: REVISION_A,
+      stage: 'layout',
+      scopeKey: 'layoutRevisionId',
+      scopeValue: LAYOUT_MINE,
+    });
+    expect(revived).toBe(1);
+
+    const back = await rawJob(mine);
+    expect(back['status']).toBe('queued');
+    // Полный бюджет типа, а не одна попытка консольного повтора: человек
+    // заказал стадию целиком, и первая же случайность не должна убить задачу
+    // снова. Терпение к молчаливым смертям обнуляется по той же причине.
+    expect(Number(back['max_attempts'])).toBe(3 + 3);
+    expect(back['lease_expiries']).toBe(0);
+
+    // Мертвец ЧУЖОЙ разметки не тронут: его предмет уже сменился, и оживлять
+    // его этой кнопкой нельзя.
+    expect((await rawJob(other))['status']).toBe('failed');
 
     await drainQueue();
   });

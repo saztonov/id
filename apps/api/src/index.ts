@@ -87,6 +87,7 @@ export {
   appendRevisionEvent,
   computeProcessingStatus,
   enqueueSystemJob,
+  listLiveRecognizePageJobs,
   readJobAutoContinue,
   publishOutboxBatch,
   queueSnapshot,

@@ -1110,6 +1110,102 @@ export async function cancelPendingJobsOfStage(
 }
 
 /**
+ * Страницы прогона, за которыми ещё стоит живая задача распознавания (S41).
+ *
+ * Нужна финализации, чтобы отличить «страница считается» от «страницу считать
+ * некому». Прежде такого различия не было: любая непройденная страница
+ * означала отсрочку, и прогон, у которого задачи умерли при перезагрузке хоста,
+ * молча ждал их четыре часа — двести сорок отсрочек, ни одной ошибки в журнале,
+ * застывший счётчик на экране.
+ *
+ * Живыми считаются `queued` и `running`. Отложенная задача лежит в `queued` и
+ * потому тоже живая — она проснётся сама.
+ */
+export async function listLiveRecognizePageJobs(
+  db: JobExecutor,
+  runId: string,
+): Promise<ReadonlySet<number>> {
+  const rows = await db.execute<{ page_index: number }>(sql`
+    select (${jobs.payload} ->> 'pageIndex')::int as page_index
+      from ${jobs}
+     where ${jobs.type} = 'vlm.recognize_page'
+       and ${jobs.payload} ->> 'recognitionRunId' = ${runId}
+       and ${jobs.status} in ('queued', 'running')
+       and ${jobs.payload} ->> 'pageIndex' is not null
+  `);
+  return new Set(rows.rows.map((row) => row.page_index));
+}
+
+/**
+ * Оживить мёртвые задачи стадии — по явному нажатию человека (S41).
+ *
+ * ## Что чинится
+ *
+ * Мёртвая задача ДЕРЖИТ `dedupe_key` (0039), и это правильно: «мертвеца
+ * разбирает человек» — иначе следующее нажатие молча пересоздавало бы работу,
+ * которая уже пять раз не удалась. Но у правила была дыра: нажатие кнопки
+ * стадии и есть решение человека, а конвейер трактовал его как ещё одну
+ * автоматическую постановку. Повторный запуск разметки на страницах с мёртвыми
+ * задачами не ставил НИЧЕГО — `enqueueJob` возвращал существующего мертвеца с
+ * `created: false`, — и комплект оставался недоразмеченным без единой ошибки на
+ * экране. Так выглядел боевой инцидент: «разметка сбросилась до нуля и не
+ * восстановилась».
+ *
+ * ## Почему полный бюджет попыток, а не +1
+ *
+ * Консольный `retryJob` даёт одну попытку: там человек разбирает КОНКРЕТНУЮ
+ * задачу и хочет посмотреть, что будет. Здесь он заказывает стадию целиком, и
+ * задача обязана получить тот же бюджет, что получила бы новая: иначе первая же
+ * случайность (недоступность шлюза на десять секунд) снова убила бы её.
+ * `lease_expiries` обнуляется по той же причине.
+ *
+ * Скоуп задаётся ключом payload, а не одной ревизией: у ревизии бывает несколько
+ * разметок и прогонов, и оживлять мертвецов ЧУЖОГО прогона нельзя — их предмета
+ * уже нет, и они честно ждут своей участи в консоли.
+ */
+export async function reviveFailedJobs(
+  db: JobExecutor,
+  params: {
+    readonly revisionId: string;
+    readonly stage: ProcessingStage;
+    /** Ключ payload, сужающий скоуп: `layoutRevisionId` или `recognitionRunId`. */
+    readonly scopeKey: 'layoutRevisionId' | 'recognitionRunId';
+    readonly scopeValue: string;
+  },
+): Promise<number> {
+  const types = JOB_TYPES.filter((type) => stageOf(type) === params.stage);
+  if (types.length === 0) return 0;
+
+  // Бюджет — свой у каждого типа: `vlm.recognize_page` живёт восемью попытками,
+  // `layout.detect_local` тремя, и выдавать им поровну значило бы придумать
+  // третье значение вдобавок к тем, что уже объявлены в каталоге задач.
+  const budgetByType = sql.join(
+    types.map((type) => sql`when ${type} then ${jobDefinition(type).maxAttempts}`),
+    sql` `,
+  );
+
+  const revived = await db.execute<{ id: string }>(sql`
+    update ${jobs} j
+       set status = 'queued',
+           max_attempts = j.attempts + (case j.type ${budgetByType} else 1 end),
+           lease_expiries = 0,
+           next_run_at = now(),
+           locked_by = null,
+           locked_until = null,
+           updated_at = now()
+     where j.payload ->> 'revisionId' = ${params.revisionId}
+       and j.payload ->> ${params.scopeKey} = ${params.scopeValue}
+       and j.status = 'failed'
+       and j.type in (${sql.join(
+         types.map((type) => sql`${type}`),
+         sql`, `,
+       )})
+    returning j.id
+  `);
+  return revived.rows.length;
+}
+
+/**
  * Снять с ревизии ВСЕ незаконченные задачи — включая мёртвые.
  *
  * Пара к `purge.ts`: сброс конвейера и удаление комплекта сносят производное, но

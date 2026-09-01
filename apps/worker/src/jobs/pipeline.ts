@@ -114,6 +114,7 @@ import {
   fillWorkPeriodIfEmpty,
   listMatchableContractors,
   listFieldValues,
+  listLiveRecognizePageJobs,
   listLogicalDocuments,
   listPageAssignments,
   listPageClassifications,
@@ -1412,6 +1413,10 @@ function vlmRecognitionDeps(options: PipelineJobsOptions): VlmRecognitionDeps {
       const { scope } = await scopeOfRun(runId);
       return listRunPages(db, scope, runId);
     },
+
+    // Область видимости здесь не нужна: спрашиваются СВОИ задачи прогона по его
+    // идентификатору, и ответ — множество номеров страниц, а не данные комплекта.
+    livePageJobs: (runId) => listLiveRecognizePageJobs(db, runId),
 
     scheduleRecoveryRound: async (input) => {
       const { scope } = await scopeOfRun(input.runId);

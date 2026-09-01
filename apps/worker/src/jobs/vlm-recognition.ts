@@ -504,6 +504,14 @@ export interface VlmRecognitionDeps {
   listRunPages(runId: string): Promise<readonly VlmRunPageState[]>;
 
   /**
+   * Страницы, за которыми ещё стоит живая задача распознавания (S41).
+   *
+   * Как wired: `listLiveRecognizePageJobs(db, runId)` — 1:1. Нужна финализации,
+   * чтобы отличить «страница считается» от «страницу считать некому».
+   */
+  livePageJobs(runId: string): Promise<ReadonlySet<number>>;
+
+  /**
    * Раунд дораспознавания упавших страниц одной транзакцией (S28).
    *
    * Как wired: `scheduleRunRecoveryRound(db, scope, input)` — 1:1. Портом, а не
@@ -2236,13 +2244,57 @@ export function createVlmFinalizeHandler(deps: VlmRecognitionDeps): JobHandler<'
   return withVlmRunTermination(deps, async (ctx: JobContext<'vlm.finalize_run'>) => {
     const run = await loadRunningVlmRun(deps, ctx, ctx.payload);
     if (run === null) return;
-    const pages = await deps.listRunPages(run.runId);
+    let pages = await deps.listRunPages(run.runId);
 
     const pending = pages.filter((page) => page.status === 'pending');
     if (pending.length > 0) {
-      throw new VlmRecognitionPendingError(
-        `Распознавание ещё идёт: ${pending.length} страниц из ${pages.length} не терминальны`,
-      );
+      /**
+       * Страница без живой задачи — не «ещё идёт», а «считать некому» (S41).
+       *
+       * Задачи страниц умирают: воркер убит нехваткой памяти, хост
+       * перезагружен, попытки исчерпаны. Прежде финализация этого различия не
+       * знала и ждала одинаково — двести сорок отсрочек, около четырёх часов, с
+       * пустым журналом и застывшим счётчиком на экране. Ровно так выглядела
+       * «заморозка распознавания на достигнутых страницах» в боевом инциденте.
+       *
+       * Осиротевшая страница помечается `failed` с уже записанными счётчиками:
+       * блоки, которые успели распознаться, никуда не делись и остаются в
+       * покрытии. Дальше прогон идёт своим обычным путём — раунд
+       * дораспознавания, частичная публикация или честный отказ, — и всё это
+       * вместо молчания.
+       */
+      const alive = await deps.livePageJobs(run.runId);
+      const orphaned = pending.filter((page) => !alive.has(page.workingPageIndex));
+
+      for (const page of orphaned) {
+        await deps.markRunPage({
+          runId: run.runId,
+          workingPageIndex: page.workingPageIndex,
+          status: 'failed',
+          blocksRecognized: page.blocksRecognized,
+          blocksInvalid: page.blocksInvalid,
+          blocksRefused: page.blocksRefused,
+        });
+      }
+
+      if (orphaned.length > 0) {
+        ctx.logger.warn(
+          {
+            event: 'vlm_recognition_orphaned_pages',
+            pages: orphaned.length,
+            page_indices: orphaned.map((page) => page.workingPageIndex),
+          },
+          'страницы остались без задачи распознавания: помечены отказом, прогон продолжает финализацию',
+        );
+        pages = await deps.listRunPages(run.runId);
+      }
+
+      const stillPending = pending.length - orphaned.length;
+      if (stillPending > 0) {
+        throw new VlmRecognitionPendingError(
+          `Распознавание ещё идёт: ${stillPending} страниц из ${pages.length} не терминальны`,
+        );
+      }
     }
 
     const counts = aggregateRunPageCounts(pages);

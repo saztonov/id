@@ -17,7 +17,7 @@ import {
 import type { AuthScope } from '../../auth/scope.js';
 import type { Database } from '../../db/repositories/users.js';
 import { readPublishedPromptCodes } from '../../db/repositories/admin.js';
-import { enqueueJob } from '../../db/repositories/jobs.js';
+import { enqueueJob, reviveFailedJobs } from '../../db/repositories/jobs.js';
 import { startRecognitionRun } from '../../db/repositories/recognition.js';
 import { recognitionSelections } from '../../integrations/rdweb/index.js';
 import { RECOGNITION_PROMPT_CODES } from '../../recognition/vlm/prompts.js';
@@ -122,6 +122,14 @@ export interface StartRecognitionResult {
    * одним словом. У ветки RD WEB развилки публикации нет — всегда `false`.
    */
   readonly dryRun: boolean;
+  /**
+   * Сколько мёртвых задач этого прогона вернулось в очередь (S41).
+   *
+   * Нажатие кнопки — решение человека о мертвецах его собственного прогона, и
+   * число полезно в журнале: «распознавание запущено» звучит одинаково и когда
+   * работа началась с нуля, и когда она продолжила упавшую.
+   */
+  readonly revivedJobs: number;
 }
 
 /**
@@ -221,6 +229,24 @@ export async function startRecognition(
     throw notFound('Ревизия разметки не относится к указанной ревизии поставки.');
   }
 
+  /**
+   * Мёртвые задачи ЭТОГО прогона оживают до постановки головной задачи (S41).
+   *
+   * Существующий прогон возвращается как есть (`created: false`), и повторное
+   * нажатие «Распознать» на нём не ставило ничего: мёртвые страницы держали
+   * свои ключи дедупликации, а head-задача склеивалась с прежней. Прогон
+   * оставался вечно незаконченным, и единственным выходом была консоль задач.
+   *
+   * Скоуп — прогон, а не ревизия: мертвецы ЧУЖОГО прогона относятся к работе,
+   * предмет которой уже сменился, и оживлять их этой кнопкой нельзя.
+   */
+  const revived = await reviveFailedJobs(db, {
+    revisionId: input.revisionId,
+    stage: 'recognition',
+    scopeKey: 'recognitionRunId',
+    scopeValue: run.id,
+  });
+
   const { jobId, created: jobCreated } = await enqueueJob(db, scope, {
     type: firstJobType,
     payload: tracePayload({
@@ -231,5 +257,5 @@ export async function startRecognition(
     dedupeKey: dedupeKeyFor(firstJobType, run.id, input.idempotencyKey),
   });
 
-  return { recognitionRunId: run.id, created, jobId, jobCreated, dryRun };
+  return { recognitionRunId: run.id, created, jobId, jobCreated, dryRun, revivedJobs: revived };
 }

@@ -23,7 +23,7 @@ import type { Logger } from 'pino';
 import type { AuthScope } from '../../auth/scope.js';
 import type { Database } from '../../db/repositories/users.js';
 import { listBundlePages } from '../../db/repositories/bundles.js';
-import { enqueueJob } from '../../db/repositories/jobs.js';
+import { enqueueJob, reviveFailedJobs } from '../../db/repositories/jobs.js';
 import { ensureDraftLayout } from '../../db/repositories/layout.js';
 import { resetPipelineForRevision } from '../../db/repositories/purge.js';
 import {
@@ -175,6 +175,32 @@ export async function startMarkupOnBundle(
     bundleId: input.bundleId,
     enforceGates,
   });
+
+  /**
+   * Мёртвые задачи этой разметки оживают ДО постановки (S41).
+   *
+   * Мёртвая задача держит `dedupe_key` — и правильно делает: «мертвеца
+   * разбирает человек». Но нажатие этой кнопки и ЕСТЬ решение человека, а
+   * конвейер трактовал его как очередную автоматическую постановку: страницы с
+   * мёртвыми задачами не получали ничего, потому что `enqueueJob` возвращал
+   * существующего мертвеца. Комплект оставался недоразмеченным, и на экране для
+   * этого не было причины — счётчик просто стоял.
+   *
+   * Порядок значим: оживление обязано случиться перед постановкой, иначе
+   * дедупликация склеит новую задачу с мертвецом и вернёт `created: false`.
+   */
+  const revived = await reviveFailedJobs(db, {
+    revisionId: input.revisionId,
+    stage: 'layout',
+    scopeKey: 'layoutRevisionId',
+    scopeValue: layout.id,
+  });
+  if (revived > 0) {
+    input.logger.info(
+      { event: 'layout_jobs_revived', revived, layout_revision_id: layout.id },
+      'мёртвые задачи разметки возвращены в очередь по нажатию кнопки стадии',
+    );
+  }
 
   // Ветвление детекции (ADR-0008): локальный RF-DETR не создаёт RD-документ и
   // не ходит в RD WEB вовсе. Настройка читается на постановке; идущие задачи её
