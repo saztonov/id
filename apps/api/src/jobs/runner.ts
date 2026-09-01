@@ -98,6 +98,9 @@ const DEFAULT_PRUNE_INTERVAL_MS = 3_600_000;
  * стороны, а не совпадение.
  */
 const TRANSIENT_STREAK_LIMIT = 3;
+/** Как часто повторять строку о нехватке памяти: цикл опрашивает очередь раз в секунду. */
+const MEMORY_PRESSURE_LOG_INTERVAL_MS = 60_000;
+
 /** Первая пауза очереди; дальше удваивается на каждый следующий отказ. */
 const QUEUE_PAUSE_BASE_MS = 60_000;
 /** Потолок паузы: дольше десяти минут очередь не молчит — сторона могла вернуться. */
@@ -342,6 +345,19 @@ export interface JobRunnerOptions {
    */
   readonly deferralBackoff?: BackoffPolicy | undefined;
   readonly shutdownTimeoutMs?: number | undefined;
+  /**
+   * Давление по памяти: `true` — новых задач не брать (S41).
+   *
+   * Инъекция, а не чтение `process.memoryUsage()` здесь же: движок живёт и в
+   * процессе API, где решение «мне тяжело» принимается иначе, а тесту нужна
+   * возможность создать давление, не занимая настоящий гигабайт.
+   *
+   * Ограничение мягкое по построению: выполняющиеся задачи продолжают работу,
+   * не берутся только новые. Жёсткого способа у процесса нет — буферы libvips,
+   * арены ONNX и тела запросов живут вне кучи V8, и обещать «не превысим» может
+   * только cgroup, убив процесс. Этот сторож нужен, чтобы до убийства не дошло.
+   */
+  readonly memoryPressure?: (() => boolean) | undefined;
 }
 
 interface QueueState {
@@ -388,6 +404,7 @@ export class JobRunner {
   #pruneTimer: NodeJS.Timeout | null = null;
   #started = false;
   #stopping = false;
+  #memoryPressureLoggedAt = 0;
 
   constructor(options: JobRunnerOptions) {
     this.#options = options;
@@ -591,6 +608,19 @@ export class JobRunner {
      */
     if (state.pausedUntil > Date.now()) return 0;
 
+    /**
+     * Память на исходе — новых задач не берём (S41).
+     *
+     * Проверка стоит ДО захвата, а не после: захваченная задача уже потратила
+     * попытку и аренду, и «передумать» без последствий уже нельзя. Возврат нуля
+     * означает «ничего не захвачено», и цикл заснёт на обычный интервал опроса —
+     * к следующему заходу текущие задачи, скорее всего, освободят память.
+     */
+    if (this.#options.memoryPressure?.() === true) {
+      this.#noteMemoryPressure(queue);
+      return 0;
+    }
+
     const types = this.#options.registry.typesOfQueue(queue);
     if (types.length === 0) return 0;
 
@@ -670,6 +700,24 @@ export class JobRunner {
         pause_ms: pauseMs,
       },
       'очередь приостановлена: сторона недоступна, попытки задач не тратятся впустую',
+    );
+  }
+
+  /**
+   * Строка о нехватке памяти — не чаще раза в минуту.
+   *
+   * Цикл опрашивает очередь раз в секунду, и без дросселя журнал под давлением
+   * заполнялся бы одним и тем же сообщением по три строки в секунду — то есть
+   * ровно в тот момент, когда в нём нужно искать причину, он становился бы
+   * нечитаемым.
+   */
+  #noteMemoryPressure(queue: JobQueue): void {
+    const now = Date.now();
+    if (now - this.#memoryPressureLoggedAt < MEMORY_PRESSURE_LOG_INTERVAL_MS) return;
+    this.#memoryPressureLoggedAt = now;
+    this.#options.logger.warn(
+      { event: 'queue_memory_pressure', queue, in_flight: this.inFlight },
+      'память на исходе: новые задачи не берутся, пока текущие не освободят её',
     );
   }
 

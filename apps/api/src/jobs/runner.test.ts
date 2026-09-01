@@ -170,6 +170,8 @@ const TEST_BACKOFF = { baseMs: 200, factor: 4, capMs: 10_000, jitter: 0 } as con
 let db: TestDatabase;
 let app: AppInstance;
 let runner: JobRunner;
+/** Реестр для отдельных раннеров теста: поведение задач общее с основным. */
+let memoryRegistry: JobRegistry;
 
 /** Что делает обработчик — задаёт тест: очередь одна, поведение разное. */
 const behaviours = new Map<string, (ctx: JobContext) => Promise<void>>();
@@ -204,6 +206,8 @@ beforeAll(async () => {
   registry.register('graph.build', dispatch);
   registry.register('checks.run', dispatch);
   registry.register('doc.classify_pages', dispatch);
+
+  memoryRegistry = registry;
 
   runner = new JobRunner({
     db: app.db,
@@ -917,6 +921,47 @@ describe('предохранитель очереди', () => {
     // больше и обязана победить.
     expect(await retryDelayMsOf(job.jobId)).toBeGreaterThanOrEqual(45_000);
 
+    await drainQueue();
+  });
+});
+
+describe('сторож памяти', () => {
+  it('под давлением новые задачи не берутся, а после — берутся', async () => {
+    // Единственная защита от OOM была внешней: cgroup убивал процесс, задачи
+    // теряли аренду, и разбираться с этим приходилось reaper'у. Сторож
+    // отодвигает эту границу — он не обещает «не превысим» (буферы libvips и
+    // арены ONNX живут вне кучи V8), но не даёт добавлять нагрузку тогда, когда
+    // память уже на исходе.
+    await drainQueue();
+
+    let tight = true;
+    const guarded = new JobRunner({
+      db: app.db,
+      registry: memoryRegistry,
+      logger: createLogger({ service: 'runner-test', level: 'silent', env: 'test' }),
+      metrics: createMetrics({ enabled: false, service: 'runner-test' }),
+      errorReporter: new NoopErrorReporter(),
+      workerId: 'worker-memory-test',
+      backoff: TEST_BACKOFF,
+      memoryPressure: () => tight,
+    });
+
+    const job = await enqueueSystemJob(app.db, {
+      type: 'graph.build',
+      payload: { revisionId: REVISION_A },
+      dedupeKey: `memory:${randomUUID()}`,
+    });
+
+    // Проверка стоит ДО захвата: захваченная задача уже потратила попытку и
+    // аренду, и «передумать» без последствий уже нельзя.
+    expect(await guarded.runOnce()).toBe(0);
+    expect((await rawJob(job.jobId))['attempts']).toBe(0);
+
+    tight = false;
+    expect(await guarded.runOnce()).toBeGreaterThan(0);
+    expect((await rawJob(job.jobId))['status']).toBe('done');
+
+    await guarded.stop();
     await drainQueue();
   });
 });

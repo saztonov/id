@@ -102,6 +102,15 @@ const workerEnvSchema = z.object({
    * завершения придёт SIGKILL.
    */
   WORKER_SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(600_000).optional(),
+  /**
+   * Мягкий потолок памяти процесса, МиБ: выше него новые задачи не берутся.
+   *
+   * Не задан — сторож выключен, и поведение прежнее. Значение выбирается ниже
+   * `mem_limit` контейнера с запасом на ту память, которую задача возьмёт уже
+   * после захвата: смысл сторожа в том, чтобы до убийства по cgroup дело не
+   * дошло, а не в том, чтобы поймать процесс на последнем мегабайте.
+   */
+  WORKER_RSS_SOFT_LIMIT_MB: z.coerce.number().int().min(128).max(65_536).optional(),
 });
 
 type WorkerEnv = z.infer<typeof workerEnvSchema>;
@@ -135,6 +144,22 @@ async function main(): Promise<void> {
   configureSharp();
 
   const shutdownTimeoutMs = worker.WORKER_SHUTDOWN_TIMEOUT_MS ?? DEFAULT_SHUTDOWN_TIMEOUT_MS;
+
+  /**
+   * Мягкий потолок памяти процесса (S41).
+   *
+   * `rss`, а не `heapUsed`: тяжёлое у воркера лежит ВНЕ кучи V8 — буферы
+   * libvips, арены ONNX, тела запросов к шлюзу, — и по куче этой нагрузки не
+   * видно вовсе. Именно поэтому `--max-old-space-size` сам по себе от убийства
+   * по cgroup не спасает: сторож обязан смотреть на ту же величину, что и ядро,
+   * когда выбирает жертву.
+   */
+  const rssSoftLimitBytes =
+    worker.WORKER_RSS_SOFT_LIMIT_MB === undefined
+      ? null
+      : worker.WORKER_RSS_SOFT_LIMIT_MB * 1024 * 1024;
+  const rssOverLimit = (): boolean =>
+    rssSoftLimitBytes !== null && process.memoryUsage.rss() > rssSoftLimitBytes;
 
   const logger = createLogger({
     service: SERVICE_NAME,
@@ -310,6 +335,16 @@ async function main(): Promise<void> {
         : {}),
     },
     shutdownTimeoutMs,
+    /**
+     * Сторож памяти (S41).
+     *
+     * `rss`, а не `heapUsed`: тяжёлое у воркера лежит ВНЕ кучи V8 — буферы
+     * libvips, арены ONNX, тела запросов к шлюзу, — и по куче эту нагрузку не
+     * видно вовсе. Именно поэтому `--max-old-space-size` сам по себе от OOM не
+     * спасает, и сторож смотрит на ту же величину, что и ядро, когда выбирает
+     * жертву.
+     */
+    ...(rssSoftLimitBytes !== null ? { memoryPressure: (): boolean => rssOverLimit() } : {}),
     // Очистка журнала живёт здесь, а не в API: у воркера уже есть часовой цикл
     // обслуживания, и одновременно работает всё равно только один процесс —
     // очистка берёт advisory-блокировку.
@@ -418,6 +453,7 @@ async function main(): Promise<void> {
       // Границы процесса — в строке готовности: «почему воркер медленнее, чем
       // вчера» разбирается по journalctl, а не по памяти о содержимом id.env.
       shutdown_timeout_ms: shutdownTimeoutMs,
+      rss_soft_limit_mb: worker.WORKER_RSS_SOFT_LIMIT_MB ?? null,
       sharp_concurrency: sharp.concurrency(),
     },
     'воркер готов принимать задачи',
