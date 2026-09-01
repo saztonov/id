@@ -131,7 +131,17 @@ export function DiagnosticsPanel(): ReactNode {
               {
                 title: 'Попытки',
                 key: 'attempts',
-                render: (_value, row) => `${row.attempts} / ${row.maxAttempts}`,
+                // Молчаливые смерти показываются отдельной меткой, а не суммой с
+                // попытками: «задача падает» и «задача роняет воркер» чинятся
+                // разным, и слепить их в одно число значило бы увести разбор.
+                render: (_value, row) => (
+                  <Space size={4}>
+                    <span>{`${row.attempts} / ${row.maxAttempts}`}</span>
+                    {row.leaseExpiries > 0 && (
+                      <Tag color="orange">{`аренда истекала ${row.leaseExpiries}`}</Tag>
+                    )}
+                  </Space>
+                ),
               },
               { title: 'Очередь', dataIndex: 'queue', key: 'queue', render: (v) => v ?? '—' },
               {

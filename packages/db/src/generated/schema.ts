@@ -1189,6 +1189,7 @@ export const jobs = pgTable("jobs", {
 	lastError: text("last_error"),
 	priority: integer().default(100).notNull(),
 	dedupeKey: text("dedupe_key"),
+	leaseExpiries: integer("lease_expiries").default(0).notNull(),
 	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
 	updatedAt: timestamp("updated_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
 }, (table) => [
@@ -1201,6 +1202,7 @@ export const jobs = pgTable("jobs", {
 	check("jobs_status_chk", sql`status = ANY (ARRAY['queued'::text, 'running'::text, 'done'::text, 'failed'::text, 'cancelled'::text])`),
 	check("jobs_attempts_chk", sql`attempts >= 0`),
 	check("jobs_max_attempts_chk", sql`max_attempts > 0`),
+	check("jobs_lease_expiries_chk", sql`lease_expiries >= 0`),
 ]);
 
 export const jobRuns = pgTable("job_runs", {

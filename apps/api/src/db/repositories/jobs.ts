@@ -619,16 +619,45 @@ export interface ReapResult {
 }
 
 /**
+ * Сколько молчаливых смертей подряд задача переживает, прежде чем уйти к людям.
+ *
+ * Потолок нужен ровно от одного случая — задачи, которая роняет воркер сама:
+ * страница-гигант, не влезающая в память, убила бы процесс, вернулась в очередь
+ * и убила следующий, бесконечно. Пять — это заметно больше, чем случайное
+ * совпадение (выкатка, перезагрузка хоста, разовый OOM соседа), и заметно
+ * меньше, чем «крутится вечно».
+ */
+export const LEASE_EXPIRY_LIMIT = 5;
+
+/**
  * Освобождение просроченных аренд (§12, задача 24).
  *
  * Воркер, убитый сигналом, ничего освободить не может — задача осталась бы в
  * `running` навсегда, и это ровно тот отказ, который не виден: очередь не
  * растёт, ошибок нет, конвейер стоит. Reaper возвращает такие задачи в очередь,
- * а исчерпавшие попытки переводит в `failed`, чтобы они были видны в консоли.
+ * а исчерпавшие терпение переводит в `failed`, чтобы они были видны в консоли.
  *
  * Открытые попытки закрываются исходом `lease_expired` (§3.8): считать их
  * прикладной ошибкой нельзя — задача, возможно, отработала целиком и умерла на
  * записи результата.
+ *
+ * ## Почему молчаливая смерть не тратит бюджет попыток (S41)
+ *
+ * `attempts` растёт при захвате, и до S41 этого счётчика хватало на всё: три
+ * смерти воркера подряд убивали задачу детекции, ни разу её не выполнив. На
+ * боевом инциденте так умер целый комплект: хост перезагрузился под нагрузкой,
+ * задачи ушли в `failed`, а `failed` держит `dedupe_key` (0039) — и повторное
+ * нажатие «Выделить блоки» для этих страниц молча не ставило ничего.
+ *
+ * Поэтому потраченный квант возвращается (`max_attempts + 1`), а считается
+ * отдельным счётчиком со своим потолком. Возврат сделан прибавкой к потолку, а
+ * не уменьшением `attempts`: номера попыток уезжают в `job_runs`, и откат
+ * счётчика назад дал бы две разные попытки с одним номером — то есть испорченную
+ * историю там, где её и смотрят при разборе.
+ *
+ * Пауза перед повтором растёт с числом потерь: воркер, которого только что убил
+ * OOM, поднимается не мгновенно, и немедленный повтор попал бы ровно в момент,
+ * когда машине ещё плохо.
  */
 export async function reapExpiredLeases(
   db: JobExecutor,
@@ -651,11 +680,21 @@ export async function reapExpiredLeases(
     ),
     requeued as (
       update ${jobs} j
-         set status = case when j.attempts >= j.max_attempts then 'failed' else 'queued' end,
+         set status = case
+               when j.lease_expiries + 1 >= ${LEASE_EXPIRY_LIMIT} then 'failed'
+               else 'queued'
+             end,
+             lease_expiries = j.lease_expiries + 1,
+             max_attempts = j.max_attempts + 1,
              locked_by = null,
              locked_until = null,
-             next_run_at = now(),
-             last_error = 'аренда истекла: воркер не завершил задачу',
+             next_run_at = now() + (j.lease_expiries + 1) * interval '30 seconds',
+             last_error = case
+               when j.lease_expiries + 1 >= ${LEASE_EXPIRY_LIMIT}
+                 then 'аренда истекала ' || (j.lease_expiries + 1)::text ||
+                      ' раз подряд: задача, вероятно, роняет воркер (нехватка памяти или зависание)'
+               else 'аренда истекла: воркер не завершил задачу'
+             end,
              updated_at = now()
         from expired e
        where j.id = e.id
@@ -699,6 +738,14 @@ export interface JobView {
   readonly status: JobStatus;
   readonly attempts: number;
   readonly maxAttempts: number;
+  /**
+   * Сколько раз аренда истекала без ответа воркера (S41).
+   *
+   * Отдельно от `attempts` и рядом с ним: «шесть попыток» и «шесть смертей
+   * воркера» — разные диагнозы с разным лечением. Первое разбирают по тексту
+   * ошибки, второе — по памяти машины.
+   */
+  readonly leaseExpiries: number;
   readonly priority: number;
   readonly nextRunAt: string;
   readonly lockedBy: string | null;
@@ -736,6 +783,7 @@ const JOB_COLUMNS = sql`
   ${jobs.status} as status,
   ${jobs.attempts} as attempts,
   ${jobs.maxAttempts} as max_attempts,
+  ${jobs.leaseExpiries} as lease_expiries,
   ${jobs.priority} as priority,
   ${sql.raw(ISO('jobs.next_run_at'))} as next_run_at,
   ${jobs.lockedBy} as locked_by,
@@ -761,6 +809,7 @@ interface JobRawRow extends Record<string, unknown> {
   status: string;
   attempts: number;
   max_attempts: number;
+  lease_expiries: number;
   priority: number;
   next_run_at: string;
   locked_by: string | null;
@@ -943,6 +992,11 @@ export async function retryJob(
       update ${jobs}
          set status = 'queued',
              max_attempts = attempts + 1,
+             -- Терпение к молчаливым смертям тоже возвращается: человек,
+             -- нажавший «повторить», уже знает, что задача роняла воркер, и
+             -- решение принял он. Оставить счётчик у потолка значило бы, что
+             -- его повтор умрёт от первой же истёкшей аренды.
+             lease_expiries = 0,
              next_run_at = now(),
              locked_by = null,
              locked_until = null,
@@ -2103,6 +2157,7 @@ function toJobView(row: JobRawRow): JobView {
     status,
     attempts: row.attempts,
     maxAttempts: row.max_attempts,
+    leaseExpiries: row.lease_expiries,
     priority: row.priority,
     nextRunAt: row.next_run_at,
     lockedBy: row.locked_by,

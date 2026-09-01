@@ -1016,6 +1016,8 @@ export interface JobView {
   status: string;
   attempts: number;
   maxAttempts: number;
+  /** Сколько раз аренда истекала без ответа воркера (S41). */
+  leaseExpiries: number;
   priority: number;
   nextRunAt: string;
   lockedBy: string | null;

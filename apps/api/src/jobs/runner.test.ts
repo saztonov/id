@@ -800,6 +800,8 @@ describe('reaper', () => {
     expect(await runner.runOnce()).toBe(0);
     expect((await rawJob(enqueued.jobId))['status']).toBe('running');
 
+    const before = await rawJob(enqueued.jobId);
+
     // Reaper вызывается МЕТОДОМ раннера, а не функцией репозитория: проверяется,
     // что раннер её действительно зовёт (урок S3).
     await runner.runMaintenanceOnce();
@@ -808,6 +810,22 @@ describe('reaper', () => {
     expect(freed['status']).toBe('queued');
     expect(freed['locked_by']).toBeNull();
     expect(freed['locked_until']).toBeNull();
+
+    /**
+     * Молчаливая смерть воркера не тратит бюджет попыток (S41).
+     *
+     * До S41 три таких смерти убивали задачу, ни разу её не выполнив, а мёртвая
+     * задача держит `dedupe_key` — и повторное нажатие кнопки стадии молча не
+     * ставило ничего. Поэтому потраченный при захвате квант возвращается
+     * прибавкой к потолку, а сами потери считаются отдельно.
+     */
+    expect(freed['lease_expiries']).toBe(1);
+    expect(Number(freed['max_attempts'])).toBe(Number(before['max_attempts']) + 1);
+
+    // Повтор не мгновенный: воркер, которого только что убил OOM, поднимается
+    // не сразу, и немедленный заход пришёлся бы ровно на больную машину.
+    expect(await runner.runOnce()).toBe(0);
+    await makeRunnable(enqueued.jobId);
 
     const closed = await runsOf(enqueued.jobId);
     expect(closed).toHaveLength(1);
@@ -833,6 +851,36 @@ describe('reaper', () => {
     expect(runs).toHaveLength(2);
     expect(runs[1]?.['outcome']).toBe('succeeded');
     expect(runs[1]?.['attempt']).toBe(2);
+
+    await drainQueue();
+  });
+
+  it('задача, роняющая воркер раз за разом, уходит к человеку с названной причиной', async () => {
+    // Обратная сторона щедрости к потерянным арендам: страница-гигант, не
+    // влезающая в память, убила бы воркер, вернулась в очередь и убила
+    // следующий — вечно. Потолок молчаливых смертей эту петлю размыкает, и
+    // текст отказа обязан отличать её от обычного падения: «падает пять раз с
+    // ошибкой» и «пять раз убивает процесс» чинятся разным.
+    const enqueued = await enqueueSystemJob(app.db, {
+      type: 'graph.build',
+      payload: { revisionId: REVISION_A },
+      dedupeKey: `poison:${Date.now()}`,
+    });
+
+    await db.query(
+      `UPDATE jobs SET status = 'running', locked_by = 'worker-oom',
+              locked_until = now() - interval '1 minute', attempts = 1,
+              lease_expiries = 4
+        WHERE id = $1`,
+      [enqueued.jobId],
+    );
+
+    await runner.runMaintenanceOnce();
+
+    const dead = await rawJob(enqueued.jobId);
+    expect(dead['status']).toBe('failed');
+    expect(dead['lease_expiries']).toBe(5);
+    expect(String(dead['last_error'])).toContain('роняет воркер');
 
     await drainQueue();
   });

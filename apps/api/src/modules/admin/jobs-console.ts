@@ -82,6 +82,8 @@ const jobSchema = z.object({
   status: z.enum(JOB_STATUSES),
   attempts: z.int(),
   maxAttempts: z.int(),
+  /** Молчаливые смерти воркера: другой диагноз, чем исчерпанные попытки (S41). */
+  leaseExpiries: z.int(),
   priority: z.int(),
   nextRunAt: z.string(),
   lockedBy: z.string().nullable(),
