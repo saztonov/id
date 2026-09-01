@@ -134,7 +134,16 @@ export interface LocalDetectionDeps {
     readonly layoutRevisionId: string;
   }): Promise<ReadonlySet<number>>;
 
-  fetchWorkingPdf(key: string, destinationPath: string): Promise<void>;
+  /**
+   * Рабочий PDF комплекта на диске (S41).
+   *
+   * Возвращает файл в аренду, а не скачивает по указанному пути: документ один
+   * на весь комплект и иммутабелен, поэтому 220 задач детекции читают ОДНУ
+   * копию. `release` обязателен — пока аренда держится, кэш файл не вытесняет.
+   */
+  workingPdf(
+    key: string,
+  ): Promise<{ readonly path: string; readonly release: () => Promise<void> }>;
 
   importBlocks(input: {
     readonly revisionId: string;
@@ -440,10 +449,9 @@ export function createLocalDetectionHandler(
     const targetPageList: number[] = [];
     const perPageBlocks = new Map<number, DetectedBlockInput[]>();
 
+    const pdf = await deps.workingPdf(target.workingPdfKey);
+    const pdfPath = pdf.path;
     try {
-      const pdfPath = join(scratchDir, 'working.pdf');
-      await deps.fetchWorkingPdf(target.workingPdfKey, pdfPath);
-
       for (const pageIndex of pageIndices) {
         /**
          * Отменённую попытку не продолжаем (S41).
@@ -634,6 +642,7 @@ export function createLocalDetectionHandler(
         targetPageList.push(pageIndex);
       }
     } finally {
+      await pdf.release();
       await rm(scratchDir, { recursive: true, force: true });
     }
 

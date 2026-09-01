@@ -113,6 +113,14 @@ const workerEnvSchema = z.object({
    * дошло, а не в том, чтобы поймать процесс на последнем мегабайте.
    */
   WORKER_RSS_SOFT_LIMIT_MB: z.coerce.number().int().min(128).max(65_536).optional(),
+  /**
+   * Потолок кэша рабочих PDF на диске воркера, МиБ.
+   *
+   * Не задан — кэша нет, и каждая задача скачивает документ себе (поведение до
+   * S41). Значение выбирается по свободному месту временного раздела: кэш
+   * ускоряет конвейер, но не является условием его работы.
+   */
+  WORKER_PDF_CACHE_MB: z.coerce.number().int().min(64).max(102_400).optional(),
 });
 
 type WorkerEnv = z.infer<typeof workerEnvSchema>;
@@ -337,6 +345,12 @@ async function main(): Promise<void> {
     llmMetrics: metrics,
     llm,
     vlm,
+    // Кэш рабочих PDF (S41): комплект на 220 страниц скачивал один и тот же
+    // документ порядка 660 раз — по разу на каждую задачу зонда, детекции и
+    // распознавания.
+    ...(worker.WORKER_PDF_CACHE_MB !== undefined
+      ? { pdfCacheBytes: worker.WORKER_PDF_CACHE_MB * 1024 * 1024 }
+      : {}),
   });
 
   const runner = new JobRunner({
@@ -477,6 +491,7 @@ async function main(): Promise<void> {
       // вчера» разбирается по journalctl, а не по памяти о содержимом id.env.
       shutdown_timeout_ms: shutdownTimeoutMs,
       rss_soft_limit_mb: worker.WORKER_RSS_SOFT_LIMIT_MB ?? null,
+      pdf_cache_mb: worker.WORKER_PDF_CACHE_MB ?? null,
       sharp_concurrency: sharp.concurrency(),
     },
     'воркер готов принимать задачи',

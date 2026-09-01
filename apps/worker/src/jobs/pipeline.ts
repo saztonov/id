@@ -240,6 +240,7 @@ import {
 import { createLayoutStartHandler, type LayoutStartDeps } from './layout-start.js';
 import { createChecksLlmReviewHandler, type ChecksLlmReviewDeps } from './checks-llm-review.js';
 import { createModelStore } from '../detection/model-store.js';
+import { WorkingPdfCache } from '../lib/pdf-cache.js';
 import {
   DEFAULT_INTER_OP_THREADS,
   DEFAULT_INTRA_OP_THREADS,
@@ -303,6 +304,14 @@ export interface PipelineJobsOptions {
   readonly limits: PipelineLimits;
   /** Каталог временных копий при сборке; по умолчанию системный. */
   readonly workDirBase?: string | undefined;
+  /**
+   * Потолок кэша рабочих PDF на диске, байт (S41).
+   *
+   * Не задан — кэша нет, и каждая задача скачивает документ себе, как до S41.
+   * Выключаемость важна для тестов и для машин, где временный раздел мал:
+   * кэш — ускорение, а не условие работы конвейера.
+   */
+  readonly pdfCacheBytes?: number | undefined;
   /**
    * Адаптер RD WEB (§5.1). `null` — интеграция не настроена: задачи 4–9 при
    * этом честно падают с внятной причиной, а стадии приёма продолжают работать.
@@ -843,8 +852,50 @@ function layoutStartDeps(options: PipelineJobsOptions): LayoutStartDeps {
   };
 }
 
+/**
+ * Кэш рабочих PDF реестра: один на процесс, общий для всех трёх стадий (S41).
+ *
+ * Общий намеренно: зонд, детекция и распознавание читают ОДИН документ
+ * комплекта, и три отдельных кэша означали бы три его копии на диске — то есть
+ * ровно ту трату, ради устранения которой кэш и заведён.
+ *
+ * `null` — кэш выключен (`pdfCacheBytes` не задан): тогда каждая задача
+ * скачивает документ себе, как до S41. Так ведут себя тесты и машины, где
+ * временный раздел мал.
+ */
+function createPdfCache(options: PipelineJobsOptions): WorkingPdfCache | null {
+  if (options.pdfCacheBytes === undefined || options.pdfCacheBytes <= 0) return null;
+  return new WorkingPdfCache({
+    dir: join(options.workDirBase ?? tmpdir(), 'working-pdf'),
+    maxBytes: options.pdfCacheBytes,
+    fetch: (storageKey, destinationPath) =>
+      fetchOriginal(options.storage, storageKey, destinationPath),
+  });
+}
+
+/**
+ * Аренда рабочего PDF: из кэша, если он есть, иначе своя временная копия.
+ *
+ * Одна функция на все три стадии — иначе выключенный кэш вёл бы себя в них
+ * по-разному, и разница вскрылась бы на машине, где кэш не настроен.
+ */
+async function leaseWorkingPdf(
+  options: PipelineJobsOptions,
+  cache: WorkingPdfCache | null,
+  storageKey: string,
+  fallbackPrefix: string,
+): Promise<{ readonly path: string; readonly release: () => Promise<void> }> {
+  if (cache !== null) return cache.lease(storageKey);
+
+  const dir = await mkdtemp(join(options.workDirBase ?? tmpdir(), fallbackPrefix));
+  const path = join(dir, 'working.pdf');
+  await fetchOriginal(options.storage, storageKey, path);
+  return { path, release: () => rm(dir, { recursive: true, force: true }) };
+}
+
 function localDetectionDeps(options: PipelineJobsOptions): LocalDetectionDeps {
   const { db, storage } = options;
+  const pdfCache = createPdfCache(options);
 
   const cacheDir =
     options.detectionCacheDir ?? join(options.workDirBase ?? tmpdir(), 'detection-models');
@@ -905,7 +956,7 @@ function localDetectionDeps(options: PipelineJobsOptions): LocalDetectionDeps {
       return new Set(blocks.map((block) => block.workingPageIndex));
     },
 
-    fetchWorkingPdf: (key, destinationPath) => fetchOriginal(storage, key, destinationPath),
+    workingPdf: (key) => leaseWorkingPdf(options, pdfCache, key, 'id-detect-pdf-'),
 
     importBlocks: async (input) => {
       const scope = await pinScope(db, input.revisionId);
@@ -1124,7 +1175,8 @@ function recognitionDeps(options: PipelineJobsOptions): RecognitionDeps {
  * качеству, без которой портал работал всё время до S35.
  */
 function orientationProbeDeps(options: PipelineJobsOptions): OrientationProbeDeps {
-  const { db, storage } = options;
+  const { db } = options;
+  const pdfCache = createPdfCache(options);
 
   const scopeOf = async (revisionId: string): Promise<AuthScope> => {
     const scope = await pinScope(db, revisionId);
@@ -1157,10 +1209,13 @@ function orientationProbeDeps(options: PipelineJobsOptions): OrientationProbeDep
     workingPdfToFile: async (bundleId) => {
       const bundle = await findBundle(db, SYSTEM_SCOPE, bundleId);
       if (bundle === null) throw new PipelineScopeError(`Рабочий документ ${bundleId} не найден.`);
-      const dir = await mkdtemp(join(options.workDirBase ?? tmpdir(), 'id-orientation-pdf-'));
-      const path = join(dir, 'working.pdf');
-      await fetchOriginal(storage, blobKey(bundle.workingPdfBlobSha256), path);
-      return { path, cleanup: () => rm(dir, { recursive: true, force: true }) };
+      const leased = await leaseWorkingPdf(
+        options,
+        pdfCache,
+        blobKey(bundle.workingPdfBlobSha256),
+        'id-orientation-pdf-',
+      );
+      return { path: leased.path, cleanup: leased.release };
     },
 
     renderPage: async (input) => {
@@ -1317,6 +1372,7 @@ function orientationProbeDeps(options: PipelineJobsOptions): OrientationProbeDep
 
 function vlmRecognitionDeps(options: PipelineJobsOptions): VlmRecognitionDeps {
   const { db, storage } = options;
+  const pdfCache = createPdfCache(options);
 
   const scopeOf = async (revisionId: string): Promise<AuthScope> => {
     const scope = await pinScope(db, revisionId);
@@ -1571,13 +1627,13 @@ function vlmRecognitionDeps(options: PipelineJobsOptions): VlmRecognitionDeps {
       const { scope } = await scopeOfRun(runId);
       const run = await findRecognitionRun(db, scope, runId);
       if (run === null) throw new PipelineScopeError(`Прогон ${runId} не найден.`);
-      const dir = await mkdtemp(join(options.workDirBase ?? tmpdir(), 'id-vlm-pdf-'));
-      const path = join(dir, 'working.pdf');
-      await fetchOriginal(storage, blobKey(run.workingPdfSha256), path);
-      return {
-        path,
-        cleanup: () => rm(dir, { recursive: true, force: true }),
-      };
+      const leased = await leaseWorkingPdf(
+        options,
+        pdfCache,
+        blobKey(run.workingPdfSha256),
+        'id-vlm-pdf-',
+      );
+      return { path: leased.path, cleanup: leased.release };
     },
 
     crop: (input) => cropBlockPng(input),

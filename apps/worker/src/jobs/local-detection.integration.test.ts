@@ -312,8 +312,13 @@ function localDetectionDeps(session: OnnxSessionPort): LocalDetectionDeps {
       return new Set(blocks.map((block) => block.workingPageIndex));
     },
 
-    fetchWorkingPdf: async (_key, destinationPath) => {
-      await writeFile(destinationPath, sourcePdfBytes);
+    // Аренда вместо скачивания (S41): документ комплекта один и иммутабелен,
+    // поэтому задачам его выдаёт кэш. Здесь он изображается файлом, который
+    // живёт всё время теста, — освобождение аренды его не удаляет.
+    workingPdf: async () => {
+      const path = join(STORAGE_DIR, 'working-lease.pdf');
+      await writeFile(path, sourcePdfBytes);
+      return { path, release: async () => {} };
     },
 
     importBlocks: async (input) => {
