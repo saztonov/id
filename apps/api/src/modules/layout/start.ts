@@ -421,6 +421,7 @@ export async function enqueueLocalDetectBatches(
         String(pageIndex),
         ...(input.overwriteExisting ? ['overwrite'] : []),
       ),
+      priority: pagePriority(100, 60, pageIndex),
     });
     jobIds.push(jobId);
     if (created) anyCreated = true;
@@ -435,6 +436,27 @@ export async function enqueueLocalDetectBatches(
     'локальная детекция поставлена постранично',
   );
   return { jobIds, created: anyCreated };
+}
+
+/**
+ * Приоритет страницы: чем дальше страница, тем ниже (S41).
+ *
+ * Fan-out ставит задачи на все страницы разом, и очередь до сих пор разбирала
+ * их строго по времени постановки. Комплект на 220 страниц, запущенный первым,
+ * занимал конвейер целиком: второй комплект не двигался вовсе, и на его экране
+ * это выглядело как «ничего не происходит» — притом что обгонять первый ему и
+ * не нужно, пропускная способность общая.
+ *
+ * Убывание по десяткам страниц даёт ранним страницам ПОЗДНЕГО комплекта обойти
+ * хвост раннего: оба показывают движение, и оператор видит первые распознанные
+ * листы обоих, а не одного. Общее время не меняется — меняется наблюдаемость.
+ *
+ * Нижняя граница нужна, чтобы конвейерные задачи не провалились под фоновые
+ * (`preview.cache_pages` — 50, уборка — 10): хвост длинного комплекта остаётся
+ * работой, которую ждёт человек.
+ */
+function pagePriority(base: number, floor: number, pageIndex: number): number {
+  return Math.max(floor, base - Math.floor(pageIndex / 10));
 }
 
 /**
@@ -478,6 +500,9 @@ export async function enqueueOrientationProbes(
         input.layoutRevisionId,
         String(page.workingPageIndex),
       ),
+      // Зонды идут выше страниц распознавания (150 против 100) — они вход
+      // разметки; внутри комплекта порядок задаёт номер страницы.
+      priority: pagePriority(150, 110, page.workingPageIndex),
     });
     jobIds.push(jobId);
     if (created) anyCreated = true;

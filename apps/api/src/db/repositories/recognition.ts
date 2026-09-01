@@ -1190,6 +1190,10 @@ export async function scheduleRunRecoveryRound(
           pageIndex,
         },
         dedupeKey: `vlm.recognize_page:${input.runId}:${String(pageIndex)}:r${String(round)}`,
+        // Тот же позиционный приоритет, что и у первого круга (S41): раунд
+        // дораспознавания — та же работа, и обгонять по нему соседний комплект
+        // не за что.
+        priority: Math.max(60, 100 - Math.floor(pageIndex / 10)),
       });
     }
 

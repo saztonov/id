@@ -680,6 +680,7 @@ export type { PromptTemplateRow } from './db/repositories/admin.js';
 
 export {
   createAiSpendReader,
+  createLlmPolicy,
   createLlmProvider,
   createVlmProvider,
   LlmBlockedProviderError,

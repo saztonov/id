@@ -42,6 +42,8 @@ import {
   createQpdfToolkit,
   createRdWeb,
   createStorage,
+  createLlmPolicy,
+  createLlmProvider,
   createVlmProvider,
   detectQpdf,
   EnvError,
@@ -247,11 +249,31 @@ async function main(): Promise<void> {
   // первом вызове `.complete()`, с внятной причиной, а не на старте процесса.
   // Бюджет (`ai_runs.cost`) общий с текстовыми стадиями — тот же расходомер,
   // читающий системной областью (§11).
-  const vlm = createVlmProvider(env, {
-    metrics,
-    logger,
-    spend: createAiSpendReader(db, SYSTEM_SCOPE),
-  });
+  /**
+   * Одна политика вызовов модели на весь процесс (S41).
+   *
+   * До S41 её создавали по месту: свою получал VLM-провайдер здесь и свою —
+   * текстовый провайдер внутри реестра задач. Политика хранит скользящее окно
+   * лимита частоты и читает бюджет, поэтому два экземпляра означали удвоенный
+   * фактический потолок и два независимых счётчика трат — то есть настройку
+   * `LLM_RATE_LIMIT_PER_MIN`, которая значит не то, что написано.
+   *
+   * Бюджет читается областью АДМИНИСТРАТОРА: `LLM_BUDGET_MONTHLY` — потолок
+   * портала, а не подрядчика.
+   */
+  const llmPolicy = createLlmPolicy(env, { spend: createAiSpendReader(db, SYSTEM_SCOPE) });
+
+  const spend = createAiSpendReader(db, SYSTEM_SCOPE);
+  const vlm = createVlmProvider(env, { metrics, logger, spend, policy: llmPolicy });
+
+  /**
+   * Текстовый порт модели — тоже один на процесс и с той же политикой.
+   *
+   * Прежде реестр собирал его сам, и у стадий анализа оказывался свой кэш
+   * ответов вдобавок к своей политике. Собранный здесь, он делит с
+   * распознаванием и окно лимита, и счётчик бюджета.
+   */
+  const llm = createLlmProvider(env, { metrics, logger, spend, policy: llmPolicy });
 
   // Сверка реестра правил с реализациями (§9.6). Воркер исполняет задачи 20–21,
   // то есть именно он даёт заключение по комплекту, — подниматься с неполным
@@ -313,6 +335,7 @@ async function main(): Promise<void> {
      */
     llmLogger: logger,
     llmMetrics: metrics,
+    llm,
     vlm,
   });
 

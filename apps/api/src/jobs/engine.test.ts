@@ -52,7 +52,13 @@ import {
 import type { AuthScope } from '../auth/scope.js';
 import { JobRegistry, type JobContext } from './registry.js';
 import { JobRunner } from './runner.js';
-import { backoffDelayMs, clampConcurrency, dedupeKeyFor, JOB_QUEUES } from './types.js';
+import {
+  backoffDelayMs,
+  clampConcurrency,
+  dedupeKeyFor,
+  jobDefinition,
+  JOB_QUEUES,
+} from './types.js';
 
 const MIGRATIONS_DIR = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -468,6 +474,25 @@ describe('очередь задач', () => {
     // выглядит в журнале как медленная БД.
     const defaults = JOB_QUEUES.map((queue) => clampConcurrency(queue, undefined));
     expect(defaults.reduce((sum, value) => sum + value, 0)).toBeLessThan(10);
+  });
+
+  it('приоритет страницы убывает с её номером и не проваливается под фоновые задачи', () => {
+    // Fan-out ставит все страницы разом, и очередь разбирала их строго по
+    // времени постановки: комплект на 220 листов занимал конвейер целиком, а
+    // второй не двигался вовсе. Формула повторена в трёх местах постановки,
+    // поэтому проверяется её смысл, а не одно из мест.
+    const priorityOf = (pageIndex: number): number =>
+      Math.max(60, 100 - Math.floor(pageIndex / 10));
+
+    // Ранние страницы позднего комплекта обходят хвост раннего — оба показывают
+    // движение; общее время при этом не меняется.
+    expect(priorityOf(0)).toBeGreaterThan(priorityOf(200));
+    expect(priorityOf(0)).toBe(priorityOf(9));
+    expect(priorityOf(10)).toBe(priorityOf(0) - 1);
+
+    // Ниже фоновых задач (кэш превью — 50, уборка — 10) хвост не падает: это
+    // по-прежнему работа, которую ждёт человек.
+    expect(priorityOf(100_000)).toBeGreaterThan(jobDefinition('preview.cache_pages').priority);
   });
 
   it('глубина очереди считается по типам и статусам', async () => {
