@@ -20,6 +20,8 @@
  */
 import type { Logger } from 'pino';
 
+import { classifySheet, type MarkupPolicy } from '@id/contracts';
+
 import type { AuthScope } from '../../auth/scope.js';
 import type { Database } from '../../db/repositories/users.js';
 import { listBundlePages } from '../../db/repositories/bundles.js';
@@ -118,17 +120,56 @@ export interface StartMarkupResult {
  * задач через минуту после нажатия, а на экране всё это время стояло бы «идёт
  * детекция».
  */
-export function detectionUnavailableReason(detection: {
-  readonly provider: string;
-  readonly modelVersion: string;
-}): string | null {
+export function detectionUnavailableReason(
+  detection: {
+    readonly provider: string;
+    readonly modelVersion: string;
+    readonly markupPolicy: MarkupPolicy;
+  },
+  /**
+   * Комплект, если он уже собран: сколько в нём листов крупнее A4.
+   *
+   * Необязателен, потому что вызывающих двое и они знают разное. Кнопка
+   * «Разметить» на несобранном комплекте карты страниц ещё не имеет, и
+   * обещать точность там, где данных нет, хуже, чем ответить условно.
+   */
+  bundle?: { readonly largeSheetCount: number },
+): string | null {
   if (detection.provider !== 'local') return null;
   if (detection.modelVersion !== '') return null;
-  return (
-    'Модель детекции не загружена: в настройках портала пуста ' +
-    '`detection.model_version`. Разметьте страницы вручную либо попросите ' +
-    'администратора выложить веса модели.'
-  );
+
+  const head =
+    'Модель детекции не загружена: в настройках портала пуста `detection.model_version`.';
+  const tail = 'Разметьте страницы вручную либо попросите администратора выложить веса модели.';
+
+  /**
+   * При правиле форматов модель нужна не всякому комплекту (S42).
+   *
+   * Лист A4 и мельче размечается одним блоком на всю страницу — без инференса,
+   * без растеризатора, без модели. Комплект, где крупных листов нет, обязан
+   * размечаться при пустой версии модели полностью, а не получать «детекция
+   * пропущена» и пустую разметку: отказывать здесь не в чем.
+   */
+  if (detection.markupPolicy.sheetStrategy === 'sheet_aware') {
+    if (bundle !== undefined && bundle.largeSheetCount === 0) return null;
+    if (bundle === undefined) {
+      return `${head} Если в комплекте есть листы крупнее A4, штампы на них найдены не будут. ${tail}`;
+    }
+    const count = bundle.largeSheetCount;
+    return `${head} В комплекте ${String(count)} ${plural(count, 'лист', 'листа', 'листов')} крупнее A4, и штампы на них найдены не будут. ${tail}`;
+  }
+
+  return `${head} ${tail}`;
+}
+
+/** Русское склонение после числа: 1 лист, 2 листа, 5 листов. */
+function plural(count: number, one: string, few: string, many: string): string {
+  const mod100 = count % 100;
+  if (mod100 >= 11 && mod100 <= 14) return many;
+  const mod10 = count % 10;
+  if (mod10 === 1) return one;
+  if (mod10 >= 2 && mod10 <= 4) return few;
+  return many;
 }
 
 /**
@@ -244,15 +285,31 @@ export async function startMarkupOnBundle(
   }
 
   if (detection.provider === 'local') {
+    /**
+     * Карта страниц читается ДО гейта модели (S42).
+     *
+     * Гейту нужно знать, есть ли в комплекте крупные листы: при правиле
+     * форматов комплект из одних A4 размечается без модели вовсе, и «детекция
+     * пропущена» было бы там неправдой. Побочное следствие порядка: комплект
+     * без карты страниц теперь отвечает 409 раньше, чем «пропущено», и это
+     * корректнее — без карты разметки не бывает никакой.
+     */
+    const pageMap = await listBundlePages(db, scope, input.bundleId);
+    const pages = pageMap.map((page) => page.workingPageIndex);
+    if (pages.length === 0) throw conflict('У рабочего документа нет карты страниц.');
+    const largeSheetCount = pageMap.filter(
+      (page) => classifySheet(page.widthPx, page.heightPx).sheetClass === 'large',
+    ).length;
+
     // Постановка пачек без выложенной модели давала бы страницу задач,
     // падающих гарантированно и одинаково: воркер не нашёл бы ни весов, ни
     // манифеста. Черновик разметки при этом уже создан выше, поэтому ручная
     // разметка доступна — а значит, отказывать нечему, и правильный ответ здесь
     // «сделано, но без детекции», а не 409.
-    const unavailable = detectionUnavailableReason(detection);
+    const unavailable = detectionUnavailableReason(detection, { largeSheetCount });
     if (unavailable !== null) {
       input.logger.warn(
-        { event: 'detection_skipped_no_model' },
+        { event: 'detection_skipped_no_model', large_sheets: largeSheetCount },
         'детекция пропущена: версия модели не задана',
       );
       return {
@@ -275,10 +332,6 @@ export async function startMarkupOnBundle(
         'PREVIEW_MODE=cached недоступен при локальной детекции: превью рендерит браузер',
       );
     }
-    const pageMap = await listBundlePages(db, scope, input.bundleId);
-    const pages = pageMap.map((page) => page.workingPageIndex);
-    if (pages.length === 0) throw conflict('У рабочего документа нет карты страниц.');
-
     /**
      * Зонд ориентации идёт ПЕРЕД детекцией (ADR-0020).
      *

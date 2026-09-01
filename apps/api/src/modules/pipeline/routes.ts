@@ -147,6 +147,10 @@ function registerMarkupRoute(app: AppInstance): void {
       // отработает в воркере, где отвечать пользователю уже некому. Ответ «идёт
       // детекция» в этом случае оказался бы ложью, обнаруживаемой минутой позже
       // и только в консоли задач.
+      // Комплекта здесь ещё может не быть, поэтому счётчик крупных листов не
+      // передаётся: формулировка отказа станет условной («если в комплекте
+      // есть листы крупнее A4»). Точный ответ выдаст `startMarkupOnBundle`
+      // после сборки — обещать точность там, где данных нет, хуже.
       const detectionSkipReason = detectionUnavailableReason(await readDetectionSettings(app.db));
 
       const bundles = await listBundles(app.db, scope, revisionId);
