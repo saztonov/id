@@ -52,7 +52,7 @@ import {
 import type { AuthScope } from '../auth/scope.js';
 import { JobRegistry, type JobContext } from './registry.js';
 import { JobRunner } from './runner.js';
-import { backoffDelayMs, dedupeKeyFor } from './types.js';
+import { backoffDelayMs, clampConcurrency, dedupeKeyFor, JOB_QUEUES } from './types.js';
 
 const MIGRATIONS_DIR = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -448,6 +448,26 @@ describe('очередь задач', () => {
     expect(backoffDelayMs(2, policy)).toBe(2_000);
     expect(backoffDelayMs(4, policy)).toBe(8_000);
     expect(backoffDelayMs(9, policy)).toBe(10_000);
+  });
+
+  it('параллелизм зажимается диапазоном и опускается до одной задачи', () => {
+    // Аварийная ручка эксплуатации: «прижать воркер до утра» обязано делаться
+    // переменной окружения, а не правкой кода. До S41 нижняя граница io была 4,
+    // и на общем хосте это означало одиннадцать одновременных задач без выбора.
+    expect(clampConcurrency('io', 1)).toBe(1);
+    expect(clampConcurrency('llm', 1)).toBe(1);
+    expect(clampConcurrency('cpu', 1)).toBe(1);
+
+    // Сверху диапазон держит по-прежнему: одна переменная не превращает cpu в
+    // четыре параллельных инференса.
+    expect(clampConcurrency('cpu', 8)).toBe(2);
+    expect(clampConcurrency('io', 99)).toBe(8);
+
+    // Умолчания рассчитаны на общий VPS 2 vCPU и обязаны оставаться в сумме
+    // меньше PG_POOL_MAX (10): иначе задачи ждут соединение, и ожидание пула
+    // выглядит в журнале как медленная БД.
+    const defaults = JOB_QUEUES.map((queue) => clampConcurrency(queue, undefined));
+    expect(defaults.reduce((sum, value) => sum + value, 0)).toBeLessThan(10);
   });
 
   it('глубина очереди считается по типам и статусам', async () => {

@@ -16,11 +16,17 @@
  *
  * SIGTERM: новые задачи не берутся, текущие дорабатывают. Не успевшие —
  * не потеряны: аренда истечёт, и задачу подберёт reaper (at-least-once, §12).
- * Именно поэтому здесь нет попыток «доделать любой ценой»: Docker присылает
- * SIGKILL через 10 секунд после SIGTERM, и ждать дольше бессмысленно.
+ * Поэтому здесь нет попыток «доделать любой ценой».
+ *
+ * Сколько именно ждать — решает не Docker, а развёртывание: `stop_grace_period`
+ * задаётся в compose, и до S41 код исходил из чужого умолчания в 10 секунд,
+ * выходя через 8, хотя прод давал 120. Теперь срок читается из окружения
+ * (`WORKER_SHUTDOWN_TIMEOUT_MS`) и обязан быть меньше `stop_grace_period`:
+ * иначе SIGKILL прилетит раньше, чем воркер успеет дописать результат.
  */
 import { createServer, type Server } from 'node:http';
 import { hostname } from 'node:os';
+import sharp from 'sharp';
 import { z } from 'zod';
 import {
   closePool,
@@ -61,8 +67,8 @@ import { createWorkerRegistry, SYSTEM_SCOPE } from './jobs/pipeline.js';
 /** Метка процесса в журнале и в метках метрик: строки API и воркера в общем потоке. */
 const SERVICE_NAME = 'worker';
 
-/** Потолок ожидания текущих задач при остановке. */
-const SHUTDOWN_TIMEOUT_MS = 8_000;
+/** Потолок ожидания текущих задач при остановке, если развёртывание молчит. */
+const DEFAULT_SHUTDOWN_TIMEOUT_MS = 8_000;
 
 /**
  * Настройки самого воркера.
@@ -70,8 +76,9 @@ const SHUTDOWN_TIMEOUT_MS = 8_000;
  * Разбираются здесь, а не в общем `loadEnv()`: они относятся к процессу-воркеру,
  * а API про них ничего не знает. Проверка всё равно fail-fast — переменная с
  * мусором обязана валить старт, а не молча превращаться в NaN. Значения
- * параллелизма дополнительно зажимаются диапазонами §12 (`clampConcurrency`),
- * поэтому «поставить 16 на cpu» не получится даже намеренно.
+ * параллелизма дополнительно зажимаются диапазонами `QUEUE_CONCURRENCY`
+ * (`clampConcurrency`), поэтому «поставить 16 на cpu» не получится даже
+ * намеренно; ноль запрещён здесь же — выключенная очередь копила бы задачи молча.
  */
 const workerEnvSchema = z.object({
   WORKER_CONCURRENCY_IO: z.coerce.number().int().positive().optional(),
@@ -86,6 +93,15 @@ const workerEnvSchema = z.object({
    * метрики самого процесса воркера.
    */
   WORKER_METRICS_PORT: z.coerce.number().int().min(1).max(65_535).optional(),
+  /**
+   * Сколько ждать текущие задачи при остановке.
+   *
+   * Значение обязано быть меньше `stop_grace_period` контейнера: разница между
+   * ними и есть запас на закрытие журнала и пула. Значение больше grace-периода
+   * не «даёт задачам больше времени» — оно лишь гарантирует, что вместо
+   * завершения придёт SIGKILL.
+   */
+  WORKER_SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(600_000).optional(),
 });
 
 type WorkerEnv = z.infer<typeof workerEnvSchema>;
@@ -115,6 +131,10 @@ function readEnv(): { env: Env; worker: WorkerEnv } {
 
 async function main(): Promise<void> {
   const { env, worker } = readEnv();
+
+  configureSharp();
+
+  const shutdownTimeoutMs = worker.WORKER_SHUTDOWN_TIMEOUT_MS ?? DEFAULT_SHUTDOWN_TIMEOUT_MS;
 
   const logger = createLogger({
     service: SERVICE_NAME,
@@ -289,7 +309,7 @@ async function main(): Promise<void> {
         ? { llm: worker.WORKER_CONCURRENCY_LLM }
         : {}),
     },
-    shutdownTimeoutMs: SHUTDOWN_TIMEOUT_MS,
+    shutdownTimeoutMs,
     // Очистка журнала живёт здесь, а не в API: у воркера уже есть часовой цикл
     // обслуживания, и одновременно работает всё равно только один процесс —
     // очистка берёт advisory-блокировку.
@@ -324,7 +344,7 @@ async function main(): Promise<void> {
     const forceExit = setTimeout(() => {
       logger.error({ event: 'shutdown_timeout' }, 'завершение не уложилось в срок, выходим');
       process.exit(1);
-    }, SHUTDOWN_TIMEOUT_MS * 2);
+    }, shutdownTimeoutMs * 2);
     forceExit.unref();
 
     void (async () => {
@@ -395,9 +415,35 @@ async function main(): Promise<void> {
       rasterizer: rasterizer?.kind ?? null,
       preview_mode: env.PREVIEW_MODE,
       metrics_port: worker.WORKER_METRICS_PORT ?? null,
+      // Границы процесса — в строке готовности: «почему воркер медленнее, чем
+      // вчера» разбирается по journalctl, а не по памяти о содержимом id.env.
+      shutdown_timeout_ms: shutdownTimeoutMs,
+      sharp_concurrency: sharp.concurrency(),
     },
     'воркер готов принимать задачи',
   );
+}
+
+/**
+ * Границы libvips: один поток на операцию и никакого общего кэша (S41).
+ *
+ * `sharp` по умолчанию заводит пул потоков размером с число ядер и держит кэш
+ * на 50 МБ / 20 файлов. На выделенной машине это разумно, на общем VPS 2 vCPU —
+ * нет: пул складывается с потоками ONNX (`ORT_INTRA_OP_THREADS`) и внешними
+ * процессами `pdftoppm`, и очередь `cpu` с потолком 1 перестаёт быть потолком —
+ * одна задача разметки занимает машину целиком.
+ *
+ * Кэш выключен по той же причине, по которой он обычно полезен: он держит
+ * ДЕКОДИРОВАННЫЕ страницы, а страница A1 на 300 DPI — это сотни мегабайт,
+ * которых у воркера с `mem_limit: 1536m` просто нет. Повторное чтение здесь и
+ * не нужно: каждая задача открывает свой файл ровно один раз.
+ *
+ * Вызывается до всего остального: настройки читаются libvips при первой
+ * операции, и после неё менять их поздно.
+ */
+function configureSharp(): void {
+  sharp.concurrency(1);
+  sharp.cache(false);
 }
 
 /**

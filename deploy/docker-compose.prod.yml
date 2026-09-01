@@ -22,12 +22,17 @@ services:
     env_file: /etc/id/id.env
     environment:
       NODE_ENV: production
+      # V8 не видит cgroup: без этой переменной он считает потолок кучи от
+      # памяти ХОСТА (7.8 ГиБ) и спокойно растёт мимо mem_limit — вместо
+      # давления на сборщик мусора получается OOM-kill.
+      NODE_OPTIONS: --max-old-space-size=384
     networks: [edge]
     volumes:
       - /etc/id/root.crt:/etc/id/root.crt:ro
     restart: unless-stopped
     mem_limit: 768m
     memswap_limit: 1024m
+    cpus: 1.0
     pids_limit: 256
     cap_drop: [ALL]
     security_opt: ['no-new-privileges:true']
@@ -38,22 +43,49 @@ services:
       retries: 5
       start_period: 40s
 
+  # Воркер — единственный контейнер портала, который считает: рендер страниц,
+  # ONNX-детекция, кропы. На общем VPS (рядом estimat/technic/billhub/keycloak)
+  # он обязан быть ограничен со всех сторон, иначе один комплект на 220 страниц
+  # уводит хост в swap и роняет соседей — так и произошло (S41).
   id-worker:
     image: id-api:${ID_TAG:-latest}
     command: ['node', 'apps/worker/dist/main.js']
     env_file: /etc/id/id.env
     environment:
       NODE_ENV: production
+      # Половина mem_limit: остальное занимает то, что вне кучи V8 и потому
+      # этой переменной не ограничивается — буферы libvips, арены ONNX,
+      # Buffer'ы картинок для модели.
+      NODE_OPTIONS: --max-old-space-size=640
     networks: [edge]
     volumes:
       - /etc/id/root.crt:/etc/id/root.crt:ro
     restart: unless-stopped
     mem_limit: 1536m
     memswap_limit: 1792m
+    # Полтора ядра из двух: конвейеру нужен запас, но не вся машина.
+    cpus: 1.5
+    # При конкуренции за процессор соседи выигрывают (умолчание 1024). Фоновая
+    # разметка обязана уступать чужому веб-интерфейсу, а не наоборот.
+    cpu_shares: 512
+    # При нехватке памяти НА ХОСТЕ ядро выбирает жертву по этому счёту. Воркер
+    # переживает своё убийство лучше всех: задачи вернутся по истечении аренды.
+    oom_score_adj: 400
     pids_limit: 128
     cap_drop: [ALL]
     security_opt: ['no-new-privileges:true']
-    stop_grace_period: 120s
+    # Согласовано с WORKER_SHUTDOWN_TIMEOUT_MS (id.env): воркеру нужно уложиться
+    # в этот срок с запасом на закрытие журнала и пула. Прежние 120s были
+    # фикцией — код выходил через 8 секунд, ничего о них не зная.
+    stop_grace_period: 45s
+    # Проверяем служебный /metrics (WORKER_METRICS_PORT): у воркера нет ни
+    # одного другого порта, а зависший процесс иначе неотличим от занятого.
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:9101/metrics >/dev/null || exit 1']
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
 
   id-web:
     build:
