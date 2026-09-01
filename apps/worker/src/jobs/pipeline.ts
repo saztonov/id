@@ -1183,7 +1183,7 @@ function orientationProbeDeps(options: PipelineJobsOptions): OrientationProbeDep
       return 'degenerate' in cropped ? null : cropped.png;
     },
 
-    probe: async ({ png, pageNumber }) => {
+    probe: async ({ png, pageNumber, signal }) => {
       const vlm = options.vlm;
       if (vlm === null || vlm === undefined) {
         throw new Error('VLM-порт не настроен: зонд не может спросить модель');
@@ -1232,6 +1232,9 @@ function orientationProbeDeps(options: PipelineJobsOptions): OrientationProbeDep
         model,
         temperature: preset.temperature,
         maxTokens: preset.maxTokens,
+        // Отмена попытки задачи доезжает до самого вызова (S41): брошенный
+        // зонд иначе держал бы соединение до ответа модели.
+        ...(signal !== undefined ? { signal } : {}),
       });
 
       const parsed = vlmOrientationResponseSchema.safeParse(

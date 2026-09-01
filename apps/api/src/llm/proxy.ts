@@ -246,15 +246,19 @@ export class ProxyLlmProvider implements LlmPort {
               ...traceHeaders(),
             },
             body: JSON.stringify(body),
-            signal: AbortSignal.timeout(timeoutMs),
+            signal: requestSignal(request.signal, timeoutMs),
           });
         } catch (error) {
+          rethrowIfCancelled(request.signal, error);
           throw this.#networkFailure(error, timeoutMs);
         }
 
         if (response.status === 429) {
+          const retryAfterMs = retryAfterMsOf(response);
           await response.arrayBuffer();
-          throw new LlmRateLimitError('Шлюз LLM ответил 429: слишком много запросов.');
+          throw new LlmRateLimitError('Шлюз LLM ответил 429: слишком много запросов.', {
+            retryAfterMs,
+          });
         }
         if (!response.ok) {
           const failure = await describeFailure(response);
@@ -304,6 +308,58 @@ export function networkFailure(error: unknown, timeoutMs: number): Error {
     return new LlmTimeoutError(timeoutMs, `Шлюз LLM не ответил за ${timeoutMs} мс.`);
   }
   return new LlmTransportError(`Вызов шлюза LLM не состоялся (${name}).`);
+}
+
+/**
+ * Срок ожидания вызова: свой таймаут И отмена попытки задачи (S41).
+ *
+ * Два сигнала, а не один, потому что причины разные: таймаут отвечает за
+ * молчащий шлюз, внешний сигнал — за то, что результата уже никто не ждёт
+ * (истёк потолок попытки, аренду забрал другой воркер, воркер гасится).
+ * Оставить только таймаут значило бы держать соединение и тело запроса до
+ * последнего, параллельно со следующей задачей на освободившемся слоте, —
+ * ровно так перегруженный воркер и удваивал собственную нагрузку.
+ */
+export function requestSignal(external: AbortSignal | undefined, timeoutMs: number): AbortSignal {
+  const timeout = AbortSignal.timeout(timeoutMs);
+  return external === undefined ? timeout : AbortSignal.any([external, timeout]);
+}
+
+/**
+ * Отмена попытки — не отказ шлюза, и подменять её причину нельзя.
+ *
+ * `fetch`, прерванный отменой, реджектится причиной сигнала, а причину ставит
+ * движок задач: `JobTimeout` или `LeaseLost`. Пропусти это здесь — и в
+ * `job_runs` вместо «попытка не уложилась в потолок» легло бы «шлюз LLM не
+ * ответил», то есть разбор инцидента поехал бы в сторону провайдера.
+ */
+export function rethrowIfCancelled(signal: AbortSignal | undefined, error: unknown): void {
+  if (signal === undefined || !signal.aborted) return;
+  throw signal.reason instanceof Error ? signal.reason : error;
+}
+
+/**
+ * Пауза, которую назвал сам шлюз (заголовок `Retry-After` при 429).
+ *
+ * Формат допускает и секунды, и дату; поддержаны оба. Значение, названное
+ * провайдером, точнее нашего экспоненциального отката: откат гадает, а шлюз
+ * знает, когда откроется окно. Мусор и отрицательные значения игнорируются —
+ * пусть работает откат.
+ */
+export function retryAfterMsOf(response: Response): number | undefined {
+  const header = response.headers.get('retry-after');
+  if (header === null) return undefined;
+
+  const seconds = Number(header.trim());
+  if (Number.isFinite(seconds)) {
+    const ms = Math.round(seconds * 1_000);
+    return ms > 0 ? ms : undefined;
+  }
+
+  const until = Date.parse(header);
+  if (Number.isNaN(until)) return undefined;
+  const ms = until - Date.now();
+  return ms > 0 ? ms : undefined;
 }
 
 /**

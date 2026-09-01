@@ -36,6 +36,15 @@ export interface RenderPageInput {
   readonly dpi: number;
   /** Куда положить PNG. Файл эфемерный: scratch задачи, удаляется в finally. */
   readonly outPath: string;
+  /**
+   * Отмена попытки задачи (S41).
+   *
+   * Рендер — внешний процесс, и он не узнаёт о том, что заказчика больше нет:
+   * `pdftoppm` на листе A1 занимает ядро на десятки секунд и продолжал бы
+   * занимать его после того, как движок уже отдал слот следующей задаче. С
+   * сигналом процесс снимается сразу.
+   */
+  readonly signal?: AbortSignal | undefined;
 }
 
 export interface RenderPageResult {

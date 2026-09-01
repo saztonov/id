@@ -59,6 +59,17 @@ export interface LlmRequest {
   readonly cacheContext: string;
   readonly model?: string;
   readonly timeoutMs?: number;
+  /**
+   * Отмена попытки задачи (S41).
+   *
+   * Собственный таймаут вызова отсюда не отменяется — он остаётся и работает
+   * рядом. Разница в том, ЧЬЁ решение исполняется: таймаут отвечает за «шлюз
+   * молчит слишком долго», а этот сигнал — за «попытку уже никто не ждёт»
+   * (истёк потолок попытки, аренду забрал другой воркер, воркер гасится).
+   * Без него брошенный вызов держал соединение и память до самого ответа,
+   * параллельно со следующей задачей, которую движок уже взял на его место.
+   */
+  readonly signal?: AbortSignal | undefined;
 }
 
 export interface LlmResponse {
@@ -203,9 +214,20 @@ export class LlmBudgetError extends LlmError {
 
 /** Превышен `LLM_RATE_LIMIT_PER_MIN` либо провайдер ответил 429. */
 export class LlmRateLimitError extends LlmError {
-  constructor(message: string) {
+  /**
+   * Пауза, названная шлюзом в `Retry-After`; `undefined` — он промолчал.
+   *
+   * Движок задач берёт бо́льшую из двух — свою (экспоненциальный откат) и эту.
+   * Своя гадает по номеру попытки, эта известна источнику ограничения: повтор
+   * раньше названного срока гарантированно получит те же 429 и потратит попытку
+   * впустую.
+   */
+  readonly retryAfterMs: number | undefined;
+
+  constructor(message: string, options: { readonly retryAfterMs?: number | undefined } = {}) {
     super(message, { retriable: true });
     this.name = 'LlmRateLimitError';
+    this.retryAfterMs = options.retryAfterMs;
   }
 }
 

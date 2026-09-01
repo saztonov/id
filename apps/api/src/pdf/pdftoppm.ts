@@ -36,8 +36,22 @@ interface RunOutcome {
 }
 
 /** Запуск без оболочки — аргументы массивом, как в qpdf.ts (инъекция невозможна). */
-function run(binary: string, args: readonly string[], timeoutMs: number): Promise<RunOutcome> {
+function run(
+  binary: string,
+  args: readonly string[],
+  timeoutMs: number,
+  signal?: AbortSignal | undefined,
+): Promise<RunOutcome> {
   return new Promise((resolve, reject) => {
+    // Отменённую попытку не начинаем вовсе: процесс, запущенный для того, кто
+    // его уже не ждёт, — это чистая трата ядра на перегруженной машине.
+    if (signal?.aborted === true) {
+      reject(
+        signal.reason instanceof Error ? signal.reason : new RasterizerError('рендер отменён'),
+      );
+      return;
+    }
+
     const child = spawn(binary, [...args], { shell: false, windowsHide: true });
     let stdout = '';
     let stderr = '';
@@ -45,10 +59,33 @@ function run(binary: string, args: readonly string[], timeoutMs: number): Promis
 
     const timer = setTimeout(() => {
       settled = true;
+      detachAbort();
       child.kill('SIGKILL');
       reject(new RasterizerError(`pdftoppm не завершился за ${timeoutMs} мс и был снят`));
     }, timeoutMs);
     timer.unref?.();
+
+    /**
+     * Отмена попытки снимает процесс сразу (S41).
+     *
+     * SIGKILL, а не SIGTERM: poppler на большом листе не проверяет сигналы, пока
+     * не закончит страницу, и мягкая просьба означала бы те же десятки секунд
+     * занятого ядра. Наружу отдаётся причина отмены, поставленная движком задач
+     * (`JobTimeout`, `LeaseLost`), — подменять её на «рендер не удался» нельзя:
+     * разбор ушёл бы к poppler вместо настоящей причины.
+     */
+    const onAbort = (): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.kill('SIGKILL');
+      const reason = signal?.reason;
+      reject(reason instanceof Error ? reason : new RasterizerError('рендер отменён'));
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+    const detachAbort = (): void => {
+      signal?.removeEventListener('abort', onAbort);
+    };
 
     child.stdout?.setEncoding('utf8');
     child.stderr?.setEncoding('utf8');
@@ -63,6 +100,7 @@ function run(binary: string, args: readonly string[], timeoutMs: number): Promis
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      detachAbort();
       reject(error);
     });
 
@@ -70,6 +108,7 @@ function run(binary: string, args: readonly string[], timeoutMs: number): Promis
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      detachAbort();
       resolve({ code: code ?? -1, stdout, stderr });
     });
   });
@@ -89,9 +128,7 @@ export interface PdftoppmDetection {
  * `pdftoppm -v` пишет версию в stderr («pdftoppm version 24.02.0») и выходит
  * нулём — это его штатное поведение, а не ошибка.
  */
-export async function detectPdftoppm(
-  binary = DEFAULT_PDFTOPPM_BINARY,
-): Promise<PdftoppmDetection> {
+export async function detectPdftoppm(binary = DEFAULT_PDFTOPPM_BINARY): Promise<PdftoppmDetection> {
   try {
     const outcome = await run(binary, ['-v'], DETECT_TIMEOUT_MS);
     if (outcome.code !== 0) {
@@ -156,7 +193,12 @@ export class PdftoppmRasterizer implements PageRasterizer {
     }
     // pdftoppm дописывает расширение сам; ему отдаётся префикс без «.png».
     const outPrefix = input.outPath.endsWith('.png') ? input.outPath.slice(0, -4) : input.outPath;
-    const outcome = await run(this.#binary, pdftoppmArgs(input, outPrefix), RENDER_TIMEOUT_MS);
+    const outcome = await run(
+      this.#binary,
+      pdftoppmArgs(input, outPrefix),
+      RENDER_TIMEOUT_MS,
+      input.signal,
+    );
     if (outcome.code !== 0) {
       // stderr уходит в диагностику как есть: poppler не печатает содержимое
       // документа, только структурные жалобы («Syntax Error: …»).

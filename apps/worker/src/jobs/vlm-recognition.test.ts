@@ -76,7 +76,12 @@ function makeContext<K extends 'vlm.start_recognition' | 'vlm.recognize_page' | 
   type: K,
   payload: Record<string, unknown>,
   sink: Sink,
-  options: { readonly attempt?: number; readonly maxAttempts?: number } = {},
+  options: {
+    readonly attempt?: number;
+    readonly maxAttempts?: number;
+    /** Отмена попытки: движок ставит её при истёкшем потолке и потере аренды. */
+    readonly signal?: AbortSignal;
+  } = {},
 ): JobContext<K> {
   return {
     jobId: '00000000-0000-4000-8000-0000000000ff',
@@ -87,7 +92,7 @@ function makeContext<K extends 'vlm.start_recognition' | 'vlm.recognize_page' | 
     payload,
     db: undefined,
     logger: recordingLogger(sink.logs),
-    signal: new AbortController().signal,
+    signal: options.signal ?? new AbortController().signal,
     enqueue: (input: Enqueued) => {
       sink.enqueued.push(input);
       return Promise.resolve({ jobId: `job-${sink.enqueued.length}`, created: true });
@@ -1015,6 +1020,61 @@ describe('createVlmRecognizePageHandler', () => {
     // Заплатка «страница целиком» ставится там, где другого текста у страницы
     // нет: зум для неё — рабочий инструмент, а не зацикливание.
     expect(inputs[0]?.maxCropRequests).toBe(3);
+  });
+
+  it('отмена попытки останавливает обход блоков и не портит страницу', async () => {
+    // Лист с медленными блоками перерастает потолок попытки, и до S41 обход
+    // этого не замечал: движок отдавал слот следующей странице, а брошенная
+    // задача продолжала резать кропы и звать модель — оплаченными вызовами,
+    // писать результат которых уже некуда. Хуже того, отмену ловил тот же
+    // `catch`, что и отказ блока: страница получала `failed` по причине,
+    // которой не было.
+    const controller = new AbortController();
+    const cancellation = new Error('попытка не уложилась в 600000 мс');
+    cancellation.name = 'JobTimeout';
+
+    const seen: string[] = [];
+    const marked: unknown[] = [];
+    const d = deps({
+      loadFrozenBlocks: async () => [
+        frozenBlock({ id: 'block-1', sortOrder: 0 }),
+        frozenBlock({ id: 'block-2', sortOrder: 1 }),
+      ],
+      workingPdfToFile: async () => ({ path: '/tmp/work.pdf', cleanup: async () => {} }),
+      rasterizer: {
+        kind: 'pdftoppm',
+        version: '1.0',
+        renderPage: async () => ({ widthPx: 595, heightPx: 842 }),
+      },
+      crop: async () => ({ png: new Uint8Array([9, 9, 9]), widthPx: 50, heightPx: 50 }),
+      recognizeBlock: async (input: VlmRecognizeBlockInput) => {
+        seen.push(input.block.layoutBlockId);
+        // Первый блок успел договорить, и на этом попытку отменили.
+        controller.abort(cancellation);
+        return okOutcome(frozenBlock({ id: input.block.layoutBlockId }));
+      },
+      insertBlockResult: async () => ({ written: true }),
+      markRunPage: async (input) => {
+        marked.push(input);
+      },
+    });
+    const sink = makeSink();
+    const handler = createVlmRecognizePageHandler(d);
+    const ctx = makeContext(
+      'vlm.recognize_page',
+      { revisionId: REVISION, recognitionRunId: RUN, pageIndex: 0 },
+      sink,
+      { signal: controller.signal },
+    );
+
+    // Наружу уходит ПРИЧИНА отмены: движок обязан записать «потолок попытки»,
+    // а не выдуманный отказ распознавания.
+    await expect(handler(ctx)).rejects.toBe(cancellation);
+
+    // Второй блок не начинали, и страницу терминальной не объявляли: её судьбу
+    // решит следующая попытка, а записанный первый блок она пропустит.
+    expect(seen).toEqual(['block-1']);
+    expect(marked).toEqual([]);
   });
 
   it('раунд дораспознавания меняет промпт: иначе ответ придёт из кэша', async () => {

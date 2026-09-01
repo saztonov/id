@@ -184,6 +184,15 @@ export interface RecognizeBlockInput {
    * знает провенанс блока, а порт — нет.
    */
   readonly maxCropRequests?: number | undefined;
+  /**
+   * Отмена попытки задачи (S41).
+   *
+   * Один блок — это до восьми физических вызовов подряд, и каждый из них после
+   * отмены был бы оплачен ради результата, который записать уже некуда. Сигнал
+   * доезжает до каждого вызова, а не проверяется один раз на входе: отмена
+   * приходит посреди диалога чаще, чем до него.
+   */
+  readonly signal?: AbortSignal | undefined;
 }
 
 /**
@@ -341,6 +350,7 @@ export async function recognizeBlock(input: RecognizeBlockInput): Promise<VlmBlo
       // провайдеров отвергает её при пустом списке инструментов.
       ...(input.requestCrop !== undefined ? { tools: [REQUEST_CROP_TOOL_SPEC], toolChoice } : {}),
       ...(exchanges.length > 0 ? { exchanges } : {}),
+      ...(input.signal !== undefined ? { signal: input.signal } : {}),
     });
     const record = (response: VlmResponse): VlmResponse => {
       calls.push(response);

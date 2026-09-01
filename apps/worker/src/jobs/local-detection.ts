@@ -443,6 +443,19 @@ export function createLocalDetectionHandler(
       await deps.fetchWorkingPdf(target.workingPdfKey, pdfPath);
 
       for (const pageIndex of pageIndices) {
+        /**
+         * Отменённую попытку не продолжаем (S41).
+         *
+         * Отмена приходит, когда попытка исчерпала потолок или аренду забрал
+         * другой воркер: движок к этому времени уже отдал слот следующей задаче.
+         * Без этой проверки брошенный обход продолжал рендерить и считать
+         * инференс рядом с новой задачей, то есть перегруженный воркер сам
+         * удваивал свою нагрузку — и ровно так лечение параллелизмом
+         * оказывалось наполовину фиктивным. Причина отмены (`JobTimeout`,
+         * `LeaseLost`) бросается как есть: она и есть настоящий исход попытки.
+         */
+        ctx.signal.throwIfAborted();
+
         if (alreadyHasBlocks.has(pageIndex)) {
           skippedExisting.push(pageIndex);
           continue;
@@ -465,8 +478,12 @@ export function createLocalDetectionHandler(
             pageIndex,
             dpi: RASTER_DPI,
             outPath: pngPath,
+            signal: ctx.signal,
           });
         } catch (error) {
+          // Отмена — не отказ рендера: считать её «страница не отрендерилась»
+          // значило бы молча пропустить страницу и записать пачку без неё.
+          if (ctx.signal.aborted) throw error;
           renderFailedPages += 1;
           ctx.logger.error(
             { event: 'detect_local_render_failed', page: pageIndex, ...errorDigest(error) },

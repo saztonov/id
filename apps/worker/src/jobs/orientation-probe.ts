@@ -110,6 +110,8 @@ export interface OrientationProbeDeps {
     readonly pageIndex: number;
     readonly dpi: number;
     readonly outPath: string;
+    /** Отмена попытки: внешний процесс рендера снимается сразу (S41). */
+    readonly signal?: AbortSignal | undefined;
   }) => Promise<{ readonly widthPx: number; readonly heightPx: number }>;
   /** Миниатюра страницы: тот же `cropBlockPng`, прямоугольник во весь лист. */
   readonly thumbnail: (input: {
@@ -121,6 +123,8 @@ export interface OrientationProbeDeps {
   readonly probe: (input: {
     readonly png: Uint8Array;
     readonly pageNumber: number;
+    /** Отмена попытки: брошенный вызов не держит соединение до ответа (S41). */
+    readonly signal?: AbortSignal | undefined;
   }) => Promise<OrientationProbeCall>;
   readonly saveOrientation: (input: {
     readonly revisionId: string;
@@ -255,6 +259,7 @@ export function createOrientationProbeHandler(
         pageIndex: workingPageIndex,
         dpi: ORIENTATION_PROBE_DPI,
         outPath,
+        signal: ctx.signal,
       });
       const png = await deps.thumbnail({
         pagePngPath: outPath,
@@ -264,9 +269,21 @@ export function createOrientationProbeHandler(
       if (png === null) {
         failure = 'миниатюра страницы вырождена';
       } else {
-        call = await deps.probe({ png, pageNumber: workingPageIndex + 1 });
+        call = await deps.probe({ png, pageNumber: workingPageIndex + 1, signal: ctx.signal });
       }
     } catch (error) {
+      /**
+       * Отмена попытки — не отказ зонда (S41).
+       *
+       * Записать её как отказ значило бы сохранить страницу с причиной «зонд не
+       * ответил» и поставить детекцию, тогда как на самом деле попытка просто
+       * не состоялась: её потолок истёк или аренду забрал другой воркер. Мнение
+       * о развороте осталось бы ложным до тех пор, пока страницу не тронет
+       * человек, — и это ровно тот сорт молчаливой порчи данных, ради которого
+       * зонд вообще заведён.
+       */
+      if (ctx.signal.aborted) throw error;
+
       /**
        * Повторяемый отказ шлюза пробрасывается — движок повторит задачу сам.
        *

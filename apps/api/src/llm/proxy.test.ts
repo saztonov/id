@@ -360,6 +360,49 @@ describe('отказы', () => {
     });
   });
 
+  it('пауза из Retry-After доезжает до вызывающего', async () => {
+    // Шлюз знает, когда откроется окно, а экспоненциальный откат движка только
+    // гадает: повтор раньше названного срока получит те же 429 и потратит
+    // попытку впустую. Поэтому названная пауза обязана дойти как значение, а не
+    // остаться в заголовке ответа, который никто не прочитал.
+    const seconds = harness(
+      () =>
+        new Response(JSON.stringify({ error: { message: 'slow down' } }), {
+          status: 429,
+          headers: { 'content-type': 'application/json', 'retry-after': '30' },
+        }),
+    );
+    await expect(seconds.provider.complete(REQUEST)).rejects.toMatchObject({
+      name: 'LlmRateLimitError',
+      retryAfterMs: 30_000,
+    });
+
+    // Заголовка нет — паузу назначает откат движка, и поле честно пустое.
+    const silent = harness(() => jsonResponse({ error: { message: 'slow down' } }, 429));
+    await expect(silent.provider.complete(REQUEST)).rejects.toMatchObject({
+      retryAfterMs: undefined,
+    });
+  });
+
+  it('отмена попытки доходит своей причиной, а не таймаутом шлюза', async () => {
+    // Отмену ставит движок задач (`JobTimeout`, `LeaseLost`), и подменять её на
+    // «шлюз LLM не ответил» нельзя: разбор инцидента ушёл бы к провайдеру,
+    // тогда как виноват потолок попытки. Отменённый fetch реджектится причиной
+    // сигнала — её и обязан пробросить провайдер.
+    const cancellation = new Error('попытка не уложилась в 600000 мс');
+    cancellation.name = 'JobTimeout';
+    const controller = new AbortController();
+
+    const h = harness(() => {
+      controller.abort(cancellation);
+      return Promise.reject(cancellation) as unknown as Response;
+    });
+
+    await expect(h.provider.complete({ ...REQUEST, signal: controller.signal })).rejects.toBe(
+      cancellation,
+    );
+  });
+
   it('5xx повторяем, 4xx — нет', async () => {
     const server = harness(() => jsonResponse({ detail: 'upstream' }, 503));
     await expect(server.provider.complete(REQUEST)).rejects.toMatchObject({ retriable: true });

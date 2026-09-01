@@ -48,6 +48,9 @@ import {
   networkFailure,
   optionalCost,
   optionalCount,
+  requestSignal,
+  rethrowIfCancelled,
+  retryAfterMsOf,
   scrubToken,
   UPSTREAM_RESPONSE_TOO_LARGE,
 } from './proxy.js';
@@ -286,15 +289,19 @@ export class ProxyVlmProvider implements VlmPort {
               ...traceHeaders(),
             },
             body: serialized,
-            signal: AbortSignal.timeout(timeoutMs),
+            signal: requestSignal(request.signal, timeoutMs),
           });
         } catch (error) {
+          rethrowIfCancelled(request.signal, error);
           throw networkFailure(error, timeoutMs);
         }
 
         if (response.status === 429) {
+          const retryAfterMs = retryAfterMsOf(response);
           await response.arrayBuffer();
-          throw new LlmRateLimitError('Шлюз LLM ответил 429: слишком много запросов.');
+          throw new LlmRateLimitError('Шлюз LLM ответил 429: слишком много запросов.', {
+            retryAfterMs,
+          });
         }
         if (response.status === 413) {
           // Шлюз оказался строже предохранителя — тело всё же велико. Класс

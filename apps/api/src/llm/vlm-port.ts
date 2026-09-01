@@ -139,6 +139,15 @@ export interface VlmRequest {
   readonly maxTokens: number;
   readonly topK?: number | undefined;
   readonly timeoutMs?: number | undefined;
+  /**
+   * Отмена попытки задачи (S41).
+   *
+   * Не заменяет `timeoutMs`, а дополняет его: таймаут — про молчащий шлюз,
+   * сигнал — про то, что результата попытки уже никто не ждёт. Брошенный вызов
+   * без него держал соединение и десятки мегабайт тела до самого ответа, уже
+   * параллельно со следующей задачей, взятой движком на освободившийся слот.
+   */
+  readonly signal?: AbortSignal | undefined;
 }
 
 export interface VlmResponse {

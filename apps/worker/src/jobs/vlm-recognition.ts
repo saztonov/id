@@ -320,6 +320,8 @@ export interface VlmRecognizeBlockInput {
     ((rect: readonly [number, number, number, number]) => Promise<Uint8Array | null>) | undefined;
   /** Потолок кругов дозапроса для этого блока; отсутствие — умолчание порта. */
   readonly maxCropRequests?: number | undefined;
+  /** Отмена попытки: доезжает до каждого физического вызова модели (S41). */
+  readonly signal?: AbortSignal | undefined;
 }
 
 /** Зеркало `VlmCropEvent` из `@id/api` (см. шапку файла: структурная копия). */
@@ -1602,6 +1604,7 @@ export function createVlmRecognizePageHandler(
           pageIndex,
           dpi: RASTER_DPI,
           outPath,
+          signal: ctx.signal,
         });
 
         const geometry = (await deps.loadPageGeometry(run.runId)).find(
@@ -1663,6 +1666,20 @@ export function createVlmRecognizePageHandler(
         const cropStats = new Map<string, { requested: number; forced: number; blocks: number }>();
 
         for (const block of pending) {
+          /**
+           * Отменённую попытку не продолжаем (S41).
+           *
+           * Блоки листа идут строго последовательно и стоят до полутора минут
+           * каждый, поэтому лист легко перерастает потолок попытки. До сих пор
+           * обход этого не замечал: движок засчитывал `JobTimeout`, отдавал слот
+           * следующей странице, а брошенная продолжала резать кропы и звать
+           * модель — оплаченными вызовами, результат которых записать было уже
+           * некуда. Проверка стоит между блоками, а не внутри: уже начатый вызов
+           * прерывает его собственный сигнал, а вот следующий начинать незачем.
+           * Записанное чекпоинтом не теряется — повтор пройдёт мимо него.
+           */
+          ctx.signal.throwIfAborted();
+
           const generationProfile = deps.generationProfile(block.blockType);
           const cropResult = await deps.crop({
             pagePngPath: outPath,
@@ -1802,6 +1819,7 @@ export function createVlmRecognizePageHandler(
               ...(block.detectorProvenance === 'full_page'
                 ? { maxCropRequests: FULL_PAGE_MAX_CROP_REQUESTS }
                 : {}),
+              signal: ctx.signal,
               downscale: deps.downscale,
               /**
                * Кроп по запросу модели (ADR-0013, S21).
@@ -1847,6 +1865,17 @@ export function createVlmRecognizePageHandler(
               },
             });
           } catch (error) {
+            /**
+             * Отмена попытки — не отказ блока (S41).
+             *
+             * Записать её строкой `ai_runs` и засчитать блоку значило бы
+             * приписать модели отказ, которого не было, и — хуже — сделать
+             * страницу `failed` по причине, которой нет. Попытка просто не
+             * состоялась: её потолок истёк или аренду забрал другой воркер.
+             * Уже записанные блоки на месте, повтор продолжит с них.
+             */
+            if (ctx.signal.aborted) throw error;
+
             await recordFailureAiRun(
               deps,
               ctx,
