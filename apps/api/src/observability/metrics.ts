@@ -110,6 +110,15 @@ export interface Metrics {
    * справился». Второе — сообщение о том, что экрану сейчас верить нельзя.
    */
   observeJournalDropped(count: number): void;
+  /**
+   * Пауза очереди предохранителем: 1 — очередь молчит, 0 — берёт задачи (S41).
+   *
+   * Метрика, а не только строка журнала: «конвейер стоит» и «конвейер ждёт
+   * недоступный шлюз» выглядят на графике глубины очереди одинаково — растущей
+   * линией, — и различить их постфактум нечем. Пауза короткая по построению,
+   * поэтому она именно указатель состояния, а не счётчик событий.
+   */
+  setQueuePaused(queue: string, paused: boolean): void;
   setQueueDepth(samples: readonly QueueDepthSample[]): void;
   setDeadJobs(samples: readonly DeadJobsSample[]): void;
   /** Снимок очереди на момент сбора: без него значения отстают на интервал. */
@@ -174,6 +183,7 @@ class PromMetrics implements Metrics {
   private readonly externalDuration: Histogram<'service' | 'operation' | 'outcome'>;
   private readonly queueDepth: Gauge<'job_type' | 'status'>;
   private readonly deadJobs: Gauge<'job_type'>;
+  private readonly queuePaused: Gauge<'queue'>;
   private readonly llmCost: Counter<'model' | 'stage'>;
   private readonly llmTokens: Counter<'model' | 'stage' | 'kind'>;
   private readonly journalDropped: Counter<string>;
@@ -230,6 +240,13 @@ class PromMetrics implements Metrics {
       name: 'job_dead_jobs',
       help: 'Задачи, исчерпавшие max_attempts',
       labelNames: ['job_type'],
+      registers,
+    });
+
+    this.queuePaused = new Gauge({
+      name: 'job_queue_paused',
+      help: 'Очередь приостановлена предохранителем: сторона недоступна (1) или работает (0)',
+      labelNames: ['queue'],
       registers,
     });
 
@@ -350,6 +367,10 @@ class PromMetrics implements Metrics {
     this.queueSnapshotProvider = provider;
   }
 
+  setQueuePaused(queue: string, paused: boolean): void {
+    this.queuePaused.set({ queue: safeLabel(queue, 'unknown') }, paused ? 1 : 0);
+  }
+
   async render(): Promise<MetricsPayload> {
     await this.refreshQueue();
     return { contentType: this.registry.contentType, body: await this.registry.metrics() };
@@ -398,6 +419,7 @@ class DisabledMetrics implements Metrics {
   setQueueDepth(): void {}
   setDeadJobs(): void {}
   setQueueSnapshotProvider(): void {}
+  setQueuePaused(): void {}
 
   render(): Promise<MetricsPayload> {
     return Promise.resolve({ contentType: this.registry.contentType, body: '' });

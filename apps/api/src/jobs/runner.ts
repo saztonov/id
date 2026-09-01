@@ -545,8 +545,9 @@ export class JobRunner {
    * которым иначе пришлось бы ждать настоящую минуту молчания.
    */
   resumeQueues(): void {
-    for (const state of this.#queues.values()) {
+    for (const [queue, state] of this.#queues) {
       state.transientStreak = 0;
+      if (state.pausedUntil !== 0) this.#options.metrics.setQueuePaused(queue, false);
       state.pausedUntil = 0;
     }
   }
@@ -679,6 +680,7 @@ export class JobRunner {
 
     if (!outage) {
       state.transientStreak = 0;
+      if (state.pausedUntil !== 0) this.#options.metrics.setQueuePaused(queue, false);
       state.pausedUntil = 0;
       return;
     }
@@ -691,6 +693,10 @@ export class JobRunner {
     const overflow = state.transientStreak - TRANSIENT_STREAK_LIMIT;
     const pauseMs = Math.min(QUEUE_PAUSE_CAP_MS, QUEUE_PAUSE_BASE_MS * 2 ** overflow);
     state.pausedUntil = Date.now() + pauseMs;
+    // На графике глубины очереди «конвейер стоит» и «конвейер ждёт недоступный
+    // шлюз» выглядят одинаково — растущей линией; указатель состояния их
+    // различает.
+    this.#options.metrics.setQueuePaused(queue, true);
 
     logger.warn(
       {
