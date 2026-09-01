@@ -50,8 +50,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
+  effectiveRasterDpi,
   errorDigest,
-  RASTER_DPI,
   type BundlePageView,
   type DetectedBlockInput,
   type JobContext,
@@ -239,8 +239,10 @@ function withinTolerance(actual: number, expected: number, ratio: number): boole
  *
  * `sourcePages.widthPx/heightPx` — это `round(widthPt)` (см. `verify.ts`), то
  * есть точки PDF, округлённые до целого, НЕ пиксели рендера: единица там же,
- * где 1 pt = 1/72 дюйма. Рендер сделан на `RASTER_DPI` (300) — ожидаемый
- * размер масштабируется отношением `dpi/72` перед сравнением. Допуск ~2%
+ * где 1 pt = 1/72 дюйма. Рендер сделан на разрешении, которое вернул
+ * `effectiveRasterDpi` для этой страницы (300 для обычных форматов, меньше для
+ * крупноформатных листов), — ожидаемый размер масштабируется отношением
+ * `dpi/72` перед сравнением, и разрешение поэтому передаётся параметром. Допуск ~2%
  * покрывает округления `Math.round(widthPt)` и особенности растеризатора, не
  * скрывая рендер ДРУГОГО файла или ошибку поворота.
  *
@@ -471,12 +473,21 @@ export function createLocalDetectionHandler(
         }
 
         const pngPath = join(scratchDir, `page-${String(pageIndex).padStart(4, '0')}.png`);
+        /**
+         * Разрешение считается от размеров ЭТОЙ страницы (S41).
+         *
+         * Крупноформатные листы на 300 DPI занимают сотни мегабайт сырого
+         * растра и укладывали воркер при любом параллелизме очереди: потолок
+         * очереди ограничивает число задач, а не аппетит одной. Для A4–A2
+         * функция возвращает те же 300.
+         */
+        const dpi = effectiveRasterDpi(page.widthPx, page.heightPx);
         let rendered: { readonly widthPx: number; readonly heightPx: number };
         try {
           rendered = await rasterizer.renderPage({
             pdfPath,
             pageIndex,
-            dpi: RASTER_DPI,
+            dpi,
             outPath: pngPath,
             signal: ctx.signal,
           });
@@ -493,7 +504,9 @@ export function createLocalDetectionHandler(
         }
         renderedPages += 1;
 
-        const sizeCheck = checkRenderedSize(rendered, page, RASTER_DPI);
+        // Сверка идёт по ФАКТИЧЕСКОМУ разрешению рендера: с константой она
+        // объявляла бы уменьшенный лист несогласованным с картой страниц.
+        const sizeCheck = checkRenderedSize(rendered, page, dpi);
         if (!sizeCheck.ok) {
           sizeMismatchPages += 1;
           ctx.logger.error(

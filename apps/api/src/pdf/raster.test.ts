@@ -9,7 +9,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { detectPdftoppm, pdftoppmArgs, selectRasterizer } from './pdftoppm.js';
-import { RasterizerError, readPngSize } from './raster.js';
+import {
+  effectiveRasterDpi,
+  RASTER_DPI,
+  RASTER_MAX_PIXELS,
+  RasterizerError,
+  readPngSize,
+} from './raster.js';
 
 let dir: string;
 
@@ -53,6 +59,52 @@ describe('readPngSize', () => {
   });
 });
 
+describe('разрешение рендера', () => {
+  /** Стороны листов в пунктах (1 pt = 1/72 дюйма), как в карте страниц. */
+  const A4 = { w: 595, h: 842 };
+  const A2 = { w: 1191, h: 1684 };
+  const A1 = { w: 1684, h: 2384 };
+  const A0 = { w: 2384, h: 3370 };
+
+  const pixelsAt = (page: { w: number; h: number }, dpi: number): number =>
+    ((page.w * dpi) / 72) * ((page.h * dpi) / 72);
+
+  it('обычные форматы рендерятся на полном разрешении', () => {
+    // Потолок площади заведён не ради экономии, а против листов, которые не
+    // влезают в память: терять качество там, где всё влезает, незачем.
+    expect(effectiveRasterDpi(A4.w, A4.h)).toBe(RASTER_DPI);
+    expect(effectiveRasterDpi(A2.w, A2.h)).toBe(RASTER_DPI);
+  });
+
+  it('крупноформатный лист укладывается в потолок площади', () => {
+    // A1 на 300 DPI — около 70 мегапикселей и сотни мегабайт сырого растра:
+    // такой лист укладывал воркер при любом параллелизме очереди.
+    expect(pixelsAt(A1, RASTER_DPI)).toBeGreaterThan(RASTER_MAX_PIXELS);
+
+    for (const page of [A1, A0]) {
+      const dpi = effectiveRasterDpi(page.w, page.h);
+      expect(dpi).toBeLessThan(RASTER_DPI);
+      expect(pixelsAt(page, dpi)).toBeLessThanOrEqual(RASTER_MAX_PIXELS);
+    }
+  });
+
+  it('чем больше лист, тем ниже разрешение, и оно не обнуляется', () => {
+    // Монотонность важна как свойство: две страницы одного комплекта не должны
+    // получать разрешение в обратном порядке своих размеров.
+    expect(effectiveRasterDpi(A0.w, A0.h)).toBeLessThan(effectiveRasterDpi(A1.w, A1.h));
+    // Нижняя граница — разрешение миниатюры: ниже текст не читается, и рендер
+    // такой страницы бессмыслен даже ради того, чтобы не упасть.
+    expect(effectiveRasterDpi(100_000, 100_000)).toBeGreaterThanOrEqual(72);
+  });
+
+  it('нечитаемая геометрия не мешает рендеру: остаётся умолчание', () => {
+    // Размеры приходят из карты страниц, и «страницы без размеров» там быть не
+    // должно — но отказывать в рендере из-за этого не за что.
+    expect(effectiveRasterDpi(0, 0)).toBe(RASTER_DPI);
+    expect(effectiveRasterDpi(Number.NaN, 842)).toBe(RASTER_DPI);
+  });
+});
+
 describe('pdftoppmArgs', () => {
   it('строит 1-базный диапазон из 0-базного индекса и singlefile-выход', () => {
     expect(
@@ -60,7 +112,18 @@ describe('pdftoppmArgs', () => {
         { pdfPath: 'C:/tmp/in.pdf', pageIndex: 0, dpi: 300, outPath: 'C:/tmp/p0000.png' },
         'C:/tmp/p0000',
       ),
-    ).toEqual(['-f', '1', '-l', '1', '-r', '300', '-png', '-singlefile', 'C:/tmp/in.pdf', 'C:/tmp/p0000']);
+    ).toEqual([
+      '-f',
+      '1',
+      '-l',
+      '1',
+      '-r',
+      '300',
+      '-png',
+      '-singlefile',
+      'C:/tmp/in.pdf',
+      'C:/tmp/p0000',
+    ]);
   });
 });
 

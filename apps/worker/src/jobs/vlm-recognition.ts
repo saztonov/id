@@ -73,7 +73,9 @@ import {
   classifyFailure,
   computeBlocksHash,
   JobDeferredError,
+  effectiveRasterDpi,
   RASTER_DPI,
+  RASTER_MAX_PIXELS,
   redactAbsoluteUrls,
   type ArtifactKind,
   type HashableBlock,
@@ -996,11 +998,42 @@ function recheckPagesOf(snapshot: Record<string, unknown>): ReadonlySet<number> 
 }
 
 /** `kind/version@dpi` из снимка; пустая строка — снимок про растеризатор молчит. */
+/**
+ * Подпись растеризатора одной строкой.
+ *
+ * Одна функция на оба конца — на запись в снимок и на сверку с ним. Два места,
+ * собирающие строку по отдельности, разошлись бы при первой же правке формата,
+ * и разошлись бы молча: восстановление просто перестало бы находить
+ * совместимые прогоны, объяснив это «растеризатор другой».
+ *
+ * Потолок площади (S41) входит в подпись, потому что от него зависит РАСТР:
+ * крупноформатный лист до правки рендерился на 300 DPI, после — ниже, и
+ * переносить результаты между такими прогонами нельзя. Снимок без `maxPixels`
+ * — это прогон до S41, и его подпись остаётся прежней: она верна для него.
+ */
+function formatRasterizerSignature(input: {
+  readonly kind: string;
+  readonly version: string;
+  readonly dpi: string;
+  readonly maxPixels: number | null;
+}): string {
+  const base = `${input.kind}/${input.version}@${input.dpi}`;
+  return input.maxPixels === null
+    ? base
+    : `${base}+cap${String(Math.round(input.maxPixels / 1_000_000))}mp`;
+}
+
 function rasterizerSignatureOf(snapshot: Record<string, unknown>): string {
   const value = snapshot['rasterizer'];
   if (typeof value !== 'object' || value === null) return '';
   const record = value as Record<string, unknown>;
-  return `${String(record['kind'])}/${String(record['version'])}@${String(record['dpi'])}`;
+  const maxPixels = record['maxPixels'];
+  return formatRasterizerSignature({
+    kind: String(record['kind']),
+    version: String(record['version']),
+    dpi: String(record['dpi']),
+    maxPixels: typeof maxPixels === 'number' ? maxPixels : null,
+  });
 }
 
 function runsProduceSameCrops(parent: VlmRunTarget, expected: RepairConditions): boolean {
@@ -1321,7 +1354,12 @@ export function createVlmStartHandler(
       }
     }
 
-    const rasterizerSignature = `${rasterizer.kind}/${rasterizer.version}@${String(RASTER_DPI)}`;
+    const rasterizerSignature = formatRasterizerSignature({
+      kind: rasterizer.kind,
+      version: String(rasterizer.version),
+      dpi: String(RASTER_DPI),
+      maxPixels: RASTER_MAX_PIXELS,
+    });
     /**
      * Развороты уходят в снимок СВОДКОЙ, а не списком.
      *
@@ -1336,7 +1374,12 @@ export function createVlmStartHandler(
     ).length;
     await deps.mergeSnapshot(run.runId, {
       promptVersions,
-      rasterizer: { kind: rasterizer.kind, version: rasterizer.version, dpi: RASTER_DPI },
+      rasterizer: {
+        kind: rasterizer.kind,
+        version: rasterizer.version,
+        dpi: RASTER_DPI,
+        maxPixels: RASTER_MAX_PIXELS,
+      },
       cropPolicyVersion: CROP_POLICY_VERSION,
       contentRotation: { version: CONTENT_ROTATION_VERSION, pagesRotated },
     });
@@ -1599,14 +1642,14 @@ export function createVlmRecognizePageHandler(
       const outPath = join(tmpdir(), `vlm-page-${run.runId}-${pageIndex}-${randomUUID()}.png`);
       let rendered: { readonly widthPx: number; readonly heightPx: number };
       try {
-        rendered = await rasterizer.renderPage({
-          pdfPath: pdf.path,
-          pageIndex,
-          dpi: RASTER_DPI,
-          outPath,
-          signal: ctx.signal,
-        });
-
+        /**
+         * Геометрия читается ДО рендера (S41).
+         *
+         * По ней считается разрешение: крупноформатный лист на 300 DPI — это
+         * сотни мегабайт сырого растра, которые укладывали воркер независимо от
+         * потолка очереди. Порядок «сначала карта страниц, потом рендер» здесь
+         * обязателен — иначе решать было бы не по чему.
+         */
         const geometry = (await deps.loadPageGeometry(run.runId)).find(
           (page) => page.workingPageIndex === pageIndex,
         );
@@ -1615,6 +1658,16 @@ export function createVlmRecognizePageHandler(
             `Геометрия страницы ${pageIndex} прогона ${run.runId} не найдена в карте страниц bundle`,
           );
         }
+
+        rendered = await rasterizer.renderPage({
+          pdfPath: pdf.path,
+          pageIndex,
+          // То же число, что у детекции: обе считают его от размеров страницы,
+          // поэтому масштабы совпадают без сговора между задачами.
+          dpi: effectiveRasterDpi(geometry.widthPx, geometry.heightPx),
+          outPath,
+          signal: ctx.signal,
+        });
 
         if (!frameSizesAgree(rendered, geometry)) {
           await deps.markRunPage({

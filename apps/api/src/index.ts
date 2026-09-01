@@ -438,7 +438,13 @@ export type {
 } from './pdf/toolkit.js';
 export { createQpdfToolkit, detectQpdf } from './pdf/qpdf.js';
 export { createPdfLibToolkit, loadPdfLibModule } from './pdf/pdf-lib.js';
-export { RASTER_DPI, RasterizerError, readPngSize } from './pdf/raster.js';
+export {
+  effectiveRasterDpi,
+  RASTER_DPI,
+  RASTER_MAX_PIXELS,
+  RasterizerError,
+  readPngSize,
+} from './pdf/raster.js';
 export type {
   PageRasterizer,
   RasterizerKind,

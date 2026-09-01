@@ -80,7 +80,15 @@ export interface NormalizationOptions {
  * `convert("RGB")`). Каналов не три после этого — дефект входа, а не режим.
  */
 export async function readTileRgb(source: string | Buffer, region: TileRegion): Promise<TileRgb> {
-  const { data, info } = await sharp(source)
+  /**
+   * `sequentialRead` — про память, а не про скорость (S41).
+   *
+   * По умолчанию libvips открывает файл в режиме произвольного доступа и держит
+   * распакованный кадр целиком: на листе A1 это сотни мегабайт, и умножается
+   * оно на каждую плитку страницы. Последовательное чтение позволяет вырезать
+   * область потоком, не разворачивая весь растр в памяти.
+   */
+  const { data, info } = await sharp(source, { sequentialRead: true })
     .extract({ left: region.x0, top: region.y0, width: region.width, height: region.height })
     .toColourspace('srgb')
     .removeAlpha()
@@ -181,6 +189,11 @@ export async function rotatePagePng(
   targetPath: string,
   turn: 90 | 180 | 270,
 ): Promise<{ readonly widthPx: number; readonly heightPx: number }> {
-  const info = await sharp(sourcePath).rotate(turn).png().toFile(targetPath);
+  // Поворот читает страницу ровно один раз и пишет её на диск: держать
+  // распакованный кадр целиком незачем (S41).
+  const info = await sharp(sourcePath, { sequentialRead: true })
+    .rotate(turn)
+    .png()
+    .toFile(targetPath);
   return { widthPx: info.width, heightPx: info.height };
 }

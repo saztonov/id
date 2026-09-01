@@ -256,7 +256,9 @@ export async function cropBlockPng(input: CropBlockInput): Promise<CropBlockResu
     return { degenerate: true };
   }
 
-  let pipeline = sharp(source).extract({ left, top, width, height });
+  // Последовательное чтение: кроп берётся потоком, а не из распакованного в
+  // память кадра страницы — на крупноформатном листе это сотни мегабайт (S41).
+  let pipeline = sharp(source, { sequentialRead: true }).extract({ left, top, width, height });
 
   if (input.polygon !== null && input.polygon.length >= 3) {
     const pointsPx = input.polygon.map(

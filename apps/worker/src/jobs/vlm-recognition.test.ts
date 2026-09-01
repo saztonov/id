@@ -468,7 +468,9 @@ describe('createVlmStartHandler', () => {
       model: 'vendor/model-1',
       dryRun: false,
       cropPolicyVersion: 'crop.v3',
-      rasterizer: { kind: 'pdftoppm', version: '1.0', dpi: 300 },
+      // Потолок площади входит в подпись растеризатора (S41): родитель без него
+      // — это прогон с другим растром, и переносить из него нельзя.
+      rasterizer: { kind: 'pdftoppm', version: '1.0', dpi: 300, maxPixels: 40_000_000 },
     };
     const parentEnvelope = (patch: Record<string, unknown> = {}) => ({
       id: 'parent-result',
@@ -573,7 +575,7 @@ describe('createVlmStartHandler', () => {
                 provider: 'openrouter_vlm',
                 model: 'vendor/model-1',
                 cropPolicyVersion: 'crop.v3',
-                rasterizer: { kind: 'pdftoppm', version: '1.0', dpi: 300 },
+                rasterizer: { kind: 'pdftoppm', version: '1.0', dpi: 300, maxPixels: 40_000_000 },
               },
             })
           : runTarget({ repairOfRunId: PARENT, localLayoutHash: hash }),
@@ -637,7 +639,7 @@ describe('createVlmStartHandler', () => {
                 provider: 'openrouter_vlm',
                 model: 'vendor/model-1',
                 cropPolicyVersion: 'crop.v3',
-                rasterizer: { kind: 'pdftoppm', version: '1.0', dpi: 300 },
+                rasterizer: { kind: 'pdftoppm', version: '1.0', dpi: 300, maxPixels: 40_000_000 },
               },
             })
           : runTarget({ repairOfRunId: PARENT }),
