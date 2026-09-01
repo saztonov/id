@@ -25,7 +25,7 @@
  * (`layout_profiles`, миграция 0012), а не этому файлу: калибровка порога не
  * должна быть релизом.
  */
-import type { AttentionFlag } from '@id/contracts';
+import type { AttentionFlag, PageMarkupMode } from '@id/contracts';
 import type { LayoutThresholds } from '../db/repositories/layout.js';
 
 export interface AnalyzedBlock {
@@ -39,6 +39,21 @@ export interface AnalyzedBlock {
 export interface AnalyzedPage {
   readonly workingPageIndex: number;
   readonly blocks: readonly AnalyzedBlock[];
+  /**
+   * Что портал ИСКАЛ на этой странице (S42). По умолчанию `full_detection` —
+   * прежнее правило.
+   *
+   * Необязательное поле, и это обратная совместимость по построению: сигнатура
+   * `analyzePages` не меняется, все прежние вызовы и тесты продолжают работать,
+   * а ревизия, размеченная до правила форматов, судится тем правилом, по
+   * которому её размечали.
+   *
+   * Передаётся именно РЕЖИМ, а не класс листа: флагам нужен ответ на вопрос
+   * «что мы здесь искали», и класс листа отвечает на него только вместе со
+   * стратегией. Пороги при этом не трогаются вовсе — новое правило предикат, а
+   * не калибровка, и калибровать в нём нечего.
+   */
+  readonly markupMode?: PageMarkupMode;
 }
 
 export interface PageAnalysis {
@@ -121,13 +136,32 @@ function flagsOfPage(
 } {
   const flags = new Set<AttentionFlag>();
   const blocks = page.blocks;
+  const mode = page.markupMode ?? 'full_detection';
+  /**
+   * Осматривал ли детектор эту страницу на предмет текста.
+   *
+   * От этого зависит право говорить о пустоте и о покрытии.
+   * `blank_page_candidate` утверждает «похоже, на странице ничего не
+   * напечатано», а `low_coverage` — «текста нашлось подозрительно мало». Оба
+   * утверждения требуют, чтобы кто-то смотрел.
+   *
+   * При `stamp_only` портал искал только штамп: тот занимает 2–5 % площади, и
+   * `low_coverage` встал бы на КАЖДОМ успешно размеченном чертеже — сигнал
+   * означал бы «всё хорошо». При `full_page` страницу не осматривали вовсе:
+   * она размечена одним блоком без единого инференса, и «похоже, ничего не
+   * напечатано» было бы утверждением, ни на чём не основанным.
+   */
+  const examinedForText = mode === 'full_detection';
 
   if (blocks.length === 0) {
     // Пустая детекция — не «пустая страница»: это два разных состояния, и
     // второе подтверждается только тем, что на странице и правда ничего нет.
     // Отличить их автоматически нечем, поэтому ставятся оба сигнала.
     flags.add('no_blocks');
-    flags.add('blank_page_candidate');
+    if (examinedForText) flags.add('blank_page_candidate');
+    // Крупный лист без штампа — это «основной надписи нет, нужен человек», и
+    // сказать это прямо честнее, чем оставить одно «блоков нет».
+    if (mode === 'stamp_only') flags.add('missing_expected_stamp');
     return { flags, coverage: 0 };
   }
 
@@ -176,11 +210,13 @@ function flagsOfPage(
   }
 
   const coverage = unionArea(blocks);
-  if (coverage < thresholds.blankPageCoverageRatio) {
-    flags.add('blank_page_candidate');
-    flags.add('low_coverage');
-  } else if (coverage < thresholds.minCoverageRatio) {
-    flags.add('low_coverage');
+  if (examinedForText) {
+    if (coverage < thresholds.blankPageCoverageRatio) {
+      flags.add('blank_page_candidate');
+      flags.add('low_coverage');
+    } else if (coverage < thresholds.minCoverageRatio) {
+      flags.add('low_coverage');
+    }
   }
 
   if (
@@ -211,8 +247,23 @@ export function analyzePages(
 
   for (let i = 0; i < perPage.length; i += 1) {
     const current = perPage[i] as (typeof perPage)[number];
+    const currentMode = current.page.markupMode ?? 'full_detection';
+    /**
+     * Соседями считаются ФИЗИЧЕСКИ соседние страницы того же режима (S42).
+     *
+     * Без этого чередование форматов даёт флаг на каждой границе: у малого
+     * листа один блок типа `text`, у крупного — штамп, и сходится всё сразу —
+     * и порог по числу, и «состав типов отличается от обоих соседей». Флаг
+     * «резкое изменение относительно соседей» на штатной раскладке комплекта —
+     * ровно то, чего этот файл велит избегать.
+     *
+     * Сравниваются именно соседи по индексу, а не ближайшие того же режима:
+     * группировка «все A4 подряд» сделала бы соседями страницы, разнесённые по
+     * комплекту на сотню листов, и сравнение перестало бы значить хоть что-то.
+     */
     const neighbours = [perPage[i - 1], perPage[i + 1]].filter(
-      (entry): entry is (typeof perPage)[number] => entry !== undefined,
+      (entry): entry is (typeof perPage)[number] =>
+        entry !== undefined && (entry.page.markupMode ?? 'full_detection') === currentMode,
     );
     if (neighbours.length === 0) continue;
 

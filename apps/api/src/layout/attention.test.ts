@@ -56,6 +56,97 @@ describe('площадь объединения', () => {
   });
 });
 
+/**
+ * Флаги обязаны судить страницу по тому правилу, по которому её размечали (S42).
+ *
+ * Иначе сигнал перестаёт быть сигналом: `low_coverage` встал бы на КАЖДОМ
+ * успешно размеченном крупном листе (штамп — это 2–5 % площади), а
+ * `blank_page_candidate` утверждал бы «на странице ничего не напечатано» там,
+ * где текст просто не искали.
+ */
+describe('режим разметки страницы', () => {
+  const stamp = (): AnalyzedPage['blocks'][number] => ({
+    blockType: 'stamp',
+    x0: 0.72,
+    y0: 0.82,
+    x1: 0.97,
+    y1: 0.95,
+  });
+
+  function withMode(base: AnalyzedPage, markupMode: AnalyzedPage['markupMode']): AnalyzedPage {
+    return { ...base, markupMode };
+  }
+
+  it('малый лист с одним полностраничным блоком флагов не получает', () => {
+    const [analysis] = analyzePages([withMode(page(0, [text(0, 0, 1, 1)]), 'full_page')], T);
+
+    expect(analysis?.flags).toEqual([]);
+    expect(analysis?.coverage).toBeCloseTo(1, 6);
+  });
+
+  it('крупный лист со штампом не считается ни пустым, ни скудно покрытым', () => {
+    // Покрытие тут ~3 %, то есть ниже обоих порогов. При прежнем правиле это
+    // дало бы `low_coverage` и `blank_page_candidate` на каждом чертеже.
+    const [analysis] = analyzePages([withMode(page(0, [stamp()]), 'stamp_only')], T);
+
+    expect(analysis?.flags).toEqual([]);
+  });
+
+  it('крупный лист без штампа говорит об этом прямо', () => {
+    const [analysis] = analyzePages([withMode(page(0, []), 'stamp_only')], T);
+
+    // `missing_expected_stamp` вместо `blank_page_candidate`: «основной надписи
+    // нет» — это утверждение о документе, а «страница пуста» — о печати, и на
+    // чертеже второе было бы ложью.
+    expect(analysis?.flags).toEqual(['missing_expected_stamp', 'no_blocks']);
+  });
+
+  it('малый лист без блоков остаётся просто пустым', () => {
+    const [analysis] = analyzePages([withMode(page(0, []), 'full_page')], T);
+
+    expect(analysis?.flags).toEqual(['no_blocks']);
+  });
+
+  it('без указания режима поведение прежнее — якорь совместимости', () => {
+    // Ревизии, размеченные до правила форматов, судятся тем правилом, по
+    // которому их размечали.
+    const [analysis] = analyzePages([page(0, [])], T);
+
+    expect(analysis?.flags).toEqual(['blank_page_candidate', 'no_blocks']);
+  });
+
+  it('чередование форматов не порождает neighbor_mismatch', () => {
+    // Без учёта режима сходится всё сразу: и порог по числу блоков, и «состав
+    // типов отличается от обоих соседей». Флаг «резкое изменение относительно
+    // соседей» на штатной раскладке комплекта — это шум, а не сигнал.
+    const pages = [0, 1, 2, 3, 4, 5].map((index) =>
+      index % 2 === 0
+        ? withMode(page(index, [text(0, 0, 1, 1)]), 'full_page')
+        : withMode(page(index, [stamp(), stamp(), stamp(), stamp()]), 'stamp_only'),
+    );
+
+    const analysis = analyzePages(pages, T);
+
+    expect(analysis.flatMap((entry) => entry.flags)).not.toContain('neighbor_mismatch');
+  });
+
+  it('аномалия среди страниц ОДНОГО режима по-прежнему замечается', () => {
+    // Отрицательный контроль: правило снимает шум на границах форматов, а не
+    // выключает сравнение с соседями.
+    const many = (index: number): AnalyzedPage =>
+      withMode(
+        page(index, [text(0.05, 0.05, 0.9, 0.2), text(0.05, 0.25, 0.9, 0.4), stamp(), stamp()]),
+        'full_detection',
+      );
+    const analysis = analyzePages(
+      [many(0), withMode(page(1, [text(0.05, 0.05, 0.9, 0.9)]), 'full_detection'), many(2)],
+      T,
+    );
+
+    expect(analysis[1]?.flags).toContain('neighbor_mismatch');
+  });
+});
+
 describe('флаги внимания', () => {
   it('страница без блоков помечена и как пустая детекция, и как кандидат в пустые', () => {
     const [result] = analyzePages([page(0, [])], T);

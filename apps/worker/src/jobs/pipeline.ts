@@ -763,6 +763,9 @@ function markupDeps(options: PipelineJobsOptions): MarkupDeps {
       return pages.map((page) => ({
         workingPageIndex: page.workingPageIndex,
         sourcePageId: page.sourcePageId,
+        // Колонки названы `_px` исторически: в них округлённые пункты.
+        widthPt: page.widthPx,
+        heightPt: page.heightPx,
         blocks: byPage.get(page.workingPageIndex) ?? [],
       }));
     },

@@ -34,7 +34,13 @@
  * вставить всё равно не даст `layout_revision_id UNIQUE`. Требование разнести
  * создание и приём байтов двумя независимыми вызовами — пункт техзадания S13.
  */
-import type { AttentionFlag, BlockType, MarkupPolicy, ShapeType } from '@id/contracts';
+import {
+  pageMarkupMode,
+  type AttentionFlag,
+  type BlockType,
+  type MarkupPolicy,
+  type ShapeType,
+} from '@id/contracts';
 import type { JobContext, JobHandler } from '@id/api';
 import {
   analyzePages,
@@ -81,6 +87,15 @@ export interface RunDocumentRef {
 export interface PageBlocksSnapshot {
   readonly workingPageIndex: number;
   readonly sourcePageId: string;
+  /**
+   * Размеры листа в пунктах (S42): по ним анализ покрытия узнаёт, что портал на
+   * этой странице искал.
+   *
+   * Достаются бесплатно — `loadPageBlocks` и так читает карту страниц, чтобы
+   * страница без единого блока попала в анализ.
+   */
+  readonly widthPt: number;
+  readonly heightPt: number;
   readonly blocks: readonly {
     readonly blockType: BlockType;
     readonly x0: number;
@@ -767,8 +782,17 @@ export function createAnalyzeCoverageHandler(
       layoutRevisionId: target.layoutRevisionId,
     });
 
+    /**
+     * Флаги считаются по тому правилу, по которому страницу размечали (S42).
+     *
+     * Правило берётся из ПИНА ревизии, а не из настроек: анализ покрытия идёт
+     * после каждой пачки детекции, растянутой на минуты, и настройка,
+     * сменившаяся посреди, дала бы страницы, размеченные одним правилом и
+     * оценённые другим.
+     */
     const pages: AnalyzedPage[] = snapshots.map((page) => ({
       workingPageIndex: page.workingPageIndex,
+      markupMode: pageMarkupMode(page.widthPt, page.heightPt, target.markupPolicy),
       blocks: page.blocks.map((block) => ({
         blockType: block.blockType,
         x0: block.x0,
