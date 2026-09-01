@@ -58,6 +58,7 @@ import {
   extractFields,
   extractFieldsWithLlm,
   llmFieldsFor,
+  JobDeferredError,
   LlmError,
   matchRegistryRows,
   pagesNeedingLlm,
@@ -219,6 +220,34 @@ export interface SegmentationDeps {
   listDocuments(folderId: string): Promise<readonly LogicalDocumentView[]>;
   listPageAssignments(folderId: string): Promise<readonly PageAssignmentView[]>;
   listFieldValues(documentId: string): Promise<readonly FieldValueView[]>;
+
+  /**
+   * Текст страниц ОДНОГО документа: вход задачи `doc.extract_document` (S44).
+   *
+   * Отдельный порт, а не `loadPages` с отбором в памяти: после дробления
+   * извлечения на задачу по документу тот же вызов означал бы 134 полных чтения
+   * папки — с составом блоков и ручной разметкой, которые извлечению не нужны.
+   */
+  loadDocumentText(
+    folderId: string,
+    documentId: string,
+  ): Promise<readonly { readonly pageTextVersionId: string | null; readonly text: string }[]>;
+
+  /**
+   * Состояние веера извлечения: чем барьер отличает «идёт» от «некому считать».
+   *
+   * Разрез по `generation` обязателен: повторная сегментация ставит веер заново,
+   * пока предыдущий ещё разбирается.
+   */
+  extractFanState(
+    folderId: string,
+    generation: string,
+  ): Promise<{
+    readonly live: number;
+    readonly dead: number;
+    readonly done: number;
+    readonly total: number;
+  }>;
 
   saveFieldValues(input: {
     readonly folderId: string;
@@ -864,11 +893,11 @@ export function createSegmentHandler(deps: SegmentationDeps): JobHandler<'doc.se
 }
 
 // =====================================================================
-// Задача 16. doc.extract_fields
+// Задача 16. doc.extract_fields — постановщик веера
 // =====================================================================
 
 /**
- * Двухуровневое извлечение реквизитов (§8.4).
+ * Двухуровневое извлечение реквизитов (§8.4), разложенное по документам (S44).
  *
  * Базовая схема применяется ВСЕГДА, включая резервные и неопознанные типы, —
  * это то, что позволяет системе работать на разделах, которых в корпусе не
@@ -878,10 +907,23 @@ export function createSegmentHandler(deps: SegmentationDeps): JobHandler<'doc.se
  * читается из `type_confidence` документа, а не из наличия кода — тип-гипотеза
  * с пометкой `needs_review` специфичных правил не заслуживает.
  *
- * Без `documentId` в payload обрабатывается вся ревизия и ставится следующая
- * задача; с `documentId` — только один документ и ничего не ставится. Это
- * ручное переизвлечение с экрана документа, и продолжать за ним весь конвейер
- * было бы неожиданностью для нажавшего кнопку.
+ * ## Почему веер, а не один обход
+ *
+ * До S44 это была ОДНА задача на всю папку с потолком аренды в десять минут. На
+ * боевой папке из 134 документов три попытки по 600 011 мс кончились
+ * `JobTimeout`, прогон встал красной плашкой, а записи `field_values`
+ * продолжали появляться ещё четыре минуты после «смерти» задачи. Теперь эта
+ * задача только раскладывает работу: по задаче на документ плюс барьер.
+ *
+ * `generation` — идентификатор ЭТОЙ задачи (`ctx.jobId`), и он же в ключе
+ * дедупликации веера. Свойство, ради которого он взят именно таким: повторная
+ * попытка постановщика попадает в те же ключи и переиспользует уже
+ * поставленные задачи, а следующий прогон получает свой веер и свой барьер.
+ *
+ * Без `documentId` в payload раскладывается вся папка и ставится барьер; с
+ * `documentId` — одна задача на один документ и ничего больше. Это ручное
+ * переизвлечение с экрана документа, и продолжать за ним весь конвейер было бы
+ * неожиданностью для нажавшего кнопку.
  */
 const TYPE_CONFIDENT_THRESHOLD = 0.7;
 
@@ -897,147 +939,127 @@ export function createExtractFieldsHandler(
     if (targets.length === 0) {
       throw new SegmentationStateError(
         documentId === undefined
-          ? `Ревизия ${folderId}: документов нет, извлекать реквизиты не из чего.`
-          : `Документ ${documentId} не принадлежит ревизии ${folderId}.`,
+          ? `Папка ${folderId}: документов нет, извлекать реквизиты не из чего.`
+          : `Документ ${documentId} не принадлежит папке ${folderId}.`,
       );
     }
 
-    const input = await deps.loadPages(folderId);
-    const textOf = new Map(
-      input.pages.map((page) => [
-        page.sourcePageId,
-        { pageTextVersionId: page.pageTextVersionId, text: page.text },
-      ]),
-    );
-    const assignments = await deps.listPageAssignments(folderId);
-    const pagesOfDocument = new Map<string, string[]>();
-    for (const assignment of [...assignments].sort(
-      (a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0),
-    )) {
-      if (assignment.documentId === null) continue;
-      const list = pagesOfDocument.get(assignment.documentId) ?? [];
-      list.push(assignment.sourcePageId);
-      pagesOfDocument.set(assignment.documentId, list);
+    const generation = ctx.jobId;
+    for (const document of targets) {
+      await ctx.enqueue({
+        type: 'doc.extract_document',
+        payload: {
+          folderId,
+          documentId: document.id,
+          generation,
+          ...forwardAutoContinue(ctx),
+        },
+        dedupeKey: `doc.extract_document:${generation}:${document.id}`,
+      });
     }
 
-    // Промт стадии читается ОДИН раз на прогон, а не на документ: он один и тот
-    // же, а `stagePrompt` ходит в базу. `null` теперь означает «встроенного
-    // текста у стадии нет вовсе» — отсутствие ОПУБЛИКОВАННОЙ версии больше не
-    // выключает ступень, иначе она не выполнялась бы никогда (сид-миграция 0032
-    // кладёт этот промт черновиком).
-    const llmPrompt = await deps.stagePrompt(FIELD_EXTRACT_STAGE);
-    let llmStop: string | null = null;
+    ctx.logger.info(
+      { documents: targets.length, generation },
+      'веер извлечения реквизитов разложен',
+    );
+    await ctx.emit('documents.fields_planned', { documents: targets.length });
 
-    let written = 0;
-    let baseOnly = 0;
+    /**
+     * Барьер ставится только за ПОЛНЫМ прогоном.
+     *
+     * Он выводит месяц и исполнителя по всем актам папки и продолжает конвейер;
+     * за переизвлечением одного документа делать это нельзя — остальные акты в
+     * его веер не попали, и «самый ранний акт» вышел бы не самым ранним.
+     */
+    if (documentId === undefined) {
+      await ctx.enqueue({
+        type: 'doc.extract_finalize',
+        payload: { folderId, generation, ...forwardAutoContinue(ctx) },
+        dedupeKey: `doc.extract_finalize:${generation}`,
+      });
+    }
+  };
+}
+
+// =====================================================================
+// Задача 16а. doc.extract_document — реквизиты одного документа
+// =====================================================================
+
+/**
+ * Единица веера: один документ, один-два вызова модели, две минуты аренды.
+ *
+ * Отказ здесь не убивает папку (дух ADR-0017): документ остаётся с базовыми
+ * реквизитами правил, барьер считает такие и называет их число в событии.
+ */
+export function createExtractDocumentHandler(
+  deps: SegmentationDeps,
+): JobHandler<'doc.extract_document'> {
+  return async (ctx: JobContext<'doc.extract_document'>) => {
+    const { folderId, documentId } = ctx.payload;
+
+    const documents = await deps.listDocuments(folderId);
+    const document = documents.find((item) => item.id === documentId);
+    if (document === undefined) {
+      throw new SegmentationStateError(`Документ ${documentId} не принадлежит папке ${folderId}.`);
+    }
+
+    const pages = await deps.loadDocumentText(folderId, documentId);
+
+    const typeConfident =
+      document.docTypeCode !== null &&
+      !isFallbackType(document.docTypeCode) &&
+      !document.needsReview &&
+      (document.typeConfidence ?? 0) >= TYPE_CONFIDENT_THRESHOLD;
+
+    const fields = [
+      ...extractFields({
+        docTypeCode: document.docTypeCode,
+        typeConfident,
+        pages,
+      }),
+    ];
+
+    // Вторая ступень: поля, у которых `extractor: 'llm'`. Она НЕ трогает уже
+    // извлечённое правилами — `llmFieldsFor` отбирает только свои коды, — и
+    // не роняет задачу: документ без ответа модели остаётся с базовыми
+    // реквизитами, ровно как до S21.
+    const llmPrompt = await deps.stagePrompt(FIELD_EXTRACT_STAGE);
     let llmFields = 0;
     let llmProblems = 0;
-    /** Даты актов: по самой ранней портал выведет месяц комплекта (S30). */
-    const actDates: (string | null)[] = [];
-    /** Реквизиты исполнителя из акта: по ним портал заменит подставленного (S37). */
-    let contractorTriple: {
-      name: string | null;
-      inn: string | null;
-      ogrn: string | null;
-    } | null = null;
-    for (const document of targets) {
-      // Отмена проверяется НА КАЖДОМ документе, а не однажды на входе.
-      //
-      // Сторож задачи обрывает попытку по `leaseMs`, но кооперативную отмену
-      // обязан подхватить сам обход: без этой строки брошенная попытка
-      // продолжала обходить все 134 документа рядом с новой, взятой ей на
-      // смену. На боевом прогоне это дало три перекрывающиеся попытки и
-      // тройные копии реквизитов — при том, что сама запись идемпотентна.
-      ctx.signal.throwIfAborted();
-
-      const pageIds = pagesOfDocument.get(document.id) ?? [];
-      const pages = pageIds
-        .map((id) => textOf.get(id))
-        .filter(
-          (value): value is { pageTextVersionId: string | null; text: string } =>
-            value !== undefined,
-        );
-
-      const typeConfident =
-        document.docTypeCode !== null &&
-        !isFallbackType(document.docTypeCode) &&
-        !document.needsReview &&
-        (document.typeConfidence ?? 0) >= TYPE_CONFIDENT_THRESHOLD;
-      if (!typeConfident) baseOnly += 1;
-
-      const fields = [
-        ...extractFields({
-          docTypeCode: document.docTypeCode,
-          typeConfident,
-          pages,
-        }),
-      ];
-
-      // Вторая ступень: поля, у которых `extractor: 'llm'`. Она НЕ трогает уже
-      // извлечённое правилами — `llmFieldsFor` отбирает только свои коды, — и
-      // не роняет задачу: документ без ответа модели остаётся с базовыми
-      // реквизитами, ровно как до S21.
-      if (llmPrompt !== null && deps.callLlm !== null && llmStop === null) {
-        const outcome = await runLlmExtraction(deps, ctx, {
-          folderId,
-          document,
-          typeConfident,
-          pages,
-          prompt: llmPrompt,
-        });
-        fields.push(...outcome.fields);
-        llmFields += outcome.fields.length;
-        llmProblems += outcome.problems.length;
-        // Отказ провайдера относится ко ВСЕМ последующим документам: исчерпанный
-        // бюджет или упавший шлюз не починятся к следующему из тридцати.
-        llmStop = outcome.stop;
-        if (outcome.problems.length > 0) {
-          ctx.logger.warn(
-            { documentId: document.id, problems: outcome.problems },
-            'часть значений модели не принята',
-          );
-        }
-      }
-
-      if (isAnalysisAnchor(document.docTypeCode)) {
-        const actDate = fields.find((value) => value.fieldCode === AOSR_FIELDS.actDate);
-        actDates.push(actDate?.valueDate ?? null);
-
-        // Тройка исполнителя берётся с ПЕРВОГО акта, у которого она непуста.
-        // Актов в комплекте бывает несколько, но работу выполняет одна
-        // организация: выбирать из расходящихся троек значило бы гадать, а
-        // расхождение и без того выносит замечанием AOSR.HDR.023.
-        if (contractorTriple === null) {
-          const textOfField = (code: string): string | null =>
-            fields.find((value) => value.fieldCode === code)?.valueText ?? null;
-          const triple = {
-            name: textOfField(AOSR_FIELDS.contractorName),
-            inn: textOfField(AOSR_FIELDS.contractorInn),
-            ogrn: textOfField(AOSR_FIELDS.contractorOgrn),
-          };
-          if (triple.name !== null || triple.inn !== null || triple.ogrn !== null) {
-            contractorTriple = triple;
-          }
-        }
-      }
-
-      const outcome = await deps.saveFieldValues({
+    let llmStop: string | null = null;
+    let llmStopError: LlmError | null = null;
+    if (llmPrompt !== null && deps.callLlm !== null) {
+      const outcome = await runLlmExtraction(deps, ctx, {
         folderId,
-        documentId: document.id,
-        fields,
-        extractorVersion: SEGMENTATION_VERSION,
+        document,
+        typeConfident,
+        pages,
+        prompt: llmPrompt,
       });
-      written += outcome.written;
+      fields.push(...outcome.fields);
+      llmFields = outcome.fields.length;
+      llmProblems = outcome.problems.length;
+      llmStop = outcome.stop;
+      llmStopError = outcome.stopError;
+      if (outcome.problems.length > 0) {
+        ctx.logger.warn(
+          { documentId: document.id, problems: outcome.problems },
+          'часть значений модели не принята',
+        );
+      }
     }
 
-    if (llmStop !== null) {
-      ctx.logger.warn({ reason: llmStop }, 'ступень модели прервана: обход документов остановлен');
-    }
+    const outcome = await deps.saveFieldValues({
+      folderId,
+      documentId: document.id,
+      fields,
+      extractorVersion: SEGMENTATION_VERSION,
+    });
 
     const counts = {
-      documents: targets.length,
-      fields: written,
-      baseSchemaOnly: baseOnly,
+      documentId: document.id,
+      fields: outcome.written,
+      baseSchemaOnly: typeConfident ? 0 : 1,
       llm: {
         used: llmPrompt !== null && deps.callLlm !== null,
         fields: llmFields,
@@ -1045,55 +1067,149 @@ export function createExtractFieldsHandler(
         stopped: llmStop,
       },
     };
+    ctx.logger.info({ counts }, 'реквизиты документа извлечены');
+
+    /**
+     * Отказ ПРОВАЙДЕРА поднимается, отказ ОТВЕТА — нет.
+     *
+     * Разведены они по тому же признаку, что и на фазе 2 сегментации. Ответ, из
+     * которого ничего не вышло, — это пустой результат с названной причиной:
+     * документ остаётся с базовыми реквизитами правил, и задача честно
+     * успешна. Упавший шлюз, исчерпанный бюджет и превышенный потолок частоты —
+     * не свойство документа: проглотить их значило бы объявить, что у акта нет
+     * реквизитов, потому что сеть моргнула.
+     *
+     * До веера оба случая гасились одинаково: обход прекращался, задача
+     * закрывалась успехом, и папка молча оставалась без реквизитов. Теперь
+     * движок повторит задачу, а предохранитель очереди `llm` (ADR-0023)
+     * придержит остальные.
+     */
+    if (llmStopError !== null && (llmStopError.retriable || llmStopError.stopsBatch)) {
+      throw llmStopError;
+    }
+  };
+}
+
+// =====================================================================
+// Задача 16б. doc.extract_finalize — барьер веера
+// =====================================================================
+
+/**
+ * Барьер: ждёт веер СВОЕГО прогона, подводит итоги уровня папки, продолжает
+ * конвейер (S44).
+ *
+ * ## Почему агрегаты считаются здесь, а не в задаче документа
+ *
+ * Месяц папки выводится по самому раннему акту, исполнитель — по первому акту с
+ * непустой тройкой реквизитов. Оба ответа требуют видеть ВСЕ акты сразу, и до
+ * S44 их считал полный обход. После дробления такого места не осталось нигде,
+ * кроме барьера: задача документа не знает о соседях по построению.
+ *
+ * Читаются они из БАЗЫ, а не из памяти прогона: веер уже записал реквизиты, и
+ * второй их источник разошёлся бы с первым при первом же отказе документа.
+ *
+ * ## Почему мёртвая задача веера не отменяет итог
+ *
+ * Отказ одного документа не убивает папку (дух ADR-0017). Барьер ждёт только
+ * ЖИВЫХ; мёртвые он считает и называет числом в событии, а папка идёт дальше с
+ * тем, что прочиталось.
+ */
+export function createExtractFinalizeHandler(
+  deps: SegmentationDeps,
+): JobHandler<'doc.extract_finalize'> {
+  return async (ctx: JobContext<'doc.extract_finalize'>) => {
+    const { folderId, generation } = ctx.payload;
+
+    const fan = await deps.extractFanState(folderId, generation);
+    if (fan.live > 0) {
+      throw new JobDeferredError(
+        `Извлечение реквизитов ещё идёт: ${fan.live} из ${fan.total} документов`,
+      );
+    }
+
+    const documents = await deps.listDocuments(folderId);
+    /** Даты актов: по самой ранней портал выведет месяц папки (S30). */
+    const actDates: (string | null)[] = [];
+    /** Реквизиты исполнителя из акта: по ним портал заменит подставленного (S37). */
+    let contractorTriple: {
+      name: string | null;
+      inn: string | null;
+      ogrn: string | null;
+    } | null = null;
+
+    for (const document of documents) {
+      if (!isAnalysisAnchor(document.docTypeCode)) continue;
+      ctx.signal.throwIfAborted();
+
+      const values = await deps.listFieldValues(document.id);
+      const textOfField = (code: string): string | null =>
+        values.find((value) => value.fieldCode === code)?.valueText ?? null;
+
+      actDates.push(
+        values.find((value) => value.fieldCode === AOSR_FIELDS.actDate)?.valueDate ?? null,
+      );
+
+      // Тройка исполнителя берётся с ПЕРВОГО акта, у которого она непуста.
+      // Актов в папке бывает несколько, но работу выполняет одна организация:
+      // выбирать из расходящихся троек значило бы гадать, а расхождение и без
+      // того выносит замечанием AOSR.HDR.023.
+      if (contractorTriple === null) {
+        const triple = {
+          name: textOfField(AOSR_FIELDS.contractorName),
+          inn: textOfField(AOSR_FIELDS.contractorInn),
+          ogrn: textOfField(AOSR_FIELDS.contractorOgrn),
+        };
+        if (triple.name !== null || triple.inn !== null || triple.ogrn !== null) {
+          contractorTriple = triple;
+        }
+      }
+    }
+
+    const counts = {
+      documents: fan.total,
+      failed: fan.dead,
+      anchors: actDates.length,
+    };
     ctx.logger.info({ counts }, 'реквизиты извлечены');
     await ctx.emit('documents.fields_extracted', counts);
 
     /**
-     * Месяц комплекта выводится ЗДЕСЬ (S30).
+     * Месяц папки выводится ЗДЕСЬ (S30).
      *
      * Раньше его называл человек при заведении, не видя акта, — и подставленный
      * по умолчанию текущий месяц оставался в карточке как факт. Теперь он
      * берётся по самому раннему распознанному акту.
      *
-     * Только при полном прогоне: `documentId` задан — переизвлекали ОДИН
-     * документ, и остальные акты комплекта в `actDates` не попали. Вывести месяц
-     * по одному из нескольких актов значило бы назвать не самый ранний.
-     *
      * Запись идемпотентна и не трогает уже определённый месяц; отсутствие
      * распознанных дат — не повод подставить сегодняшний.
      */
-    if (documentId === undefined) {
-      const period = periodOfEarliestAct(actDates);
-      if (period !== null) {
-        const filled = await deps.fillFolderPeriod(folderId, period);
-        if (filled) {
-          ctx.logger.info({ period }, 'месяц комплекта выведен по дате акта');
-          await ctx.emit('work.period_resolved', { period });
-        }
-      } else if (actDates.length > 0) {
-        /**
-         * Разбор прошёл, а даты нет — и это НЕ то же самое, что «ещё не
-         * разбирали» (S37).
-         *
-         * Раньше здесь была тишина, и экран объекта в обоих случаях печатал
-         * «После OCR». Заказчик на это и указал: «комплект распознан, а месяц —
-         * После OCR». Числа в событии различают две причины пустоты: якорей
-         * нет вовсе или якоря есть, но дата ни на одном не прочиталась.
-         */
-        const dated = actDates.filter((value) => value !== null).length;
-        ctx.logger.info(
-          { anchors: actDates.length, dated },
-          'месяц комплекта не выведен: даты акта не распознаны',
-        );
-        await ctx.emit('work.period_unresolved', { anchors: actDates.length, dated });
+    const period = periodOfEarliestAct(actDates);
+    if (period !== null) {
+      const filled = await deps.fillFolderPeriod(folderId, period);
+      if (filled) {
+        ctx.logger.info({ period }, 'месяц папки выведен по дате акта');
+        await ctx.emit('work.period_resolved', { period });
       }
+    } else if (actDates.length > 0) {
+      /**
+       * Разбор прошёл, а даты нет — и это НЕ то же самое, что «ещё не
+       * разбирали» (S37).
+       *
+       * Раньше здесь была тишина, и экран объекта в обоих случаях печатал
+       * «После OCR». Заказчик на это и указал: «комплект распознан, а месяц —
+       * После OCR». Числа в событии различают две причины пустоты: якорей нет
+       * вовсе или якоря есть, но дата ни на одном не прочиталась.
+       */
+      const dated = actDates.filter((value) => value !== null).length;
+      ctx.logger.info(
+        { anchors: actDates.length, dated },
+        'месяц папки не выведен: даты акта не распознаны',
+      );
+      await ctx.emit('work.period_unresolved', { anchors: actDates.length, dated });
     }
 
     /**
-     * Исполнитель комплекта выводится здесь же, рядом с месяцем (S37).
-     *
-     * Только при полном прогоне и по тем же основаниям: переизвлечение ОДНОГО
-     * документа не видит остальных актов комплекта.
+     * Исполнитель папки выводится здесь же, рядом с месяцем (S37).
      *
      * Отличие от месяца — в источнике: реквизиты исполнителя объявлены
      * `extractor: 'llm'` (в шапке РД-11-02 ИНН напечатан у четырёх участников
@@ -1101,7 +1217,7 @@ export function createExtractFieldsHandler(
      * ступени модели тройка не придёт, и признак «подставлен» останется. Это
      * записано долгом честно, а не спрятано.
      */
-    if (documentId === undefined && contractorTriple !== null) {
+    if (contractorTriple !== null) {
       const parties = await deps.listMatchableContractors();
       const matched = matchCounterparty(parties, contractorTriple);
       if (matched === null) {
@@ -1123,19 +1239,17 @@ export function createExtractFieldsHandler(
       } else {
         const replaced = await deps.replaceAssumedContractor(folderId, matched.id);
         if (replaced) {
-          ctx.logger.info({ contractorId: matched.id }, 'исполнитель комплекта выведен из акта');
+          ctx.logger.info({ contractorId: matched.id }, 'исполнитель папки выведен из акта');
           await ctx.emit('work.contractor_resolved', { contractorId: matched.id });
         }
       }
     }
 
-    if (documentId === undefined) {
-      await ctx.enqueue({
-        type: 'doc.parse_registry',
-        payload: { folderId, ...forwardAutoContinue(ctx) },
-        dedupeKey: `doc.parse_registry:${folderId}`,
-      });
-    }
+    await ctx.enqueue({
+      type: 'doc.parse_registry',
+      payload: { folderId, ...forwardAutoContinue(ctx) },
+      dedupeKey: `doc.parse_registry:${folderId}`,
+    });
   };
 }
 
@@ -1144,6 +1258,15 @@ interface LlmExtractionResult {
   readonly problems: readonly string[];
   /** Причина, по которой обход остальных документов бессмыслен, либо `null`. */
   readonly stop: string | null;
+  /**
+   * Сам отказ провайдера — чтобы вызывающий решал, поднимать ли его (S44).
+   *
+   * До веера отказ всегда оставался внутри: обход прекращался, а задача
+   * закрывалась успехом. На задаче по документу такое молчание означало бы
+   * «моргнувший на секунду шлюз лишил документ реквизитов навсегда», поэтому
+   * решение принимает вызывающий, а не эта функция.
+   */
+  readonly stopError: LlmError | null;
 }
 
 /** Значение реквизита в форме, которую принимает `saveFieldValues`. */
@@ -1161,7 +1284,7 @@ type ExtractedFieldOfDocument = ReturnType<typeof extractFields>[number];
  */
 async function runLlmExtraction(
   deps: SegmentationDeps,
-  ctx: JobContext<'doc.extract_fields'>,
+  ctx: JobContext<'doc.extract_document'>,
   input: {
     readonly folderId: string;
     readonly document: LogicalDocumentView;
@@ -1171,13 +1294,13 @@ async function runLlmExtraction(
   },
 ): Promise<LlmExtractionResult> {
   const call = deps.callLlm;
-  if (call === null) return { fields: [], problems: [], stop: null };
+  if (call === null) return { fields: [], problems: [], stop: null, stopError: null };
 
   const wanted = llmFieldsFor({
     docTypeCode: input.document.docTypeCode,
     typeConfident: input.typeConfident,
   });
-  if (wanted.length === 0) return { fields: [], problems: [], stop: null };
+  if (wanted.length === 0) return { fields: [], problems: [], stop: null, stopError: null };
 
   const userPrompt = renderExtractUserPrompt(
     {
@@ -1221,7 +1344,7 @@ async function runLlmExtraction(
       accepted: outcome.fields.length,
       problems: outcome.problems,
     });
-    return { fields: outcome.fields, problems: outcome.problems, stop: null };
+    return { fields: outcome.fields, problems: outcome.problems, stop: null, stopError: null };
   } catch (error) {
     if (error instanceof LlmError) {
       await writeExtractAiRun(deps, ctx, input, recorded, {
@@ -1229,7 +1352,7 @@ async function runLlmExtraction(
         accepted: 0,
         problems: [error.message],
       });
-      return { fields: [], problems: [error.message], stop: error.message };
+      return { fields: [], problems: [error.message], stop: error.message, stopError: error };
     }
     throw error;
   }
@@ -1245,7 +1368,7 @@ async function runLlmExtraction(
  */
 async function writeExtractAiRun(
   deps: SegmentationDeps,
-  ctx: JobContext<'doc.extract_fields'>,
+  ctx: JobContext<'doc.extract_document'>,
   input: { readonly folderId: string; readonly prompt: PublishedPrompt },
   call: LlmCallResult | null,
   structured: { documentId: string; accepted: number; problems: readonly string[] },

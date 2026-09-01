@@ -1137,6 +1137,52 @@ export async function listLiveRecognizePageJobs(
 }
 
 /**
+ * Состояние веера извлечения реквизитов одного прогона (S44).
+ *
+ * Барьер `doc.extract_finalize` спрашивает им ровно одно: «остался ли кто-то,
+ * кто ещё считает?». Живыми считаются `queued` и `running` — отложенная задача
+ * лежит в `queued` и проснётся сама.
+ *
+ * Разрез по `generation` (идентификатор задачи-постановщика), а не по одной
+ * папке: повторная сегментация ставит веер заново, пока предыдущий ещё
+ * разбирается, и без разреза барьер ждал бы чужую работу либо, что хуже,
+ * посчитал бы её своей и подвёл итог по чужому составу.
+ */
+export interface ExtractFanState {
+  /** Ещё считаются: `queued` либо `running`. */
+  readonly live: number;
+  /** Отказались окончательно: попытки исчерпаны или задача снята. */
+  readonly dead: number;
+  readonly done: number;
+  readonly total: number;
+}
+
+export async function readExtractFanState(
+  db: JobExecutor,
+  folderId: string,
+  generation: string,
+): Promise<ExtractFanState> {
+  const rows = await db.execute<{ status: string; n: number }>(sql`
+    select ${jobs.status} as status, count(*)::int as n
+      from ${jobs}
+     where ${jobs.type} = 'doc.extract_document'
+       and ${jobs.payload} ->> 'folderId' = ${folderId}
+       and ${jobs.payload} ->> 'generation' = ${generation}
+     group by ${jobs.status}
+  `);
+
+  let live = 0;
+  let dead = 0;
+  let done = 0;
+  for (const row of rows.rows) {
+    if (row.status === 'queued' || row.status === 'running') live += row.n;
+    else if (row.status === 'done') done += row.n;
+    else dead += row.n;
+  }
+  return { live, dead, done, total: live + dead + done };
+}
+
+/**
  * Оживить мёртвые задачи стадии — по явному нажатию человека (S41).
  *
  * ## Что чинится

@@ -752,6 +752,70 @@ export async function loadSegmentationPages(
   };
 }
 
+/** Страница документа в том виде, в каком её читает извлечение реквизитов. */
+export interface DocumentPageText {
+  readonly pageTextVersionId: string | null;
+  readonly text: string;
+}
+
+/**
+ * Текст страниц ОДНОГО документа (S44).
+ *
+ * Появилась вместе с веером `doc.extract_document`. До S44 извлечение читало
+ * `loadSegmentationPages` однажды на всю папку и раздавало текст документам из
+ * памяти; после дробления на задачу по документу тот же вызов означал бы 134
+ * полных чтения папки — с составом блоков, ручной разметкой и координатами,
+ * которые извлечению не нужны вовсе.
+ *
+ * Прогон выбирается ТЕМ ЖЕ правилом, что в `loadSegmentationPages`: последний
+ * завершённый и опубликовавший хотя бы одну версию текста. Разойдясь, два
+ * правила дали бы `char_span` реквизита, измеренный в одной версии текста, и
+ * цитату — в другой.
+ *
+ * Порядок страниц — порядок в документе (`page_assignments.sort_order`), а не
+ * порядок в папке: реквизиты читаются по документу, и его первая страница — та,
+ * которую человек видит первой, открыв документ.
+ */
+export async function loadDocumentPageText(
+  db: Database,
+  scope: AuthScope,
+  folderId: string,
+  documentId: string,
+): Promise<readonly DocumentPageText[]> {
+  await requireVisibleFolder(db, scope, folderId);
+
+  const rows = await db.execute<{
+    page_text_version_id: string | null;
+    text_md: string | null;
+  }>(sql`
+    with run as (
+      select r.id
+        from recognition_runs r
+       where r.folder_id = ${folderId}::uuid
+         and r.status = 'done'
+         and exists (select 1 from page_text_versions ptv where ptv.recognition_run_id = r.id)
+       order by r.finished_at desc nulls last
+       limit 1
+    )
+    select ptv.id as page_text_version_id, ptv.text_md as text_md
+      from page_assignments pa
+      join source_pages sp on sp.id = pa.source_page_id
+      left join page_text_versions ptv
+        on ptv.source_page_id = sp.id
+       and ptv.recognition_run_id = (select id from run)
+     where pa.folder_id = ${folderId}::uuid
+       and pa.document_id = ${documentId}::uuid
+     order by pa.sort_order asc nulls last, sp.folder_ordinal asc
+  `);
+
+  return rows.rows.map((row) => ({
+    pageTextVersionId: row.page_text_version_id,
+    // Текст отдаётся КАК ЕСТЬ по той же причине, что в `loadSegmentationPages`:
+    // `char_span` цитат измеряется именно в нём.
+    text: row.text_md ?? '',
+  }));
+}
+
 // =====================================================================
 // Применение сегментации (задача 15) — центральная функция этапа
 // =====================================================================

@@ -34,6 +34,7 @@ import {
   analysisPromptDefaultByStage,
   assembleRecognitionResult,
   insertBlockResultIdempotent,
+  readExtractFanState,
   readJobAutoContinue,
   listRunBlockEnvelopes,
   listRunBlockIds,
@@ -107,6 +108,7 @@ import {
   listPageClassifications,
   listPromptTemplates,
   listRegistryRows,
+  loadDocumentPageText,
   loadSegmentationPages,
   observeDocTypeCandidate,
   recordAiRun,
@@ -189,7 +191,9 @@ import {
 } from './recognition.js';
 import {
   createClassifyPagesHandler,
+  createExtractDocumentHandler,
   createExtractFieldsHandler,
+  createExtractFinalizeHandler,
   createGraphBuildHandler,
   createMatchRegistryHandler,
   createParseRegistryHandler,
@@ -1814,6 +1818,13 @@ function segmentationDeps(options: PipelineJobsOptions): SegmentationDeps {
   return {
     loadPages: async (folderId) => loadSegmentationPages(db, await scopeOf(folderId), folderId),
 
+    loadDocumentText: async (folderId, documentId) =>
+      loadDocumentPageText(db, await scopeOf(folderId), folderId, documentId),
+
+    // Область не нужна: состояние веера читается по идентификаторам задач, а не
+    // по данным папки, и спрашивает его конвейер, а не человек.
+    extractFanState: async (folderId, generation) => readExtractFanState(db, folderId, generation),
+
     savePageClassifications: async (input) =>
       savePageClassifications(db, await scopeOf(input.folderId), input),
 
@@ -2152,6 +2163,8 @@ export function registerPipelineJobs(
   registry.register('doc.classify_pages', createClassifyPagesHandler(segmentation));
   registry.register('doc.segment', createSegmentHandler(segmentation));
   registry.register('doc.extract_fields', createExtractFieldsHandler(segmentation));
+  registry.register('doc.extract_document', createExtractDocumentHandler(segmentation));
+  registry.register('doc.extract_finalize', createExtractFinalizeHandler(segmentation));
   registry.register('doc.parse_registry', createParseRegistryHandler(segmentation));
   registry.register('doc.match_registry', createMatchRegistryHandler(segmentation));
   registry.register('graph.build', createGraphBuildHandler(segmentation));

@@ -539,6 +539,27 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * Перемотать вперёд отсрочки очереди.
+ *
+ * Барьер веера извлечения (`doc.extract_finalize`, S44) на первый вопрос
+ * отвечает отсрочкой: веер ещё считается. Отсрочка кладёт задачу в `queued` с
+ * `run_after` через минуту, и обход, идущий без часов, объявил бы очередь
+ * пустой ровно тогда, когда работа продолжается.
+ *
+ * Двигаются ТОЛЬКО отложенные задачи (`next_run_at > now()`), и это не подмена
+ * поведения: ожидание проверяется отдельным утверждением про исход `deferred`,
+ * а здесь проверяется то, что после ожидания конвейер доходит до конца.
+ */
+async function fastForwardDeferrals(): Promise<number> {
+  const moved = await testDb.query<{ id: string }>(
+    `UPDATE jobs SET next_run_at = now()
+      WHERE status = 'queued' AND next_run_at > now()
+      RETURNING id`,
+  );
+  return moved.length;
+}
+
 async function drainQueue(maxRounds = 160): Promise<void> {
   let idle = 0;
   for (let round = 0; round < maxRounds; round += 1) {
@@ -548,7 +569,13 @@ async function drainQueue(maxRounds = 160): Promise<void> {
       continue;
     }
     idle += 1;
-    if (idle > 3) return;
+    if (idle > 3) {
+      if ((await fastForwardDeferrals()) > 0) {
+        idle = 0;
+        continue;
+      }
+      return;
+    }
     await sleep(120);
   }
   throw new Error('очередь не опустела за отведённое число проходов');
@@ -585,10 +612,34 @@ describe('задачи 14–19 действительно выполняются
   });
 
   it('ни одна задача не завершилась отказом', async () => {
+    // `deferred` — не отказ, а ответ «работы ещё нет» (0041). Барьер веера
+    // извлечения отвечает им штатно, пока веер считается, и записывать его в
+    // отказы значило бы объявить ожидание дефектом.
     const failed = await testDb.query<{ job_type: string; error_message: string }>(
-      `SELECT job_type, error_message FROM job_runs WHERE outcome <> 'succeeded'`,
+      `SELECT job_type, error_message FROM job_runs
+        WHERE outcome NOT IN ('succeeded', 'deferred')`,
     );
     expect(failed).toEqual([]);
+  });
+
+  it('веер извлечения разложен по документам и закрыт барьером', async () => {
+    // Отказ S5 в этом месте выглядел бы так: задача-постановщик отработала, а
+    // её веер никто не выполнил. Проверяется, что задач документа столько же,
+    // сколько документов, и что барьер за ними успешно закрылся.
+    const documents = await count(
+      `SELECT count(*) FROM logical_documents WHERE folder_id = '${FOLDER}'`,
+    );
+    const fanned = await count(
+      `SELECT count(*) FROM job_runs WHERE job_type = 'doc.extract_document'
+        AND outcome = 'succeeded'`,
+    );
+    expect(fanned).toBe(documents);
+
+    const finalized = await count(
+      `SELECT count(*) FROM job_runs WHERE job_type = 'doc.extract_finalize'
+        AND outcome = 'succeeded'`,
+    );
+    expect(finalized).toBe(1);
   });
 });
 
