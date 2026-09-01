@@ -43,6 +43,7 @@ import {
 } from '@id/db';
 import {
   attentionFlagSchema,
+  classifySheet,
   LEGACY_MARKUP_POLICY,
   parseMarkupPolicy,
   type AttentionFlag,
@@ -1138,6 +1139,40 @@ async function pagesWithManualBlocks(
 }
 
 /** Карта «индекс страницы рабочего PDF → id исходной страницы» под областью. */
+/**
+ * Размеры страниц рабочего документа в ПУНКТАХ, по индексу страницы.
+ *
+ * Отдельно от `loadPageMap` намеренно: тот отвечает на вопрос «какой исходной
+ * странице соответствует эта рабочая» и нужен пяти вызывающим, а размеры нужны
+ * ровно одному — заплатке покрытия, которой запрещено трогать крупные листы.
+ * Расширить общий запрос значило бы обязать четырёх остальных читать поля,
+ * которые им не нужны.
+ *
+ * Колонки названы `_px` исторически: в них лежат округлённые пункты
+ * (`apps/api/src/modules/files/verify.ts`), и `classifySheet` ждёт именно их.
+ */
+async function loadPageSizes(
+  db: Database,
+  scope: AuthScope,
+  bundleId: string,
+): Promise<ReadonlyMap<number, { readonly widthPt: number; readonly heightPt: number }>> {
+  const rows = await db
+    .select({
+      workingPageIndex: processingBundlePages.workingPageIndex,
+      widthPt: sourcePages.widthPx,
+      heightPt: sourcePages.heightPx,
+    })
+    .from(processingBundlePages)
+    .innerJoin(processingBundles, eq(processingBundlePages.bundleId, processingBundles.id))
+    .innerJoin(submissionRevisions, eq(processingBundles.revisionId, submissionRevisions.id))
+    .innerJoin(sourcePages, eq(processingBundlePages.sourcePageId, sourcePages.id))
+    .where(withScope(scope, REVISION_SCOPE, eq(processingBundlePages.bundleId, bundleId)));
+
+  return new Map(
+    rows.map((row) => [row.workingPageIndex, { widthPt: row.widthPt, heightPt: row.heightPt }]),
+  );
+}
+
 async function loadPageMap(
   db: Database,
   scope: AuthScope,
@@ -1633,6 +1668,17 @@ export interface TextCoverageFallbackResult {
  * `replacePageWithFullPageBlock`, где это верно — там её ставит человек)
  * навсегда закрыла бы странице повторную детекцию.
  */
+/**
+ * Крупный ли лист. Неизвестный размер — НЕ крупный: страницу с нечитаемой
+ * геометрией заплатка обязана обработать как раньше, а не выбросить молча.
+ */
+function isLargeSheet(
+  size: { readonly widthPt: number; readonly heightPt: number } | undefined,
+): boolean {
+  if (size === undefined) return false;
+  return classifySheet(size.widthPt, size.heightPt).sheetClass === 'large';
+}
+
 export async function applyTextCoverageFallback(
   db: Database,
   scope: AuthScope,
@@ -1652,6 +1698,24 @@ export async function applyTextCoverageFallback(
   const pages = await loadPageMap(db, scope, layout.bundleId, []);
   if (pages.size === 0) return { version: layout.version, pages: [] };
 
+  /**
+   * Правило 0: при `sheet_aware` крупный лист не трогается никогда.
+   *
+   * Иначе заплатка отменяла бы решение разметки ровно там, где оно принято
+   * осознанно: на крупном листе портал ищет ТОЛЬКО штамп, и лист, оставшийся
+   * без блоков, — это «штамп не найден, нужен человек», а не «детекция не
+   * справилась». Полностраничный `text` на листе A1 отправил бы чертёж в
+   * текстовый промт и стёр бы флаг, ради которого страница и осталась пустой.
+   *
+   * Правило читается из ПИНА ревизии, а не из настройки: заплатку жмут кнопкой
+   * «Проверить» уже после разметки, и настройка к этому моменту могла смениться
+   * — тогда лист судился бы одним правилом, а размечался другим.
+   */
+  const skipLargeSheets = layout.markupPolicy.sheetStrategy === 'sheet_aware';
+  const sizes = skipLargeSheets
+    ? await loadPageSizes(db, scope, layout.bundleId)
+    : new Map<number, { readonly widthPt: number; readonly heightPt: number }>();
+
   const blocks = await listLayoutBlocks(db, scope, layout.id);
   const byPage = new Map<number, LayoutBlockView[]>();
   for (const block of blocks) {
@@ -1663,6 +1727,7 @@ export async function applyTextCoverageFallback(
   const ratio = input.thresholds.textFallbackCoverageRatio;
   const targets: number[] = [];
   for (const workingPageIndex of pages.keys()) {
+    if (skipLargeSheets && isLargeSheet(sizes.get(workingPageIndex))) continue;
     const own = byPage.get(workingPageIndex) ?? [];
     if (own.length === 0) {
       targets.push(workingPageIndex);

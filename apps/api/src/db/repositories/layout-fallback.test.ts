@@ -285,4 +285,87 @@ describe('applyTextCoverageFallback', () => {
     expect(result.pages).not.toContain(PAGE_SPARSE);
     expect(result.pages).toContain(PAGE_EMPTY);
   });
+
+  /**
+   * Правило 0: при `sheet_aware` крупный лист заплатке не принадлежит.
+   *
+   * Без него заплатка отменяла бы решение разметки ровно там, где оно принято
+   * осознанно: на крупном листе портал ищет ТОЛЬКО штамп, и пустой лист — это
+   * «штампа нет, нужен человек», а не «детекция не справилась». Полностраничный
+   * `text` на A1 отправил бы чертёж в текстовый промт и стёр бы флаг, ради
+   * которого страница и осталась пустой.
+   *
+   * Фикстура здесь удачна сама по себе: её страницы 1654×2339 pt — это A1 по
+   * правилу форматов, то есть ровно тот случай, который заплатка обязана
+   * пропустить.
+   */
+  describe('правило разметки по формату листа', () => {
+    const layout3 = id(10);
+
+    beforeAll(async () => {
+      // Черновик у поставки ровно один: прежний уступает место.
+      await testDb.query(
+        `UPDATE layout_revisions
+            SET state = 'superseded', blocks_hash = '${'d'.repeat(64)}'
+          WHERE state = 'draft' AND revision_id = '${REVISION}'`,
+      );
+      await testDb.query(
+        `INSERT INTO layout_revisions
+           (id, revision_id, object_id, bundle_id, revision_no, state, markup_policy)
+         VALUES ('${layout3}', '${REVISION}', '${OBJECT}', '${BUNDLE}', 3, 'draft',
+                 '{"version":1,"sheetStrategy":"sheet_aware","numberZone":"near_stamp","numberZonePad":{"x":0.1,"y":0.25}}'::jsonb)`,
+      );
+    });
+
+    it('крупные листы без блоков не получают полностраничной заплатки', async () => {
+      const before = await findLayoutRevision(db, SCOPE, layout3);
+
+      const result = await applyTextCoverageFallback(db, SCOPE, {
+        layoutRevisionId: layout3,
+        expectedVersion: before?.version ?? 0,
+        thresholds: FALLBACK_LAYOUT_THRESHOLDS,
+      });
+
+      // Ни одной цели: все пять страниц крупные, хотя блоков нет ни на одной.
+      expect(result.pages).toEqual([]);
+      expect(await listLayoutBlocks(db, SCOPE, layout3)).toEqual([]);
+    });
+
+    it('малый лист заплатку по-прежнему получает', async () => {
+      // Отрицательный контроль: правило снимает заплатку с КРУПНЫХ листов, а не
+      // выключает её. Иначе A4 без блоков молча остался бы без текста.
+      await testDb.query(
+        `UPDATE source_pages SET width_px = 595, height_px = 842
+          WHERE id = '${id(100 + PAGE_EMPTY)}'`,
+      );
+      const before = await findLayoutRevision(db, SCOPE, layout3);
+
+      const result = await applyTextCoverageFallback(db, SCOPE, {
+        layoutRevisionId: layout3,
+        expectedVersion: before?.version ?? 0,
+        thresholds: FALLBACK_LAYOUT_THRESHOLDS,
+      });
+
+      expect(result.pages).toEqual([PAGE_EMPTY]);
+    });
+
+    it('при detect_all крупный лист заплатку получает как раньше', async () => {
+      // Правило обратимо: ревизия, размеченная прежним способом, судится
+      // прежним способом — это и есть смысл пина.
+      await testDb.query(
+        `UPDATE layout_revisions
+            SET markup_policy = '{"version":1,"sheetStrategy":"detect_all","numberZone":"off","numberZonePad":{"x":0.1,"y":0.25}}'::jsonb
+          WHERE id = '${layout3}'`,
+      );
+      const before = await findLayoutRevision(db, SCOPE, layout3);
+
+      const result = await applyTextCoverageFallback(db, SCOPE, {
+        layoutRevisionId: layout3,
+        expectedVersion: before?.version ?? 0,
+        thresholds: FALLBACK_LAYOUT_THRESHOLDS,
+      });
+
+      expect(result.pages).toEqual([PAGE_SPARSE, PAGE_COVERED, PAGE_SCHEME, PAGE_MANUAL]);
+    });
+  });
 });
