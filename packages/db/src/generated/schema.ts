@@ -1150,6 +1150,35 @@ export const appSettings = pgTable("app_settings", {
 		}),
 ]);
 
+export const jobs = pgTable("jobs", {
+	id: uuid().defaultRandom().primaryKey().notNull(),
+	type: text().notNull(),
+	payload: jsonb().default({}).notNull(),
+	status: text().default('queued').notNull(),
+	attempts: integer().default(0).notNull(),
+	maxAttempts: integer("max_attempts").default(5).notNull(),
+	nextRunAt: timestamp("next_run_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	lockedBy: text("locked_by"),
+	lockedUntil: timestamp("locked_until", { withTimezone: true, mode: 'string' }),
+	lastError: text("last_error"),
+	priority: integer().default(100).notNull(),
+	dedupeKey: text("dedupe_key"),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	updatedAt: timestamp("updated_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	leaseExpiries: integer("lease_expiries").default(0).notNull(),
+}, (table) => [
+	index("ix_jobs_claim").using("btree", table.priority.desc().nullsFirst().op("int4_ops"), table.nextRunAt.asc().nullsLast().op("timestamptz_ops")).where(sql`(status = 'queued'::text)`),
+	index("ix_jobs_lease").using("btree", table.lockedUntil.asc().nullsLast().op("timestamptz_ops")).where(sql`(status = 'running'::text)`),
+	index("ix_jobs_revision").using("btree", sql`((payload ->> 'revisionId'::text))`).where(sql`(status = ANY (ARRAY['queued'::text, 'running'::text, 'failed'::text]))`),
+	index("ix_jobs_status_next_run").using("btree", table.status.asc().nullsLast().op("timestamptz_ops"), table.nextRunAt.asc().nullsLast().op("timestamptz_ops")),
+	uniqueIndex("ux_jobs_dedupe_key").using("btree", table.dedupeKey.asc().nullsLast().op("text_ops")).where(sql`((dedupe_key IS NOT NULL) AND (status <> ALL (ARRAY['done'::text, 'cancelled'::text])))`),
+	check("jobs_type_chk", sql`type ~ '^[a-z][a-z0-9_]*([.][a-z0-9_]+)*$'::text`),
+	check("jobs_status_chk", sql`status = ANY (ARRAY['queued'::text, 'running'::text, 'done'::text, 'failed'::text, 'cancelled'::text])`),
+	check("jobs_attempts_chk", sql`attempts >= 0`),
+	check("jobs_max_attempts_chk", sql`max_attempts > 0`),
+	check("jobs_lease_expiries_chk", sql`lease_expiries >= 0`),
+]);
+
 export const errorEventsLegacy = pgTable("error_events_legacy", {
 	fingerprint: text().primaryKey().notNull(),
 	errorClass: text("error_class").notNull(),
@@ -1174,35 +1203,6 @@ export const errorEventsLegacy = pgTable("error_events_legacy", {
 		}),
 	check("error_events_count_chk", sql`count > 0`),
 	check("error_events_status_chk", sql`status = ANY (ARRAY['new'::text, 'ack'::text, 'resolved'::text])`),
-]);
-
-export const jobs = pgTable("jobs", {
-	id: uuid().defaultRandom().primaryKey().notNull(),
-	type: text().notNull(),
-	payload: jsonb().default({}).notNull(),
-	status: text().default('queued').notNull(),
-	attempts: integer().default(0).notNull(),
-	maxAttempts: integer("max_attempts").default(5).notNull(),
-	nextRunAt: timestamp("next_run_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-	lockedBy: text("locked_by"),
-	lockedUntil: timestamp("locked_until", { withTimezone: true, mode: 'string' }),
-	lastError: text("last_error"),
-	priority: integer().default(100).notNull(),
-	dedupeKey: text("dedupe_key"),
-	leaseExpiries: integer("lease_expiries").default(0).notNull(),
-	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-	updatedAt: timestamp("updated_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-}, (table) => [
-	index("ix_jobs_claim").using("btree", table.priority.desc().nullsFirst().op("int4_ops"), table.nextRunAt.asc().nullsLast().op("timestamptz_ops")).where(sql`(status = 'queued'::text)`),
-	index("ix_jobs_lease").using("btree", table.lockedUntil.asc().nullsLast().op("timestamptz_ops")).where(sql`(status = 'running'::text)`),
-	index("ix_jobs_revision").using("btree", sql`((payload ->> 'revisionId'::text))`).where(sql`(status = ANY (ARRAY['queued'::text, 'running'::text, 'failed'::text]))`),
-	index("ix_jobs_status_next_run").using("btree", table.status.asc().nullsLast().op("timestamptz_ops"), table.nextRunAt.asc().nullsLast().op("timestamptz_ops")),
-	uniqueIndex("ux_jobs_dedupe_key").using("btree", table.dedupeKey.asc().nullsLast().op("text_ops")).where(sql`((dedupe_key IS NOT NULL) AND (status <> ALL (ARRAY['done'::text, 'cancelled'::text])))`),
-	check("jobs_type_chk", sql`type ~ '^[a-z][a-z0-9_]*([.][a-z0-9_]+)*$'::text`),
-	check("jobs_status_chk", sql`status = ANY (ARRAY['queued'::text, 'running'::text, 'done'::text, 'failed'::text, 'cancelled'::text])`),
-	check("jobs_attempts_chk", sql`attempts >= 0`),
-	check("jobs_max_attempts_chk", sql`max_attempts > 0`),
-	check("jobs_lease_expiries_chk", sql`lease_expiries >= 0`),
 ]);
 
 export const jobRuns = pgTable("job_runs", {
