@@ -34,7 +34,7 @@
  * вставить всё равно не даст `layout_revision_id UNIQUE`. Требование разнести
  * создание и приём байтов двумя независимыми вызовами — пункт техзадания S13.
  */
-import type { AttentionFlag, BlockType, ShapeType } from '@id/contracts';
+import type { AttentionFlag, BlockType, MarkupPolicy, ShapeType } from '@id/contracts';
 import type { JobContext, JobHandler } from '@id/api';
 import {
   analyzePages,
@@ -62,6 +62,14 @@ export interface MarkupTarget {
   readonly pageIndices: readonly number[];
   readonly thresholds: LayoutThresholds;
   readonly layoutProfileVersion: number | null;
+  /**
+   * Правило разметки, ЗАПИНЕННОЕ на ревизии (S42): что портал ищет на странице.
+   *
+   * Приходит из ревизии, а не из настроек: постраничные задачи исполняются
+   * минутами и вразнобой, и настройка, сменившаяся между ними, разъехалась бы
+   * по одной ревизии двумя правилами.
+   */
+  readonly markupPolicy: MarkupPolicy;
 }
 
 export interface RunDocumentRef {

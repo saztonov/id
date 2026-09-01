@@ -15,6 +15,8 @@
 import { Readable } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
 
+import { LEGACY_MARKUP_POLICY } from '@id/contracts';
+
 import {
   FALLBACK_LAYOUT_THRESHOLDS,
   RdWebError,
@@ -92,6 +94,10 @@ function target(overrides: Partial<MarkupTarget> = {}): MarkupTarget {
     pageIndices: [0, 1, 2],
     thresholds: FALLBACK_LAYOUT_THRESHOLDS,
     layoutProfileVersion: 1,
+    // Прежнее правило разметки: легаси-путь RD WEB правила форматов не знает и
+    // никогда не получит — `markupPolicyFromSettings` возвращает ему
+    // `detect_all` независимо от настройки.
+    markupPolicy: LEGACY_MARKUP_POLICY,
     ...overrides,
   };
 }

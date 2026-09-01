@@ -657,6 +657,7 @@ async function buildMarkupTarget(
     // разошедшиеся значения дали бы флаги, не совпадающие с экраном.
     thresholds: profile?.thresholds ?? FALLBACK_LAYOUT_THRESHOLDS,
     layoutProfileVersion: profile?.version ?? null,
+    markupPolicy: layout.markupPolicy,
   };
 }
 
@@ -967,11 +968,16 @@ function localDetectionDeps(options: PipelineJobsOptions): LocalDetectionDeps {
         layoutRevisionId: input.layoutRevisionId,
         workingPageIndices: input.workingPageIndices,
         blocks: input.blocks,
-        // Провенанс локального детектора — отдельное значение от легаси
-        // `rd_detr`... то есть в точности `rf_detr`, как и у RD WEB (§0.1):
-        // портал переиспользует ОДНУ и ту же модель детекции, менялся только
-        // способ инференса (локально vs через RD WEB), а не архитектура сети.
-        provenance: 'rf_detr',
+        /**
+         * Провенанс приходит от обработчика (S42), а не зашит здесь.
+         *
+         * Раньше он был константой `rf_detr`: локальный детектор — та же модель,
+         * что у RD WEB, менялся только способ инференса, а не архитектура сети.
+         * Теперь обработчик размечает часть страниц БЕЗ модели вовсе — лист A4
+         * получает один блок на всю страницу, — и назвать это `rf_detr` значило
+         * бы приписать модели работу, которой она не делала.
+         */
+        provenance: input.provenance,
       });
       return { imported: result.imported, skippedPages: result.skippedPages };
     },

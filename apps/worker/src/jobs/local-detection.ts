@@ -50,6 +50,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
+  classifySheet,
+  resolvePageMarkupMode,
+  type MarkupPolicy,
+  type SheetFormat,
+} from '@id/contracts';
+import {
   effectiveRasterDpi,
   errorDigest,
   type BundlePageView,
@@ -150,6 +156,17 @@ export interface LocalDetectionDeps {
     readonly layoutRevisionId: string;
     readonly workingPageIndices: readonly number[];
     readonly blocks: readonly DetectedBlockInput[];
+    /**
+     * Откуда взялись эти блоки (S42).
+     *
+     * Импорт зовётся ОДИН РАЗ НА ПРОВЕНАНС, а не один раз на пачку: страницы,
+     * размеченные полностраничным блоком, и страницы, обведённые детектором, —
+     * это разные ответы на вопрос «кто это нарисовал», и записать их одним
+     * значением значило бы соврать в провенансе одной из групп. Наборы страниц
+     * у групп не пересекаются, поэтому удаление прежних `source='auto'` внутри
+     * репозитория остаётся корректным.
+     */
+    readonly provenance: 'rf_detr' | 'full_page';
   }): Promise<{ readonly imported: number; readonly skippedPages: readonly number[] }>;
 }
 
@@ -199,6 +216,16 @@ async function recordEmptyPageFeedback(
     readonly modelVersion: string;
     readonly threshold: number;
     readonly stats: DetectPageStats;
+    /**
+     * Крупный лист, на котором детектор что-то нашёл, но не штамп (S42).
+     *
+     * Третий код причины, а не оттенок двух прежних: `detect.no_blocks`
+     * означает дефект конвейера (рендер, порог, модель), а «штампа нет» —
+     * свойство ВХОДЯЩЕЙ документации, то есть метрика качества комплекта.
+     * Склеив их, портал потерял бы единственный срез, по которому это
+     * различается.
+     */
+    readonly sawSomething?: boolean;
   },
 ): Promise<void> {
   const sink = deps.feedback;
@@ -206,6 +233,12 @@ async function recordEmptyPageFeedback(
 
   const best = bestRejected(input.stats);
   const nearThreshold = best !== null && best >= input.threshold * LOW_SCORE_HINT_RATIO;
+  const reasonCode =
+    input.sawSomething === true
+      ? 'detect.no_stamp'
+      : nearThreshold
+        ? 'detect.low_score'
+        : 'detect.no_blocks';
 
   await sink.record({
     // Тип из закрытого перечня (миграция 0024): отдельного «wrong_detection»
@@ -213,7 +246,7 @@ async function recordEmptyPageFeedback(
     // получил того, что должен был». Различает случаи код причины, по нему же
     // строится годовой ряд.
     feedbackType: 'recognition_failure',
-    reasonCode: nearThreshold ? 'detect.low_score' : 'detect.no_blocks',
+    reasonCode,
     severity: 'warn',
     revisionId: input.revisionId,
     sourcePageId: input.sourcePageId,
@@ -322,11 +355,241 @@ function toBlockInput(
   };
 }
 
+/**
+ * Что делать с одной страницей пачки.
+ *
+ * Отдельный тип и отдельная ЧИСТАЯ функция, а не ветвление внутри цикла: от
+ * плана зависит, понадобится ли задаче модель детекции вообще, и проверить это
+ * иначе как юнит-тестом без ONNX и растеризатора невозможно. Заодно план — это
+ * ответ на вопрос «почему на 47-й странице один блок», который уезжает в
+ * журнал, а не выводится из тишины.
+ */
+export type PagePlanEntry =
+  | { readonly kind: 'skip_existing'; readonly pageIndex: number }
+  | { readonly kind: 'missing_geometry'; readonly pageIndex: number }
+  | {
+      readonly kind: 'full_page';
+      readonly pageIndex: number;
+      readonly page: BundlePageView;
+      readonly format: SheetFormat;
+    }
+  | {
+      readonly kind: 'detect';
+      readonly pageIndex: number;
+      readonly page: BundlePageView;
+      readonly format: SheetFormat;
+      readonly mode: 'stamp_only' | 'full_detection';
+    };
+
+/**
+ * План пачки: страница → режим её разметки.
+ *
+ * Решение принимает ОБРАБОТЧИК, а не постановщик задач, и это осознанно.
+ * Отфильтруй мы страницы при постановке, ключ дедупликации остался бы прежним,
+ * а задачи бы не было — и «задачи нет, потому что не нужна» стало бы
+ * неотличимо от «задачи нет, потому что она уже была». Плюс правило пришлось бы
+ * читать зонду разворота, у которого карты страниц под рукой нет вовсе.
+ */
+export function planDetectionPages(input: {
+  readonly pageIndices: readonly number[];
+  readonly geometryByPage: ReadonlyMap<number, BundlePageView>;
+  readonly alreadyHasBlocks: ReadonlySet<number>;
+  readonly policy: MarkupPolicy;
+}): readonly PagePlanEntry[] {
+  return input.pageIndices.map((pageIndex): PagePlanEntry => {
+    if (input.alreadyHasBlocks.has(pageIndex)) return { kind: 'skip_existing', pageIndex };
+
+    const page = input.geometryByPage.get(pageIndex);
+    if (page === undefined) return { kind: 'missing_geometry', pageIndex };
+
+    const format = classifySheet(page.widthPx, page.heightPx);
+    const mode = resolvePageMarkupMode(format.sheetClass, input.policy);
+    if (mode === 'full_page') return { kind: 'full_page', pageIndex, page, format };
+    return { kind: 'detect', pageIndex, page, format, mode };
+  });
+}
+
+/**
+ * Полностраничный текстовый блок — разметка листа A4 и мельче.
+ *
+ * `detectionScore`/`detectionModelVersion` НЕ заполняются, и это не упущение:
+ * репозиторий требует их парой и только у блока, который действительно нарисовал
+ * детектор (`insertBlock`). Здесь модель не запускалась вовсе, и число
+ * уверенности пришлось бы выдумать.
+ */
+function fullPageBlock(workingPageIndex: number): DetectedBlockInput {
+  return {
+    workingPageIndex,
+    blockType: 'text',
+    shapeType: 'rectangle',
+    x0: 0,
+    y0: 0,
+    x1: 1,
+    y1: 1,
+    sortOrder: 0,
+    points: [],
+  };
+}
+
+/** Прямоугольник, охватывающий все переданные. `null` — их нет. */
+function unionRect(rects: readonly Rect[]): Rect | null {
+  if (rects.length === 0) return null;
+  let [x0, y0, x1, y1] = rects[0] as Rect;
+  for (const rect of rects.slice(1)) {
+    x0 = Math.min(x0, rect[0]);
+    y0 = Math.min(y0, rect[1]);
+    x1 = Math.max(x1, rect[2]);
+    y1 = Math.max(y1, rect[3]);
+  }
+  return [x0, y0, x1, y1];
+}
+
+function rectsIntersect(a: Rect, b: Rect): boolean {
+  return a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3];
+}
+
+/**
+ * Отбор кандидатов на КРУПНОМ листе: штампы и зона номера листа.
+ *
+ * ## Почему только штамп
+ *
+ * Крупный формат в комплекте ИД — это исполнительная схема или чертёж. Текст на
+ * нём принадлежит самому чертежу (экспликации, выноски, размеры), и в текст
+ * страницы ему не нужно: сверку с реестром приложений и разбор комплекта ведёт
+ * основная надпись, а не подписи к осям. Распознавать остальное значило бы
+ * платить за каждый лист вызовом модели, ничего не получая взамен.
+ *
+ * ## Почему вместе со штампом остаётся зона номера
+ *
+ * Собственный номер листа напечатан ОТДЕЛЬНОЙ мелкой ячейкой рядом со штампом
+ * или над ним — вне его прямоугольника. В самом штампе стоит «Обозначение»
+ * проекта, общее у всех листов раздела, и без номера каждая исполнительная
+ * схема оказывалась бы «нет в комплекте» при сверке с реестром приложений.
+ * Поэтому текстовые кандидаты, попавшие в околоштамповую зону, остаются: их
+ * текст доедет до страницы, и номер найдёт то же правило «№ …», которым портал
+ * уже пользуется.
+ *
+ * Синтетический прямоугольник зоны НЕ рисуется: на реальных схемах номер стоит
+ * то над штампом, то в правом верхнем углу, и вывести его геометрию из формы
+ * штампа — гадание. Берутся только настоящие кандидаты; нет их — нет и номера,
+ * и это видно по флагу внимания.
+ *
+ * Отбор стоит ЗДЕСЬ, а не внутри `detectPage`: там числовой паритет с
+ * референсом и статистика `rawByType`/`bestRejectedScore`, по которой только и
+ * отличимо «нашли девять текстов и ни одного штампа» от «не нашли ничего».
+ * Отфильтровав раньше статистики, портал уничтожил бы это различие ровно там,
+ * где оно и нужно.
+ */
+export function selectLargeSheetBlocks(
+  candidates: readonly Candidate[],
+  policy: MarkupPolicy,
+): { readonly kept: readonly Candidate[]; readonly numberZone: number } {
+  const stamps = candidates.filter((candidate) => candidate.blockType === 'stamp');
+  if (policy.numberZone === 'off' || stamps.length === 0) {
+    return { kept: stamps, numberZone: 0 };
+  }
+
+  const around = unionRect(stamps.map((stamp) => [...stamp.coordsNorm] as Rect));
+  if (around === null) return { kept: stamps, numberZone: 0 };
+
+  const { x: padX, y: padY } = policy.numberZonePad;
+  const zone: Rect = [
+    Math.max(0, around[0] - padX),
+    // Вверх — на padY, вниз тоже: номер бывает и под штампом, а лишняя полоса
+    // вниз почти всегда упирается в край листа.
+    Math.max(0, around[1] - padY),
+    Math.min(1, around[2] + padX),
+    Math.min(1, around[3] + padY),
+  ];
+
+  const nearby = candidates.filter(
+    (candidate) =>
+      candidate.blockType === 'text' && rectsIntersect([...candidate.coordsNorm] as Rect, zone),
+  );
+
+  return { kept: [...stamps, ...nearby], numberZone: nearby.length };
+}
+
 function orderReadingWise(candidates: readonly Candidate[]): readonly Candidate[] {
   return [...candidates].sort((a, b) => {
     const dy = a.coordsNorm[1] - b.coordsNorm[1];
     return dy !== 0 ? dy : a.coordsNorm[0] - b.coordsNorm[0];
   });
+}
+
+/** Готовый к работе детектор: то, без чего нельзя обработать ни одну страницу. */
+interface PreparedDetector {
+  readonly rasterizer: PageRasterizer;
+  readonly session: Awaited<ReturnType<ModelStore['ensureModel']>>['session'];
+  readonly params: ReturnType<typeof applyParamOverrides>;
+  readonly inferenceMode: InferenceMode | typeof INFERENCE_MODE_AUTO;
+}
+
+/**
+ * Гейты конфигурации и загрузка модели — только когда детектор нужен.
+ *
+ * Отказ называет формат листа, из-за которого он понадобился: на комплекте из
+ * двухсот A4 и одного A1 упадёт ровно одна задача из двухсот, и без формата в
+ * тексте оператор не поймёт, почему.
+ */
+async function prepareDetector(
+  deps: LocalDetectionDeps,
+  ctx: JobContext<'layout.detect_local'>,
+  settings: Awaited<ReturnType<LocalDetectionDeps['detectionSettings']>>,
+  plan: readonly PagePlanEntry[],
+): Promise<PreparedDetector> {
+  const sample = plan.find((entry) => entry.kind === 'detect');
+  const why =
+    sample?.kind === 'detect'
+      ? `лист ${sample.format.code ?? 'нестандартного формата'} крупнее A4 (страница ${String(sample.pageIndex + 1)})`
+      : 'страницы пачки';
+
+  if (settings.modelVersion.trim() === '') {
+    throw new DetectionConfigurationError(
+      `модель детекции не загружена, а на пачке есть ${why}: задайте detection.model_version ` +
+        'в администрировании и выложите файлы модели, прежде чем запускать локальную детекцию',
+    );
+  }
+  if (deps.rasterizer === null) {
+    throw new DetectionConfigurationError(
+      `локальная детекция недоступна, а на пачке есть ${why}: на воркере не найден растеризатор ` +
+        'PDF (нужен poppler/pdftoppm). Установите poppler-utils либо задайте PDFTOPPM_PATH.',
+    );
+  }
+
+  const {
+    session,
+    params: manifestParamsForModel,
+    warnings,
+  } = await deps.modelStore.ensureModel(settings.modelVersion);
+  for (const warning of warnings) {
+    ctx.logger.warn({ event: 'detect_local_model_warning' }, warning);
+  }
+
+  /**
+   * Настройки портала поверх параметров манифеста.
+   *
+   * Незаполненная карточка ничего не меняет — `applyParamOverrides` трактует
+   * `null` как «из манифеста». В журнал уходит РАЗНИЦА, а не сам объект
+   * настроек: «порог 0.5» в записи не отвечает на вопрос, пришёл он из модели
+   * или из админки, а объяснить прошлую разметку можно только по этому ответу.
+   */
+  const params = applyParamOverrides(manifestParamsForModel, settings.overrides);
+  const appliedOverrides = describeAppliedOverrides(manifestParamsForModel, params);
+  const inferenceMode = settings.inferenceMode ?? INFERENCE_MODE_AUTO;
+  if (Object.keys(appliedOverrides).length > 0 || inferenceMode !== INFERENCE_MODE_AUTO) {
+    ctx.logger.info(
+      {
+        event: 'detect_local_overrides',
+        model_version: settings.modelVersion,
+        inference_mode: inferenceMode,
+        applied: appliedOverrides,
+      },
+      'параметры детекции переопределены настройками портала',
+    );
+  }
+
+  return { rasterizer: deps.rasterizer, session, params, inferenceMode };
 }
 
 export function createLocalDetectionHandler(
@@ -378,54 +641,8 @@ export function createLocalDetectionHandler(
       );
     }
 
-    // Конфигурационные отказы — до единой страницы (см. докстринг файла).
     const settings = await deps.detectionSettings();
-    if (settings.modelVersion.trim() === '') {
-      throw new DetectionConfigurationError(
-        'модель детекции не загружена: задайте detection.model_version в администрировании ' +
-          'и выложите файлы модели, прежде чем запускать локальную детекцию',
-      );
-    }
-    if (deps.rasterizer === null) {
-      throw new DetectionConfigurationError(
-        'локальная детекция недоступна: на воркере не найден растеризатор PDF (нужен poppler/pdftoppm). ' +
-          'Установите poppler-utils либо задайте PDFTOPPM_PATH.',
-      );
-    }
-    const rasterizer: PageRasterizer = deps.rasterizer;
-
-    const {
-      session,
-      params: manifestParamsForModel,
-      warnings,
-    } = await deps.modelStore.ensureModel(settings.modelVersion);
-    for (const warning of warnings) {
-      ctx.logger.warn({ event: 'detect_local_model_warning' }, warning);
-    }
-
-    /**
-     * Настройки портала поверх параметров манифеста.
-     *
-     * Незаполненная карточка ничего не меняет — `applyParamOverrides` трактует
-     * `null` как «из манифеста». В журнал уходит РАЗНИЦА, а не сам объект
-     * настроек: «порог 0.5» в записи не отвечает на вопрос, пришёл он из
-     * модели или из админки, а объяснить прошлую разметку можно только по
-     * этому ответу.
-     */
-    const params = applyParamOverrides(manifestParamsForModel, settings.overrides);
-    const appliedOverrides = describeAppliedOverrides(manifestParamsForModel, params);
-    const inferenceMode = settings.inferenceMode ?? INFERENCE_MODE_AUTO;
-    if (Object.keys(appliedOverrides).length > 0 || inferenceMode !== INFERENCE_MODE_AUTO) {
-      ctx.logger.info(
-        {
-          event: 'detect_local_overrides',
-          model_version: settings.modelVersion,
-          inference_mode: inferenceMode,
-          applied: appliedOverrides,
-        },
-        'параметры детекции переопределены настройками портала',
-      );
-    }
+    const policy = target.markupPolicy;
 
     const overwriteExisting = ctx.payload.overwriteExisting === true;
     const [geometry, alreadyHasBlocks] = await Promise.all([
@@ -439,20 +656,103 @@ export function createLocalDetectionHandler(
     ]);
     const geometryByPage = new Map(geometry.map((page) => [page.workingPageIndex, page]));
 
-    const scratchDir = await mkdtemp(join(deps.workDirBase ?? tmpdir(), 'id-detect-local-'));
+    /**
+     * План пачки строится ДО конфигурационных гейтов (S42).
+     *
+     * Прежде гейты стояли первыми и валили задачу до единой страницы: модель
+     * детекции была нужна всегда. При правиле форматов это перестало быть
+     * правдой — лист A4 размечается одним блоком на всю страницу, и ни ONNX, ни
+     * растеризатор, ни рабочий PDF для этого не нужны. Комплект без крупных
+     * листов обязан размечаться при пустой `detection.model_version` и без
+     * poppler на воркере, а отказ обязан наступать только там, где модель
+     * действительно требуется.
+     */
+    const plan = planDetectionPages({
+      pageIndices,
+      geometryByPage,
+      alreadyHasBlocks,
+      policy,
+    });
+    const needsDetector = plan.some((entry) => entry.kind === 'detect');
+
+    /**
+     * Конфигурационные отказы — только если детектор действительно нужен.
+     *
+     * Текст называет формат листа: оператор комплекта из двухсот A4 и одного A1
+     * иначе не поймёт, почему упала ровно одна задача из двухсот.
+     */
+    const detector = needsDetector ? await prepareDetector(deps, ctx, settings, plan) : null;
+
     let renderedPages = 0;
     let rotatedPages = 0;
     let renderFailedPages = 0;
     let sizeMismatchPages = 0;
     let emptyPages = 0;
+    let fullPagePages = 0;
+    let numberZoneBlocks = 0;
     const skippedExisting: number[] = [];
     const targetPageList: number[] = [];
+    const fullPagePageList: number[] = [];
     const perPageBlocks = new Map<number, DetectedBlockInput[]>();
 
-    const pdf = await deps.workingPdf(target.workingPdfKey);
-    const pdfPath = pdf.path;
+    /**
+     * Ни временного каталога, ни аренды рабочего PDF, если рендерить нечего.
+     *
+     * Это и есть цена правила форматов: на комплекте из одних A4 задача не
+     * скачивает стомегабайтный документ и не создаёт каталог ради ста строк в
+     * базе.
+     */
+    const scratchDir =
+      detector === null
+        ? null
+        : await mkdtemp(join(deps.workDirBase ?? tmpdir(), 'id-detect-local-'));
+    const pdf = detector === null ? null : await deps.workingPdf(target.workingPdfKey);
+    const pdfPath = pdf?.path ?? '';
     try {
-      for (const pageIndex of pageIndices) {
+      for (const entry of plan) {
+        const pageIndex = entry.pageIndex;
+
+        if (entry.kind === 'skip_existing') {
+          skippedExisting.push(pageIndex);
+          continue;
+        }
+        if (entry.kind === 'missing_geometry') {
+          ctx.logger.error(
+            { event: 'detect_local_page_missing', page: pageIndex },
+            'страницы нет в карте рабочего документа: пропущена',
+          );
+          continue;
+        }
+        if (entry.kind === 'full_page') {
+          /**
+           * Лист A4 и мельче: страница целиком — один текстовый блок.
+           *
+           * Ни рендера, ни инференса. `recordEmptyPageFeedback` здесь не
+           * зовётся и флаг `text_fallback_applied` не ставится: на малом листе
+           * это ШТАТНЫЙ путь, а не заплатка, и запись «дефект качества» на
+           * каждую вторую страницу комплекта испортила бы годовой ряд по
+           * причинам.
+           */
+          perPageBlocks.set(pageIndex, [fullPageBlock(pageIndex)]);
+          fullPagePageList.push(pageIndex);
+          fullPagePages += 1;
+          continue;
+        }
+
+        const { page, format, mode } = entry;
+        /**
+         * Инвариант плана: ветка `detect` существует ровно тогда, когда
+         * `needsDetector`, а тогда детектор и каталог подготовлены. Проверка —
+         * не защита от оператора, а страховка от рассинхрона плана и подготовки
+         * при будущей правке: молчаливый `null` здесь означал бы страницу,
+         * пропущенную без единой записи.
+         */
+        if (detector === null || scratchDir === null) {
+          throw new Error(
+            `внутренняя ошибка: страница ${String(pageIndex)} запланирована на детекцию, ` +
+              'но детектор не подготовлен',
+          );
+        }
         /**
          * Отменённую попытку не продолжаем (S41).
          *
@@ -466,20 +766,6 @@ export function createLocalDetectionHandler(
          */
         ctx.signal.throwIfAborted();
 
-        if (alreadyHasBlocks.has(pageIndex)) {
-          skippedExisting.push(pageIndex);
-          continue;
-        }
-
-        const page = geometryByPage.get(pageIndex);
-        if (page === undefined) {
-          ctx.logger.error(
-            { event: 'detect_local_page_missing', page: pageIndex },
-            'страницы нет в карте рабочего документа: пропущена',
-          );
-          continue;
-        }
-
         const pngPath = join(scratchDir, `page-${String(pageIndex).padStart(4, '0')}.png`);
         /**
          * Разрешение считается от размеров ЭТОЙ страницы (S41).
@@ -492,7 +778,7 @@ export function createLocalDetectionHandler(
         const dpi = effectiveRasterDpi(page.widthPx, page.heightPx);
         let rendered: { readonly widthPx: number; readonly heightPx: number };
         try {
-          rendered = await rasterizer.renderPage({
+          rendered = await detector.rasterizer.renderPage({
             pdfPath,
             pageIndex,
             dpi,
@@ -564,9 +850,9 @@ export function createLocalDetectionHandler(
           pngPath: inferencePath,
           widthPx: inferenceSize.widthPx,
           heightPx: inferenceSize.heightPx,
-          session,
-          params,
-          inferenceMode,
+          session: detector.session,
+          params: detector.params,
+          inferenceMode: detector.inferenceMode,
         });
         if (detected.warning !== null) {
           ctx.logger.warn(
@@ -585,7 +871,22 @@ export function createLocalDetectionHandler(
          * задом наперёд. Координаты же обязаны остаться там, где их рисует
          * экран разметки, — то есть в системе неповёрнутой страницы.
          */
-        const ordered = orderReadingWise(detected.candidates);
+        /**
+         * На крупном листе остаются только штамп и зона номера (S42).
+         *
+         * Отбор — ДО `orderReadingWise` и до нумерации: `sortOrder` обязан
+         * получиться плотным 0..n−1 по оставшимся блокам. Для канонического
+         * хэша дыры безразличны (он пересчитывает ранг внутри группы
+         * «страница×тип» сам), но `sort_order` читают экран разметки и порядок
+         * сборки текста страницы, и дыры там были бы просто мусором.
+         */
+        const selection =
+          mode === 'stamp_only'
+            ? selectLargeSheetBlocks(detected.candidates, policy)
+            : { kept: detected.candidates, numberZone: 0 };
+        numberZoneBlocks += selection.numberZone;
+
+        const ordered = orderReadingWise(selection.kept);
         const blocks = ordered.map((candidate, index) =>
           toBlockInput(
             pageIndex,
@@ -612,6 +913,14 @@ export function createLocalDetectionHandler(
           {
             event: 'detect_local_page_stats',
             page: pageIndex,
+            // Без этих трёх «почему крупный лист пуст» выводится только из
+            // тишины: «нашли 9 text, 0 stamp, оставили 0» — это ответ, и он
+            // обязан быть в журнале.
+            sheet_class: format.sheetClass,
+            sheet_format: format.code,
+            markup_mode: mode,
+            dropped_by_mode: detected.candidates.length - selection.kept.length,
+            number_zone_blocks: selection.numberZone,
             content_rotation: contentRotation,
             mode: detected.mode,
             mode_source: detected.modeSource,
@@ -622,7 +931,7 @@ export function createLocalDetectionHandler(
             final_by_type: detected.stats.finalByType,
             rejected_min_box: detected.stats.rejectedMinBox,
             best_rejected_score: detected.stats.bestRejectedScore,
-            threshold: params.defaultThreshold,
+            threshold: detector.params.defaultThreshold,
           },
           'детекция страницы завершена',
         );
@@ -634,36 +943,57 @@ export function createLocalDetectionHandler(
             sourcePageId: page.sourcePageId,
             workingPageIndex: pageIndex,
             modelVersion: settings.modelVersion,
-            threshold: params.defaultThreshold,
+            threshold: detector.params.defaultThreshold,
             stats: detected.stats,
+            // «Модель что-то видела, но штампа среди этого не было» — другой
+            // диагноз, чем «модель не увидела ничего»: первый говорит о
+            // качестве входящей документации, второй о дефекте конвейера.
+            sawSomething: mode === 'stamp_only' && detected.candidates.length > 0,
           });
         }
         perPageBlocks.set(pageIndex, blocks);
         targetPageList.push(pageIndex);
       }
     } finally {
-      await pdf.release();
-      await rm(scratchDir, { recursive: true, force: true });
+      if (pdf !== null) await pdf.release();
+      if (scratchDir !== null) await rm(scratchDir, { recursive: true, force: true });
     }
 
+    /**
+     * Импорт — по группе провенанса, а не одним вызовом.
+     *
+     * Полностраничный блок нарисовал не детектор, и записать его как `rf_detr`
+     * значило бы приписать модели работу, которой она не делала: провенанс
+     * читают и экран разметки, и repair-перенос результатов распознавания.
+     * Наборы страниц у групп не пересекаются по построению плана, поэтому
+     * удаление прежних `source='auto'` внутри репозитория остаётся корректным.
+     */
     let importedBlocks = 0;
-    let manualSkipped: readonly number[] = [];
-    if (targetPageList.length > 0) {
-      const blocks = targetPageList.flatMap((page) => perPageBlocks.get(page) ?? []);
+    const manualSkippedPages: number[] = [];
+    for (const group of [
+      { provenance: 'rf_detr', pages: targetPageList } as const,
+      { provenance: 'full_page', pages: fullPagePageList } as const,
+    ]) {
+      if (group.pages.length === 0) continue;
       const imported = await deps.importBlocks({
         revisionId: target.revisionId,
         layoutRevisionId: target.layoutRevisionId,
-        workingPageIndices: targetPageList,
-        blocks,
+        workingPageIndices: group.pages,
+        blocks: group.pages.flatMap((page) => perPageBlocks.get(page) ?? []),
+        provenance: group.provenance,
       });
-      importedBlocks = imported.imported;
-      manualSkipped = imported.skippedPages;
+      importedBlocks += imported.imported;
+      manualSkippedPages.push(...imported.skippedPages);
     }
+    const manualSkipped: readonly number[] = manualSkippedPages;
 
     ctx.logger.info(
       {
         event: 'detect_local_done',
         model_version: settings.modelVersion,
+        sheet_strategy: policy.sheetStrategy,
+        number_zone: policy.numberZone,
+        policy_version: policy.version,
         pages_requested: pageIndices.length,
         pages_skipped_existing: skippedExisting.length,
         pages_rendered: renderedPages,
@@ -671,6 +1001,8 @@ export function createLocalDetectionHandler(
         pages_render_failed: renderFailedPages,
         pages_size_mismatch: sizeMismatchPages,
         pages_empty: emptyPages,
+        pages_full_page: fullPagePages,
+        number_zone_blocks: numberZoneBlocks,
         pages_manual_skipped: manualSkipped.length,
         imported: importedBlocks,
         overwrite_existing: overwriteExisting,

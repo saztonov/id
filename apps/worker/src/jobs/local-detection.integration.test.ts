@@ -35,6 +35,7 @@ import type { Pool } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { createPgliteDatabase, createTestPool, type TestDatabase } from '@id/db-harness';
+import type { MarkupPolicy } from '@id/contracts';
 import { loadMigrations } from '@id/migrator';
 import {
   blobKey,
@@ -143,16 +144,73 @@ async function fixtureStatements(sha256: string, sizeBytes: number): Promise<rea
 }
 
 /** Растеризатор-двойник: пишет заранее сгенерированный PNG, размеры фиксированы. */
+/**
+ * Растеризатор-двойник, честный к размеру листа.
+ *
+ * Фикстура комплекта — квадратные страницы 72×72 pt, и на них хватало одной
+ * картинки 300×300. Сценарии правила форматов переразмечают страницу в крупный
+ * лист (S42), и рендер обязан отдавать размер, согласованный с картой страниц:
+ * иначе `checkRenderedSize` отвергнет страницу раньше, чем дойдёт до отбора
+ * блоков, и тест проверял бы сверку размеров вместо правила.
+ */
 class FakeRasterizer implements PageRasterizer {
   readonly kind = 'pdftoppm' as const;
   readonly version = 'fake-test';
+  readonly #cache = new Map<string, Buffer>();
   constructor(private readonly png: Buffer) {}
 
   async renderPage(input: RenderPageInput): Promise<RenderPageResult> {
-    await writeFile(input.outPath, this.png);
-    return { widthPx: RENDERED_SIZE, heightPx: RENDERED_SIZE };
+    const override = OVERSIZED_PAGES.get(input.pageIndex);
+    if (override === undefined) {
+      await writeFile(input.outPath, this.png);
+      return { widthPx: RENDERED_SIZE, heightPx: RENDERED_SIZE };
+    }
+
+    const scale = input.dpi / 72;
+    const widthPx = Math.round(override.widthPt * scale);
+    const heightPx = Math.round(override.heightPt * scale);
+    const key = `${String(widthPx)}x${String(heightPx)}`;
+    let png = this.#cache.get(key);
+    if (png === undefined) {
+      png = await gradientPng(widthPx, heightPx);
+      this.#cache.set(key, png);
+    }
+    await writeFile(input.outPath, png);
+    return { widthPx, heightPx };
   }
 }
+
+/**
+ * Растр с градиентом, а не однотонный.
+ *
+ * Крупный лист режется на плитки, и в тайловом режиме `detectPage` пропускает
+ * ПУСТЫЕ плитки, не тратя на них инференс (`BLANK_TILE_STD_THRESHOLD`).
+ * Однотонная заливка даёт нулевое стандартное отклонение, то есть пустую
+ * плитку: сессия не вызывается ни разу, и тест «на крупном листе остаётся
+ * штамп» проверял бы отсечение пустых плиток вместо правила форматов.
+ */
+async function gradientPng(width: number, height: number): Promise<Buffer> {
+  const raw = Buffer.allocUnsafe(width * height * 3);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const offset = (y * width + x) * 3;
+      raw[offset] = (x * 7 + y * 13) % 256;
+      raw[offset + 1] = (x * 3 + y * 5) % 256;
+      raw[offset + 2] = (x + y) % 256;
+    }
+  }
+  return sharp(raw, { raw: { width, height, channels: 3 } })
+    .png()
+    .toBuffer();
+}
+
+/**
+ * Страницы, переразмеченные тестом в крупный лист: индекс → размеры в пунктах.
+ *
+ * Заполняется сценариями правила форматов; пустая карта означает фикстуру как
+ * была, поэтому все прежние сценарии продолжают работать не изменившись.
+ */
+const OVERSIZED_PAGES = new Map<number, { readonly widthPt: number; readonly heightPt: number }>();
 
 /** ONNX-сессия-двойник: очередь фикстурных тензоров, по одной на вызов `run()`. */
 class QueueSession implements OnnxSessionPort {
@@ -179,6 +237,25 @@ function oneTextDetection(): { readonly dets: OnnxTensorLike; readonly labels: O
   return {
     dets: { data: Float32Array.from([0.5, 0.5, 0.4, 0.2]), dims: [1, 1, 4] },
     labels: { data: Float32Array.from([10, -10, -10, -10]), dims: [1, 1, 4] },
+  };
+}
+
+/**
+ * Штамп и текст на одном листе: класс `stamp` — столбец 2, `text` — столбец 0.
+ *
+ * Оба бокса уверенные, но на крупном листе в разметку обязан попасть только
+ * штамп: текст чертежа (экспликации, выноски) в текст страницы не нужен.
+ */
+function stampAndTextDetection(): {
+  readonly dets: OnnxTensorLike;
+  readonly labels: OnnxTensorLike;
+} {
+  return {
+    dets: { data: Float32Array.from([0.8, 0.9, 0.25, 0.12, 0.3, 0.3, 0.3, 0.2]), dims: [1, 2, 4] },
+    labels: {
+      data: Float32Array.from([-10, -10, 10, -10, 10, -10, -10, -10]),
+      dims: [1, 2, 4],
+    },
   };
 }
 
@@ -246,6 +323,7 @@ async function buildTestMarkupTarget(
   readonly pageIndices: readonly number[];
   readonly thresholds: LayoutThresholds;
   readonly layoutProfileVersion: number | null;
+  readonly markupPolicy: MarkupPolicy;
 } | null> {
   const layout = await findLayoutRevision(db, ADMIN_SCOPE, lrId);
   if (layout === null || layout.revisionId !== revisionId) return null;
@@ -264,6 +342,10 @@ async function buildTestMarkupTarget(
     // добавлении порога — как это и случилось с `textFallbackCoverageRatio`.
     thresholds: FALLBACK_LAYOUT_THRESHOLDS,
     layoutProfileVersion: null,
+    // Правило берётся из ревизии — ровно как в боевой сборке зависимостей
+    // (`buildMarkupTarget` в `pipeline.ts`). Сценарии ниже переключают его
+    // через колонку, а не подменой двойника.
+    markupPolicy: layout.markupPolicy,
   };
 }
 
@@ -326,7 +408,10 @@ function localDetectionDeps(session: OnnxSessionPort): LocalDetectionDeps {
         layoutRevisionId: input.layoutRevisionId,
         workingPageIndices: input.workingPageIndices,
         blocks: input.blocks,
-        provenance: 'rf_detr',
+        // Как в боевой сборке (`pipeline.ts`): провенанс приходит от
+        // обработчика. Константа здесь скрыла бы половину правила форматов —
+        // полностраничный блок писался бы как результат детектора.
+        provenance: input.provenance,
       });
       return { imported: result.imported, skippedPages: result.skippedPages };
     },
@@ -926,5 +1011,109 @@ describe('разворот содержимого страницы перед и
     expect(box?.height ?? 0).toBeGreaterThan(box?.width ?? 1);
 
     await testDb.query(`DELETE FROM page_orientations WHERE revision_id = '${REVISION}'`);
+  });
+});
+
+/**
+ * Правило разметки по формату листа (S42) — до базы включительно.
+ *
+ * Юнит-тест рядом проверяет решение (какой странице какой режим) на двойниках;
+ * здесь проверяется ПОСЛЕДСТВИЕ: что именно легло в `layout_blocks` и в
+ * `processing_feedback`. Три утверждения, каждое со своей ценой ошибки:
+ * полностраничный блок малого листа не смеет называться результатом детектора;
+ * крупный лист не смеет приносить текст чертежа; крупный лист без штампа не
+ * смеет молча выглядеть как «детекция не справилась».
+ */
+describe('разметка по формату листа (S42)', () => {
+  /** Чуть крупнее порога A4 (625.04 × 883.98 pt): растр 2625×3708 терпим для CI. */
+  const LARGE_SHEET = { widthPt: 630, heightPt: 890 };
+  const LARGE_PAGE = 1;
+  const SMALL_PAGE = 0;
+
+  beforeAll(async () => {
+    await testDb.query(
+      `UPDATE layout_revisions
+          SET markup_policy = '{"version":1,"sheetStrategy":"sheet_aware","numberZone":"near_stamp","numberZonePad":{"x":0.1,"y":0.25}}'::jsonb
+        WHERE id = '${layoutRevisionId}'`,
+    );
+    await testDb.query(
+      `UPDATE source_pages SET width_px = ${String(LARGE_SHEET.widthPt)}, height_px = ${String(LARGE_SHEET.heightPt)}
+        WHERE id IN (SELECT source_page_id FROM processing_bundle_pages
+                      WHERE bundle_id = '${bundleId}' AND working_page_index = ${String(LARGE_PAGE)})`,
+    );
+    OVERSIZED_PAGES.set(LARGE_PAGE, LARGE_SHEET);
+    await testDb.query(`DELETE FROM processing_feedback WHERE revision_id = '${REVISION}'`);
+    /**
+     * Инференс одним кадром: крупный лист иначе режется на дюжину плиток, и
+     * очередь фикстур пришлось бы набивать ими вместо предмета проверки.
+     * Плитки — предмет соседних сценариев, здесь проверяется ОТБОР блоков.
+     */
+    await testDb.query(
+      `INSERT INTO app_settings (key, value) VALUES ('detection.inference_mode', '"whole_page"'::jsonb)
+         ON CONFLICT (key) DO UPDATE SET value = excluded.value`,
+    );
+  });
+
+  afterAll(async () => {
+    OVERSIZED_PAGES.clear();
+    await testDb.query(`DELETE FROM app_settings WHERE key = 'detection.inference_mode'`);
+  });
+
+  async function blocksOfPage(
+    pageIndex: number,
+  ): Promise<
+    readonly { block_type: string; detector_provenance: string; detection_score: string | null }[]
+  > {
+    return testDb.query(
+      `SELECT block_type, detector_provenance, detection_score FROM layout_blocks
+        WHERE layout_revision_id = '${layoutRevisionId}' AND working_page_index = ${String(pageIndex)}
+        ORDER BY sort_order`,
+    );
+  }
+
+  it('малый лист получает один полностраничный блок без вызова модели', async () => {
+    // Очередь фикстур ПУСТА: любой вызов `session.run()` бросит исключение, и
+    // это и есть проверка «модель не запускалась».
+    const session = new QueueSession([]);
+
+    await runJob(session, { pageIndices: [SMALL_PAGE], overwriteExisting: true });
+
+    expect(session.calls).toBe(0);
+    const blocks = await blocksOfPage(SMALL_PAGE);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]?.block_type).toBe('text');
+    // Провенанс `full_page`, а не `rf_detr`: модель этот блок не рисовала, и
+    // назвать его результатом детектора значило бы соврать в провенансе.
+    expect(blocks[0]?.detector_provenance).toBe('full_page');
+    // Уверенности нет — её неоткуда взять, и выдуманное число хуже пустоты.
+    expect(blocks[0]?.detection_score).toBeNull();
+  });
+
+  it('на крупном листе остаётся штамп, текст чертежа отбрасывается', async () => {
+    const session = new QueueSession([stampAndTextDetection()]);
+
+    await runJob(session, { pageIndices: [LARGE_PAGE], overwriteExisting: true });
+
+    expect(session.calls).toBe(1);
+    const blocks = await blocksOfPage(LARGE_PAGE);
+    expect(blocks.map((block) => block.block_type)).toEqual(['stamp']);
+    expect(blocks[0]?.detector_provenance).toBe('rf_detr');
+  });
+
+  it('крупный лист без штампа остаётся без блоков и объясняется detect.no_stamp', async () => {
+    // Ключевое отличие от `detect.no_blocks`: модель ЧТО-ТО видела. Это
+    // качество входящей документации — чертёж без основной надписи, — а не
+    // дефект конвейера, и годовой ряд по причинам обязан их различать.
+    const session = new QueueSession([oneTextDetection()]);
+
+    await runJob(session, { pageIndices: [LARGE_PAGE], overwriteExisting: true });
+
+    expect(await blocksOfPage(LARGE_PAGE)).toEqual([]);
+    const feedback = await testDb.query<{ reason_code: string }>(
+      `SELECT reason_code FROM processing_feedback
+        WHERE revision_id = '${REVISION}' AND working_page_index = ${String(LARGE_PAGE)}
+        ORDER BY at DESC LIMIT 1`,
+    );
+    expect(feedback[0]?.reason_code).toBe('detect.no_stamp');
   });
 });
