@@ -350,7 +350,7 @@ export {
 } from './prompts/analysis-defaults.js';
 export type { AnalysisPromptDefault, AnalysisPromptStage } from './prompts/analysis-defaults.js';
 export { schemaHash, vlmOrientationResponseSchema } from './recognition/vlm/schemas.js';
-export { stripNoise } from './recognition/vlm/postprocess.js';
+export { RETRYABLE_TABLE_EMPTY_ROWS, stripNoise } from './recognition/vlm/postprocess.js';
 export { recognizeBlock } from './recognition/vlm/recognize-block.js';
 export type {
   RecognizeBlockInput,

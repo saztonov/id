@@ -27,11 +27,16 @@
  *
  * ## Два внутренних повтора — оба ограничены единицей
  *
- * 1. **Корректирующий** — платный второй вызов при классифицированной
- *    ЖАНРОВОЙ ошибке (`classifyFailure → fixable_genre`): к system добавляется
- *    `CORRECTIVE_INSTRUCTION`, после второй неудачи повторов нет. Ровно один —
- *    решение плана v3 (порт `output_shape` RD WEB: детерминированный промпт
- *    без довеска даёт детерминированно тот же не-JSON).
+ * 1. **Корректирующий** — платный второй вызов, и причин у него две при одном
+ *    потолке. Первая: классифицированная ЖАНРОВАЯ ошибка
+ *    (`classifyFailure → fixable_genre`) — к system добавляется
+ *    `CORRECTIVE_INSTRUCTION`. Вторая: содержательный код `retryable`
+ *    валидатора (таблица без единой строки) — довесок берётся из
+ *    `RETRY_INSTRUCTION` по коду. После второй неудачи повторов нет: жанровая
+ *    ошибка становится `invalid_response`, а `retryable` — предупреждением при
+ *    ПРИНЯТОМ результате. Ровно один повтор — решение плана v3 (порт
+ *    `output_shape` RD WEB: детерминированный промпт без довеска даёт
+ *    детерминированно тот же не-JSON).
  * 2. **Downscale** — при отказе транспорта «тело слишком велико»
  *    (`LlmPayloadTooLargeError`) и переданной инъекции `downscale` кроп ОДИН
  *    раз уменьшается и вызов повторяется. Инъекция, а не импорт: sharp живёт в
@@ -63,6 +68,7 @@ import {
 import {
   CORRECTIVE_INSTRUCTION,
   NO_MORE_CROPS_INSTRUCTION,
+  RETRY_INSTRUCTION,
   classifyFailure,
   extractJson,
   stripNoise,
@@ -131,6 +137,21 @@ export type VlmBlockOutcome =
     } & VlmBlockEvidence)
   | ({ kind: 'invalid_response'; reason: string; response?: VlmResponse } & VlmBlockEvidence)
   | ({ kind: 'model_refusal'; reason: string; response?: VlmResponse } & VlmBlockEvidence);
+
+/**
+ * Просьба повторить вызов с довеском `retryWith` к system-промпту.
+ *
+ * Отдельный тип, а не `null`: причин повтора теперь две, и им нужны разные
+ * инструкции. Возвращать `null` и выбирать инструкцию у вызывающего значило бы
+ * решать в одном месте по признаку, известному в другом.
+ */
+interface RetryRequest {
+  readonly retryWith: string;
+}
+
+function isRetryRequest(value: VlmBlockOutcome | RetryRequest): value is RetryRequest {
+  return 'retryWith' in value;
+}
 
 export interface RecognizeBlockPrompt {
   readonly code: string;
@@ -471,8 +492,11 @@ export async function recognizeBlock(input: RecognizeBlockInput): Promise<VlmBlo
     forcedFinal: forcedFinalUsed,
   });
 
-  /** `null` — жанровая ошибка, разрешён корректирующий повтор. */
-  const interpret = (response: VlmResponse, allowGenreRetry: boolean): VlmBlockOutcome | null => {
+  /** `RetryRequest` — дефект чинится повтором; повтор разрешён только первым проходом. */
+  const interpret = (
+    response: VlmResponse,
+    allowRetry: boolean,
+  ): VlmBlockOutcome | RetryRequest => {
     const finish = response.finishReason;
     if (finish === 'length' || finish === 'content_filter') {
       // Вызов оплачен, результата нет: оборванный/зацензуренный ответ — отказ
@@ -526,7 +550,7 @@ export async function recognizeBlock(input: RecognizeBlockInput): Promise<VlmBlo
 
     const parsed = extractJson(stripNoise(response.text));
     if (parsed === null) {
-      if (allowGenreRetry) return null;
+      if (allowRetry) return { retryWith: CORRECTIVE_INSTRUCTION[input.block.blockType] };
       return {
         kind: 'invalid_response',
         reason: 'ответ не является JSON-объектом (и после корректирующего повтора)',
@@ -553,9 +577,22 @@ export async function recognizeBlock(input: RecognizeBlockInput): Promise<VlmBlo
       block: RecognitionBlock,
       raw: unknown,
       validation: BlockValidation,
-    ): VlmBlockOutcome | null => {
+    ): VlmBlockOutcome | RetryRequest => {
       if (validation.invalid !== null) return finishInvalid(validation.invalid);
       const warnings = [...validation.warnings];
+      if (validation.retryable !== null) {
+        // Первым проходом — повтор с адресной инструкцией. Вторым результат
+        // принимается: упрямая пустота остаётся ответом модели, и ронять из-за
+        // неё блок значило бы в строгом режиме уронить весь прогон.
+        if (allowRetry) {
+          return {
+            retryWith:
+              RETRY_INSTRUCTION[validation.retryable] ??
+              CORRECTIVE_INSTRUCTION[input.block.blockType],
+          };
+        }
+        warnings.push(validation.retryable);
+      }
       // Дозапрос кропа — не дефект, но факт, влияющий на цену и на доверие к
       // результату: он обязан быть виден в предупреждениях прогона, а не
       // только в счётчиках шлюза. Закрывающий вызов отмечается отдельно: это
@@ -565,9 +602,11 @@ export async function recognizeBlock(input: RecognizeBlockInput): Promise<VlmBlo
       return { kind: 'ok', block, raw, response, warnings, ...evidence() };
     };
 
-    const schemaFailure = (error: ZodError): VlmBlockOutcome | null => {
+    const schemaFailure = (error: ZodError): VlmBlockOutcome | RetryRequest => {
       const failureClass = classifyFailure(response.text, error);
-      if (failureClass === 'fixable_genre' && allowGenreRetry) return null;
+      if (failureClass === 'fixable_genre' && allowRetry) {
+        return { retryWith: CORRECTIVE_INSTRUCTION[input.block.blockType] };
+      }
       return finishInvalid(`ответ не по схеме (${failureClass}): ${issuesSummary(error)}`);
     };
 
@@ -590,6 +629,7 @@ export async function recognizeBlock(input: RecognizeBlockInput): Promise<VlmBlo
         return complete(mapImageResponse(result.data, context), result.data, {
           warnings: [],
           invalid: null,
+          retryable: null,
         });
       }
       case 'stamp': {
@@ -606,19 +646,17 @@ export async function recognizeBlock(input: RecognizeBlockInput): Promise<VlmBlo
 
   const first = await call(input.prompt.systemPrompt);
   const initial = interpret(first, true);
-  if (initial !== null) return initial;
+  if (!isRetryRequest(initial)) return initial;
 
-  const corrected = await call(
-    `${input.prompt.systemPrompt}\n\n${CORRECTIVE_INSTRUCTION[input.block.blockType]}`,
-  );
+  const corrected = await call(`${input.prompt.systemPrompt}\n\n${initial.retryWith}`);
   const second = interpret(corrected, false);
-  // interpret(…, false) по построению не просит повтора; страховка типов.
-  return (
-    second ?? {
-      kind: 'invalid_response',
-      reason: 'ответ не разобран после корректирующего повтора',
-      response: corrected,
-      ...evidence(),
-    }
-  );
+  // interpret(…, false) по построению повтора не просит; страховка типов.
+  return isRetryRequest(second)
+    ? {
+        kind: 'invalid_response',
+        reason: 'ответ не разобран после корректирующего повтора',
+        response: corrected,
+        ...evidence(),
+      }
+    : second;
 }

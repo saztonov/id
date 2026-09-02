@@ -72,6 +72,7 @@ import { join } from 'node:path';
 import {
   classifyFailure,
   computeBlocksHash,
+  RETRYABLE_TABLE_EMPTY_ROWS,
   JobDeferredError,
   effectiveRasterDpi,
   RASTER_DPI,
@@ -1500,7 +1501,8 @@ async function recordBlockFeedback(
   prompt: { readonly code: string; readonly version: number },
   model: string,
   input: {
-    readonly reasonCode: 'vlm.invalid_json' | 'vlm.schema_mismatch' | 'vlm.refusal';
+    readonly reasonCode:
+      'vlm.invalid_json' | 'vlm.schema_mismatch' | 'vlm.refusal' | 'vlm.empty_result';
     readonly observed: Record<string, unknown>;
   },
 ): Promise<void> {
@@ -2064,6 +2066,26 @@ export function createVlmRecognizePageHandler(
                 },
               });
               if (written) recognizedThisAttempt += 1;
+
+              /**
+               * Принятый результат с признаком незакрытого дефекта.
+               *
+               * `table_empty_rows` означает, что модель объявила таблицу и не
+               * выписала из неё ни строки — и корректирующий повтор этого не
+               * исправил. Результат принят (иначе страница, а в строгом режиме
+               * и весь прогон, падали бы из-за одного блока), но потеря
+               * содержимого реальна, и единственный способ узнать её долю —
+               * считать эти случаи наравне с отказами.
+               */
+              if (outcome.warnings.includes(RETRYABLE_TABLE_EMPTY_ROWS)) {
+                await recordBlockFeedback(deps, ctx, run, block, prompt, requestedModel, {
+                  reasonCode: 'vlm.empty_result',
+                  observed: {
+                    warnings: outcome.warnings,
+                    finishReason: outcome.response.finishReason,
+                  },
+                });
+              }
               break;
             }
             case 'invalid_response': {

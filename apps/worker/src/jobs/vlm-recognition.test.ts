@@ -6,6 +6,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+  RETRYABLE_TABLE_EMPTY_ROWS,
   computeBlocksHash,
   NoopProcessingFeedbackSink,
   type HashableBlock,
@@ -245,13 +246,16 @@ function vlmResponse(patch: Record<string, unknown> = {}) {
   };
 }
 
-function okOutcome(block: VlmFrozenBlock): VlmRecognizeBlockOutcome {
+function okOutcome(
+  block: VlmFrozenBlock,
+  warnings: readonly string[] = [],
+): VlmRecognizeBlockOutcome {
   return {
     kind: 'ok',
     block: okBlock(block),
     raw: {},
     response: vlmResponse() as never,
-    warnings: [],
+    warnings: [...warnings],
     calls: [vlmResponse() as never],
     cropTrail: [],
     cropRequests: 0,
@@ -970,6 +974,80 @@ describe('createVlmRecognizePageHandler', () => {
         blocksRefused: 0,
       },
     ]);
+  });
+
+  it('принятый результат с непустой потерей таблицы попадает в обратную связь', async () => {
+    // Повтор не помог: таблица объявлена и не выписана. Результат принят —
+    // иначе страница, а в строгом режиме и весь прогон, падали бы из-за одного
+    // блока, — но потеря содержимого реальна, и без записи её долю не измерить.
+    const feedback: Record<string, unknown>[] = [];
+    const d = deps({
+      workingPdfToFile: async () => ({ path: '/tmp/work.pdf', cleanup: async () => {} }),
+      rasterizer: {
+        kind: 'pdftoppm',
+        version: '1.0',
+        renderPage: async () => ({ widthPx: 595, heightPx: 842 }),
+      },
+      crop: async () => ({ png: new Uint8Array([9, 9, 9]), widthPx: 50, heightPx: 50 }),
+      recognizeBlock: async (input: VlmRecognizeBlockInput) =>
+        okOutcome(frozenBlock({ id: input.block.layoutBlockId }), [RETRYABLE_TABLE_EMPTY_ROWS]),
+      insertBlockResult: async () => ({ written: true }),
+      markRunPage: async () => {},
+      feedback: {
+        record: async (event: Record<string, unknown>) => {
+          feedback.push(event);
+        },
+      } as never,
+    });
+    const handler = createVlmRecognizePageHandler(d);
+
+    await handler(
+      makeContext(
+        'vlm.recognize_page',
+        { folderId: FOLDER, recognitionRunId: RUN, pageIndex: 0 },
+        makeSink(),
+      ),
+    );
+
+    expect(feedback).toHaveLength(1);
+    expect(feedback[0]).toMatchObject({
+      feedbackType: 'recognition_failure',
+      reasonCode: 'vlm.empty_result',
+      observed: { warnings: [RETRYABLE_TABLE_EMPTY_ROWS] },
+    });
+  });
+
+  it('чистый ok-исход обратную связь не пишет', async () => {
+    const feedback: Record<string, unknown>[] = [];
+    const d = deps({
+      workingPdfToFile: async () => ({ path: '/tmp/work.pdf', cleanup: async () => {} }),
+      rasterizer: {
+        kind: 'pdftoppm',
+        version: '1.0',
+        renderPage: async () => ({ widthPx: 595, heightPx: 842 }),
+      },
+      crop: async () => ({ png: new Uint8Array([9, 9, 9]), widthPx: 50, heightPx: 50 }),
+      recognizeBlock: async (input: VlmRecognizeBlockInput) =>
+        okOutcome(frozenBlock({ id: input.block.layoutBlockId })),
+      insertBlockResult: async () => ({ written: true }),
+      markRunPage: async () => {},
+      feedback: {
+        record: async (event: Record<string, unknown>) => {
+          feedback.push(event);
+        },
+      } as never,
+    });
+    const handler = createVlmRecognizePageHandler(d);
+
+    await handler(
+      makeContext(
+        'vlm.recognize_page',
+        { folderId: FOLDER, recognitionRunId: RUN, pageIndex: 0 },
+        makeSink(),
+      ),
+    );
+
+    expect(feedback).toEqual([]);
   });
 
   it('строка ai_runs пишется на КАЖДЫЙ физический вызов, кэш-хиты пропускаются', async () => {

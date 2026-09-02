@@ -8,7 +8,12 @@ import { describe, expect, it } from 'vitest';
 import { LlmPayloadTooLargeError, LlmRateLimitError, LlmUpstreamError } from '../../llm/port.js';
 import type { VlmPort, VlmRequest, VlmResponse } from '../../llm/vlm-port.js';
 
-import { CORRECTIVE_INSTRUCTION, WARNING_EMPTY_FRAGMENTS } from './postprocess.js';
+import {
+  CORRECTIVE_INSTRUCTION,
+  RETRYABLE_TABLE_EMPTY_ROWS,
+  RETRY_INSTRUCTION,
+  WARNING_EMPTY_FRAGMENTS,
+} from './postprocess.js';
 import { RECOGNITION_PROMPT_DEFAULTS } from './prompts.js';
 import {
   recognizeBlock,
@@ -106,6 +111,27 @@ function inputFor(
 
 const validTextJson = JSON.stringify({
   fragments: [{ kind: 'paragraph', text: 'Общие указания', emphasis: 'none' }],
+});
+
+/** Боевой ответ на страницу описи: сетка объявлена, строк ноль. */
+const emptyTableJson = JSON.stringify({
+  fragments: [
+    { kind: 'table', text: null, emphasis: null, level: null, title: null, header: null, rows: [] },
+  ],
+});
+
+const filledTableJson = JSON.stringify({
+  fragments: [
+    {
+      kind: 'table',
+      text: null,
+      emphasis: null,
+      level: null,
+      title: null,
+      header: ['№', 'Наименование'],
+      rows: [['1.1', 'АОСР']],
+    },
+  ],
 });
 
 const blankStampJson = JSON.stringify({
@@ -245,6 +271,34 @@ describe('recognizeBlock: корректирующий повтор', () => {
     const outcome = await recognizeBlock(inputFor(vlm, 'text'));
 
     expect(outcome.kind).toBe('invalid_response');
+    expect(vlm.requests).toHaveLength(2);
+  });
+
+  it('пустая таблица → повтор с табличной инструкцией, затем таблица прочитана', async () => {
+    // Жанр ответа верен, поэтому довесок берётся не из CORRECTIVE_INSTRUCTION:
+    // модели говорят про строки таблицы, а не про вид ответа.
+    const vlm = new FakeVlm([reply(emptyTableJson), reply(filledTableJson)]);
+    const outcome = await recognizeBlock(inputFor(vlm, 'text'));
+
+    expect(outcome.kind).toBe('ok');
+    if (outcome.kind === 'ok') expect(outcome.warnings).toEqual([]);
+    expect(vlm.requests).toHaveLength(2);
+    const [first, second] = vlm.requests;
+    expect(second?.systemPrompt).toBe(
+      `${first?.systemPrompt}
+
+${RETRY_INSTRUCTION[RETRYABLE_TABLE_EMPTY_ROWS] ?? ''}`,
+    );
+  });
+
+  it('пустая таблица дважды → ok с warning, а не отказ', async () => {
+    // Упрямая пустота остаётся ответом модели. Отказ здесь стоил бы страницы,
+    // а в строгом режиме — всего прогона: покрытие стало бы неполным.
+    const vlm = new FakeVlm([reply(emptyTableJson), reply(emptyTableJson)]);
+    const outcome = await recognizeBlock(inputFor(vlm, 'text'));
+
+    expect(outcome.kind).toBe('ok');
+    if (outcome.kind === 'ok') expect(outcome.warnings).toEqual([RETRYABLE_TABLE_EMPTY_ROWS]);
     expect(vlm.requests).toHaveLength(2);
   });
 

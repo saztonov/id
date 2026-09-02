@@ -7,6 +7,8 @@ import { describe, expect, it } from 'vitest';
 import {
   CORRECTIVE_INSTRUCTION,
   INVALID_STAMP_PROSE_DOCUMENT_CODE,
+  RETRYABLE_TABLE_EMPTY_ROWS,
+  RETRY_INSTRUCTION,
   WARNING_EMPTY_FRAGMENTS,
   WARNING_STAMP_ALL_FIELDS_BLANK,
   WARNING_TABLE_RAGGED_ROWS,
@@ -104,13 +106,47 @@ describe('validateText', () => {
     const verdict = validateText({ fragments: [] });
     expect(verdict.warnings).toEqual([WARNING_EMPTY_FRAGMENTS]);
     expect(verdict.invalid).toBeNull();
+    expect(verdict.retryable).toBeNull();
+  });
+
+  it('таблица без строк и без шапки — retryable, а не отказ и не норма', () => {
+    // Боевой ответ модели на страницу описи передачи: сетку объявила, из сорока
+    // строк не выписала ни одной. Страница осталась без текста и не отнеслась
+    // ни к одному документу.
+    const verdict = validateText({
+      fragments: [{ kind: 'table', title: null, header: null, rows: [] }],
+    });
+    expect(verdict.retryable).toBe(RETRYABLE_TABLE_EMPTY_ROWS);
+    expect(verdict.invalid).toBeNull();
+  });
+
+  it('пустая сетка рядом с абзацами — тоже retryable', () => {
+    // Тот же ответ, но текст вокруг таблицы модель отдала. Потеряна ровно
+    // таблица, и это по-прежнему потеря: на боевой странице так ушёл весь
+    // перечень документов, а шапка и подвал остались.
+    const verdict = validateText({
+      fragments: [
+        { kind: 'table', title: null, header: null, rows: [] },
+        { kind: 'paragraph', text: 'Стр. 1 из 4', emphasis: 'none' },
+      ],
+    });
+    expect(verdict.retryable).toBe(RETRYABLE_TABLE_EMPTY_ROWS);
+  });
+
+  it('шапка без строк — законная форма бланка, повтора не просит', () => {
+    // Незаполненная графа печатной формы: шапка напечатана, данных нет. Такая
+    // таблица есть на первой странице описи, и требовать по ней повтор значило
+    // бы платить за то, что модель прочитала верно.
+    const verdict = validateText({
+      fragments: [{ kind: 'table', title: null, header: ['№', 'Наименование'], rows: [] }],
+    });
+    expect(verdict.retryable).toBeNull();
+    expect(verdict.warnings).toEqual([]);
   });
 
   it('таблица с рваными строками — warning table_ragged_rows, не отказ', () => {
     const response: VlmTextResponse = {
-      fragments: [
-        { kind: 'table', title: null, header: null, rows: [['a'], ['b', 'c']] },
-      ],
+      fragments: [{ kind: 'table', title: null, header: null, rows: [['a'], ['b', 'c']] }],
     };
     const verdict = validateText(response);
     expect(verdict.warnings).toEqual([WARNING_TABLE_RAGGED_ROWS]);
@@ -124,7 +160,18 @@ describe('validateText', () => {
         { kind: 'table', title: null, header: ['а', 'б'], rows: [['1', '2']] },
       ],
     });
-    expect(verdict).toEqual({ warnings: [], invalid: null });
+    expect(verdict).toEqual({ warnings: [], invalid: null, retryable: null });
+  });
+
+  it('рваная таблица и пустая сетка в одном блоке — оба кода, по одному', () => {
+    const verdict = validateText({
+      fragments: [
+        { kind: 'table', title: null, header: null, rows: [['a'], ['b', 'c']] },
+        { kind: 'table', title: null, header: null, rows: [] },
+      ],
+    });
+    expect(verdict.warnings).toEqual([WARNING_TABLE_RAGGED_ROWS]);
+    expect(verdict.retryable).toBe(RETRYABLE_TABLE_EMPTY_ROWS);
   });
 });
 
@@ -144,6 +191,7 @@ describe('validateStamp', () => {
     expect(validateStamp(stamp({ document_code: 'СТ26/01-14-АР5-3-РД' }))).toEqual({
       warnings: [],
       invalid: null,
+      retryable: null,
     });
   });
 
@@ -152,6 +200,8 @@ describe('validateStamp', () => {
       'Многоквартирный жилой дом со встроенными помещениями обслуживания по адресу город условный, улица условная, участок 12';
     const verdict = validateStamp(stamp({ document_code: prose }));
     expect(verdict.invalid).toBe(INVALID_STAMP_PROSE_DOCUMENT_CODE);
+    // Проза в шифре повтором не лечится: промпт уже требует шифр из графы.
+    expect(verdict.retryable).toBeNull();
   });
 
   it('сверхдлинная строка (>160) — invalid независимо от состава слов', () => {
@@ -213,5 +263,23 @@ describe('CORRECTIVE_INSTRUCTION', () => {
       expect(CORRECTIVE_INSTRUCTION[type]).toContain('ONLY one JSON object');
       expect(CORRECTIVE_INSTRUCTION[type]).toContain('response_format');
     }
+  });
+});
+
+describe('RETRY_INSTRUCTION', () => {
+  it('у каждого кода retryable есть свой довесок', () => {
+    // Код без инструкции означал бы повтор с тем же промптом: платный вызов,
+    // детерминированно возвращающий тот же ответ.
+    const instruction = RETRY_INSTRUCTION[RETRYABLE_TABLE_EMPTY_ROWS];
+    expect(instruction).toBeDefined();
+    expect(instruction).toMatch(/^CRITICAL — /u);
+    expect(instruction).toContain('ONLY one JSON object');
+  });
+
+  it('говорит о таблице, а не о жанре ответа', () => {
+    // Жанр здесь верен: модель ответила по схеме. Сказать ей «вернул не тот вид
+    // ответа» значило бы отправить чинить то, что не сломано.
+    expect(RETRY_INSTRUCTION[RETRYABLE_TABLE_EMPTY_ROWS]).toContain('rows');
+    expect(RETRY_INSTRUCTION[RETRYABLE_TABLE_EMPTY_ROWS]).not.toContain('wrong kind of answer');
   });
 });

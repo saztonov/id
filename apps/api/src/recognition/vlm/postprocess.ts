@@ -163,27 +163,67 @@ export const WARNING_STAMP_ALL_FIELDS_BLANK = 'stamp_all_fields_blank';
 /** В document_code — проза наименования/адреса вместо шифра: результат непригоден. */
 export const INVALID_STAMP_PROSE_DOCUMENT_CODE = 'stamp_prose_document_code';
 
+/**
+ * Табличный фрагмент без единой строки и без шапки — лечится повтором.
+ *
+ * Модель объявила, что видит сетку, и не выписала из неё ничего. Ни то ни
+ * другое по отдельности дефектом не является: пустой кроп даёт пустые
+ * `fragments`, а бланк с напечатанной, но незаполненной шапкой — таблицу с
+ * `header` и нулём строк. Дефект — именно связка «сетка есть, содержимого нет
+ * вовсе»: промпт требует переносить каждую видимую строку.
+ *
+ * Цена молчания здесь максимальная: на боевой папке так потерялись три
+ * страницы описи передачи (сорок строк перечня) и пять учётных листов ЖАН —
+ * страницы остались без текста, не отнеслись ни к одному документу и утащили
+ * за собой сверку реестра. При этом `finish_reason` был `stop`, то есть ни
+ * один существующий сторож такой ответ не видел.
+ *
+ * Не `invalid`: `invalid` в этом файле означает «повтор не поможет», а здесь
+ * поможет — довесок к промпту адресует ровно это умолчание. Поэтому код живёт
+ * в третьей категории, между warning и отказом.
+ */
+export const RETRYABLE_TABLE_EMPTY_ROWS = 'table_empty_rows';
+
 export interface BlockValidation {
   readonly warnings: readonly string[];
   /** Код непригодности либо `null` — результат пригоден. */
   readonly invalid: string | null;
+  /**
+   * Код дефекта, который чинится ОДНИМ корректирующим повтором.
+   *
+   * После повтора результат принимается как есть, а код уходит в `warnings`:
+   * упрямая пустота — всё ещё ответ модели, и ронять из-за неё страницу (а с
+   * ней и прогон в строгом режиме) значило бы менять потерю одного блока на
+   * потерю всех.
+   */
+  readonly retryable: string | null;
 }
 
-const VALID: BlockValidation = { warnings: [], invalid: null };
+const VALID: BlockValidation = { warnings: [], invalid: null, retryable: null };
 
 export function validateText(response: VlmTextResponse): BlockValidation {
   const warnings: string[] = [];
   if (response.fragments.length === 0) warnings.push(WARNING_EMPTY_FRAGMENTS);
 
+  // Флагами, а не выходом из цикла: кодов на блок по-прежнему по одному
+  // (warnings — сигнал, а не перечень таблиц), но искать надо оба.
+  let ragged = false;
+  let emptyGrid = false;
   for (const fragment of response.fragments) {
     if (fragment.kind !== 'table') continue;
-    const widths = new Set(fragment.rows.map((row) => row.length));
-    if (widths.size > 1) {
-      warnings.push(WARNING_TABLE_RAGGED_ROWS);
-      break; // Один код на блок: warnings — сигнал, а не перечень таблиц.
+    if (fragment.rows.length === 0 && (fragment.header === null || fragment.header.length === 0)) {
+      emptyGrid = true;
     }
+    const widths = new Set(fragment.rows.map((row) => row.length));
+    if (widths.size > 1) ragged = true;
   }
-  return warnings.length === 0 ? VALID : { warnings, invalid: null };
+  if (ragged) warnings.push(WARNING_TABLE_RAGGED_ROWS);
+
+  return {
+    warnings,
+    invalid: null,
+    retryable: emptyGrid ? RETRYABLE_TABLE_EMPTY_ROWS : null,
+  };
 }
 
 function blank(value: string | null): boolean {
@@ -227,9 +267,11 @@ export function validateStamp(response: VlmStampResponse): BlockValidation {
 
   const code = (response.document_code ?? '').trim();
   if (code !== '' && looksLikeProseCode(code)) {
-    return { warnings: [], invalid: INVALID_STAMP_PROSE_DOCUMENT_CODE };
+    return { warnings: [], invalid: INVALID_STAMP_PROSE_DOCUMENT_CODE, retryable: null };
   }
-  return allBlank ? { warnings: [WARNING_STAMP_ALL_FIELDS_BLANK], invalid: null } : VALID;
+  return allBlank
+    ? { warnings: [WARNING_STAMP_ALL_FIELDS_BLANK], invalid: null, retryable: null }
+    : VALID;
 }
 
 // ---------------------------------------------------------------------------
@@ -272,6 +314,26 @@ export const CORRECTIVE_INSTRUCTION: Record<'text' | 'image' | 'stamp', string> 
     'CRITICAL — the previous attempt returned the wrong kind of answer. Return ONLY one JSON object matching the provided response_format schema, with every schema field present. No prose, no Markdown, no fences, no explanations — nothing outside the JSON object.',
   stamp:
     'CRITICAL — the previous attempt returned the wrong kind of answer. Return ONLY one JSON object matching the provided response_format schema, with every field present: null for unread scalar fields, [] for absent signature/revision rows. No prose, no Markdown, no fences, no explanations — nothing outside the JSON object.',
+};
+
+/**
+ * Довесок повтора по коду `retryable` — в отличие от `CORRECTIVE_INSTRUCTION`,
+ * жанр ответа здесь верен, и говорить «вернул не тот вид ответа» было бы
+ * неправдой: модель ответила по схеме и промолчала о содержимом сетки.
+ *
+ * Ключ — код дефекта, а не тип блока: пустая сетка бывает только у текстового
+ * блока, а следующий такой дефект придёт со своей причиной и своим текстом.
+ */
+export const RETRY_INSTRUCTION: Record<string, string> = {
+  [RETRYABLE_TABLE_EMPTY_ROWS]:
+    'CRITICAL — the previous attempt reported a table with an empty "rows" list. ' +
+    'A visible table grid always has content: transcribe EVERY visible data row ' +
+    'into "rows", each as an array of cell strings in column order, and put the ' +
+    'visible header row into "header". If the grid is genuinely empty of data, ' +
+    'return the header alone; if what you see is not a table at all, return the ' +
+    'text as "paragraph" fragments instead. Do not answer with an empty "rows" ' +
+    'for a grid you can see. Return ONLY one JSON object matching the provided ' +
+    'response_format schema.',
 };
 
 // ---------------------------------------------------------------------------
