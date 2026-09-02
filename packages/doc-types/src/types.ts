@@ -119,10 +119,12 @@ export interface DocTypeDefinition {
 /**
  * Роль страницы — ортогональна типу документа.
  *
- * «КОПИЯ ВЕРНА», лист штампа ЭП, пустая страница и приложение-продолжение
- * не являются самостоятельными видами ИД: это роли страниц внутри документа.
+ * «КОПИЯ ВЕРНА», лист штампа ЭП, пустая страница, приложение-продолжение и
+ * продолжение многостраничного документа не являются самостоятельными видами
+ * ИД: это роли страниц внутри документа.
  */
-export type PageRoleCode = 'blank' | 'copy_stamp' | 'signature_visual' | 'annex_continuation';
+export type PageRoleCode =
+  'blank' | 'copy_stamp' | 'signature_visual' | 'annex_continuation' | 'doc_continuation';
 
 export interface PageRoleDefinition {
   readonly code: PageRoleCode;

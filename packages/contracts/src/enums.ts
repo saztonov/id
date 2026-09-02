@@ -277,6 +277,10 @@ export const pageRoleCodeSchema = z.enum([
   'copy_stamp',
   'signature_visual',
   'annex_continuation',
+  // Роль ставится разбором страницы с S30, а перечень её не знал: значение,
+  // которое портал уже писал в page_classifications, отвергалось на границе
+  // API. Справочник page_roles этот код содержит с того же сида.
+  'doc_continuation',
 ]);
 export type PageRoleCode = z.infer<typeof pageRoleCodeSchema>;
 
