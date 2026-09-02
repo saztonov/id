@@ -44,7 +44,7 @@
  * ради чего сюда заходят. Карточка осталась (без неё непонятно, почему в форме
  * нет нужного раздела), но уступила верх экрана данным.
  */
-import { useState, type ReactNode } from 'react';
+import { useRef, useState, type ReactNode } from 'react';
 import {
   App as AntApp,
   Button,
@@ -213,6 +213,15 @@ function ObjectCard({ object }: { object: ConstructionObject }): ReactNode {
     </Descriptions>
   );
 }
+
+/**
+ * Как часто перечитывать список и сводку конвейера, пока идёт работа.
+ *
+ * Пять секунд — компромисс между «человек видит движение» и «сервер не занят
+ * экраном, на который никто не смотрит»: опрос замолкает, как только работать
+ * перестало.
+ */
+const LIST_POLL_MS = 5_000;
 
 // =====================================================================
 // Панель отбора
@@ -423,11 +432,27 @@ function SectionPanel({
 }): ReactNode {
   const scoped: WorkFilter = { ...filter, objectId, sectionCode: section.sectionCode };
 
+  const anyFolderBusy = useRef(false);
+
   const works = useInfiniteQuery({
     queryKey: navigationKeys.folderList(JSON.stringify(scoped)),
     queryFn: ({ pageParam }) => listFolders({ ...scoped, cursor: pageParam }),
     initialPageParam: null as string | null,
     getNextPageParam: (last) => (last.kind === 'available' ? last.data.nextCursor : null),
+    /**
+     * Список перечитывается, пока по какой-нибудь папке идёт работа (S45).
+     *
+     * Месяц и исполнителя дописывает конвейер, и на экране папки об этом
+     * сообщает поток событий. Сюда он не дотягивается — смонтирован на экране
+     * папки, — поэтому без опроса колонки «Месяц» и «Исполнитель» держали бы
+     * «После OCR» до перезагрузки страницы, хотя портал уже всё прочитал.
+     *
+     * Тот же интервал и то же условие, что у сводки конвейера ниже: опрос
+     * замолкает, как только работать перестало. Спрашивать вечно на
+     * остановленной папке значило бы держать сервер занятым ради экрана,
+     * который больше не меняется.
+     */
+    refetchInterval: () => (anyFolderBusy.current ? LIST_POLL_MS : false),
   });
 
   const blocked = pagesBlocked(works.data?.pages);
@@ -450,8 +475,13 @@ function SectionPanel({
     queryFn: () => listWorkPipeline(objectId, workIds),
     enabled: workIds.length > 0,
     refetchInterval: (query) =>
-      (query.state.data ?? []).some((row) => pipelineBusy(row)) ? 5_000 : false,
+      (query.state.data ?? []).some((row) => pipelineBusy(row)) ? LIST_POLL_MS : false,
   });
+
+  // Признак «по какой-то папке идёт работа» нужен обоим опросам, но приходит из
+  // сводки: список о конвейере не знает ничего. Ссылка, а не состояние, — иначе
+  // каждый ответ сводки перерисовывал бы таблицу целиком.
+  anyFolderBusy.current = (pipeline.data ?? []).some((row) => pipelineBusy(row));
 
   const byWork = new Map<string, WorkPipeline>(
     // Ключ — `folderId` из ответа: поля `workId` сервер не отдаёт с S44, и

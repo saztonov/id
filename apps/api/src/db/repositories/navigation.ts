@@ -641,6 +641,31 @@ export async function summarizeFolderPipeline(
 }
 
 /**
+ * Сообщить о том, что конвейер дописал карточку папки (S45).
+ *
+ * Месяц (S30) и исполнитель (S37) появляются не действием человека, а
+ * прочтением акта — и до S45 об этом не узнавал никто: событие писалось только
+ * на `folder.created`, поэтому экран показывал «После OCR» у папки, месяц
+ * которой портал уже прочитал, до перезагрузки страницы.
+ *
+ * Отказ записи события НЕ отменяет саму запись поля: поток — это уведомление, а
+ * источник состояния REST (§3.8). Обратный порядок означал бы, что прочитанный
+ * месяц не сохраняется из-за неработающего оповещения.
+ */
+async function announceFolderCardChange(
+  db: Database,
+  folderId: string,
+  field: 'period' | 'contractor',
+): Promise<void> {
+  try {
+    await appendFolderEvent(db, { folderId, eventType: 'folder.updated', payload: { field } });
+  } catch {
+    // Молча: писать сюда в журнал нечем — у репозитория нет логгера, а
+    // вызывающая задача уже пишет свой исход.
+  }
+}
+
+/**
  * Записать исполнителя, прочитанного из акта (S37).
  *
  * Пара к `fillFolderPeriodIfEmpty`: тот же вызывающий (конвейер, задача
@@ -701,6 +726,14 @@ export async function replaceAssumedContractor(
       update findings set contractor_id = ${contractorId}::uuid
        where folder_id = ${folderId}::uuid
     `);
+
+    // Событие пишется В ТОЙ ЖЕ транзакции: откат замены обязан унести и
+    // сообщение о ней, иначе экран узнал бы об исполнителе, которого нет.
+    await appendFolderEvent(tx, {
+      folderId,
+      eventType: 'folder.updated',
+      payload: { field: 'contractor' },
+    });
 
     return true;
   });
@@ -882,7 +915,10 @@ export async function fillFolderPeriodIfEmpty(
     .set({ period, updatedAt: sql`now()` })
     .where(and(isNull(folders.period), eq(folders.id, folderId)))
     .returning({ id: folders.id });
-  return updated.length > 0;
+  if (updated.length === 0) return false;
+
+  await announceFolderCardChange(db, folderId, 'period');
+  return true;
 }
 
 export interface UpdateFolderPatch {

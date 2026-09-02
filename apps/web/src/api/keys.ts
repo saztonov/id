@@ -16,7 +16,6 @@ export const folderKeys = {
   files: (folderId: string) => ['folders', folderId, 'files'] as const,
   bundles: (folderId: string) => ['folders', folderId, 'bundles'] as const,
   bundlePages: (bundleId: string) => ['bundles', bundleId, 'pages'] as const,
-  workflow: (folderId: string) => ['folders', folderId, 'workflow'] as const,
   processingStatus: (folderId: string) => ['folders', folderId, 'processing-status'] as const,
   documents: (folderId: string) => ['folders', folderId, 'documents'] as const,
   pages: (folderId: string) => ['folders', folderId, 'pages'] as const,
@@ -26,7 +25,6 @@ export const folderKeys = {
   findings: (folderId: string) => ['folders', folderId, 'findings'] as const,
   checkReport: (folderId: string) => ['folders', folderId, 'check-report'] as const,
   recognitionRuns: (folderId: string) => ['folders', folderId, 'recognition-runs'] as const,
-  archive: (folderId: string) => ['folders', folderId, 'archive'] as const,
 };
 
 export const pipelineKeys = {

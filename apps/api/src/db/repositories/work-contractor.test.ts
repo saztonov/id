@@ -130,6 +130,21 @@ describe('replaceAssumedContractor', () => {
     expect(documents[0]?.contractor_id).toBe(ORG_FROM_ACT);
   });
 
+  it('о замене узнаёт поток событий папки', async () => {
+    /**
+     * Месяц и исполнителя дописывает конвейер, а не человек, и до S45 об этом
+     * не узнавал никто: событие писалось только на `folder.created`. Экран
+     * держал «После OCR» у папки, исполнителя которой портал уже прочитал, до
+     * перезагрузки страницы.
+     */
+    const events = await testDb.query<{ event_type: string; payload: { field?: string } }>(
+      `SELECT event_type, payload FROM folder_events
+        WHERE folder_id = '${FOLDER_ASSUMED}' ORDER BY seq`,
+    );
+    expect(events.map((row) => row.event_type)).toContain('folder.updated');
+    expect(events.at(-1)?.payload.field).toBe('contractor');
+  });
+
   it('повторный вызов ничего не делает: признак снят первым', async () => {
     // Задачи конвейера исполняются at-least-once (§12), и второй прогон не
     // должен переписывать исполнителя ещё раз — тем более другим значением
