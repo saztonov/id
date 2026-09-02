@@ -154,6 +154,18 @@ function firstOf(...stages: readonly RawHit[][]): RawHit[] {
 const DATE_NUMERIC = String.raw`\d{1,2}\.\d{1,2}\.\d{4}`;
 
 /**
+ * Год двумя цифрами: «04.07.25г.».
+ *
+ * Форма законна только там, где дату НАЗВАЛИ ярлыком. Без ярлыка «04.07.25»
+ * неотличимо от номера, обозначения по ГОСТ и от куска таблицы, и голая
+ * ступень поиска дат хватала бы их пачками. С ярлыком двусмысленности нет:
+ * бланк подписал поле сам. Паспорт качества «ЛИГА-РЕГИОН» из папки «ИД Мастер
+ * апрель 2026» датирован ровно так, и до этой формы дата выдачи у него не
+ * читалась вовсе.
+ */
+const DATE_NUMERIC_SHORT = String.raw`\d{1,2}\.\d{1,2}\.\d{2}(?!\d)`;
+
+/**
  * Выделение markdown, которым OCR оформляет дату бланка.
  *
  * На боевом акте корпуса дата составления напечатана как
@@ -189,14 +201,30 @@ const MONTHS: readonly string[] = [
 
 const DATE_VERBAL = String.raw`[«"']?\s*${EMPHASIS}\s*\d{1,2}\s*${EMPHASIS}\s*[»"']?\s*${EMPHASIS}\s*(?:${MONTHS.join('|')})[а-я]*\s*\d{4}`;
 
-/** Любая из двух записей даты. Используется как хвост подписанных шаблонов. */
+/** Любая из двух записей даты. Используется как хвост неподписанных шаблонов. */
 const ANY_DATE = `(?:${DATE_NUMERIC}|${DATE_VERBAL})`;
+
+/** То же плюс короткий год: допустимо там, где поле подписано ярлыком. */
+const ANY_LABELLED_DATE = `(?:${DATE_NUMERIC}|${DATE_VERBAL}|${DATE_NUMERIC_SHORT})`;
 
 function isoFromNumeric(value: string): string | null {
   const parts = /^(\d{1,2})\.(\d{1,2})\.(\d{4})$/u.exec(value);
   if (parts === null) return null;
 
   return toIso(Number(parts[1]), Number(parts[2]), Number(parts[3]));
+}
+
+/**
+ * Век у двузначного года: он всегда нынешний.
+ *
+ * Документы ИД двадцатого века в комплект не подшивают, а «25» в дате бланка
+ * означает 2025-й — так его печатает и так читает человек.
+ */
+function isoFromShortNumeric(value: string): string | null {
+  const parts = /^(\d{1,2})\.(\d{1,2})\.(\d{2})$/u.exec(value);
+  if (parts === null) return null;
+
+  return toIso(Number(parts[1]), Number(parts[2]), 2000 + Number(parts[3]));
 }
 
 function isoFromVerbal(value: string): string | null {
@@ -211,8 +239,23 @@ function isoFromVerbal(value: string): string | null {
   return toIso(Number(parts[1]), month, Number(parts[3]));
 }
 
+/**
+ * Годы, в которые дата документа попасть может.
+ *
+ * Нижняя граница — задолго до любого ГОСТа, на который ссылается ИД; верхняя
+ * покрывает самые долгие сроки действия сертификатов (десять лет вперёд с
+ * запасом). Вне их лежит не дата, а след чтения: техническому заключению из
+ * папки «ИД Мастер апрель 2026» ИИ-извлечение назначило дату выдачи
+ * «1327-02-02», и она молча уехала в реквизиты, а оттуда в правила сроков.
+ * Разбор обязан ответить «в свой тип не разобралось», и вызывающий отбросит
+ * значение с названной причиной — это честнее выдуманного года.
+ */
+const MIN_DOCUMENT_YEAR = 1900;
+const MAX_DOCUMENT_YEAR = 2100;
+
 function toIso(day: number, month: number, year: number): string | null {
   if (!Number.isInteger(day) || !Number.isInteger(month) || !Number.isInteger(year)) return null;
+  if (year < MIN_DOCUMENT_YEAR || year > MAX_DOCUMENT_YEAR) return null;
 
   const probe = new Date(Date.UTC(year, month - 1, day));
   if (
@@ -235,12 +278,13 @@ function toIso(day: number, month: number, year: number): string | null {
  * реализации контрольных сумм.
  */
 export function toIsoDate(value: string): string | null {
-  return isoFromNumeric(value.trim()) ?? isoFromVerbal(value);
+  const trimmed = value.trim();
+  return isoFromNumeric(trimmed) ?? isoFromVerbal(value) ?? isoFromShortNumeric(trimmed);
 }
 
 /** Шаблон даты, подписанной одним из перечисленных слов. */
 function labelledDate(labels: readonly string[]): RegExp {
-  return new RegExp(String.raw`(?:${labels.join('|')})\s*[:;]?\s*(${ANY_DATE})`, 'gidu');
+  return new RegExp(String.raw`(?:${labels.join('|')})\s*[:;]?\s*(${ANY_LABELLED_DATE})`, 'gidu');
 }
 
 // =====================================================================
@@ -848,6 +892,12 @@ const BASE_RULES: readonly RuleSpec[] = [
             'дата\\s+проверки',
             'дата\\s+калибровки',
             'дата\\s+аттестации',
+            // Голое «Дата» — только с двоеточием, то есть как подпись поля
+            // бланка. В шапке таблицы «| Дата | 28.01.26 |» двоеточия нет, и
+            // дата записи журнала датой выдачи документа не станет. С
+            // двоеточием двусмысленности нет: так подписан паспорт качества
+            // «ЛИГА-РЕГИОН» («Дата: 04.07.25г.»), и другой даты у него нет.
+            'дата(?=\\s*:)',
           ]),
           CONFIDENCE.labelled,
         ),

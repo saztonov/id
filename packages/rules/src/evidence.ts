@@ -77,6 +77,7 @@ export const EVIDENCE_FIELDS = {
   validFrom: 'valid_from',
   validTo: 'valid_to',
   productMarks: 'product_marks',
+  batchNo: 'batch_no',
   /** Типовые (`extract.ts`). */
   ndReference: 'nd_reference',
   ndRequirements: 'nd_requirements',
@@ -250,6 +251,24 @@ function requisitesFindings(
   for (const code of options.required) {
     const value = field(document, code);
     if (value === null || isEmptyValue(value)) {
+      /**
+       * Номер партии — законная форма номера паспорта качества.
+       *
+       * Бланк паспорта на партию другого номера не печатает: «№ партии: 7,
+       * Дата: 04.07.25». Реестр приложений называет такой документ «Паспорт
+       * качества № 7», то есть номером партии, — и это не вольность
+       * подрядчика, а то, как документ опознаётся в комплекте.
+       *
+       * В реквизит `number` номер партии не уезжает намеренно: у него свой
+       * код `batch_no`, и захват его номером документа ломал сверку с
+       * реестром на других формах. Поэтому подстановка живёт здесь — в
+       * вопросе «заполнен ли реквизит», а не в извлечении.
+       */
+      if (code === EVIDENCE_FIELDS.number) {
+        const batch = field(document, EVIDENCE_FIELDS.batchNo);
+        if (batch !== null && !isEmptyValue(batch)) continue;
+      }
+
       findings.push(
         defect({
           ...at(document, value),

@@ -407,6 +407,40 @@ describe('PASS.611 — реквизиты паспорта качества', ()
     expect(result.verdict).toBe('pass');
   });
 
+  it('номер партии заменяет номер документа', () => {
+    // Бланк паспорта на партию другого номера не печатает: «№ партии: 7».
+    // Реестр приложений называет такой документ «Паспорт качества № 7» —
+    // то есть номером партии, и это не вольность подрядчика.
+    const result = run(
+      'PASS.611',
+      graphWith(
+        makeDocument({
+          docTypeCode: EVIDENCE_DOC_TYPES.qualityPassport,
+          fields: [
+            textField(EVIDENCE_FIELDS.batchNo, '7'),
+            dateField(EVIDENCE_FIELDS.issuedAt, '2025-07-04'),
+          ],
+        }),
+      ),
+    );
+
+    expect(result.verdict).toBe('pass');
+  });
+
+  it('без номера и без партии — дефект остаётся', () => {
+    const result = run(
+      'PASS.611',
+      graphWith(
+        makeDocument({
+          docTypeCode: EVIDENCE_DOC_TYPES.qualityPassport,
+          fields: [dateField(EVIDENCE_FIELDS.issuedAt, '2025-07-04')],
+        }),
+      ),
+    );
+
+    expect(result.verdict).toBe('fail');
+  });
+
   it('нет даты выдачи — дефект', () => {
     const result = run(
       'PASS.611',

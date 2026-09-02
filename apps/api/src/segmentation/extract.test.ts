@@ -13,6 +13,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  toIsoDate,
   extractBaseFields,
   extractFields,
   extractTypeFields,
@@ -115,6 +116,40 @@ describe('типо-специфичная схема — только при у�
     expect(
       extractTypeFields(input(PROTOCOL, { docTypeCode: 'нет_такого_типа', typeConfident: true })),
     ).toEqual([]);
+  });
+
+  it('дата паспорта качества с двузначным годом читается', () => {
+    // Паспорт «ЛИГА-РЕГИОН» другого номера и другой даты не печатает:
+    // «№ партии: 7» и «Дата: 04.07.25г.». До короткой формы дата выдачи у
+    // него не читалась вовсе, и правило заполненности реквизитов сообщало
+    // о незаполненном поле.
+    const passport = 'ПАСПОРТ КАЧЕСТВА\nЛента клейкая малярная\n№ партии: 7\nДата: 04.07.25г.';
+    const fields = extractFields(
+      input(passport, { docTypeCode: 'quality_passport', typeConfident: true }),
+    );
+
+    expect(valueOf(fields, 'issued_at')).toMatchObject({ valueDate: '2025-07-04' });
+    expect(valueOf(fields, 'batch_no')).toMatchObject({ valueText: '7' });
+  });
+
+  it('двузначный год берётся только у подписанной даты', () => {
+    // Без ярлыка «04.07.25» неотличимо от номера или куска таблицы.
+    const text = 'ПАСПОРТ КАЧЕСТВА\nПартия 04.07.25 отгружена';
+    const fields = extractFields(
+      input(text, { docTypeCode: 'quality_passport', typeConfident: true }),
+    );
+
+    expect(valueOf(fields, 'issued_at')).toBeUndefined();
+  });
+
+  it('невозможный год датой не становится', () => {
+    // Техническому заключению папки «ИД Мастер апрель 2026» ИИ-извлечение
+    // назначило дату выдачи «1327-02-02»; она молча уехала в реквизиты, а
+    // оттуда в правила сроков.
+    expect(toIsoDate('02.02.1327')).toBeNull();
+    expect(toIsoDate('26.10.2016')).toBe('2016-10-26');
+    // Долгий срок действия сертификата остаётся датой.
+    expect(toIsoDate('31.08.2030')).toBe('2030-08-31');
   });
 
   it('кадастровый номер участка номером схемы не становится', () => {
