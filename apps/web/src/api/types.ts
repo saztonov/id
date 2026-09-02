@@ -184,7 +184,16 @@ export interface PageOrientation {
 export interface BundleBuildResult {
   jobId: string | null;
   created: boolean;
-  bundle: Bundle | null;
+  /**
+   * Собранный документ БЕЗ признака соответствия текущему составу.
+   *
+   * Признак считает сервер сравнением хэшей и отдаёт его только в списке
+   * (`bundleListSchema`): в ответе сборки его нет и быть не может — документ
+   * только что собран из текущих файлов. До S45 тип обещал здесь полный
+   * `Bundle`, и чтение признака дало бы `undefined`, то есть «состав изменился»
+   * там, где он совпадает.
+   */
+  bundle: Omit<Bundle, 'matchesCurrentFiles'> | null;
   aggregateManifestHash: string;
 }
 
@@ -317,6 +326,16 @@ export interface RecognizeResult {
   created: boolean;
   jobId: string;
   jobCreated: boolean;
+  /**
+   * Прогон идёт в shadow-режиме (`ai.dry_run_only`): результат будет собран и
+   * проверен, но не опубликован.
+   *
+   * Сервер сообщает это в ответе намеренно — гейта на маршруте нет, он и есть
+   * инструмент сравнения провайдеров, — а клиент до S45 поле не объявлял, и
+   * «Комплект отправлен на распознавание» означало разное в двух режимах, не
+   * отличаясь ни одним словом.
+   */
+  dryRun: boolean;
 }
 
 export interface Artifact {

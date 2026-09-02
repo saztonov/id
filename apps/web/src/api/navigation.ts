@@ -116,22 +116,6 @@ export interface Work {
   createdAt: string;
 }
 
-export interface FolderSummary {
-  id: string;
-  workId: string;
-  revisionNo: number;
-  status: string;
-  parentFolderId: string | null;
-  aggregateManifestHash: string | null;
-  version: number;
-  createdAt: string;
-  submittedAt: string | null;
-  submittedBy: string | null;
-  decidedAt: string | null;
-  decidedBy: string | null;
-  returnReason: string | null;
-}
-
 /** Конверт курсорной страницы (`cursorPageSchema` из `@id/contracts`). */
 export interface CursorPage<TItem> {
   items: TItem[];
@@ -322,8 +306,15 @@ export interface CreateFolderInput {
 }
 
 export interface CreatedFolder {
-  work: Work;
-  folder: FolderSummary;
+  /**
+   * Заведённая папка — той же формы, что элемент списка (`folderSchema`).
+   *
+   * До S45 здесь стояли два поля, `work` и `folder: FolderSummary`, то есть
+   * комплект со своей ревизией. S44 схлопнул их в папку, сервер отдаёт одну
+   * сущность, и прежний тип обещал `created.work.id` — обращение, которое
+   * упало бы TypeError на первом же вызове.
+   */
+  folder: Work;
 }
 
 /**

@@ -146,7 +146,6 @@ export interface CreateWorkWithFileInput {
 }
 
 export interface CreatedFolderWithFile {
-  readonly workId: string;
   readonly folderId: string;
   readonly upload: UploadTicket;
 }

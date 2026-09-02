@@ -308,10 +308,14 @@ function LayoutWorkspace(props: WorkspaceProps): ReactNode {
   const recognize = useMutation({
     mutationFn: () => recognition.start(folderId, layoutId),
     onSuccess: (result) => {
+      // Режим называется сразу, а не выясняется потом по снимку прогона: в
+      // shadow-режиме результат не публикуется вовсе, и «отправлен на
+      // распознавание» без оговорки обещало бы распознанный текст.
+      const shadow = result.dryRun ? ' (теневой режим: результат не публикуется)' : '';
       notify.success(
         result.created
-          ? 'Комплект отправлен на распознавание'
-          : 'Прогон распознавания по этой разметке уже идёт',
+          ? `Комплект отправлен на распознавание${shadow}`
+          : `Прогон распознавания по этой разметке уже идёт${shadow}`,
       );
       props.onAfterRecognize();
     },
