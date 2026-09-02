@@ -33,16 +33,27 @@ execFileSync(process.execPath, [tsc, '-p', join(RULES_DIR, 'tsconfig.build.json'
 });
 
 const dist = pathToFileURL(join(RULES_DIR, 'dist', 'index.js')).href;
-const {
-  RULE_SEED_BATCHES,
-  generateRuleSeedSql,
-  generateBuiltinRulesetSql,
-  BUILTIN_RULESET_MIGRATION,
-} = await import(dist);
+const { RULE_SEED_BATCHES, BUILTIN_RULESETS, generateRuleSeedSql, generateBuiltinRulesetSql } =
+  await import(dist);
 
 for (const batch of RULE_SEED_BATCHES) {
   const target = join(MIGRATIONS_DIR, `${batch.migration}.sql`);
-  const sql = generateRuleSeedSql(batch.rules);
+  /**
+   * `seededAs` — замены, которыми ЗАСТЫВШИЙ файл отличается от нынешнего
+   * каталога: значение поля существующего правила переименовано, а строки уже
+   * засеяны применённой миграцией (уровень `revision` → `folder`, S44).
+   *
+   * Без них генератор переписывал применённые файлы при каждом запуске — и
+   * переписал их на S47, когда его позвали ради новой партии. Раннер объявляет
+   * такой файл `modified` и отказывает в накате на любом стенде, где миграция
+   * уже применена. Замены здесь те же, что в тесте на дрейф, и по той же
+   * причине: два места, сравнивающие файл с каталогом, обязаны понимать
+   * «совпадает» одинаково.
+   */
+  const sql = (batch.seededAs ?? []).reduce(
+    (text, [now, seeded]) => text.split(now).join(seeded),
+    generateRuleSeedSql(batch.rules),
+  );
 
   if (!sql.startsWith('--') || !/сгенерирован/iu.test(sql.slice(0, 1000))) {
     console.error('generateRuleSeedSql() вернул SQL без шапки о том, что файл сгенерирован.');
@@ -80,9 +91,12 @@ for (const batch of RULE_SEED_BATCHES) {
  * обязан соответствовать умолчаниям правил, и второе место, где он собирается
  * руками, разошлось бы с первым молча.
  */
-{
-  const target = join(MIGRATIONS_DIR, `${BUILTIN_RULESET_MIGRATION}.sql`);
-  const sql = generateBuiltinRulesetSql();
+for (const ruleset of BUILTIN_RULESETS) {
+  const target = join(MIGRATIONS_DIR, `${ruleset.migration}.sql`);
+  const sql = generateBuiltinRulesetSql(ruleset.specs, {
+    version: ruleset.version,
+    bootstrap: ruleset.bootstrap,
+  });
   const shortPath = relative(ROOT, target).replaceAll('\\', '/');
 
   let previous = null;
