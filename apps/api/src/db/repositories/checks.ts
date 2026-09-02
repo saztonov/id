@@ -696,6 +696,24 @@ export interface SaveFindingsOutcome {
   readonly evidence: number;
 }
 
+/** Записанное замечание: чем оно является и к чему относится. */
+export interface SavedFindingRef {
+  readonly id: string;
+  readonly ruleCode: string;
+  readonly targetId: string | null;
+}
+
+/**
+ * Итог записи замечаний модели: счётчики плюс сами строки (S44).
+ *
+ * Строки нужны обратной связи: сигнал о качестве извлечения пишется по
+ * СОХРАНЁННЫМ замечаниям, а не по принятым от модели. Замечание, не дошедшее до
+ * базы, в годовой ряд качества попадать не должно.
+ */
+export interface SaveLlmFindingsOutcome extends SaveFindingsOutcome {
+  readonly saved: readonly SavedFindingRef[];
+}
+
 /**
  * Запись замечаний прогона.
  *
@@ -805,7 +823,7 @@ export async function saveLlmFindings(
     readonly folderId: string;
     readonly findings: readonly PreparedFinding[];
   },
-): Promise<SaveFindingsOutcome> {
+): Promise<SaveLlmFindingsOutcome> {
   const folder = await loadFolderContext(db, scope, input.folderId);
 
   return db.transaction(async (tx) => {
@@ -816,6 +834,7 @@ export async function saveLlmFindings(
 
     let written = 0;
     let evidenceCount = 0;
+    const saved: SavedFindingRef[] = [];
 
     for (const finding of input.findings) {
       const rows = await tx
@@ -844,6 +863,11 @@ export async function saveLlmFindings(
       const findingId = rows[0]?.id;
       if (findingId === undefined) throw internal({ logDetail: 'замечание модели не записано' });
       written += 1;
+      saved.push({
+        id: findingId,
+        ruleCode: finding.ruleCode,
+        targetId: finding.targetId,
+      });
 
       for (const evidence of finding.evidence ?? []) {
         await tx
@@ -859,7 +883,7 @@ export async function saveLlmFindings(
       }
     }
 
-    return { removed: removed.length, written, evidence: evidenceCount };
+    return { removed: removed.length, written, evidence: evidenceCount, saved };
   });
 }
 
@@ -1042,6 +1066,15 @@ export interface FindingView {
   readonly id: string;
   readonly validationRunId: string;
   readonly ruleCode: string;
+  /**
+   * Вид правила из каталога (`rule_definitions.kind`) — S44.
+   *
+   * Нужен, чтобы отличить дефект бумаги от отчёта о качестве извлечения
+   * (`extraction_quality`). Приходит соединением, а не выводится по коду
+   * правила: вывод по коду пришлось бы повторить в отчёте, в счётчиках и в
+   * ленте, и они разошлись бы при первом же новом правиле.
+   */
+  readonly ruleKind: string;
   readonly severity: FindingSeverity;
   readonly state: 'open' | 'resolved' | 'waived' | 'undetermined';
   readonly origin: FindingOrigin;
@@ -1312,7 +1345,22 @@ export interface ChecksCounts {
   readonly openInfo: number;
   readonly undetermined: number;
   readonly waived: number;
+  /**
+   * Замечания о качестве ИЗВЛЕЧЕНИЯ, а не о документе (S44).
+   *
+   * Считаются отдельно и в дефекты не входят: «портал прочитал не то, что
+   * написано» — претензия портала к самому себе, и подрядчику с ней делать
+   * нечего. На боевой папке их 61 из 201 предупреждения, то есть счётчик
+   * дефектов на треть состоял из них.
+   *
+   * Отдельный счётчик, а не молчание: скрыть их значило бы объявить извлечение
+   * безупречным. Они видны своим разделом отчёта и своим числом здесь.
+   */
+  readonly extractionQuality: number;
 }
+
+/** Вид правила, чьи замечания говорят о качестве извлечения, а не о бумаге. */
+export const EXTRACTION_QUALITY_KIND = 'extraction_quality';
 
 /**
  * Счётчики сводки — по УЖЕ загруженному списку, а не отдельным запросом.
@@ -1326,14 +1374,18 @@ export interface ChecksCounts {
  * его не установила.
  */
 export function countFindings(items: readonly FindingView[]): ChecksCounts {
+  const aboutDocument = items.filter((item) => item.ruleKind !== EXTRACTION_QUALITY_KIND);
   const openOf = (severity: FindingSeverity): number =>
-    items.filter((item) => item.state === 'open' && item.severity === severity).length;
+    aboutDocument.filter((item) => item.state === 'open' && item.severity === severity).length;
   return {
     openErrors: openOf('error'),
     openWarnings: openOf('warning'),
     openInfo: openOf('info'),
-    undetermined: items.filter((item) => item.state === 'undetermined').length,
-    waived: items.filter((item) => item.state === 'waived').length,
+    undetermined: aboutDocument.filter((item) => item.state === 'undetermined').length,
+    waived: aboutDocument.filter((item) => item.state === 'waived').length,
+    // Здесь считаются ВСЕ состояния: и открытые, и снятые человеком. Вопрос
+    // «сколько раз портал прочитал иначе» о снятии не спрашивает.
+    extractionQuality: items.filter((item) => item.ruleKind === EXTRACTION_QUALITY_KIND).length,
   };
 }
 
@@ -1405,6 +1457,7 @@ export async function collectFindings(
       id: findings.id,
       validationRunId: findings.validationRunId,
       ruleCode: findings.ruleCode,
+      ruleKind: ruleDefinitions.kind,
       severity: findings.severity,
       state: findings.state,
       origin: findings.origin,
@@ -1418,6 +1471,9 @@ export async function collectFindings(
     })
     .from(findings)
     .innerJoin(folders, eq(findings.folderId, folders.id))
+    // `findings.rule_code` — внешний ключ на каталог, поэтому соединение
+    // внутреннее: замечания без своего правила не бывает по построению.
+    .innerJoin(ruleDefinitions, eq(ruleDefinitions.code, findings.ruleCode))
     .where(
       withScope(
         scope,

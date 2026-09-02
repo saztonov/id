@@ -1214,6 +1214,40 @@ describe('GET /folders/:id/check-report', () => {
     expect(sectionsOf(body).length).toBeGreaterThan(0);
   });
 
+  it('«портал прочитал иначе» идёт своим разделом, а не строкой документа', async () => {
+    /**
+     * `LLM.FILL.020` утверждает «извлечённое значение расходится с текстом», то
+     * есть претензию портала к самому себе. В строке документа она читалась бы
+     * как дефект бумаги, а на боевой папке таких 61 из 201 предупреждения.
+     */
+    const finding = id(125);
+    await db.query(
+      `INSERT INTO findings (id, validation_run_id, folder_id, object_id, contractor_id, rule_code,
+                             severity, state, origin, is_blocking, target_type, target_id, message)
+       VALUES ('${finding}', '${RUN_D}', '${FOLDER_D}', '${OBJECT}', '${ORG_A}', 'LLM.FILL.020',
+               'warning', 'open', 'llm', false, 'document', '${DOC_D_PASSPORT}',
+               'В паспорте напечатано другое значение номера.')`,
+    );
+
+    try {
+      const body = await report(KC.a, FOLDER_D);
+
+      const group = body.groups.find((candidate) => candidate.kind === 'extraction');
+      expect(group?.title).toBe('Портал прочитал иначе');
+      expect(group?.sections[0]?.rows.map((row) => row.id)).toEqual([finding]);
+      expect(group?.sections[0]?.note).toContain('РАСПОЗНАВАНИЮ');
+
+      // И в строке своего документа его нет: иначе оно читалось бы как дефект.
+      const rowsOfPassport = sectionsOf(body)
+        .flatMap((section) => section.rows)
+        .filter((row) => row.id === DOC_D_PASSPORT);
+      expect(rowsOfPassport).toHaveLength(1);
+      expect(rowsOfPassport[0]?.findingIds).not.toContain(finding);
+    } finally {
+      await db.query(`DELETE FROM findings WHERE id = '${finding}'`);
+    }
+  });
+
   it('чек-лист акта читает вердикт СВОЕГО комплекта, а не последнего в журнале', async () => {
     /**
      * После нарезки одно правило исполняется по разу на комплект, и журнал

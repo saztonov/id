@@ -129,6 +129,8 @@ export const checksSummarySchema = z.object({
   counts: z.object({
     openErrors: z.int().nonnegative(),
     openWarnings: z.int().nonnegative(),
+    /** Замечания о качестве извлечения: считаются отдельно от дефектов (S44). */
+    extractionQuality: z.int().nonnegative(),
     openInfo: z.int().nonnegative(),
     undetermined: z.int().nonnegative(),
     waived: z.int().nonnegative(),
@@ -215,7 +217,7 @@ const reportSectionSchema = z.object({
  * складывал их в одну таблицу из 134 строк.
  */
 const reportGroupSchema = z.object({
-  kind: z.enum(['complect', 'outside', 'unplaced']),
+  kind: z.enum(['complect', 'outside', 'unplaced', 'extraction']),
   complectId: z.uuid().nullable(),
   title: z.string(),
   sections: z.array(reportSectionSchema),

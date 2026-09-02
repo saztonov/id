@@ -58,7 +58,16 @@ export interface ChecksLlmReviewDeps {
     readonly validationRunId: string;
     readonly folderId: string;
     readonly findings: readonly PreparedFinding[];
-  }): Promise<{ readonly removed: number; readonly written: number }>;
+  }): Promise<{
+    readonly removed: number;
+    readonly written: number;
+    /** Сохранённые строки: по ним пишется обратная связь (S44). */
+    readonly saved: readonly {
+      readonly id: string;
+      readonly ruleCode: string;
+      readonly targetId: string | null;
+    }[];
+  }>;
 
   /** Опубликованный промт стадии; `null` — проверка пропускается. */
   stagePrompt(stage: LlmTextStage): Promise<PublishedPrompt | null>;
@@ -93,7 +102,33 @@ export interface ChecksLlmReviewDeps {
     readonly structuredResult: unknown;
     readonly requestId: string | null;
   }): Promise<void>;
+
+  /**
+   * Сигнал о качестве извлечения (§11, ADR-0010).
+   *
+   * Замечание живёт один прогон — пересегментация и повторная проверка стирают
+   * прошлые `findings`, — а годовой ряд «как часто портал читает неверно и
+   * каким промтом» строится по `processing_feedback`. Только КОД реквизита,
+   * никогда его значение: значение — это ПДн.
+   */
+  recordFeedback(event: {
+    readonly folderId: string;
+    readonly findingId: string | null;
+    readonly docTypeCode: string | null;
+    readonly promptCode: string;
+    readonly promptVersion: number;
+  }): Promise<void>;
 }
+
+/**
+ * Правило, чьи замечания говорят о качестве ИЗВЛЕЧЕНИЯ, а не о документе.
+ *
+ * Код, а не вид правила (`extraction_quality`): здесь под рукой только
+ * `PreparedFinding`, у которого вида нет — он живёт в каталоге. Читать каталог
+ * ради одного сравнения значило бы завести здесь зависимость от снимка набора
+ * правил, а он к обратной связи отношения не имеет.
+ */
+const EXTRACTION_QUALITY_RULE = 'LLM.FILL.020';
 
 export function createChecksLlmReviewHandler(
   deps: ChecksLlmReviewDeps,
@@ -141,6 +176,31 @@ export function createChecksLlmReviewHandler(
       folderId,
       findings: accepted,
     });
+
+    /**
+     * «Портал прочитал иначе» уходит ещё и в обратную связь (S44).
+     *
+     * Замечание отвечает на вопрос «что не так в этом прогоне», а
+     * `processing_feedback` — на вопрос «как часто и каким промтом», и второй
+     * ответ по замечаниям не собрать: следующая проверка их заменит.
+     *
+     * Пишется по СОХРАНЁННЫМ замечаниям, а не по принятым от модели: строка,
+     * не дошедшая до базы, не должна попадать в ряд качества.
+     */
+    const typeOfDocument = new Map(
+      documents.map((document) => [document.documentId, document.docTypeCode]),
+    );
+    for (const finding of saved.saved) {
+      if (finding.ruleCode !== EXTRACTION_QUALITY_RULE) continue;
+      await deps.recordFeedback({
+        folderId,
+        findingId: finding.id,
+        docTypeCode:
+          finding.targetId === null ? null : (typeOfDocument.get(finding.targetId) ?? null),
+        promptCode: prompt.code,
+        promptVersion: prompt.version,
+      });
+    }
 
     const counts = {
       documents: documents.length,

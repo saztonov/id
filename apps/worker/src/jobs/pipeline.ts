@@ -2059,6 +2059,26 @@ function checksLlmReviewDeps(options: PipelineJobsOptions): ChecksLlmReviewDeps 
 
     saveLlmFindings: async (input) => saveLlmFindings(db, await scopeOf(input.folderId), input),
 
+    // Сигнал о качестве извлечения: годовой ряд «как часто портал читает
+    // неверно и каким промтом» строится по нему, а не по замечаниям — их
+    // заменяет следующая проверка.
+    recordFeedback: async (event) => {
+      const sink = options.feedback ?? new NoopProcessingFeedbackSink();
+      await sink.record({
+        feedbackType: 'wrong_extraction',
+        reasonCode: 'extract.value_mismatch',
+        severity: 'warn',
+        folderId: event.folderId,
+        ...(event.findingId === null ? {} : { findingId: event.findingId }),
+        ...(event.docTypeCode === null ? {} : { docTypeCode: event.docTypeCode }),
+        pipelineStage: 'checks',
+        promptCode: event.promptCode,
+        // Версия 0 — встроенный промт (см. `stagePrompt`), а CHECK таблицы
+        // требует положительную: тогда версия не называется вовсе.
+        ...(event.promptVersion > 0 ? { promptVersion: event.promptVersion } : {}),
+      });
+    },
+
     stagePrompt: segmentation.stagePrompt,
     callLlm: segmentation.callLlm,
     recordAiRun: segmentation.recordAiRun,

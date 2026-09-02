@@ -59,7 +59,14 @@ function summary(over: Partial<ChecksSummary> = {}): ChecksSummary {
       documentsTotal: 6,
       documentsUnknownType: 0,
     },
-    counts: { openErrors: 0, openWarnings: 0, openInfo: 0, undetermined: 0, waived: 0 },
+    counts: {
+      openErrors: 0,
+      openWarnings: 0,
+      extractionQuality: 0,
+      openInfo: 0,
+      undetermined: 0,
+      waived: 0,
+    },
     ...over,
   };
 }
@@ -173,7 +180,14 @@ describe('runStateOf', () => {
   it('зелёное только при чистом прогоне: предупреждение уже мешает', () => {
     const state = runStateOf(
       summary({
-        counts: { openErrors: 0, openWarnings: 3, openInfo: 0, undetermined: 0, waived: 0 },
+        counts: {
+          openErrors: 0,
+          openWarnings: 3,
+          extractionQuality: 0,
+          openInfo: 0,
+          undetermined: 0,
+          waived: 0,
+        },
       }),
       true,
     );
@@ -187,7 +201,14 @@ describe('runStateOf', () => {
   it('«не проверено» не сливается с успехом: данных для вывода не было', () => {
     const state = runStateOf(
       summary({
-        counts: { openErrors: 0, openWarnings: 0, openInfo: 0, undetermined: 2, waived: 0 },
+        counts: {
+          openErrors: 0,
+          openWarnings: 0,
+          extractionQuality: 0,
+          openInfo: 0,
+          undetermined: 2,
+          waived: 0,
+        },
       }),
       true,
     );
@@ -225,7 +246,14 @@ describe('runStateOf', () => {
   it('открытая ошибка красит плашку в красный, а не в жёлтый', () => {
     const state = runStateOf(
       summary({
-        counts: { openErrors: 1, openWarnings: 0, openInfo: 0, undetermined: 0, waived: 0 },
+        counts: {
+          openErrors: 1,
+          openWarnings: 0,
+          extractionQuality: 0,
+          openInfo: 0,
+          undetermined: 0,
+          waived: 0,
+        },
       }),
       true,
     );
@@ -261,7 +289,14 @@ describe('summaryText', () => {
   it('отвечает на вопрос «что прочитано и что нашлось»', () => {
     const text = summaryText(
       summary({
-        counts: { openErrors: 7, openWarnings: 3, openInfo: 0, undetermined: 0, waived: 0 },
+        counts: {
+          openErrors: 7,
+          openWarnings: 3,
+          extractionQuality: 0,
+          openInfo: 0,
+          undetermined: 0,
+          waived: 0,
+        },
       }),
       { kind: 'done_with_issues', tone: 'error', reservations: ['7 ошибок'] },
     );

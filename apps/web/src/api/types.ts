@@ -555,6 +555,8 @@ export interface ChecksSummary {
   counts: {
     openErrors: number;
     openWarnings: number;
+    /** Замечания о качестве извлечения: не дефекты документа (S44). */
+    extractionQuality: number;
     openInfo: number;
     undetermined: number;
     waived: number;
@@ -639,7 +641,7 @@ export interface ReportSection {
  * Уровень появился в S44: до нарезки папки на комплекты отчёт был плоским
  * списком секций и складывал двенадцать актов в одну таблицу из 134 строк.
  */
-export type ReportGroupKind = 'complect' | 'outside' | 'unplaced';
+export type ReportGroupKind = 'complect' | 'outside' | 'unplaced' | 'extraction';
 
 export interface ReportGroup {
   kind: ReportGroupKind;

@@ -90,7 +90,12 @@ export const RULE_SEED_BATCHES: readonly RuleSeedBatch[] = [
     // старте сравнивает таблицу с каталогом в обе стороны. Исполняет их задача
     // `checks.llm_review`, движок отвечает `n_a` с названной причиной.
     migration: '0031_seed_llm_review_rules',
-    seededAs: [['$rules$folder$rules$', '$rules$revision$rules$']],
+    seededAs: [
+      ['$rules$folder$rules$', '$rules$revision$rules$'],
+      // Вид `extraction_quality` появился в S44 и есть только у LLM.FILL.020;
+      // засеян он был как `crosscheck`. Правит значение отдельная миграция.
+      ['extraction_quality', 'crosscheck'],
+    ],
     rules: LLM_REVIEW_RULES,
   },
 ];

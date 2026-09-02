@@ -61,6 +61,8 @@ interface LlmRuleInput {
   readonly title: string;
   readonly level: RuleSpec['level'];
   readonly severity: RuleSpec['defaultSeverity'];
+  /** Умолчание — `crosscheck`; см. `extraction_quality` у LLM.FILL.020. */
+  readonly kind?: RuleSpec['kind'];
 }
 
 function llmRule(input: LlmRuleInput): RuleSpec {
@@ -69,7 +71,7 @@ function llmRule(input: LlmRuleInput): RuleSpec {
     title: input.title,
     docTypeCode: null,
     level: input.level,
-    kind: 'crosscheck',
+    kind: input.kind ?? 'crosscheck',
     defaultSeverity: input.severity,
     // См. шапку: инвариант БД, а не осторожность.
     defaultBlocking: false,
@@ -93,6 +95,15 @@ export const LLM_REVIEW_RULES: readonly RuleSpec[] = [
     title: 'Значение реквизита расходится с текстом документа',
     level: 'document',
     severity: 'warning',
+    /**
+     * Отчёт о качестве извлечения, а не дефект бумаги (S44).
+     *
+     * Утверждение правила — «портал прочитал не то, что написано». Подрядчику с
+     * ним делать нечего: исправлять надо не документ, а извлечение. 61 такое
+     * предупреждение боевой папки лежало вперемешку с настоящими дефектами, где
+     * их и принимали за дефекты.
+     */
+    kind: 'extraction_quality',
   }),
   llmRule({
     code: 'LLM.FILL.030',

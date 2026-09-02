@@ -55,6 +55,7 @@ import {
   loadFindingContext,
   readRunJournal,
   resolveShownRun,
+  EXTRACTION_QUALITY_KIND,
   type DocumentFacts,
   type FindingContext,
   type FindingView,
@@ -169,7 +170,7 @@ export interface ReportSection {
  * складывал двенадцать разных комплектов в одну таблицу из 134 строк, и понять
  * по ней, у какого акта чего не хватает, было нельзя.
  */
-export type ReportGroupKind = 'complect' | 'outside' | 'unplaced';
+export type ReportGroupKind = 'complect' | 'outside' | 'unplaced' | 'extraction';
 
 export interface ReportGroup {
   readonly kind: ReportGroupKind;
@@ -297,6 +298,16 @@ export async function buildCheckReport(
         // акту значило бы соврать о составе.
         title: 'Вне комплектов',
         sections: outside,
+      });
+    }
+
+    const extraction = facts.extractionSection();
+    if (extraction.rows.length > 0) {
+      groups.push({
+        kind: 'extraction',
+        complectId: null,
+        title: extraction.title,
+        sections: [extraction],
       });
     }
 
@@ -455,6 +466,8 @@ class ReportFacts {
   /** Идентификаторы замечаний, уже разложенных по строкам: инвариант полноты. */
   private readonly placed = new Set<string>();
   private readonly visible: readonly FindingView[];
+  /** Замечания о качестве извлечения: свой раздел, не строка документа (S44). */
+  private readonly extraction: readonly FindingView[];
 
   constructor(input: FactsInput) {
     this.context = input.context;
@@ -487,8 +500,24 @@ class ReportFacts {
       this.fieldsByDocument.set(field.documentId, own);
     }
 
+    /**
+     * Замечания о качестве ИЗВЛЕЧЕНИЯ идут своим разделом (S44).
+     *
+     * «Портал прочитал не то, что написано» — претензия портала к самому себе, и
+     * в строке документа она читалась бы как дефект бумаги. Из строк они
+     * исключены здесь, а не в каждом месте сборки: тогда любое новое место
+     * снова смешало бы их с дефектами.
+     */
+    this.extraction = input.findings.filter(
+      (finding) =>
+        finding.ruleKind === EXTRACTION_QUALITY_KIND &&
+        (finding.state === 'open' || finding.state === 'undetermined'),
+    );
+
     this.visible = input.findings.filter(
-      (finding) => finding.state === 'open' || finding.state === 'undetermined',
+      (finding) =>
+        finding.ruleKind !== EXTRACTION_QUALITY_KIND &&
+        (finding.state === 'open' || finding.state === 'undetermined'),
     );
     for (const finding of this.visible) {
       const documentId = finding.document?.id;
@@ -636,6 +665,44 @@ class ReportFacts {
         rows.length === 0
           ? null
           : 'Эти замечания не привязаны к документу: они о том, чего в комплекте не хватает.',
+      rows,
+    };
+  }
+
+  /**
+   * «Портал прочитал иначе» — отчёт о качестве извлечения (S44).
+   *
+   * Отдельно от дефектов документа, потому что и адресат другой: дефект правит
+   * подрядчик, а расхождение с текстом правит портал — переизвлечением,
+   * настройкой промта или сменой модели. Смешанные в одну таблицу, они делали
+   * счётчик «201 предупреждение» на треть претензией портала к самому себе.
+   */
+  extractionSection(): ReportSection {
+    const rows = this.extraction.map<ReportRow>((finding) => ({
+      id: finding.id,
+      kind: 'finding',
+      title: finding.document?.label ?? finding.target.label,
+      subtitle: finding.target.detail,
+      page: finding.page === null ? null : { ...finding.page },
+      pages: null,
+      dates: null,
+      status: statusOfSeverity(finding),
+      statusText: finding.text,
+      statusHint: finding.hint,
+      statusRuleCode: finding.ruleCode,
+      blockId: finding.blockId,
+      findingIds: [finding.id],
+      items: [],
+    }));
+
+    return {
+      kind: 'unplaced',
+      title: 'Портал прочитал иначе',
+      note:
+        rows.length === 0
+          ? null
+          : 'Это замечания к РАСПОЗНАВАНИЮ, а не к документам: портал прочитал ' +
+            'не то, что написано. Исправлять надо не бумагу.',
       rows,
     };
   }
