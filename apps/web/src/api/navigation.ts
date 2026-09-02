@@ -11,19 +11,26 @@
  *
  * | Маршрут | Фильтры |
  * |---|---|
- * | `GET /api/v1/works` | `objectId`, `sectionCode`, `period`, `unassigned`, `search` |
- * | `GET /api/v1/works/{workId}` | — |
- * | `POST /api/v1/works` | заводит комплект и первую ревизию |
- * | `GET|POST /api/v1/works/{id}/folders` | — |
- * | `GET /api/v1/registries` | `objectId`, `sectionCode`, `period`, `status` |
- * | `GET /api/v1/registries/{id}` | состав и блокеры — по правам актора |
- * | `PUT|DELETE /api/v1/registries/{id}/works/{workId}` | состав, `If-Match` |
- * | `POST /api/v1/registries/{id}/file` | заводит комплект-файл описи |
- * | `POST /api/v1/registries/{id}/issue|accept` | передача и приёмка, `If-Match` |
+ * | `GET /api/v1/folders` | `objectId`, `sectionCode`, `period`, `search` |
+ * | `GET /api/v1/folders/{folderId}` | — |
+ * | `POST /api/v1/folders` | заводит папку |
+ * | `PATCH|DELETE /api/v1/folders/{folderId}` | правка и удаление, `If-Match` |
+ * | `GET /api/v1/objects/{objectId}/folders/pipeline` | ход конвейера по папкам |
+ * | `GET /api/v1/folders/{folderId}/deletion-preview` | что снесётся вместе с папкой |
  *
  * Расхождение исправлено здесь, а не в API: сервер — источник правды, и
  * «комплекты объекта» отличаются от «всех моих комплектов» одним условием, а не
  * вторым маршрутом с собственной областью видимости.
+ *
+ * ## Имена в этом файле отстают от адресов (S44 → S45)
+ *
+ * S44 схлопнул ревизию и комплект в ПАПКУ, и API переехал с `/works` на
+ * `/folders`. В клиенте тогда переименовали ключи и типы, а строки адресов
+ * остались прежними — и экран объекта на бою получил 404 на каждый список
+ * комплектов. Адреса восстановлены в S45; часть внутренних имён (`Work`,
+ * `works`, `workId`) ещё говорит на прежнем языке, и это осознанный долг:
+ * переименование сущности во фронте — отдельная работа, а адреса обязаны быть
+ * верными сегодня.
  *
  * ## Страница — конверт с курсором, а не массив
  *
@@ -44,10 +51,12 @@
  * Причин ровно две, и они разные по смыслу:
  *
  * * `route-missing` — маршрута нет в API. Признак точный: 404 с `detail`,
- *   равным сообщению `setNotFoundHandler` из `apps/api/src/app.ts`. Сегодня все
- *   маршруты на месте, и ветка не срабатывает; она остаётся рубежом на случай
- *   отката или опечатки в пути — молчаливо выродиться в «пусто» она уже не
- *   может.
+ *   равным сообщению `setNotFoundHandler` из `apps/api/src/app.ts`. Ветка не
+ *   теоретическая: в S44 адреса клиента разошлись с маршрутами, и она честно
+ *   показала «раздел недоступен» вместо пустой таблицы. Обратная сторона
+ *   выяснилась там же — отказ выглядел настолько штатно, что о нём узнали от
+ *   пользователя, а не от мониторинга; поэтому теперь адреса ещё и сверяются
+ *   тестом (`packages/contracts/src/routes.ts`).
  * * `forbidden` — маршрут есть, права нет (403). Это НЕ пустой список: §1.6
  *   запрещает различать «нет такого» и «не ваше» по идентификатору, но не
  *   запрещает сказать пользователю, что раздел ему не по правам.
@@ -174,12 +183,11 @@ export interface CursorPage<TItem> {
  * `apps/api` — это чтение одного объекта.
  */
 export const NAVIGATION_ROUTES = {
-  works: `${V1}/works`,
-  work: (workId: string) => `${V1}/works/${workId}`,
+  works: `${V1}/folders`,
+  work: (folderId: string) => `${V1}/folders/${folderId}`,
   sectionCounts: (objectId: string) => `${V1}/objects/${objectId}/sections/counts`,
-  foldersPipeline: (objectId: string) => `${V1}/objects/${objectId}/works/pipeline`,
-  foldersOfWork: (workId: string) => `${V1}/works/${workId}/folders`,
-  folderDeletionPreview: (workId: string) => `${V1}/works/${workId}/deletion-preview`,
+  foldersPipeline: (objectId: string) => `${V1}/objects/${objectId}/folders/pipeline`,
+  folderDeletionPreview: (folderId: string) => `${V1}/folders/${folderId}/deletion-preview`,
   registries: `${V1}/registries`,
   registry: (registryId: string) => `${V1}/registries/${registryId}`,
   registryWork: (registryId: string, workId: string) =>

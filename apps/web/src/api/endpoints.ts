@@ -168,7 +168,7 @@ export const files = {
    * разносить половины одного потока по двум модулям было бы неверно.
    */
   createFolderWithFile: (body: CreateWorkWithFileInput) =>
-    request<CreatedFolderWithFile>('POST', `${V1}/works/with-file`, { body }).then((r) => r.data),
+    request<CreatedFolderWithFile>('POST', `${V1}/folders/with-file`, { body }).then((r) => r.data),
 
   completeUpload: (folderId: string, uploadId: string) =>
     request<SourceFile>('POST', `${V1}/folders/${folderId}/files/upload/complete`, {
