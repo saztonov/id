@@ -62,6 +62,7 @@ import {
   type ClaimedJob,
 } from '../db/repositories/jobs.js';
 import type { Database } from '../db/repositories/users.js';
+import { pruneExpiredSessions } from '../db/repositories/auth-sessions.js';
 import { pruneJournal } from '../db/repositories/error-journal.js';
 import { emitFolderEvent, type JobContext, type JobRegistry } from './registry.js';
 import {
@@ -343,6 +344,18 @@ export interface JobRunnerOptions {
         readonly samplesPerIssue: number;
       }
     | undefined;
+  /**
+   * Срок хранения отработавших строк `auth_sessions`, в днях.
+   *
+   * Отдельной ручкой от `journalRetention`, а не полем в ней: журнал ошибок и
+   * сессии — разные данные с разными основаниями хранения (§15), и связывать их
+   * один срок значило бы менять политику по персональным данным заодно с
+   * настройкой наблюдаемости. Цикл при этом общий: обе уборки часовые и обе
+   * берут свою advisory-блокировку.
+   *
+   * Не задано — уборка не запускается, как и у журнала.
+   */
+  readonly sessionRetentionDays?: number | undefined;
   readonly pruneIntervalMs?: number | undefined;
   readonly backoff?: BackoffPolicy | undefined;
   /**
@@ -475,7 +488,10 @@ export class JobRunner {
     void this.#reapOnce();
     this.#scheduleReaper();
     this.#scheduleOutbox();
-    if (this.#options.journalRetention !== undefined) this.#schedulePrune();
+    const prunes =
+      this.#options.journalRetention !== undefined ||
+      this.#options.sessionRetentionDays !== undefined;
+    if (prunes) this.#schedulePrune();
   }
 
   /**
@@ -774,13 +790,13 @@ export class JobRunner {
   }
 
   /**
-   * Очистка журнала по срокам хранения.
+   * Часовой цикл уборки: журнал ошибок и отработавшие сессии.
    *
    * Цикл живёт в каждом процессе с исполнителем задач, но одновременно работает
-   * только один: `pruneJournal` берёт advisory-блокировку и не получивший её
-   * уходит без работы. Выделять очистку в отдельный процесс или в задачу
-   * очереди не за чем — она обслуживает саму наблюдаемость и не должна зависеть
-   * от того, жива ли очередь.
+   * только один: обе уборки берут advisory-блокировку, и не получивший её
+   * уходит без работы. Выделять их в отдельный процесс или в задачу очереди не
+   * за чем — они обслуживают сам портал и не должны зависеть от того, жива ли
+   * очередь.
    */
   #schedulePrune(): void {
     if (this.#stopping) return;
@@ -794,6 +810,11 @@ export class JobRunner {
   }
 
   async #pruneOnce(): Promise<void> {
+    await this.#pruneJournalOnce();
+    await this.#pruneSessionsOnce();
+  }
+
+  async #pruneJournalOnce(): Promise<void> {
     const retention = this.#options.journalRetention;
     if (retention === undefined) return;
 
@@ -818,6 +839,36 @@ export class JobRunner {
       void this.#options.errorReporter.report(error, {
         execution: 'process',
         extra: { source: 'journal_prune' },
+      });
+    }
+  }
+
+  /**
+   * Уборка отработавших сессий.
+   *
+   * Отдельным проходом с собственным `try`, а не веткой в очистке журнала:
+   * сбой одной уборки не повод пропустить другую, а по событию в журнале должно
+   * быть видно, какая именно не отработала.
+   */
+  async #pruneSessionsOnce(): Promise<void> {
+    const retentionDays = this.#options.sessionRetentionDays;
+    if (retentionDays === undefined) return;
+
+    try {
+      const result = await pruneExpiredSessions(this.#options.db, { retentionDays });
+      if (!result.locked || result.deleted === 0) return;
+      this.#options.logger.info(
+        { event: 'auth_sessions_pruned', deleted: result.deleted },
+        'отработавшие сессии удалены по сроку хранения',
+      );
+    } catch (error) {
+      this.#options.logger.error(
+        { event: 'auth_sessions_prune_failed', ...errorDigest(error) },
+        'не удалось убрать отработавшие сессии',
+      );
+      void this.#options.errorReporter.report(error, {
+        execution: 'process',
+        extra: { source: 'auth_sessions_prune' },
       });
     }
   }

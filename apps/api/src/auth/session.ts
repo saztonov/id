@@ -260,6 +260,26 @@ export function cookieSecurity(env: Env): boolean {
   return env.PUBLIC_URL.startsWith('https://');
 }
 
+/**
+ * Срок хранения cookie сессии: ровно абсолютный срок и ни секундой больше.
+ *
+ * Без него обе cookie были сессионными — умирали вместе с процессом браузера, —
+ * и закрытое на ночь окно стоило пользователю входа заново, хотя серверная
+ * сессия была жива ещё много часов.
+ *
+ * Именно абсолютный, а не скользящий: `touch()` двигает только окно простоя и
+ * абсолютный срок не трогает, поэтому переустанавливать cookie на каждом
+ * ответе не нужно. Cookie, пережившая строку в `auth_sessions`, — это
+ * генератор 401 на пустом месте.
+ *
+ * Гарантией времени работы `maxAge` при этом не является: действительность
+ * сессии решает `load()`, сверяя оба срока с `now()`. Cookie лишь перестаёт
+ * быть искусственно короче того, что разрешил сервер.
+ */
+function cookieMaxAgeSeconds(env: Env): number {
+  return env.SESSION_ABSOLUTE_HOURS * 3600;
+}
+
 export function sessionCookieOptions(env: Env): CookieSerializeOptions {
   return {
     httpOnly: true,
@@ -267,16 +287,26 @@ export function sessionCookieOptions(env: Env): CookieSerializeOptions {
     sameSite: 'lax',
     path: '/',
     signed: true,
+    maxAge: cookieMaxAgeSeconds(env),
   };
 }
 
-/** CSRF-токен читает SPA, поэтому `httpOnly` здесь неприменим. */
+/**
+ * CSRF-токен читает SPA, поэтому `httpOnly` здесь неприменим.
+ *
+ * `maxAge` обязан совпадать с сессионным. Переживи `id_session` закрытие
+ * браузера в одиночку — пользователь вернулся бы с действующей сессией и без
+ * CSRF-токена, а восстановить его нечем: `POST /auth/csrf` сам проходит общую
+ * проверку и требует предъявить текущий токен. То есть чтение работало бы, а
+ * любая запись отвечала 403 до повторного входа.
+ */
 export function csrfCookieOptions(env: Env): CookieSerializeOptions {
   return {
     httpOnly: false,
     secure: cookieSecurity(env),
     sameSite: 'lax',
     path: '/',
+    maxAge: cookieMaxAgeSeconds(env),
   };
 }
 
@@ -461,7 +491,21 @@ export class SessionStore {
     return plaintext === null || plaintext === '' ? null : plaintext;
   }
 
-  /** Вызывается после обновления токенов: конверт всегда перезаписывается целиком. */
+  /**
+   * Перезапись конверта с refresh-токеном целиком.
+   *
+   * Вызывающего у метода СЕЙЧАС НЕТ, и это не упущение. Портал не обновляет
+   * токены провайдера: срок работы в нём задаёт сессия портала
+   * (`SESSION_IDLE_MINUTES`, `SESSION_ABSOLUTE_HOURS`), access-токен не хранится
+   * вовсе, а refresh-токен нужен ровно один раз — чтобы отозвать доступ на
+   * `/auth/logout` (RFC 7009). В боевом режиме `AUTH_MODE=local` его не
+   * существует и физически.
+   *
+   * Метод оставлен под возврат к Keycloak вместе с `AuthProvider.refresh()`.
+   * Прежний комментарий утверждал, что он «вызывается после обновления
+   * токенов», — и отправлял искать в этой стороне причину разлогинов, которых
+   * она никогда не вызывала (настоящей было окно простоя, см. S45).
+   */
   async replaceRefreshToken(sessionId: string, refreshToken: string | null): Promise<void> {
     const envelope = await this.#cipher.seal(
       refreshToken ?? '',

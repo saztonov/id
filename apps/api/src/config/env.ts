@@ -121,8 +121,35 @@ const envSchema = z.object({
   SESSION_ENC_KEY: z.string().optional(),
   SESSION_ENC_KEY_VERSION: z.coerce.number().int().nonnegative().default(1),
   CSRF_SECRET: z.string().min(32).optional(),
-  SESSION_IDLE_MINUTES: z.coerce.number().int().positive().default(60),
-  SESSION_ABSOLUTE_HOURS: z.coerce.number().int().positive().default(12),
+  /**
+   * Скользящее окно простоя и абсолютный потолок сессии.
+   *
+   * Прежние 60 минут и 12 часов разлогинивали людей по несколько раз за день, и
+   * виновато было именно окно простоя: двигает его только запрос к API
+   * (`sessionContextHook` → `SessionStore.touch()`), а портал на открытом, но
+   * бездействующем экране к API не обращается вовсе. Час чтения комплекта был
+   * для сервера неотличим от закрытой вкладки.
+   *
+   * Окно простоя закрывает рабочий разрыв — совещание, обед, полдня в другой
+   * программе, — а абсолютный потолок остаётся единственным сроком, который не
+   * двигает ничто: ни запрос, ни пульс SPA. Именно он, а не короткое окно
+   * простоя, не даёт сессии стать вечной.
+   *
+   * Действующие сессии подхватывают новое окно сами: `touch()` считает
+   * `now + idleMs` из конфигурации текущего процесса. Абсолютный срок у старых
+   * строк остаётся прежним — он записан при создании.
+   */
+  SESSION_IDLE_MINUTES: z.coerce.number().int().positive().default(720),
+  SESSION_ABSOLUTE_HOURS: z.coerce.number().int().positive().default(168),
+  /**
+   * Сколько строка `auth_sessions` живёт ПОСЛЕ конца сессии.
+   *
+   * Не совпадает со сроком самой сессии намеренно: в строке лежат адрес и
+   * `User-Agent` (§15), и держать их бессрочно нет основания, — но разбор «кто
+   * и откуда входил на прошлой неделе» опирается на них же, и удаление в момент
+   * истечения выносило бы улики раньше, чем о них спросят.
+   */
+  SESSION_RETENTION_DAYS: z.coerce.number().int().positive().default(30),
 
   STORAGE_DRIVER: z.enum(['s3', 'local']).default('s3'),
   S3_ENDPOINT: z.string().optional(),

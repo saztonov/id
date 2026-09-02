@@ -25,6 +25,7 @@
  */
 
 import { retryAfterMsOf } from './problem.js';
+import { notifyUnauthenticated } from './unauthenticated.js';
 
 /**
  * Поток отклонён ответом сервера.
@@ -147,6 +148,14 @@ export async function readEventStream(options: SseOptions): Promise<void> {
     // свежесть держит опрос — то есть исчерпание лимита включало бы более
     // прожорливый режим. Здесь вместо этого называется пауза, которую назвал
     // сервер, и вызывающий её выжидает.
+    //
+    // Поток ходит с той же cookie, что и остальной транспорт, и конец сессии
+    // обязан выглядеть одинаково, откуда бы ни пришёл. Без этой строки истёкшая
+    // сессия сначала сжигала бы пять попыток переподключения, а потом уводила
+    // экран ревизии в `lost` с плашкой «поток отклонён» — то есть выглядела бы
+    // поломкой портала, а не поводом войти.
+    if (response.status === 401) notifyUnauthenticated();
+
     throw new StreamRejected(response.status, retryAfterMsOf(response));
   }
   const body = response.body;

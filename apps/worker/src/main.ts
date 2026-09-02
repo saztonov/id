@@ -391,6 +391,10 @@ async function main(): Promise<void> {
       slowRetentionDays: env.SLOW_OPERATION_RETENTION_DAYS,
       samplesPerIssue: env.ERROR_SAMPLES_PER_ISSUE,
     },
+    // Отработавшие сессии убираются тем же часовым циклом и по той же причине,
+    // по которой здесь живёт очистка журнала: цикл уже есть, а одновременно
+    // работает всё равно один процесс — уборка берёт advisory-блокировку.
+    sessionRetentionDays: env.SESSION_RETENTION_DAYS,
   });
 
   const metricsServer = startMetricsServer(worker.WORKER_METRICS_PORT, metrics, logger);

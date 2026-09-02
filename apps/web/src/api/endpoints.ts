@@ -117,17 +117,28 @@ export const session = {
  */
 export const auth = {
   config: () => get<AuthConfig>(`${V1}/auth/config`),
+  /**
+   * `unauthenticatedIsExpected` здесь и у двух соседей ниже — не оптимизация.
+   *
+   * 401 в портале означает две разные вещи: «сессия истекла» на любом запросе
+   * данных и «пароль не подошёл» на этих трёх. Первое уводит на экран входа,
+   * второе обязано остаться ошибкой поля в форме — иначе опечатка в пароле
+   * подменяла бы саму форму предложением войти, и войти было бы нельзя.
+   */
   login: (email: string, password: string, returnTo?: string) =>
     request<{ redirectTo: string }>('POST', `${V1}/auth/login`, {
       body: { email, password, ...(returnTo === undefined ? {} : { returnTo }) },
+      unauthenticatedIsExpected: true,
     }).then((response) => response.data),
   register: (input: { email: string; fullName: string; position?: string; password: string }) =>
     request<{ status: 'pending-activation' }>('POST', `${V1}/auth/register`, {
       body: input,
+      unauthenticatedIsExpected: true,
     }).then((response) => response.data),
   changePassword: (currentPassword: string, newPassword: string) =>
     request<{ changed: true }>('POST', `${V1}/auth/password`, {
       body: { currentPassword, newPassword },
+      unauthenticatedIsExpected: true,
     }).then((response) => response.data),
 };
 

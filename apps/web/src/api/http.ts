@@ -25,9 +25,16 @@
  * полёте, повторы по 429/5xx и общую паузу по `Retry-After`. Повтор CSRF
  * остался здесь и в очередь не переехал намеренно — это протокол приложения, а
  * не свойство транспорта, и очереди незачем знать про вращение токена.
+ *
+ * **5. 401 объявляется, а не обрабатывается.** Продлить сессию отсюда нечем:
+ * токенов в браузере нет, и 401 означает, что сессии на сервере уже не
+ * существует. Транспорт лишь сообщает об этом через `api/unauthenticated.ts`;
+ * что показать человеку, решает приложение. Про роутер и кэш здесь по-прежнему
+ * ничего не известно.
  */
 import { ApiError, isCsrfRejection, parseProblem, retryAfterMsOf } from './problem.js';
 import { submit, type RequestKind } from './queue.js';
+import { notifyUnauthenticated } from './unauthenticated.js';
 
 /** Заголовок CSRF (`apps/api/src/auth/session.ts`). */
 const CSRF_HEADER = 'x-csrf-token';
@@ -47,6 +54,19 @@ export interface RequestOptions {
   readonly idempotencyKey?: string;
   readonly signal?: AbortSignal;
   readonly headers?: Readonly<Record<string, string>>;
+  /**
+   * Ожидается ли 401 как штатный ответ именно этого запроса.
+   *
+   * Существует ради трёх вызовов — вход, регистрация и смена пароля: там 401
+   * означает «пароль не подошёл», а не «сессия истекла». Без этого различения
+   * опечатка в пароле подменяла бы форму входа экраном «требуется вход», то
+   * есть войти в портал стало бы нельзя вовсе.
+   *
+   * Умолчание — объявлять: забыть флаг на обычном запросе безопасно (человек
+   * увидит экран входа, который ему и нужен), забыть его отсутствие на входе —
+   * нет.
+   */
+  readonly unauthenticatedIsExpected?: boolean;
 }
 
 /** Ответ вместе с заголовками, которые несут состояние. */
@@ -194,6 +214,14 @@ export async function request<T>(
   }
 
   if (!response.ok) {
+    // Конец сессии объявляется ДО броска: подписчик обязан узнать о нём даже
+    // тогда, когда вызывающий проглотит ошибку в своём `catch`. Ветка узкая и
+    // в очередь не переехала по той же причине, что и повтор CSRF, — это
+    // протокол приложения, а не свойство транспорта.
+    if (response.status === 401 && options.unauthenticatedIsExpected !== true) {
+      notifyUnauthenticated();
+    }
+
     throw new ApiError(
       response.status,
       await parseProblem(response),

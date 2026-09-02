@@ -12,17 +12,28 @@
  * 403 с `denial` — это другой случай: вход состоялся, а бизнес-ролей нет.
  * Показывается именно это, потому что «войдите ещё раз» отправило бы человека в
  * бесконечный цикл входа.
+ *
+ * Сессия может кончиться и посреди работы — тогда 401 приходит не в `/me`, а в
+ * запрос данных. За это отвечает `SessionGate`: транспорт объявляет конец сессии
+ * (`api/unauthenticated.ts`), заслон подменяет дерево тем же экраном входа.
  */
-import { StrictMode, type ReactNode } from 'react';
+import { StrictMode, useEffect, useState, type ReactNode } from 'react';
 import { App as AntApp, ConfigProvider, Result, Spin, Typography } from 'antd';
 import ruRU from 'antd/locale/ru_RU';
-import { MutationCache, QueryCache, QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import {
+  MutationCache,
+  QueryCache,
+  QueryClient,
+  QueryClientProvider,
+  useQueryClient,
+} from '@tanstack/react-query';
 
 import { AppShell } from './AppShell.js';
 import { resolveRoute, RouterProvider, useLocation, type RouteDefinition } from './router.js';
 import { SessionProvider, useMeQuery } from './session.js';
 import { session as sessionApi } from '../api/endpoints.js';
 import { isApiError, isUnauthenticated } from '../api/problem.js';
+import { isSessionLost, onUnauthenticated } from '../api/unauthenticated.js';
 import { ErrorState } from '../shared/ui.js';
 import { IdsScreen } from '../features/ids/IdsScreen.js';
 import { ObjectScreen } from '../features/ids/ObjectScreen.js';
@@ -203,7 +214,87 @@ function Root(): ReactNode {
   if (pathname === '/login') return <LoginPage />;
   if (pathname === '/register') return <RegisterPage />;
 
-  return <Authenticated />;
+  // Заслон стоит НИЖЕ форм входа намеренно: 401 от запроса, ушедшего до
+  // перехода на форму, иначе подменил бы саму форму предложением войти.
+  return (
+    <SessionGate>
+      <Authenticated />
+    </SessionGate>
+  );
+}
+
+/**
+ * Единственный экран «войдите» на оба случая.
+ *
+ * Их два: 401 на первом `/me` — сессии не было; 401 в середине работы — сессия
+ * кончилась. Показывать разное было бы враньём: делать надо одно и то же, — а
+ * две копии одного `Result` неизбежно разъезжаются.
+ */
+function LoginRequired(): ReactNode {
+  const returnTo = `${window.location.pathname}${window.location.search}`;
+  return (
+    <Result
+      status="403"
+      title="Требуется вход в портал"
+      subTitle="Токены в браузер не передаются: портал работает на серверной сессии."
+      extra={
+        // Ссылка одна на все режимы: в локальном `/auth/login` отвечает
+        // перенаправлением на форму портала, в федеративном — к провайдеру.
+        <a href={sessionApi.loginUrl(returnTo)} data-testid="login-link">
+          Войти
+        </a>
+      }
+    />
+  );
+}
+
+/**
+ * Подмена дерева экраном входа, когда сессия кончилась в середине работы.
+ *
+ * ## Почему заслон, а не обработка в каждом экране
+ *
+ * 401 приходит сразу во все запросы открытого экрана. Разобранный по панелям,
+ * он даёт горсть красных карточек, из которых непонятно, что делать; собранный
+ * в одном месте — один экран с одной ссылкой. До S45 не было и этого: истёкшая
+ * сессия выглядела поломкой портала, а разлогин человек осознавал после F5.
+ *
+ * ## Почему не редирект
+ *
+ * `location.assign('/auth/login')` увёл бы немедленно, потеряв несохранённую
+ * разметку и не объяснив, что случилось. Ссылка оставляет решение за человеком
+ * и несёт `returnTo` — после входа он вернётся на тот же экран.
+ *
+ * ## Почему кэш чистится ПОСЛЕ подмены дерева
+ *
+ * `clear()` при живых наблюдателях немедленно запускает перезапросы, то есть
+ * вторую волну 401 ровно тогда, когда человек тянется к ссылке «Войти».
+ * Сначала состояние — дерево размонтировано, наблюдателей нет, — потом
+ * очистка. Чистить обязательно: данные прошлой сессии не должны пережить вход
+ * под другой учётной записью.
+ */
+function SessionGate({ children }: { children: ReactNode }): ReactNode {
+  // Начальное значение читается из модуля, а не берётся `false`: StrictMode
+  // монтирует дважды, и 401, объявленный между монтированиями, иначе потерялся
+  // бы вместе с первой подпиской.
+  const [lost, setLost] = useState(isSessionLost);
+  const queryClient = useQueryClient();
+
+  useEffect(
+    () =>
+      onUnauthenticated(() => {
+        setLost(true);
+      }),
+    [],
+  );
+
+  useEffect(() => {
+    if (!lost) return;
+    void queryClient.cancelQueries();
+    queryClient.clear();
+  }, [lost, queryClient]);
+
+  if (lost) return <LoginRequired />;
+  return children;
 }
 
 function Authenticated(): ReactNode {
@@ -218,23 +309,9 @@ function Authenticated(): ReactNode {
   }
 
   if (me.isError) {
-    if (isUnauthenticated(me.error)) {
-      const returnTo = `${window.location.pathname}${window.location.search}`;
-      return (
-        <Result
-          status="403"
-          title="Требуется вход в портал"
-          subTitle="Токены в браузер не передаются: портал работает на серверной сессии."
-          extra={
-            // Ссылка одна на все режимы: в локальном `/auth/login` отвечает
-            // перенаправлением на форму портала, в федеративном — к провайдеру.
-            <a href={sessionApi.loginUrl(returnTo)} data-testid="login-link">
-              Войти
-            </a>
-          }
-        />
-      );
-    }
+    // Путь холодного старта: сессии не было вовсе. Срабатывает синхронно, не
+    // дожидаясь эффекта заслона, — экран тот же самый.
+    if (isUnauthenticated(me.error)) return <LoginRequired />;
     return <ErrorState error={me.error} title="Не удалось проверить сессию" />;
   }
 
