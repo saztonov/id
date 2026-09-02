@@ -195,14 +195,14 @@ test('файл, отвергнутый хранилищем, оставляет 
   await expect(orphan).toBeVisible({ timeout: 30_000 });
   await expect(orphan).toContainText('открыть ревизию');
 
-  // Последствие в базе: комплект существует и у него есть черновая ревизия.
+  // Последствие в базе: папка существует, несмотря на оборванную заливку.
+  // С S44 ревизия схлопнута в саму папку, и отдельного currentFolderId у неё
+  // больше нет — проверять нечего, кроме её существования.
   const list = await page.request.get(`/api/v1/folders?objectId=${IDS.object}&limit=50`);
-  const works = (await list.json()) as {
-    items: { title: string; currentFolderId: string | null }[];
-  };
-  const created = works.items.find((item) => item.title === 'Комплект с оборванной загрузкой');
-  expect(created, 'комплект не должен удаляться из-за отказа на заливке').toBeDefined();
-  expect(created?.currentFolderId).not.toBeNull();
+  const folders = (await list.json()) as { items: { id: string; title: string }[] };
+  const created = folders.items.find((item) => item.title === 'Комплект с оборванной загрузкой');
+  expect(created, 'папка не должна удаляться из-за отказа на заливке').toBeDefined();
+  expect(created?.id).toBeTruthy();
 });
 
 test('роли подрядчика и инженера вместе: организация берётся не из второй роли', async ({

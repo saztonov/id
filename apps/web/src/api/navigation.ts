@@ -105,12 +105,13 @@ export interface Work {
   contractorName: string;
   /** Организация, ведущая комплект: только она правит его состав. */
   managedByContractorId: string;
-  kind: 'complect' | 'registry';
   title: string;
-  registryId: string | null;
+  /** Порядок папки в разделе — тот же, что в бумаге. */
   ordinal: number | null;
   autoRunEnabled: boolean;
-  currentFolderId: string | null;
+  /** Хэш состава: им сверяется переиспользование прогонов распознавания. */
+  aggregateManifestHash: string | null;
+  version: number;
   createdBy: string;
   createdAt: string;
 }

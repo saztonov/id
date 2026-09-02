@@ -498,12 +498,11 @@ function SectionPanel({
                 title: 'Работа',
                 dataIndex: 'title',
                 key: 'title',
-                render: (title: string, row) =>
-                  row.currentFolderId === null ? (
-                    title
-                  ) : (
-                    <Link to={`/ids/folders/${row.currentFolderId}`}>{title}</Link>
-                  ),
+                // Ссылка ведёт на саму папку: с S44 ревизия и комплект
+                // схлопнуты, и открывать теперь нечего, кроме неё. Прежде здесь
+                // читалось поле currentFolderId, которого сервер уже не отдаёт,
+                // и ссылка вела на /ids/folders/undefined.
+                render: (title: string, row) => <Link to={`/ids/folders/${row.id}`}>{title}</Link>,
               },
               {
                 title: 'Месяц',
@@ -531,17 +530,6 @@ function SectionPanel({
                 title: 'Распознавание',
                 key: 'pipeline',
                 render: (_value: unknown, row) => pipelineLabel(pipelineOf(row.id)),
-              },
-              {
-                title: 'Реестр',
-                dataIndex: 'registryId',
-                key: 'registryId',
-                render: (registryId: string | null) =>
-                  registryId === null ? (
-                    <Tag>не включён</Tag>
-                  ) : (
-                    <Link to={`/ids/registries/${registryId}`}>папка</Link>
-                  ),
               },
               // Колонка действий появляется только у администратора: у
               // остальных ролей ей нечего показать, а пустой столбец «Действия»
