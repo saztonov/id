@@ -106,17 +106,9 @@ export const navigationKeys = {
    */
   foldersPipeline: (objectId: string, folderIds: string) =>
     ['nav', 'folders', 'pipeline', objectId, folderIds] as const,
-  registryDeletionPreview: (registryId: string) =>
-    ['nav', 'registries', 'one', registryId, 'deletion'] as const,
   folder: (folderId: string) => ['nav', 'folders', 'one', folderId] as const,
   sectionCounts: (objectId: string, filter: string) =>
-    ['nav', 'works', 'counts', objectId, filter] as const,
-  registries: (filter: string) => ['nav', 'registries', filter] as const,
-  registry: (registryId: string) => ['nav', 'registries', 'one', registryId] as const,
-  registryItems: (registryId: string) => ['nav', 'registries', 'one', registryId, 'items'] as const,
-  registryReconciliation: (registryId: string) =>
-    ['nav', 'registries', 'one', registryId, 'reconciliation'] as const,
-  workReconciliation: (folderId: string) => ['nav', 'folders', folderId, 'reconciliation'] as const,
+    ['nav', 'folders', 'counts', objectId, filter] as const,
 };
 
 export const adminKeys = {

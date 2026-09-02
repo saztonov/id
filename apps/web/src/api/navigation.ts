@@ -1,5 +1,5 @@
 /**
- * Навигация ИД: объект → комплект → ревизия и реестры передачи (§3, §14).
+ * Навигация ИД: объект → раздел → папка (§3, §14).
  *
  * ## Пути сверены с фактическими маршрутами
  *
@@ -61,13 +61,13 @@
  *   запрещает различать «нет такого» и «не ваше» по идентификатору, но не
  *   запрещает сказать пользователю, что раздел ему не по правам.
  *
- * Отдельно: 404 на конкретном идентификаторе (комплект, реестр) — обычная ошибка,
+ * Отдельно: 404 на конкретном идентификаторе (папка) — обычная ошибка,
  * и она проходит наверх как есть. Чужое и несуществующее неразличимы по
  * построению сервера, и клиент не пытается их разделить.
  */
 import type { ProcessingStage } from '@id/contracts';
 import { isApiError } from './problem.js';
-import { get, newIdempotencyKey, request } from './http.js';
+import { get, request } from './http.js';
 
 /** Дословно из `app.setNotFoundHandler` в `apps/api/src/app.ts`. */
 const ROUTE_MISSING_DETAIL = 'Маршрут не найден.';
@@ -83,7 +83,7 @@ export interface Work {
   sectionCode: string;
   /** Месяц первым числом; `null` — портал ещё не прочитал акт (S30). */
   period: string | null;
-  /** Исполнитель работы — он печатается в реестре. */
+  /** Исполнитель работы: он же печатается в бумагах комплекта. */
   contractorId: string;
   /**
    * Исполнитель подставлен ПОРТАЛОМ, а не назван человеком (S37).
@@ -113,45 +113,6 @@ export interface Work {
   currentFolderId: string | null;
   createdBy: string;
   createdAt: string;
-}
-
-export type RegistryStatus = 'draft' | 'issued' | 'accepted';
-
-export interface Registry {
-  id: string;
-  objectId: string;
-  sectionCode: string;
-  period: string;
-  number: string | null;
-  folderNo: string | null;
-  building: string | null;
-  floor: string | null;
-  structure: string | null;
-  status: RegistryStatus;
-  version: number;
-  issuedBy: string | null;
-  issuedAt: string | null;
-  issuedFileFolderId: string | null;
-  acceptedBy: string | null;
-  acceptedAt: string | null;
-  createdBy: string;
-  createdAt: string;
-}
-
-/** Строка снимка состава переданного реестра. */
-export interface RegistryItem {
-  registryId: string;
-  ordinal: number;
-  workId: string;
-  folderId: string;
-  contractorId: string;
-  title: string;
-}
-
-/** Причина, по которой реестр ещё нельзя передать. */
-export interface RegistryBlocker {
-  code: string;
-  message: string;
 }
 
 export interface FolderSummary {
@@ -188,21 +149,6 @@ export const NAVIGATION_ROUTES = {
   sectionCounts: (objectId: string) => `${V1}/objects/${objectId}/sections/counts`,
   foldersPipeline: (objectId: string) => `${V1}/objects/${objectId}/folders/pipeline`,
   folderDeletionPreview: (folderId: string) => `${V1}/folders/${folderId}/deletion-preview`,
-  registries: `${V1}/registries`,
-  registry: (registryId: string) => `${V1}/registries/${registryId}`,
-  registryWork: (registryId: string, workId: string) =>
-    `${V1}/registries/${registryId}/works/${workId}`,
-  registryFile: (registryId: string) => `${V1}/registries/${registryId}/file`,
-  registryIssue: (registryId: string) => `${V1}/registries/${registryId}/issue`,
-  registryAccept: (registryId: string) => `${V1}/registries/${registryId}/accept`,
-  registryItems: (registryId: string) => `${V1}/registries/${registryId}/items`,
-  registryDeletionPreview: (registryId: string) =>
-    `${V1}/registries/${registryId}/deletion-preview`,
-  registryReconcile: (registryId: string) => `${V1}/registries/${registryId}/reconcile`,
-  registryReconciliation: (registryId: string) => `${V1}/registries/${registryId}/reconciliation`,
-  registryReconciliationReview: (registryId: string) =>
-    `${V1}/registries/${registryId}/reconciliation/review`,
-  folderReconciliation: (folderId: string) => `${V1}/folders/${folderId}/reconciliation`,
 } as const;
 
 export type UnavailableReason = 'route-missing' | 'forbidden';
@@ -443,49 +389,6 @@ export async function deleteFolder(folderId: string): Promise<void> {
 }
 
 /**
- * Что исчезнет вместе с реестром.
- *
- * Два счётчика намеренно про разное: `worksDetached` — сколько комплектов
- * ОТВЯЖЕТСЯ (они останутся на объекте), а `file` и `reconciliations` — что
- * будет удалено безвозвратно. Экран обязан печатать их разными глаголами.
- */
-export interface RegistryDeletionPreview {
-  registryId: string;
-  number: string | null;
-  status: Registry['status'];
-  worksDetached: number;
-  registryItems: number;
-  reconciliations: number;
-  file: {
-    workId: string;
-    title: string;
-    folders: number;
-    files: number;
-    pages: number;
-  } | null;
-  blockers: string[];
-}
-
-export async function getRegistryDeletionPreview(
-  registryId: string,
-): Promise<RegistryDeletionPreview> {
-  return get<RegistryDeletionPreview>(NAVIGATION_ROUTES.registryDeletionPreview(registryId));
-}
-
-/**
- * Удаление реестра.
- *
- * Версия обязательна, как у всех правящих маршрутов реестра, и здесь сильнее
- * прочих: между «увидел состав» и «нажал удалить» папку могли передать, а
- * переданную удалять нельзя.
- */
-export async function deleteRegistry(registryId: string, version: number): Promise<void> {
-  await request<void>('DELETE', NAVIGATION_ROUTES.registry(registryId), {
-    headers: ifMatch(version),
-  });
-}
-
-/**
  * Состояние конвейера по комплектам страницы списка.
  *
  * Идентификаторы уходят строкой через запятую: это `GET`, и повторяющийся ключ
@@ -511,334 +414,4 @@ export async function listWorkPipeline(
   return get<FolderPipelineSummary[]>(NAVIGATION_ROUTES.foldersPipeline(objectId), {
     query: { workIds: workIds.join(',') },
   });
-}
-
-// =====================================================================
-// Ревизии комплекта
-// =====================================================================
-
-// =====================================================================
-// Реестры передачи
-// =====================================================================
-
-export interface RegistryFilter {
-  readonly objectId?: string | undefined;
-  readonly sectionCode?: string | undefined;
-  readonly period?: string | undefined;
-  readonly status?: RegistryStatus | undefined;
-  readonly cursor?: string | null | undefined;
-}
-
-export async function listRegistries(
-  filter: RegistryFilter = {},
-): Promise<NavigationResult<CursorPage<Registry>>> {
-  return loadNavigation(NAVIGATION_ROUTES.registries, () =>
-    get<CursorPage<Registry>>(NAVIGATION_ROUTES.registries, {
-      query: pageQuery(filter.cursor, {
-        ...(filter.objectId === undefined ? {} : { objectId: filter.objectId }),
-        ...(filter.sectionCode === undefined ? {} : { sectionCode: filter.sectionCode }),
-        ...(filter.period === undefined ? {} : { period: filter.period }),
-        ...(filter.status === undefined ? {} : { status: filter.status }),
-      }),
-    }),
-  );
-}
-
-/**
- * Карточка реестра.
- *
- * `works`, `file` и `blockers` необязательны, и это часть контракта: подрядчику
- * сервер их не отдаёт вовсе. Нулевой счётчик вместо отсутствия был бы ответом на
- * вопрос «сколько работ у соседей», а не умолчанием.
- */
-export interface RegistryView {
-  registry: Registry;
-  works?: Work[];
-  file?: Work | null;
-  blockers?: RegistryBlocker[];
-  /**
-   * Сводка сверки описи. Того же класса, что `works`: подрядчику не отдаётся
-   * вовсе, потому что относится к папке целиком. Свои расхождения он читает на
-   * экране СВОЕГО комплекта.
-   */
-  reconciliation?: RegistryReconciliation | null;
-}
-
-export async function getRegistry(registryId: string): Promise<NavigationResult<RegistryView>> {
-  const route = NAVIGATION_ROUTES.registry(registryId);
-  return loadNavigation(route, () => get<RegistryView>(route));
-}
-
-export interface CreateRegistryInput {
-  readonly objectId: string;
-  readonly sectionCode: string;
-  readonly period: string;
-  readonly number?: string | undefined;
-  readonly folderNo?: string | undefined;
-  readonly building?: string | undefined;
-}
-
-export async function createRegistry(input: CreateRegistryInput): Promise<Registry> {
-  const response = await request<Registry>('POST', NAVIGATION_ROUTES.registries, {
-    body: {
-      objectId: input.objectId,
-      sectionCode: input.sectionCode,
-      period: input.period,
-      ...(input.number === undefined || input.number === '' ? {} : { number: input.number }),
-      ...(input.folderNo === undefined || input.folderNo === ''
-        ? {}
-        : { folderNo: input.folderNo }),
-      ...(input.building === undefined || input.building === ''
-        ? {}
-        : { building: input.building }),
-    },
-  });
-  return response.data;
-}
-
-/**
- * Версия реестра в `If-Match` на каждом изменении состава.
- *
- * Реестр собирают минутами, а передают одним нажатием: без версии второй
- * сотрудник ПТО молча затёр бы состав, собранный первым, и подпись оказалась бы
- * под тем, чего никто не видел.
- */
-function ifMatch(version: number): Record<string, string> {
-  return { 'if-match': `"${String(version)}"` };
-}
-
-export async function updateRegistry(
-  registryId: string,
-  version: number,
-  patch: Record<string, string | null>,
-): Promise<Registry> {
-  const response = await request<Registry>('PATCH', NAVIGATION_ROUTES.registry(registryId), {
-    headers: ifMatch(version),
-    body: patch,
-  });
-  return response.data;
-}
-
-export async function includeWork(
-  registryId: string,
-  workId: string,
-  version: number,
-): Promise<Registry> {
-  const response = await request<Registry>(
-    'PUT',
-    NAVIGATION_ROUTES.registryWork(registryId, workId),
-    { headers: ifMatch(version), body: {} },
-  );
-  return response.data;
-}
-
-export async function excludeWork(
-  registryId: string,
-  workId: string,
-  version: number,
-): Promise<Registry> {
-  const response = await request<Registry>(
-    'DELETE',
-    NAVIGATION_ROUTES.registryWork(registryId, workId),
-    { headers: ifMatch(version) },
-  );
-  return response.data;
-}
-
-/** Заведение файла описи: сам скан грузится обычным приёмом на его ревизию. */
-export async function attachRegistryFile(registryId: string): Promise<CreatedFolder> {
-  const response = await request<CreatedFolder>('POST', NAVIGATION_ROUTES.registryFile(registryId));
-  return response.data;
-}
-
-export async function issueRegistry(registryId: string, version: number): Promise<Registry> {
-  const response = await request<Registry>('POST', NAVIGATION_ROUTES.registryIssue(registryId), {
-    headers: ifMatch(version),
-  });
-  return response.data;
-}
-
-export async function acceptRegistry(registryId: string, version: number): Promise<Registry> {
-  const response = await request<Registry>('POST', NAVIGATION_ROUTES.registryAccept(registryId), {
-    headers: ifMatch(version),
-  });
-  return response.data;
-}
-
-/**
- * Снимок состава переданного реестра.
- *
- * Отдаётся массивом, а не курсорной страницей: состав описи — это то, что
- * поместилось в подписанную бумагу, и он конечен по построению.
- */
-export async function listRegistryItems(registryId: string): Promise<RegistryItem[]> {
-  return get<RegistryItem[]>(NAVIGATION_ROUTES.registryItems(registryId));
-}
-
-// =====================================================================
-// Сверка описи передачи (S20)
-// =====================================================================
-
-export type ReconciliationVerdict = 'unparsed' | 'mismatch' | 'clean';
-export type ReconciliationMatchState = 'matched' | 'missing' | 'ambiguous';
-
-/** Комплект папки со своим вердиктом: единица выдачи подрядчику и инженеру. */
-export interface ReconciliationWork {
-  workId: string;
-  matchedFolderId: string | null;
-  contractorId: string;
-  title: string;
-  contractorName: string | null;
-  state: 'matched' | 'extra';
-  verdict: ReconciliationVerdict;
-  rowsTotal: number;
-  rowsMatched: number;
-  rowsMissing: number;
-  rowsAmbiguous: number;
-  rowsFieldMismatch: number;
-  extraDocuments: number;
-}
-
-export interface ReconciliationGroup {
-  ordinal: number;
-  groupNo: string | null;
-  titleRaw: string;
-  actNoRaw: string | null;
-  actNoNorm: string | null;
-  contractorRaw: string | null;
-  matchedWorkId: string | null;
-  matchedFolderId: string | null;
-  matchedContractorId: string | null;
-  matchState: ReconciliationMatchState;
-  matchScore: number | null;
-  reason: string;
-}
-
-export interface ReconciliationRow {
-  ordinal: number;
-  groupOrdinal: number;
-  workId: string | null;
-  contractorId: string | null;
-  rowNo: string | null;
-  docNameRaw: string;
-  docNoRaw: string | null;
-  docNoNorm: string | null;
-  orgRaw: string | null;
-  issuedAt: string | null;
-  validFrom: string | null;
-  validTo: string | null;
-  sheets: number | null;
-  copies: number | null;
-  pagesRaw: string | null;
-  matchedDocumentId: string | null;
-  matchState: ReconciliationMatchState;
-  matchScore: number | null;
-  fieldMismatches: string[];
-  reason: string;
-}
-
-export interface ReconciliationExtraDocument {
-  documentId: string;
-  workId: string;
-  folderId: string;
-  contractorId: string;
-  docNoRaw: string | null;
-  docNameRaw: string | null;
-  docTypeCode: string | null;
-}
-
-export interface RegistryReconciliation {
-  id: string;
-  registryId: string;
-  folderId: string;
-  verdict: ReconciliationVerdict;
-  version: number;
-  headerRegistryNo: string | null;
-  headerFolderNo: string | null;
-  headerMismatch: boolean;
-  parserVersion: string;
-  matcherVersion: string;
-  finishedAt: string;
-  groupsTotal: number;
-  groupsMatched: number;
-  groupsMissing: number;
-  groupsAmbiguous: number;
-  rowsTotal: number;
-  rowsMatched: number;
-  rowsMissing: number;
-  rowsAmbiguous: number;
-  rowsFieldMismatch: number;
-  worksTotal: number;
-  worksExtra: number;
-  extraDocuments: number;
-  warnings: string[];
-  reviewedBy: string | null;
-  reviewedAt: string | null;
-  reviewedNote: string | null;
-}
-
-/** Сводка по ПАПКЕ: отдаётся только тому, кто её ведёт. */
-export interface RegistryReconciliationView {
-  reconciliation: RegistryReconciliation | null;
-  works?: ReconciliationWork[];
-  groups?: ReconciliationGroup[];
-  rows?: ReconciliationRow[];
-  extraDocuments?: ReconciliationExtraDocument[];
-}
-
-/**
- * Результат по ОДНОМУ комплекту.
- *
- * Полей о папке в этом типе нет — ни шапки описи, ни групп, ни чужих
- * комплектов, ни общих счётчиков. Их нет и в ответе сервера: разделение
- * выражено типом, а не условием на экране.
- */
-export interface WorkReconciliationView {
-  work: ReconciliationWork | null;
-  rows: ReconciliationRow[];
-  extraDocuments: ReconciliationExtraDocument[];
-  parserVersion: string | null;
-  finishedAt: string | null;
-}
-
-/**
- * Постановка сверки.
- *
- * `Idempotency-Key` обязателен: сверка читает документы всей папки. В ключ
- * дедупликации очереди он не входит — второе нажатие получает уже стоящую
- * задачу, а не заводит вторую по той же папке.
- */
-export async function reconcileRegistry(
-  registryId: string,
-): Promise<{ jobId: string; created: boolean }> {
-  const response = await request<{ jobId: string; created: boolean }>(
-    'POST',
-    NAVIGATION_ROUTES.registryReconcile(registryId),
-    { idempotencyKey: newIdempotencyKey('reconcile') },
-  );
-  return response.data;
-}
-
-export async function getRegistryReconciliation(
-  registryId: string,
-): Promise<NavigationResult<RegistryReconciliationView>> {
-  const route = NAVIGATION_ROUTES.registryReconciliation(registryId);
-  return loadNavigation(route, () => get<RegistryReconciliationView>(route));
-}
-
-export async function getFolderReconciliation(folderId: string): Promise<WorkReconciliationView> {
-  return get<WorkReconciliationView>(NAVIGATION_ROUTES.folderReconciliation(folderId));
-}
-
-export async function reviewReconciliation(
-  registryId: string,
-  version: number,
-  note: string,
-): Promise<RegistryReconciliation> {
-  const response = await request<RegistryReconciliation>(
-    'POST',
-    NAVIGATION_ROUTES.registryReconciliationReview(registryId),
-    { headers: ifMatch(version), body: { note } },
-  );
-  return response.data;
 }
