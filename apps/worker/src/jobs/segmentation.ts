@@ -1660,7 +1660,7 @@ export function createMatchRegistryHandler(
 /** Группы каталога, определяющие вид связи документа с актом. */
 const PROTOCOL_TYPES = /^lab_protocol_|^sampling_act$|^protocol_/u;
 const QUALITY_TYPES =
-  /^cert_conformity$|^declaration$|^quality_passport$|^technical_passport$|^mill_certificate$|^mix_quality_doc$|^fire_certificate$|^refusal_letter$|^equipment_passport$|^ttn$|^other_quality_docs$/u;
+  /^cert_conformity$|^declaration$|^state_registration_certificate$|^quality_passport$|^technical_passport$|^mill_certificate$|^mix_quality_doc$|^fire_certificate$|^refusal_letter$|^equipment_passport$|^ttn$|^other_quality_docs$/u;
 const PRIMARY_TYPES = /^aosr/u;
 
 /**

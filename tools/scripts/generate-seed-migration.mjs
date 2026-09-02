@@ -31,7 +31,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const DOC_TYPES_DIR = join(ROOT, 'packages', 'doc-types');
-export const TARGET = join(ROOT, 'migrations', '0050_reseed_doc_types.sql');
+export const TARGET = join(ROOT, 'migrations', '0066_reseed_doc_types.sql');
 
 /**
  * Собирает каталог и возвращает его вместе с готовым SQL.
