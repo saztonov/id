@@ -1046,7 +1046,16 @@ export async function applySegmentation(
             documentId,
             sortOrder: page.sortOrder,
             pageRoleCode: page.pageRoleCode,
-            needsReview: document.needsReview,
+            // Два разных сомнения складываются: в ВИДЕ документа (`document`) и
+            // в принадлежности конкретного ЛИСТА (`page`, S44). Второе бывает
+            // и у документа с уверенно определённым видом — приложение без
+            // номера родителя присоединяется по соседству.
+            needsReview: document.needsReview || page.needsReview === true,
+            // Причина — только у сомнения в ЛИСТЕ: сомнение в виде документа
+            // объясняется его собственными полями (`type_confidence`,
+            // `observed_title`), и дублировать его здесь значило бы завести
+            // второй источник того же факта.
+            reviewReason: page.reviewReason ?? null,
           });
           pagesAssigned += 1;
         }
@@ -1345,6 +1354,8 @@ export interface PageAssignmentView {
   readonly pageRoleCode: PageRoleCode | null;
   readonly reason: string | null;
   readonly needsReview: boolean;
+  /** Чем присоединение листа не доказано; `null` — сомнений в листе нет (S44). */
+  readonly reviewReason: string | null;
 }
 
 /** Учёт страниц ревизии: и привязанные, и явно непривязанные — одним списком. */
@@ -1362,6 +1373,7 @@ export async function listPageAssignments(
       pageRoleCode: pageAssignments.pageRoleCode,
       reason: pageAssignments.reason,
       needsReview: pageAssignments.needsReview,
+      reviewReason: pageAssignments.reviewReason,
     })
     .from(pageAssignments)
     .innerJoin(

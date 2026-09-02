@@ -475,6 +475,51 @@ describe('applySegmentation', () => {
     expect(await listUnaccountedPages(db, ADMIN, FOLDER_A)).toEqual([]);
   });
 
+  it('лист, присоединённый по соседству, помечен и объяснён', async () => {
+    /**
+     * Приложение без напечатанного номера родителя присоединяется к соседнему
+     * документу (S44): на боевой папке это было 17 из 27 непривязанных листов, и
+     * каждый уменьшал покрытие, по которому правила полноты решают, вправе ли
+     * они сказать «документа нет в комплекте».
+     *
+     * Присоединение по соседству — довод, а не доказательство, поэтому лист
+     * несёт и пометку, и причину. Пометки без причины мало: «проверьте» без
+     * «что именно» человек проверить не может.
+     */
+    await applySegmentation(db, ADMIN, {
+      folderId: FOLDER_A,
+      documents: [
+        {
+          ...decoded(0, [PAGE_A0, PAGE_A1]),
+          pages: [
+            { sourcePageId: PAGE_A0, sortOrder: 0, pageRoleCode: null },
+            {
+              sourcePageId: PAGE_A1,
+              sortOrder: 1,
+              pageRoleCode: null,
+              needsReview: true,
+              reviewReason: 'номер родительского документа на приложении не назван',
+            },
+          ],
+        },
+        decoded(1, [PAGE_A2], { docTypeCode: 'cert_conformity' }),
+      ],
+      unassigned: [unassigned(PAGE_A3)],
+      extractorVersion: 'seg/1',
+    });
+
+    const assignments = await listPageAssignments(db, ADMIN, FOLDER_A);
+    const flagged = assignments.find((page) => page.sourcePageId === PAGE_A1);
+    expect(flagged?.needsReview).toBe(true);
+    expect(flagged?.reviewReason).toBe('номер родительского документа на приложении не назван');
+
+    // Соседний лист того же документа сомнения не наследует: пометка про ЛИСТ,
+    // а не про документ.
+    const clean = assignments.find((page) => page.sourcePageId === PAGE_A0);
+    expect(clean?.needsReview).toBe(false);
+    expect(clean?.reviewReason).toBeNull();
+  });
+
   /**
    * ПЕРВЫЙ РУБЕЖ инварианта §1.6: потеря страницы.
    *

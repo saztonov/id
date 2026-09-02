@@ -261,12 +261,25 @@ function openDocument(ordinal: number, page: PageInput, c: PageClassification): 
   };
 }
 
-function attach(doc: OpenDocument, page: PageInput, c: PageClassification): void {
+/**
+ * Присоединить страницу к документу.
+ *
+ * `reviewReason` — причина, по которой присоединение стоит перепроверить
+ * человеку (S44). Пустая означает обычное присоединение: страница попала в
+ * документ по своему признаку, а не по соседству с ним.
+ */
+function attach(
+  doc: OpenDocument,
+  page: PageInput,
+  c: PageClassification,
+  reviewReason?: string,
+): void {
   doc.texts.push(page.text);
   doc.pages.push({
     sourcePageId: page.sourcePageId,
     sortOrder: doc.pages.length + 1,
     pageRoleCode: c.pageRoleCode,
+    ...(reviewReason === undefined ? {} : { needsReview: true, reviewReason }),
   });
 }
 
@@ -404,10 +417,35 @@ export function decodeSegmentation(
       }
       if (role === ANNEX_ROLE) {
         if (c.parentRef === null) {
-          drop(
-            page,
-            'приложение-продолжение без номера родительского документа: привязка не подтверждена',
-          );
+          /**
+           * Приложение без номера родителя: решает СОСЕДСТВО, но с пометкой (S44).
+           *
+           * До S44 такая страница уходила в непривязанные всегда, и на боевой
+           * папке это дало 17 из 27 непривязанных листов — больше половины.
+           * Разбор показал, что случай не редкий и не сомнительный: приложение
+           * лежит сразу за страницей своего документа, а номера родителя на нём
+           * просто не напечатано.
+           *
+           * Отбрасывание тут дороже присоединения. Непривязанная страница
+           * уменьшает покрытие, а покрытие читают правила полноты: при
+           * ненулевых пробелах вывод «документа нет в комплекте» становится
+           * `undetermined`. То есть каждый такой лист гасил проверки соседей.
+           *
+           * Присоединение НЕ выдаёт догадку за факт: страница помечается
+           * `needsReview` со своей причиной, и человек видит именно её. Лист,
+           * оторванный от документа (`previousInCurrent === false`), остаётся
+           * ничьим — там опереться не на что.
+           */
+          if (!previousInCurrent) {
+            drop(
+              page,
+              'приложение-продолжение без номера родительского документа отделено от него: ' +
+                'привязка не подтверждена',
+            );
+            continue;
+          }
+          attach(current, page, c, 'номер родительского документа на приложении не назван');
+          previousInCurrent = true;
           continue;
         }
         const parentText = current.texts.join('\n');

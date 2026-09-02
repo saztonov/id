@@ -752,6 +752,7 @@ export const pageAssignments = pgTable("page_assignments", {
 	reason: text(),
 	needsReview: boolean("needs_review").default(false).notNull(),
 	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	reviewReason: text("review_reason"),
 }, (table) => [
 	index("ix_page_assignments_document").using("btree", table.documentId.asc().nullsLast().op("int4_ops"), table.sortOrder.asc().nullsLast().op("uuid_ops")),
 	index("ix_page_assignments_role").using("btree", table.pageRoleCode.asc().nullsLast().op("text_ops")),
@@ -770,6 +771,7 @@ export const pageAssignments = pgTable("page_assignments", {
 	unique("page_assignments_page_uq").on(table.folderId, table.sourcePageId),
 	check("page_assignments_sort_order_chk", sql`(sort_order IS NULL) OR (sort_order >= 0)`),
 	check("page_assignments_state_chk", sql`((document_id IS NOT NULL) AND (sort_order IS NOT NULL) AND (reason IS NULL)) OR ((document_id IS NULL) AND (sort_order IS NULL) AND (page_role_code IS NULL) AND (reason IS NOT NULL))`),
+	check("page_assignments_review_reason_chk", sql`(review_reason IS NULL) OR needs_review`),
 ]);
 
 export const fieldValues = pgTable("field_values", {

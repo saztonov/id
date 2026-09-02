@@ -245,13 +245,38 @@ describe('приложение-продолжение', () => {
     expect(result.unassigned[0]?.reason).toContain('B-9');
   });
 
-  it('не присоединяется без номера родителя', () => {
+  it('без номера родителя присоединяется вплотную — но с пометкой «проверьте»', () => {
+    /**
+     * На боевой папке это 17 из 27 непривязанных листов: приложение лежит сразу
+     * за страницей своего документа, а номера родителя на нём не напечатано.
+     * Отбрасывание тут дороже присоединения — непривязанная страница уменьшает
+     * покрытие, а по покрытию правила полноты решают, вправе ли они вообще
+     * говорить «документа нет в комплекте».
+     */
     const result = decodeSegmentation(
       [parent, page('p2')],
       [opensKnown('p1', 'cert_conformity'), annexTo('p2', null)],
     );
+
+    expect(result.documents[0]?.pages).toHaveLength(2);
+    // Догадка не выдаётся за факт: лист помечен своей причиной.
+    const attached = result.documents[0]?.pages[1];
+    expect(attached?.needsReview).toBe(true);
+    expect(attached?.reviewReason).toContain('номер родительского документа');
+    expect(result.unassigned).toEqual([]);
+  });
+
+  it('без номера родителя и в отрыве от документа остаётся ничьим', () => {
+    // Отрицательный контроль к предыдущему: соседство — единственное основание,
+    // и без него присоединять не к чему.
+    const result = decodeSegmentation(
+      [parent, page('p2'), page('p3')],
+      [opensKnown('p1', 'cert_conformity'), cls('p2'), annexTo('p3', null)],
+    );
+
     expect(result.documents[0]?.pages).toHaveLength(1);
-    expect(result.unassigned[0]?.reason).toContain('без номера родительского документа');
+    expect(result.unassigned.map((u) => u.sourcePageId)).toEqual(['p2', 'p3']);
+    expect(result.unassigned[1]?.reason).toContain('без номера родительского документа');
   });
 
   it('при непрочитанном номере документа присоединяется только вплотную к нему', () => {

@@ -112,6 +112,16 @@ export interface DecodedPage {
   readonly sourcePageId: string;
   readonly sortOrder: number;
   readonly pageRoleCode: string | null;
+  /**
+   * Присоединение стоит перепроверить человеку (S44).
+   *
+   * Не то же, что `DecodedDocument.needsReview`: тот про ВИД документа, этот —
+   * про принадлежность конкретного листа. Лист приложения без номера родителя
+   * присоединяется по соседству, и соседство — довод, а не доказательство.
+   */
+  readonly needsReview?: boolean;
+  /** Чем именно присоединение не доказано; заполнено вместе с `needsReview`. */
+  readonly reviewReason?: string;
 }
 
 /** Логический документ, собранный декодером. */
