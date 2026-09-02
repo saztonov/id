@@ -367,6 +367,14 @@ export interface BundlePageView {
   readonly contentRotation: ContentRotation;
   /** Кем поставлен разворот; `null` — решения не было, значение нулевое. */
   readonly contentRotationSource: ContentRotationSource | null;
+  /**
+   * Разрешение покрывающего страницу растра, точек на дюйм; `null` — растра нет
+   * либо он не опознан.
+   *
+   * Потолок для рендера: выше него страница не станет детальнее, а байты и
+   * время на кодирование вырастут (см. `effectiveRasterDpi`).
+   */
+  readonly nativeDpi: number | null;
 }
 
 /**
@@ -386,6 +394,7 @@ const PAGE_MAP_SELECTION = {
   widthPx: sourcePages.widthPx,
   heightPx: sourcePages.heightPx,
   rotation: sourcePages.rotation,
+  nativeDpi: sourcePages.nativeDpi,
   contentRotation: sql<number>`coalesce(${pageOrientations.contentRotation}, 0)`,
   contentRotationSource: pageOrientations.source,
 };
@@ -412,6 +421,7 @@ function toPageView(row: {
   readonly widthPx: number;
   readonly heightPx: number;
   readonly rotation: number;
+  readonly nativeDpi: number | null;
   readonly contentRotation: number;
   readonly contentRotationSource: string | null;
 }): BundlePageView {
@@ -424,6 +434,7 @@ function toPageView(row: {
     widthPx: row.widthPx,
     heightPx: row.heightPx,
     rotation: row.rotation,
+    nativeDpi: row.nativeDpi,
     // CHECK базы уже сузил домен до четырёх значений; здесь только приведение
     // типа, а `?? 0` покрывает страницу без строки разворота.
     contentRotation: (row.contentRotation ?? 0) as ContentRotation,

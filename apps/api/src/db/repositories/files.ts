@@ -114,6 +114,8 @@ export interface PageGeometryInput {
   readonly widthPx: number;
   readonly heightPx: number;
   readonly rotation: 0 | 90 | 180 | 270;
+  /** Разрешение покрывающего растра; `null` — рендерить на полном разрешении. */
+  readonly nativeDpi: number | null;
 }
 
 export interface RecordUploadInput {
@@ -347,6 +349,7 @@ async function insertUploadedFile(
           widthPx: page.widthPx,
           heightPx: page.heightPx,
           rotation: page.rotation,
+          nativeDpi: page.nativeDpi,
           attentionFlags: [],
         })),
       );
@@ -504,6 +507,7 @@ export async function saveFileVerdict(
             widthPx: page.widthPx,
             heightPx: page.heightPx,
             rotation: page.rotation,
+            nativeDpi: page.nativeDpi,
             attentionFlags: [],
           })),
         )
@@ -843,6 +847,7 @@ export async function replaceSourceFile(
           widthPx: page.widthPx,
           heightPx: page.heightPx,
           rotation: page.rotation,
+          nativeDpi: page.nativeDpi,
           attentionFlags: [],
         })),
       );

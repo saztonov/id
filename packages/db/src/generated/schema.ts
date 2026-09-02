@@ -415,6 +415,7 @@ export const sourcePages = pgTable("source_pages", {
 	rotation: integer().default(0).notNull(),
 	attentionFlags: text("attention_flags").array().default([""]).notNull(),
 	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	nativeDpi: integer("native_dpi"),
 }, (table) => [
 	index("ix_source_pages_file").using("btree", table.sourceFileId.asc().nullsLast().op("uuid_ops")),
 	foreignKey({
@@ -441,6 +442,7 @@ export const sourcePages = pgTable("source_pages", {
 	check("source_pages_rotation_chk", sql`rotation = ANY (ARRAY[0, 90, 180, 270])`),
 	check("source_pages_attention_flags_chk", sql`attention_flags <@ ARRAY['no_blocks'::text, 'low_coverage'::text, 'suspicious_overlap'::text, 'bbox_out_of_page'::text, 'degenerate_geometry'::text, 'tiny_block'::text, 'neighbor_mismatch'::text, 'blank_page_candidate'::text, 'missing_expected_stamp'::text, 'layout_hash_mismatch'::text, 'text_fallback_applied'::text]`),
 	check("source_pages_folder_ordinal_chk", sql`folder_ordinal >= 0`),
+	check("source_pages_native_dpi_chk", sql`(native_dpi IS NULL) OR (native_dpi > 0)`),
 ]);
 
 export const artifactVersions = pgTable("artifact_versions", {

@@ -103,6 +103,34 @@ describe('разрешение рендера', () => {
     expect(effectiveRasterDpi(0, 0)).toBe(RASTER_DPI);
     expect(effectiveRasterDpi(Number.NaN, 842)).toBe(RASTER_DPI);
   });
+
+  it('родное разрешение страницы ограничивает рендер сверху', () => {
+    // Замер по пяти боевым комплектам: сканы лежат в 200 dpi, и рендер в 300
+    // растягивал те же пиксели, ничего не прибавляя.
+    expect(effectiveRasterDpi(A4.w, A4.h, 200)).toBe(200);
+  });
+
+  it('родное разрешение выше умолчания рендер не поднимает', () => {
+    // Выше RASTER_DPI детектор не обучен, и скан в 600 dpi не повод туда идти.
+    expect(effectiveRasterDpi(A4.w, A4.h, 600)).toBe(RASTER_DPI);
+  });
+
+  it('неизвестное родное разрешение оставляет прежнее поведение', () => {
+    // `null` означает «покрывающего растра не нашлось» — страница нарисована
+    // шрифтами либо картинка не опознана. Обе причины ведут к полному рендеру.
+    expect(effectiveRasterDpi(A4.w, A4.h, null)).toBe(RASTER_DPI);
+    expect(effectiveRasterDpi(A4.w, A4.h, undefined)).toBe(RASTER_DPI);
+    expect(effectiveRasterDpi(A4.w, A4.h, 0)).toBe(RASTER_DPI);
+    expect(effectiveRasterDpi(A4.w, A4.h, Number.NaN)).toBe(RASTER_DPI);
+  });
+
+  it('потолок площади остаётся главнее родного разрешения', () => {
+    // A0, отсканированный в 200 dpi, всё равно не помещается: потолок площади
+    // про то, что машина не должна лечь, а не про качество картинки.
+    const dpi = effectiveRasterDpi(A0.w, A0.h, 200);
+    expect(dpi).toBeLessThan(200);
+    expect(pixelsAt(A0, dpi)).toBeLessThanOrEqual(RASTER_MAX_PIXELS);
+  });
 });
 
 describe('pdftoppmArgs', () => {

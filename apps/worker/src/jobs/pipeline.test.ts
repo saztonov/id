@@ -98,8 +98,8 @@ const OK_VERDICT: FileVerdict = {
   sha256: FILE.sha256,
   pageCount: 2,
   pages: [
-    { index: 0, widthPt: 595, heightPt: 842, rotation: 0 },
-    { index: 1, widthPt: 595, heightPt: 842, rotation: 90 },
+    { index: 0, widthPt: 595, heightPt: 842, rotation: 0, nativeDpi: 200 },
+    { index: 1, widthPt: 595, heightPt: 842, rotation: 90, nativeDpi: null },
   ],
   signature: {
     result: 'none_detected',

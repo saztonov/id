@@ -43,6 +43,8 @@ import { createHash } from 'node:crypto';
 import { inflateSync } from 'node:zlib';
 import type { SignatureProbeResult } from '@id/contracts';
 
+import { POINTS_PER_INCH } from './raster.js';
+
 // =====================================================================
 // Пределы разбора: защита от PDF-бомб (§4.2)
 // =====================================================================
@@ -90,6 +92,22 @@ export interface PdfPageGeometry {
   readonly widthPt: number;
   readonly heightPt: number;
   readonly rotation: 0 | 90 | 180 | 270;
+  /**
+   * Разрешение покрывающего страницу растра, точек на дюйм, либо `null`.
+   *
+   * Отвечает на один вопрос: есть ли смысл рендерить страницу мельче, чем
+   * `RASTER_DPI`. У скана смысл есть — комплекты приходят в 200 dpi, и рендер в
+   * 300 растягивает те же пиксели в полтора раза по площади, ничего не
+   * прибавляя. У страницы, нарисованной шрифтами, смысла нет: там разрешение
+   * решает, и значение остаётся `null`.
+   *
+   * `null` означает «покрывающего растра не нашлось», а НЕ «растра нет»: на
+   * странице может лежать картинка, про которую по одному словарю ресурсов
+   * нельзя сказать, покрывает ли она лист (см. `coveringRasterDpi`). Обе
+   * причины ведут к прежнему поведению — рендеру на полном разрешении, — и
+   * различать их незачем.
+   */
+  readonly nativeDpi: number | null;
 }
 
 /**
@@ -698,6 +716,8 @@ interface InheritedAttributes {
   readonly mediaBox: readonly number[] | null;
   readonly cropBox: readonly number[] | null;
   readonly rotate: number | null;
+  /** `/Resources` наследуется по дереву страниц ровно как `/MediaBox`. */
+  readonly resources: PdfValue | undefined;
 }
 
 function resolve(index: ObjectIndex, value: PdfValue | undefined): PdfValue | undefined {
@@ -743,6 +763,7 @@ function collectPages(
       mediaBox: boxOf(index, dict.get('MediaBox')) ?? inherited.mediaBox,
       cropBox: boxOf(index, dict.get('CropBox')) ?? inherited.cropBox,
       rotate: numberOf(resolve(index, dict.get('Rotate'))) ?? inherited.rotate,
+      resources: dict.get('Resources') ?? inherited.resources,
     };
 
     const kids = resolve(index, dict.get('Kids'));
@@ -753,21 +774,95 @@ function collectPages(
     }
     if (type === 'Pages') return;
 
-    pages.push(geometryOf(pages.length, attributes, warnings));
+    pages.push(geometryOf(index, pages.length, attributes, warnings));
   };
 
-  walk(root, { mediaBox: null, cropBox: null, rotate: null }, 0);
+  walk(root, { mediaBox: null, cropBox: null, rotate: null, resources: undefined }, 0);
   return pages;
 }
 
+/**
+ * Наибольший допуск расхождения разрешений по осям у покрывающего растра.
+ *
+ * У скана листа он около нуля: сканер идёт одной головкой и даёт по обеим осям
+ * одно разрешение (замер по пяти комплектам: 200.0 против 199.9). Всё, что
+ * расходится сильнее, покрывающим растром не является — это либо подпись или
+ * логотип, наложенные на страницу, либо картинка в две страницы высотой.
+ * Отличить их иначе нельзя: матрица размещения лежит в потоке содержимого,
+ * который зонд не разбирает.
+ */
+const RASTER_AXIS_TOLERANCE = 0.02;
+
+/**
+ * Нижняя граница разрешения, ниже которой растр не считается покрывающим.
+ *
+ * Страховка от вырожденного случая «на листе одна мелкая картинка и больше
+ * ничего»: у неё разрешения по осям могут случайно совпасть, и без границы
+ * страница ушла бы в рендер на 40 dpi. Ошибиться здесь дороже, чем не
+ * оптимизировать: при `null` поведение остаётся прежним.
+ */
+const MIN_COVERING_RASTER_DPI = 72;
+
+/**
+ * Разрешение растра, покрывающего страницу, либо `null`.
+ *
+ * Берётся наибольшая по площади картинка из `/Resources /XObject`, у которой
+ * разрешения по осям сходятся (`RASTER_AXIS_TOLERANCE`). Вложенные формы не
+ * раскрываются: у сканов картинка лежит прямо в ресурсах страницы, а обход
+ * форм потребовал бы разбора потоков содержимого — цены, несоразмерной
+ * выигрышу.
+ *
+ * Считается по ДОПОВОРОТНОМУ кадру: `/Rotate` разворачивает уже отрисованную
+ * страницу, а `/Width` и `/Height` картинки заданы в её собственных осях.
+ */
+function coveringRasterDpi(
+  index: ObjectIndex,
+  resources: PdfValue | undefined,
+  widthPt: number,
+  heightPt: number,
+): number | null {
+  if (widthPt <= 0 || heightPt <= 0) return null;
+  const xobjects = dictOf(resolve(index, dictOf(resolve(index, resources))?.get('XObject')));
+  if (xobjects === null) return null;
+
+  let bestArea = 0;
+  let bestDpi: number | null = null;
+
+  for (const entry of xobjects.values()) {
+    const image = dictOf(resolve(index, entry));
+    if (image === null) continue;
+    if (nameOf(resolve(index, image.get('Subtype'))) !== 'Image') continue;
+
+    const widthPx = numberOf(resolve(index, image.get('Width')));
+    const heightPx = numberOf(resolve(index, image.get('Height')));
+    if (widthPx === null || heightPx === null) continue;
+    if (widthPx <= 0 || heightPx <= 0) continue;
+
+    const area = widthPx * heightPx;
+    if (area <= bestArea) continue;
+
+    const dpiX = widthPx / (widthPt / POINTS_PER_INCH);
+    const dpiY = heightPx / (heightPt / POINTS_PER_INCH);
+    const larger = Math.max(dpiX, dpiY);
+    if (larger < MIN_COVERING_RASTER_DPI) continue;
+    if (Math.abs(dpiX - dpiY) / larger > RASTER_AXIS_TOLERANCE) continue;
+
+    bestArea = area;
+    bestDpi = Math.round(larger);
+  }
+
+  return bestDpi;
+}
+
 function geometryOf(
-  index: number,
+  index: ObjectIndex,
+  pageIndex: number,
   attributes: InheritedAttributes,
   warnings: string[],
 ): PdfPageGeometry {
   const media = attributes.mediaBox ?? DEFAULT_MEDIA_BOX;
   if (attributes.mediaBox === null) {
-    warnings.push(`страница ${index}: /MediaBox не найден, взят формат по умолчанию`);
+    warnings.push(`страница ${pageIndex}: /MediaBox не найден, взят формат по умолчанию`);
   }
   // Видимая область — пересечение CropBox и MediaBox: именно её показывает
   // читатель и по ней же считает координаты pdf.js (§7.1).
@@ -778,10 +873,11 @@ function geometryOf(
   const swapped = rotation === 90 || rotation === 270;
 
   return {
-    index,
+    index: pageIndex,
     widthPt: swapped ? height : width,
     heightPt: swapped ? width : height,
     rotation,
+    nativeDpi: coveringRasterDpi(index, attributes.resources, width, height),
   };
 }
 

@@ -775,7 +775,7 @@ export function createLocalDetectionHandler(
          * очереди ограничивает число задач, а не аппетит одной. Для A4–A2
          * функция возвращает те же 300.
          */
-        const dpi = effectiveRasterDpi(page.widthPx, page.heightPx);
+        const dpi = effectiveRasterDpi(page.widthPx, page.heightPx, page.nativeDpi);
         let rendered: { readonly widthPx: number; readonly heightPx: number };
         try {
           rendered = await detector.rasterizer.renderPage({

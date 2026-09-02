@@ -190,6 +190,77 @@ function encryptedPdf(): Buffer {
   );
 }
 
+/**
+ * Страница A4 с одной картинкой заданного размера в ресурсах.
+ *
+ * Пиксели картинки не нужны: разрешение выводится из `/Width` и `/Height`
+ * словаря XObject, а поток зонд для этого не читает.
+ */
+function pageWithImage(
+  widthPx: number,
+  heightPx: number,
+  options: { readonly resourcesOnParent?: boolean } = {},
+): Buffer {
+  const resources = '/Resources << /XObject << /Im0 4 0 R >> >>';
+  const onParent = options.resourcesOnParent === true;
+  return buildPdf(
+    [
+      '<< /Type /Catalog /Pages 2 0 R >>',
+      `<< /Type /Pages /Kids [3 0 R] /Count 1 ${onParent ? resources : ''} >>`,
+      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] ${onParent ? '' : resources} >>`,
+      `<< /Type /XObject /Subtype /Image /Width ${widthPx} /Height ${heightPx} >>`,
+    ],
+    '<< /Root 1 0 R /Size 5 >>',
+  );
+}
+
+function firstPage(bytes: Buffer) {
+  const probe = probePdf(bytes);
+  expect(probe.ok).toBe(true);
+  if (!probe.ok) throw new Error('зонд отверг документ');
+  return probe.pages[0];
+}
+
+describe('разрешение покрывающего растра', () => {
+  it('скан на всю страницу даёт своё разрешение', () => {
+    // 1653 / (595/72) = 200.06; 2338 / (842/72) = 199.94 — оси сходятся.
+    expect(firstPage(pageWithImage(1653, 2338))?.nativeDpi).toBe(200);
+  });
+
+  it('скан в 300 dpi так и остаётся тремястами', () => {
+    expect(firstPage(pageWithImage(2480, 3508))?.nativeDpi).toBe(300);
+  });
+
+  it('ресурсы наследуются от узла дерева страниц', () => {
+    expect(firstPage(pageWithImage(1653, 2338, { resourcesOnParent: true }))?.nativeDpi).toBe(200);
+  });
+
+  it('подпись или логотип покрывающим растром не считается', () => {
+    // 378 / (595/72) = 45.8 против 65 / (842/72) = 5.6: оси расходятся в восемь
+    // раз, и покрыть лист такая картинка не может.
+    expect(firstPage(pageWithImage(378, 65))?.nativeDpi).toBeNull();
+  });
+
+  it('картинка в две страницы высотой отвергается', () => {
+    // 200 dpi по ширине против 400 по высоте — склейка двух листов, а не скан
+    // этого.
+    expect(firstPage(pageWithImage(1653, 4676))?.nativeDpi).toBeNull();
+  });
+
+  it('слишком мелкий растр отвергается, даже когда оси сошлись', () => {
+    // 60 / (595/72) = 7.3 и 85 / (842/72) = 7.3: пропорции листа соблюдены, но
+    // рендерить страницу в 7 dpi нельзя.
+    expect(firstPage(pageWithImage(60, 85))?.nativeDpi).toBeNull();
+  });
+
+  it('страница без картинок разрешения не имеет', () => {
+    const probe = probePdf(fixture('multipage.pdf'));
+    expect(probe.ok).toBe(true);
+    if (!probe.ok) return;
+    expect(probe.pages.every((page) => page.nativeDpi === null)).toBe(true);
+  });
+});
+
 describe('случаи, которых нет среди фикстур', () => {
   it('зашифрованный файл распознаётся по /Encrypt в трейлере', () => {
     const probe = probePdf(encryptedPdf());

@@ -85,8 +85,8 @@ const PROBE: SignatureProbe = {
 
 /** Геометрия из вердикта: ровно то, что уже лежит в БД у `FILE_UPLOADED`. */
 const PAGES = [
-  { widthPx: 595, heightPx: 842, rotation: 0 },
-  { widthPx: 842, heightPx: 595, rotation: 90 },
+  { widthPx: 595, heightPx: 842, rotation: 0, nativeDpi: 200 },
+  { widthPx: 842, heightPx: 595, rotation: 90, nativeDpi: null },
 ] as const;
 
 const FIXTURE: readonly string[] = [
@@ -270,7 +270,7 @@ describe('replaceSourceFile', () => {
         verifyState: 'ok',
         verifyError: null,
         signatureProbe: PROBE,
-        pages: [{ widthPx: 595, heightPx: 842, rotation: 0 }],
+        pages: [{ widthPx: 595, heightPx: 842, rotation: 0, nativeDpi: null }],
       },
       ACTOR,
     );

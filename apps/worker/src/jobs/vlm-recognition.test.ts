@@ -162,12 +162,26 @@ function runTarget(overrides: Partial<VlmRunTarget> = {}): VlmRunTarget {
 }
 
 const GEOMETRY: readonly VlmPageGeometry[] = [
-  { workingPageIndex: 0, widthPx: 595, heightPx: 842, rotation: 0, contentRotation: 0 },
+  {
+    workingPageIndex: 0,
+    widthPx: 595,
+    heightPx: 842,
+    rotation: 0,
+    contentRotation: 0,
+    nativeDpi: null,
+  },
 ];
 
 /** Та же карта, но страница развёрнута: скан лёг на лист боком (ADR-0020). */
 const GEOMETRY_TURNED: readonly VlmPageGeometry[] = [
-  { workingPageIndex: 0, widthPx: 595, heightPx: 842, rotation: 0, contentRotation: 90 },
+  {
+    workingPageIndex: 0,
+    widthPx: 595,
+    heightPx: 842,
+    rotation: 0,
+    contentRotation: 90,
+    nativeDpi: null,
+  },
 ];
 
 function publishedPrompt(code: string, version = 1) {
@@ -446,7 +460,7 @@ describe('createVlmStartHandler', () => {
     ]);
     expect(merged).toHaveLength(1);
     expect(merged[0]).toMatchObject({
-      cropPolicyVersion: 'crop.v3',
+      cropPolicyVersion: 'crop.v4',
       rasterizer: { kind: 'pdftoppm', version: '1.0', dpi: 300 },
     });
     expect((merged[0]?.['promptVersions'] as Record<string, number>)['text']).toBe(1);
@@ -470,7 +484,7 @@ describe('createVlmStartHandler', () => {
       provider: 'openrouter_vlm',
       model: 'vendor/model-1',
       dryRun: false,
-      cropPolicyVersion: 'crop.v3',
+      cropPolicyVersion: 'crop.v4',
       // Потолок площади входит в подпись растеризатора (S41): родитель без него
       // — это прогон с другим растром, и переносить из него нельзя.
       rasterizer: { kind: 'pdftoppm', version: '1.0', dpi: 300, maxPixels: 40_000_000 },
@@ -487,7 +501,7 @@ describe('createVlmStartHandler', () => {
           promptCode: 'recognition_block_text',
           promptVersion: 1,
           model: 'vendor/model-1',
-          cropPolicyVersion: 'crop.v3',
+          cropPolicyVersion: 'crop.v4',
           ...patch,
         },
       },
@@ -554,7 +568,7 @@ describe('createVlmStartHandler', () => {
       promptCode: 'recognition_block_text',
       promptVersion: 1,
       model: 'vendor/model-1',
-      cropPolicyVersion: 'crop.v3',
+      cropPolicyVersion: 'crop.v4',
       contentRotation,
     });
 
@@ -563,8 +577,22 @@ describe('createVlmStartHandler', () => {
       loadFrozenBlocks: async () => [turned, straight],
       // Страница 0 развёрнута СЕЙЧАС, страница 1 — нет.
       loadPageGeometry: async () => [
-        { workingPageIndex: 0, widthPx: 595, heightPx: 842, rotation: 0, contentRotation: 90 },
-        { workingPageIndex: 1, widthPx: 595, heightPx: 842, rotation: 0, contentRotation: 0 },
+        {
+          workingPageIndex: 0,
+          widthPx: 595,
+          heightPx: 842,
+          rotation: 0,
+          contentRotation: 90,
+          nativeDpi: null,
+        },
+        {
+          workingPageIndex: 1,
+          widthPx: 595,
+          heightPx: 842,
+          rotation: 0,
+          contentRotation: 0,
+          nativeDpi: null,
+        },
       ],
       loadRun: async ({ recognitionRunId }) =>
         recognitionRunId === PARENT
@@ -577,7 +605,7 @@ describe('createVlmStartHandler', () => {
                 version: 2,
                 provider: 'openrouter_vlm',
                 model: 'vendor/model-1',
-                cropPolicyVersion: 'crop.v3',
+                cropPolicyVersion: 'crop.v4',
                 rasterizer: { kind: 'pdftoppm', version: '1.0', dpi: 300, maxPixels: 40_000_000 },
               },
             })
@@ -637,7 +665,7 @@ describe('createVlmStartHandler', () => {
                 version: 2,
                 provider: 'openrouter_vlm',
                 model: 'vendor/model-1',
-                cropPolicyVersion: 'crop.v3',
+                cropPolicyVersion: 'crop.v4',
                 rasterizer: { kind: 'pdftoppm', version: '1.0', dpi: 300, maxPixels: 40_000_000 },
               },
             })
@@ -657,7 +685,7 @@ describe('createVlmStartHandler', () => {
               // Блок прочитан другой моделью: перенести его значит выдать
               // чужой ответ за результат этого прогона.
               model: 'vendor/model-OLD',
-              cropPolicyVersion: 'crop.v3',
+              cropPolicyVersion: 'crop.v4',
             },
           },
         },
@@ -1342,7 +1370,7 @@ describe('createVlmFinalizeHandler', () => {
           actualModel: 'vendor/model-1',
           finishReason: 'stop',
           attempts: 1,
-          cropPolicyVersion: 'crop.v3',
+          cropPolicyVersion: 'crop.v4',
           cropSha256: 'x'.repeat(64),
         },
       },
@@ -1795,7 +1823,7 @@ describe('разворот содержимого доезжает до кроп
       .contentJson;
     const provenance = envelope['provenance'] as Record<string, unknown>;
     expect(provenance['contentRotation']).toBe(90);
-    expect(provenance['cropPolicyVersion']).toBe('crop.v3');
+    expect(provenance['cropPolicyVersion']).toBe('crop.v4');
   });
 
   it('на прямой странице в провенанс пишется явный ноль, а не отсутствие поля', async () => {

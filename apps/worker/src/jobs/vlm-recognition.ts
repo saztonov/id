@@ -234,6 +234,11 @@ export interface VlmPageGeometry {
    * его с `rotation` выше — самый вероятный класс ошибки в этом коде.
    */
   readonly contentRotation: 0 | 90 | 180 | 270;
+  /**
+   * Разрешение покрывающего страницу растра; `null` — растра нет либо он не
+   * опознан. Потолок рендера: выше него страница детальнее не станет.
+   */
+  readonly nativeDpi: number | null;
 }
 
 export type VlmRunPageStatus = 'pending' | 'done' | 'failed';
@@ -1685,9 +1690,10 @@ export function createVlmRecognizePageHandler(
         rendered = await rasterizer.renderPage({
           pdfPath: pdf.path,
           pageIndex,
-          // То же число, что у детекции: обе считают его от размеров страницы,
-          // поэтому масштабы совпадают без сговора между задачами.
-          dpi: effectiveRasterDpi(geometry.widthPx, geometry.heightPx),
+          // То же число, что у детекции: обе считают его от размеров страницы и
+          // её родного разрешения, поэтому масштабы совпадают без сговора между
+          // задачами.
+          dpi: effectiveRasterDpi(geometry.widthPx, geometry.heightPx, geometry.nativeDpi),
           outPath,
           signal: ctx.signal,
         });

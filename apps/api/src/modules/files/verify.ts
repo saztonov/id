@@ -51,6 +51,8 @@ export interface VerifiedPage {
   readonly widthPx: number;
   readonly heightPx: number;
   readonly rotation: 0 | 90 | 180 | 270;
+  /** Разрешение покрывающего растра; `null` — страница не скан либо растр не опознан. */
+  readonly nativeDpi: number | null;
 }
 
 export interface VerifiedUpload {
@@ -155,6 +157,7 @@ export function storableVerdict(
       widthPx: Math.max(1, Math.round(page.widthPt)),
       heightPx: Math.max(1, Math.round(page.heightPt)),
       rotation: page.rotation,
+      nativeDpi: page.nativeDpi,
     })),
   };
 }
