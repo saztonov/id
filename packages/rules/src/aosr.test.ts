@@ -35,6 +35,7 @@ import {
   makeCounterparty,
   makeDocument,
   makeField,
+  makeFolder,
   makeGraph,
   makeMaterial,
   makeObject,
@@ -894,6 +895,31 @@ describe('REG.100 / REG.101 / REG.102 — сверка с реестром пр�
     expect(messagesOf('REG.100', missing)[0]).toContain('строка 3 реестра');
   });
 
+  it('REG.100: строка «б/н» отсутствия документа не доказывает', () => {
+    // Сверка идёт по номеру, а у такой строки его нет: разбор реестра
+    // намеренно оставляет сравнимые формы пустыми, чтобы два разных
+    // документа «без номера» не совпали друг с другом. Превращать «не с чем
+    // сверить» в «документа нет» правило не вправе: на боевой папке так
+    // возникало по три-четыре ложных «нет в комплекте» на каждый комплект.
+    const graph = makeGraph({
+      documents: [registry, quality],
+      registryRows: [
+        makeRegistryRow({
+          registryDocumentId: registry.id,
+          rowNo: 5,
+          docNameRaw: 'Приложение к экспертному заключению',
+          docNoRaw: 'б/н',
+          docNoNorm: null,
+          docNoFolded: null,
+          matchState: 'missing',
+        }),
+      ],
+    });
+
+    expect(verdictOf('REG.100', graph)).toBe('undetermined');
+    expect(messagesOf('REG.100', graph)[0]).toContain('без номера');
+  });
+
   it('REG.100: без реестра правило неприменимо', () => {
     expect(verdictOf('REG.100', makeGraph({ documents: [quality] }))).toBe('n_a');
   });
@@ -1232,17 +1258,56 @@ describe('REF.120 — объект активен', () => {
 });
 
 describe('REF.121 — контрагенты активны', () => {
+  /** Исполнитель папки — контрагент, названный её карточкой. */
+  const folderContractor = (patch = {}) => {
+    const party = makeCounterparty({ name: 'ООО «СТРОЙПРОФИЛЬ»', ...patch });
+    return { party, folder: makeFolder({ contractorId: party.id }) };
+  };
+
   it('активные контрагенты дают pass', () => {
-    const graph = makeGraph({ counterparties: [makeCounterparty({ name: 'ООО «СТРОЙПРОФИЛЬ»' })] });
-    expect(verdictOf('REF.121', graph)).toBe('pass');
+    const { party, folder } = folderContractor();
+    expect(verdictOf('REF.121', makeGraph({ counterparties: [party], folder }))).toBe('pass');
   });
 
   it('неактивный контрагент даёт fail', () => {
-    const graph = makeGraph({
-      counterparties: [makeCounterparty({ name: 'ООО «МСЕТ»', isActive: false })],
-    });
+    const { party, folder } = folderContractor({ name: 'ООО «МСЕТ»', isActive: false });
+    const graph = makeGraph({ counterparties: [party], folder });
+
     expect(verdictOf('REF.121', graph)).toBe('fail');
     expect(messagesOf('REF.121', graph)[0]).toContain('МСЕТ');
+  });
+
+  it('неактивный контрагент, к папке не относящийся, замечанием не становится', () => {
+    // Справочник грузится целиком ради сверки тройки реквизитов (HDR.023).
+    // Пока правило смотрело на него весь, любая снятая с учёта организация
+    // портала становилась замечанием чужого комплекта.
+    const { party, folder } = folderContractor();
+    const stranger = makeCounterparty({ name: 'ООО «ПОСТОРОННИЙ»', isActive: false });
+
+    expect(verdictOf('REF.121', makeGraph({ counterparties: [party, stranger], folder }))).toBe(
+      'pass',
+    );
+  });
+
+  it('контрагент из шапки акта в папку входит, даже если он не исполнитель', () => {
+    const stranger = makeCounterparty({
+      name: 'ООО «СУБПОДРЯД»',
+      inn: '7708203762',
+      isActive: false,
+    });
+    const graph = makeGraph({
+      counterparties: [stranger],
+      documents: [
+        makeAct(
+          replacing(
+            replacing(healthyActFields(), text(AOSR_FIELDS.contractorName, 'ООО «СУБПОДРЯД»')),
+            text(AOSR_FIELDS.contractorInn, '7708203762'),
+          ),
+        ),
+      ],
+    });
+
+    expect(verdictOf('REF.121', graph)).toBe('fail');
   });
 
   it('пустой справочник делает правило неприменимым', () => {

@@ -65,6 +65,7 @@ import {
 import { defect, externalUnavailable, fromFindings, notApplicable, unknown } from './result.js';
 import type {
   CheckGraph,
+  CounterpartyNode,
   DocumentNode,
   FieldNode,
   FindingSeverity,
@@ -1447,6 +1448,27 @@ function evaluateRegistryMissing(graph: CheckGraph): RuleResult {
     .filter((row) => row.matchState === 'missing')
     .map((row) => {
       const label = rowLabel(row.rowNo, row.docNoRaw, row.docNameRaw);
+
+      /**
+       * Строка без сравнимого номера («б/н») отсутствия документа не доказывает.
+       *
+       * Сверка идёт по номеру, и у такой строки его нет: разбор реестра
+       * намеренно оставляет `doc_no_norm` пустым, чтобы два разных документа
+       * «без номера» не совпали друг с другом. Дальше сверка честно отвечает
+       * «не нашла», а правило превращало это в утверждение «документа нет».
+       * На боевой папке так возникало по три-четыре ложных «нет в комплекте»
+       * на каждый из двенадцати комплектов — все на приложениях, которые в
+       * комплекте лежат.
+       */
+      if (row.docNoNorm === null) {
+        return unknown({
+          ...anchorOf('registry_row', row.id),
+          origin: 'deterministic',
+          message: `Документ, названный в ${label}, сверить не с чем: в реестре он указан без номера.`,
+          hint: 'Сверьте строку с документом комплекта вручную либо укажите номер документа в реестре.',
+        });
+      }
+
       if (gaps > 0) {
         return unknown({
           ...anchorOf('registry_row', row.id),
@@ -1815,12 +1837,46 @@ function evaluateObjectActive(graph: CheckGraph): RuleResult {
   ]);
 }
 
-function evaluateCounterpartiesActive(graph: CheckGraph): RuleResult {
-  if (graph.counterparties.length === 0) {
-    return notApplicable('справочник контрагентов комплекта пуст');
+/**
+ * Контрагенты, названные ЭТОЙ папкой.
+ *
+ * `graph.counterparties` — весь справочник портала: он загружается целиком,
+ * потому что `AOSR.HDR.023` ищет в нём совпадение по тройке реквизитов из
+ * шапки акта. Правило про активность спрашивает обратное — «действует ли тот,
+ * кто участвует в этой папке», — и на полном справочнике отвечало о чужих:
+ * любая снятая с учёта организация портала становилась замечанием комплекта,
+ * к которому она не имеет отношения.
+ *
+ * Участниками считаются исполнитель папки и те, кого назвали шапки её актов.
+ * Сопоставление — то же `matchCounterparty`, что у HDR.023: вторая мерка
+ * разошлась бы с первой молча.
+ */
+function folderCounterparties(graph: CheckGraph): readonly CounterpartyNode[] {
+  const involved = new Map<string, CounterpartyNode>();
+
+  const contractor = graph.counterparties.find((party) => party.id === graph.folder.contractorId);
+  if (contractor !== undefined) involved.set(contractor.id, contractor);
+
+  for (const act of aosrActs(graph)) {
+    const name = trimmedText(actField(act, AOSR_FIELDS.contractorName));
+    const inn = trimmedText(actField(act, AOSR_FIELDS.contractorInn));
+    const ogrn = trimmedText(actField(act, AOSR_FIELDS.contractorOgrn));
+    if (name === null && inn === null && ogrn === null) continue;
+
+    const party = matchCounterparty(graph.counterparties, { name, inn, ogrn });
+    if (party !== null) involved.set(party.id, party);
   }
 
-  const findings = graph.counterparties
+  return [...involved.values()];
+}
+
+function evaluateCounterpartiesActive(graph: CheckGraph): RuleResult {
+  const parties = folderCounterparties(graph);
+  if (parties.length === 0) {
+    return notApplicable('контрагенты папки не опознаны в справочнике');
+  }
+
+  const findings = parties
     .filter((party) => !party.isActive)
     .map((party) =>
       defect({
