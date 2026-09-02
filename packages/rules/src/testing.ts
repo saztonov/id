@@ -11,6 +11,7 @@
  * профиль, недоступные внешние реестры. Тест дополняет ровно то, что проверяет,
  * и тогда упавший тест указывает на изменённое поле, а не на фон.
  */
+import { normalizeDocNo } from '@id/contracts';
 import { NO_SOURCE_REASON } from './external.js';
 import type {
   BatchNode,
@@ -107,7 +108,19 @@ export function makeMaterial(patch: Partial<MaterialNode> = {}): MaterialNode {
   };
 }
 
+/**
+ * Строка реестра приложений.
+ *
+ * Сравнимые формы номера выводятся из `docNoRaw` той же `normalizeDocNo`, что
+ * и в разборе реестра, — если тест не задал их сам. Иначе фикстура описывала бы
+ * состояние, которого конвейер не порождает: номер напечатан, а сравнить его
+ * нечем. Такое состояние законно ровно для «б/н», и выражается оно явным
+ * `docNoNorm: null`.
+ */
 export function makeRegistryRow(patch: Partial<RegistryRowNode> = {}): RegistryRowNode {
+  const raw = 'docNoRaw' in patch ? (patch.docNoRaw ?? null) : null;
+  const derived = raw === null ? null : normalizeDocNo(raw);
+
   return {
     id: testId('row'),
     registryDocumentId: 'doc-registry',
@@ -116,8 +129,8 @@ export function makeRegistryRow(patch: Partial<RegistryRowNode> = {}): RegistryR
     sectionTitle: null,
     docNameRaw: 'Документ о качестве',
     docNoRaw: null,
-    docNoNorm: null,
-    docNoFolded: null,
+    docNoNorm: derived?.normalized ?? null,
+    docNoFolded: derived?.folded ?? null,
     orgRaw: null,
     validFrom: null,
     validTo: null,
