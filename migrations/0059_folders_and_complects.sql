@@ -291,11 +291,25 @@ CREATE VIEW v_unaccounted_pages AS
 -- `findings.target_type` — значение ДАННЫХ, а не имя объекта, поэтому оно не
 -- переименовывается вместе с колонками: его надо переписать в строках и в
 -- ограничении.
+--
+-- ## Порядок трёх операторов не переставляется
+--
+-- Ограничение снимается ПЕРВЫМ, и это не стиль. Прежний CHECK перечисляет
+-- `revision` и не знает `folder`, поэтому UPDATE под ним отвергается на первой
+-- же строке; новый CHECK не знает `revision`, поэтому добавить его до UPDATE
+-- тоже нельзя — Postgres проверяет ограничение на существующих строках.
+-- Единственный порядок, при котором таблица ни на шаг не оказывается в
+-- запрещённом состоянии: снять → переписать → поставить.
+--
+-- Ошибка была не гипотетической: на пустой таблице UPDATE не трогает ни одной
+-- строки, и неверный порядок проходил и локально, и во всех тестах. Отказ
+-- случился при развёртывании на боевую базу, где такие строки есть.
 -- ---------------------------------------------------------------------------
+
+ALTER TABLE findings DROP CONSTRAINT findings_target_type_chk;
 
 UPDATE findings SET target_type = 'folder' WHERE target_type = 'revision';
 
-ALTER TABLE findings DROP CONSTRAINT findings_target_type_chk;
 ALTER TABLE findings ADD CONSTRAINT findings_target_type_chk CHECK (target_type IN (
   'folder', 'source_page', 'document', 'field_value', 'registry_row',
   'material', 'batch'));
