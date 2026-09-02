@@ -119,13 +119,33 @@ describe('normalizeDocNo', () => {
     it('фолдинг идёт в латиницу и не трогает буквы без латинской пары', () => {
       // `Д` (U+0414) латинского двойника не имеет и остаётся собой:
       // приведение «на всякий случай» склеивало бы разные номера.
-      expect(normalizeDocNo(DECLARATION_LATIN).folded).toBe('POCCPUД-PU.PA01.B.17254/23');
+      expect(normalizeDocNo(DECLARATION_LATIN).folded).toBe('P0CCPUД-PU.PA01.B.17254/23');
     });
 
     it('покрыты все десять пар §8.3', () => {
       const cyrillic = 'САРОЕМТХВК';
 
-      expect(normalizeDocNo(cyrillic).folded).toBe('CAPOEMTXBK');
+      // «О» здесь складывается в НОЛЬ, а не в латинскую «O»: буквенная пара
+      // и цифра — один класс смешения (см. таблицу фолдинга).
+      expect(normalizeDocNo(cyrillic).folded).toBe('CAP0EMTXBK');
+    });
+
+    it('нуль и обе «о» — один класс', () => {
+      // Приложение к сертификату АРТАЛИКС ссылается на родителя нулём, сам
+      // сертификат напечатан буквой. Без общего класса приложение не находило
+      // своего документа, а строка реестра получала «нет в комплекте».
+      const withZero = normalizeDocNo('РОСС RU.32311.0С01.ПБ01.0539');
+      const withLetter = normalizeDocNo('РОСС RU.32311.ОС01.ПБ01.0539');
+
+      expect(withZero.normalized).not.toBe(withLetter.normalized);
+      expect(withZero.folded).toBe(withLetter.folded);
+    });
+
+    it('складывание идёт в цифру: серии не рвутся', () => {
+      // Обратное направление («0» → «O») разорвало бы числовые серии, а на
+      // них держится ступень сверки по числовому ядру.
+      expect(normalizeDocNo('0539').folded).toBe('0539');
+      expect(normalizeDocNo('RU.MCC.240.445.38406').folded).toContain('38406');
     });
 
     it('цифры и латиница остаются на месте', () => {

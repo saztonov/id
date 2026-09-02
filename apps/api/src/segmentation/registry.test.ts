@@ -225,7 +225,8 @@ describe('parseAnnexRegistry', () => {
 
       expect(row?.docNoRaw).toBe('РОСС RU Д- RU.PA01.B.10254/23');
       expect(row?.docNoNorm).toBe('РОССRUД-RU.PA01.B.10254/23');
-      expect(row?.docNoFolded).toBe('POCCPUД-PU.PA01.B.10254/23');
+      // «О» складывается в нуль: буква и цифра — один класс смешения.
+      expect(row?.docNoFolded).toBe('P0CCPUД-PU.PA01.B.10254/23');
     });
 
     it('один номер на нескольких позициях реестра — не аномалия', () => {

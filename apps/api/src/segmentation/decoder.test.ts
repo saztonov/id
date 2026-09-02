@@ -236,6 +236,35 @@ describe('приложение-продолжение', () => {
     expect(result.documents[0]?.pages).toHaveLength(2);
   });
 
+  it('нуль вместо буквы «О» в номере родителя привязку не рвёт', () => {
+    // Боевой случай папки «ИД Мастер апрель 2026»: на приложении к сертификату
+    // пожарной безопасности АРТАЛИКС напечатано «…0С01…» (нуль), на самом
+    // сертификате — «…ОС01…» (буква). Пять приложений из шести оставались
+    // ничьими, а строки реестра получали «нет в комплекте».
+    const artalix = page(
+      'p1',
+      '##### СЕРТИФИКАТ СООТВЕТСТВИЯ ПОЖАРНОЙ БЕЗОПАСНОСТИ\n№ РОСС RU.32311.ОС01.ПБ01.0539',
+    );
+    const result = decodeSegmentation(
+      [artalix, page('p2')],
+      [opensKnown('p1', 'cert_conformity'), annexTo('p2', 'РОСС RU.32311.0С01.ПБ01.0539')],
+    );
+
+    expect(result.documents[0]?.pages).toHaveLength(2);
+    expect(result.unassigned).toHaveLength(0);
+  });
+
+  it('приставка «Не» вместо «№» на приложении привязку не рвёт', () => {
+    // Та же общая нормализация: «Не» — то, во что OCR превращает «№», и в
+    // папке так прочитано 35 номеров из 138.
+    const result = decodeSegmentation(
+      [parent, page('p2')],
+      [opensKnown('p1', 'cert_conformity'), annexTo('p2', 'НеA-1')],
+    );
+
+    expect(result.documents[0]?.pages).toHaveLength(2);
+  });
+
   it('не присоединяется при чужом номере родителя', () => {
     const result = decodeSegmentation(
       [parent, page('p2')],
