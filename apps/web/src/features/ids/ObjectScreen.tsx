@@ -132,7 +132,7 @@ export function ObjectScreen({ objectId }: { objectId: string }): ReactNode {
   const countOf = (sectionCode: string): number | null => {
     const result = counts.data;
     if (result === undefined || result.kind !== 'available') return null;
-    return result.data.find((row) => row.sectionCode === sectionCode)?.works ?? 0;
+    return result.data.find((row) => row.sectionCode === sectionCode)?.folders ?? 0;
   };
 
   return (
@@ -395,7 +395,6 @@ function DeleteWorkAction({ work }: { work: Work }): ReactNode {
             <Space direction="vertical" size={8}>
               <Typography.Text>Будет удалено безвозвратно:</Typography.Text>
               <ul style={{ margin: 0, paddingLeft: 18 }}>
-                <li>ревизий: {preview.data.folders}</li>
                 <li>
                   файлов: {preview.data.files}, страниц: {preview.data.pages}
                 </li>
@@ -466,7 +465,9 @@ function SectionPanel({
   });
 
   const byWork = new Map<string, WorkPipeline>(
-    (pipeline.data ?? []).map((row) => [row.workId, row]),
+    // Ключ — `folderId` из ответа: поля `workId` сервер не отдаёт с S44, и
+    // сводка не находилась бы ни для одной строки списка.
+    (pipeline.data ?? []).map((row) => [row.folderId, row]),
   );
   /** `null` — сводки нет: комплект без ревизии либо строка, которой не оказалось в ответе. */
   const pipelineOf = (workId: string): WorkPipeline | null => byWork.get(workId) ?? null;

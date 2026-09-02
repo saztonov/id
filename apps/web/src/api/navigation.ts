@@ -279,7 +279,14 @@ export async function listFolders(
 /** Сколько комплектов видно спрашивающему в каждом разделе объекта. */
 export interface SectionFolderCount {
   readonly sectionCode: string;
-  readonly works: number;
+  /**
+   * Сколько папок в разделе.
+   *
+   * Имя поля — из ответа сервера (`sectionCountsSchema`). До S45 здесь стояло
+   * `works`, которого сервер после S44 не отдаёт: заголовок раздела читал
+   * `undefined` и печатал «комплектов 0» над непустым списком.
+   */
+  readonly folders: number;
 }
 
 /**
@@ -363,9 +370,8 @@ export async function createFolder(input: CreateFolderInput): Promise<CreatedFol
  * нажатия, а не выясняются им.
  */
 export interface FolderDeletionPreview {
-  workId: string;
+  folderId: string;
   title: string;
-  folders: number;
   files: number;
   pages: number;
   layoutBlocks: number;
@@ -399,7 +405,6 @@ export async function deleteFolder(folderId: string): Promise<void> {
  * Разбирает это `pipelineState`, здесь только транспорт.
  */
 export interface FolderPipelineSummary {
-  workId: string;
   folderId: string;
   stage: ProcessingStage;
   queued: number;
@@ -409,10 +414,13 @@ export interface FolderPipelineSummary {
 
 export async function listWorkPipeline(
   objectId: string,
-  workIds: readonly string[],
+  folderIds: readonly string[],
 ): Promise<readonly FolderPipelineSummary[]> {
-  if (workIds.length === 0) return [];
+  if (folderIds.length === 0) return [];
   return get<FolderPipelineSummary[]>(NAVIGATION_ROUTES.foldersPipeline(objectId), {
-    query: { workIds: workIds.join(',') },
+    // Имя параметра — из схемы сервера (`folderPipelineQuerySchema`). До S45
+    // клиент слал `workIds`, и запрос отвергался схемой: 422 на каждой
+    // отрисовке списка, а колонка «Распознавание» показывала «нет данных».
+    query: { folderIds: folderIds.join(',') },
   });
 }
