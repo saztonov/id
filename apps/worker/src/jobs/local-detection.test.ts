@@ -129,31 +129,61 @@ describe('planDetectionPages', () => {
 
 describe('selectLargeSheetBlocks', () => {
   const stamp = candidate('stamp', [0.72, 0.82, 0.97, 0.95]);
-  const numberCell = candidate('text', [0.72, 0.74, 0.97, 0.8]);
-  const explication = candidate('text', [0.05, 0.05, 0.4, 0.3]);
+  /** Заголовок вверху листа: замер показал, что номер печатают именно там. */
+  const heading = candidate('text', [0.3, 0.02, 0.9, 0.06]);
+  const explication = candidate('text', [0.05, 0.35, 0.4, 0.6]);
   const drawing = candidate('image', [0.05, 0.35, 0.7, 0.75]);
 
-  it('штампы проходят всегда, текст и изображения чертежа — нет', () => {
-    const { kept } = selectLargeSheetBlocks([stamp, explication, drawing], SHEET_AWARE);
-
-    expect(kept).toEqual([stamp]);
-  });
-
-  it('текст в околоштамповой зоне остаётся: это номер листа', () => {
-    // Без него у исполнительной схемы нет собственного номера вовсе — в штампе
-    // стоит «Обозначение» проекта, общее у всех листов раздела, и сверка с
-    // реестром приложений объявила бы «нет в комплекте» каждую схему.
+  it('остаются штамп и самая верхняя надпись', () => {
     const { kept, numberZone } = selectLargeSheetBlocks(
-      [stamp, numberCell, explication],
+      [stamp, heading, explication, drawing],
       SHEET_AWARE,
     );
 
-    expect(kept).toEqual([stamp, numberCell]);
+    expect(kept).toEqual([stamp, heading]);
     expect(numberZone).toBe(1);
   });
 
+  it('верхняя надпись берётся ровно одна, а не все верхние', () => {
+    // Замер на двенадцати листах: второй по высоте кандидат не добавил ни
+    // одного носителя номера, зато удваивал счёт блоков.
+    const second = candidate('text', [0.3, 0.08, 0.9, 0.12]);
+
+    const { kept, numberZone } = selectLargeSheetBlocks([stamp, heading, second], SHEET_AWARE);
+
+    expect(kept).toEqual([stamp, heading]);
+    expect(numberZone).toBe(1);
+  });
+
+  it('порядок кандидатов детектора на выбор не влияет', () => {
+    // Детектор порядка не обещает, а один и тот же лист обязан давать один и
+    // тот же набор блоков: иначе `blocks_hash` прыгал бы от прогона к прогону.
+    const forward = selectLargeSheetBlocks([stamp, heading, explication], SHEET_AWARE);
+    const backward = selectLargeSheetBlocks([explication, heading, stamp], SHEET_AWARE);
+
+    expect(backward.kept).toEqual(forward.kept);
+  });
+
+  it('на одной высоте выигрывает левый', () => {
+    const left = candidate('text', [0.1, 0.02, 0.4, 0.06]);
+    const right = candidate('text', [0.5, 0.02, 0.9, 0.06]);
+
+    const { kept } = selectLargeSheetBlocks([stamp, right, left], SHEET_AWARE);
+
+    expect(kept).toEqual([stamp, left]);
+  });
+
+  it('изображения чертежа не проходят никогда', () => {
+    // Даже когда изображение выше всего текста: в текст страницы ему не нужно.
+    const topDrawing = candidate('image', [0.05, 0.01, 0.7, 0.2]);
+
+    const { kept } = selectLargeSheetBlocks([stamp, topDrawing, explication], SHEET_AWARE);
+
+    expect(kept).toEqual([stamp, explication]);
+  });
+
   it('при off остаётся только штамп', () => {
-    const { kept, numberZone } = selectLargeSheetBlocks([stamp, numberCell], {
+    const { kept, numberZone } = selectLargeSheetBlocks([stamp, heading], {
       ...SHEET_AWARE,
       numberZone: 'off',
     });
@@ -162,24 +192,17 @@ describe('selectLargeSheetBlocks', () => {
     expect(numberZone).toBe(0);
   });
 
-  it('без штампа зоны нет: гадать, где номер, портал не берётся', () => {
-    // Синтетический прямоугольник не рисуется намеренно: на реальных схемах
-    // номер стоит то над штампом, то в правом верхнем углу.
-    const { kept } = selectLargeSheetBlocks([numberCell, explication], SHEET_AWARE);
+  it('без штампа блоков нет: гадать, где номер, портал не берётся', () => {
+    const { kept } = selectLargeSheetBlocks([heading, explication], SHEET_AWARE);
 
     expect(kept).toEqual([]);
   });
 
-  it('зона клэмпится в лист и не выходит за его границы', () => {
-    // Штамп в правом нижнем углу: зона вниз и вправо упирается в край, вверх
-    // раскрывается на четверть листа.
-    const cornerStamp = candidate('stamp', [0.85, 0.9, 1, 1]);
-    const above = candidate('text', [0.85, 0.66, 1, 0.72]);
-    const farAway = candidate('text', [0.05, 0.05, 0.3, 0.12]);
+  it('без текстовых кандидатов остаётся один штамп', () => {
+    const { kept, numberZone } = selectLargeSheetBlocks([stamp, drawing], SHEET_AWARE);
 
-    const { kept } = selectLargeSheetBlocks([cornerStamp, above, farAway], SHEET_AWARE);
-
-    expect(kept).toEqual([cornerStamp, above]);
+    expect(kept).toEqual([stamp]);
+    expect(numberZone).toBe(0);
   });
 });
 

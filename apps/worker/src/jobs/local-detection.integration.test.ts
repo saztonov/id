@@ -1086,15 +1086,19 @@ describe('разметка по формату листа (S42)', () => {
     expect(blocks[0]?.detection_score).toBeNull();
   });
 
-  it('на крупном листе остаётся штамп, текст чертежа отбрасывается', async () => {
+  it('на крупном листе остаются штамп и самая верхняя надпись', async () => {
+    // Номер листа напечатан заголовком вверху, вне прямоугольника штампа, и
+    // другого источника у него нет: `stamp.sheetCode` на пути RD WEB всегда
+    // пуст. В фикстуре текст лежит выше штампа — он и остаётся.
     const session = new QueueSession([stampAndTextDetection()]);
 
     await runJob(session, { pageIndices: [LARGE_PAGE], overwriteExisting: true });
 
     expect(session.calls).toBe(1);
     const blocks = await blocksOfPage(LARGE_PAGE);
-    expect(blocks.map((block) => block.block_type)).toEqual(['stamp']);
-    expect(blocks[0]?.detector_provenance).toBe('rf_detr');
+    // Порядок — по чтению сверху вниз, поэтому надпись идёт первой.
+    expect(blocks.map((block) => block.block_type)).toEqual(['text', 'stamp']);
+    expect(blocks.every((block) => block.detector_provenance === 'rf_detr')).toBe(true);
   });
 
   it('крупный лист без штампа остаётся без блоков и объясняется detect.no_stamp', async () => {

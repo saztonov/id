@@ -68,7 +68,7 @@ export const DETECTION_SHEET_STRATEGY_LABELS: Record<DetectionSheetStrategy, str
 };
 
 export const LARGE_SHEET_NUMBER_ZONE_LABELS: Record<LargeSheetNumberZone, string> = {
-  near_stamp: 'искать номер листа рядом со штампом',
+  near_stamp: 'искать номер листа в верхней надписи',
   off: 'только штамп',
 };
 
