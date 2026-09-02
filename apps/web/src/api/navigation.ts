@@ -246,8 +246,6 @@ export interface WorkFilter {
   readonly periodTo?: string | undefined;
   /** Пускать в отбор по месяцу комплекты, месяц которых ещё не определён. */
   readonly includeUndatedPeriod?: boolean | undefined;
-  readonly registryId?: string | undefined;
-  readonly unassigned?: boolean | undefined;
   readonly search?: string | undefined;
   readonly cursor?: string | null | undefined;
 }
@@ -264,12 +262,6 @@ export async function listFolders(
         ...(filter.includeUndatedPeriod === true ? { includeUndatedPeriod: 'true' } : {}),
         ...(filter.periodFrom === undefined ? {} : { periodFrom: filter.periodFrom }),
         ...(filter.periodTo === undefined ? {} : { periodTo: filter.periodTo }),
-        ...(filter.registryId === undefined ? {} : { registryId: filter.registryId }),
-        // Признак передаётся строкой: сервер принимает только `true` и `false`,
-        // потому что `z.coerce.boolean()` считал бы истиной и «false».
-        ...(filter.unassigned === undefined
-          ? {}
-          : { unassigned: filter.unassigned ? 'true' : 'false' }),
         ...(filter.search === undefined || filter.search === '' ? {} : { search: filter.search }),
       }),
     }),
@@ -299,7 +291,7 @@ export interface SectionFolderCount {
  */
 export async function listSectionCounts(
   objectId: string,
-  filter: Omit<WorkFilter, 'objectId' | 'cursor' | 'registryId'> = {},
+  filter: Omit<WorkFilter, 'objectId' | 'cursor'> = {},
 ): Promise<NavigationResult<SectionFolderCount[]>> {
   const route = NAVIGATION_ROUTES.sectionCounts(objectId);
   return loadNavigation(route, () =>
@@ -309,9 +301,6 @@ export async function listSectionCounts(
         ...(filter.period === undefined ? {} : { period: filter.period }),
         ...(filter.periodFrom === undefined ? {} : { periodFrom: filter.periodFrom }),
         ...(filter.periodTo === undefined ? {} : { periodTo: filter.periodTo }),
-        ...(filter.unassigned === undefined
-          ? {}
-          : { unassigned: filter.unassigned ? 'true' : 'false' }),
         ...(filter.search === undefined || filter.search === '' ? {} : { search: filter.search }),
       },
     }),

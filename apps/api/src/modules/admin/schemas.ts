@@ -439,7 +439,10 @@ export type IntegrationName = (typeof INTEGRATION_NAMES)[number];
 
 export const idParamsSchema = z.object({ id: uuidSchema });
 
-export const userListQuerySchema = adminPageQuerySchema;
+export const userListQuerySchema = adminPageQuerySchema.extend({
+  /** Подстрока имени или почты; экран администратора шлёт её с самого начала. */
+  search: z.string().min(1).max(200).optional(),
+});
 
 /**
  * Набор бизнес-ролей пользователя.

@@ -135,6 +135,7 @@ function registerUserRoutes(app: AppInstance): void {
       const page = await listUsers(app.db, scope, {
         limit: request.query.limit,
         cursor: request.query.cursor ?? null,
+        ...(request.query.search === undefined ? {} : { search: request.query.search }),
       });
       return { items: page.items.map(toUserResponse), nextCursor: page.nextCursor };
     },

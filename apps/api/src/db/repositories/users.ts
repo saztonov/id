@@ -27,7 +27,7 @@
  * тех, кто назначен хотя бы на один из его объектов, подрядчик — сотрудников
  * своей организации.
  */
-import { asc, eq, inArray, sql } from 'drizzle-orm';
+import { asc, eq, ilike, inArray, or, sql } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { authThrottle, userCredentials, userObjectScopes, userRoles, users } from '@id/db';
@@ -90,6 +90,15 @@ export interface UserSummary {
 export interface ListUsersParams {
   readonly limit: number;
   readonly cursor?: string | null | undefined;
+  /**
+   * Подстрока имени или почты (S45).
+   *
+   * Экран администратора спрашивал её с самого начала, но параметр не доходил
+   * до сервера: схема маршрута его не знала, zod срезал ключ, и список
+   * возвращался нефильтрованным. Поиск, который молча ничего не ищет, хуже
+   * отсутствующего — по нему делают вывод «такого пользователя нет».
+   */
+  readonly search?: string | undefined;
 }
 
 export interface UserPage {
@@ -154,6 +163,17 @@ const SELECTION = {
  * GROUP BY значило бы получить список, который забудут обновить при добавлении
  * колонки.
  */
+/**
+ * Экранирование спецсимволов LIKE.
+ *
+ * Подчёркивание в почте — обычный символ, а для LIKE это «любой знак»: без
+ * экранирования поиск `ivan_petrov` нашёл бы и `ivanXpetrov`, то есть ответил
+ * бы на другой вопрос.
+ */
+function escapeLike(term: string): string {
+  return term.replace(/[\\%_]/gu, (character) => `\\${character}`);
+}
+
 export async function listUsers(
   db: Database,
   scope: AuthScope,
@@ -161,6 +181,14 @@ export async function listUsers(
 ): Promise<UserPage> {
   const after = decodeCursor(params.cursor);
   const conditions = after === null ? [] : [keysetAfter(after)];
+
+  if (params.search !== undefined && params.search !== '') {
+    // Символы LIKE экранируются: подчёркивание в почте — обычный символ, а не
+    // «любой знак», и без экранирования поиск по нему возвращал бы лишнее.
+    const term = `%${escapeLike(params.search)}%`;
+    const match = or(ilike(users.fullName, term), ilike(users.email, term));
+    if (match !== undefined) conditions.push(match);
+  }
 
   const rows = await db
     .select(SELECTION)

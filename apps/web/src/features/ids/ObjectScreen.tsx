@@ -49,7 +49,6 @@ import {
   App as AntApp,
   Button,
   Card,
-  Checkbox,
   Collapse,
   Descriptions,
   Form,
@@ -223,7 +222,6 @@ interface FilterFormValues {
   search?: string;
   from?: string;
   to?: string;
-  unassigned?: boolean;
 }
 
 /**
@@ -250,17 +248,11 @@ function FolderFilters({
         : { search: values.search.trim() }),
       ...(values.from === undefined ? {} : { periodFrom: monthToPeriod(values.from) }),
       ...(values.to === undefined ? {} : { periodTo: monthToPeriod(values.to) }),
-      // Признак трёхзначен и на сервере: снятая галка означает «любые», а не
-      // «только включённые в реестр». Передавать `false` было бы другим вопросом.
-      ...(values.unassigned === true ? { unassigned: true } : {}),
     });
   };
 
   const active =
-    value.search !== undefined ||
-    value.periodFrom !== undefined ||
-    value.periodTo !== undefined ||
-    value.unassigned !== undefined;
+    value.search !== undefined || value.periodFrom !== undefined || value.periodTo !== undefined;
 
   return (
     <Card size="small" title="Отбор комплектов" style={{ marginTop: 16 }}>
@@ -278,9 +270,6 @@ function FolderFilters({
         </Form.Item>
         <Form.Item name="to" label="по">
           <Input type="month" style={{ width: 160 }} data-testid="filter-to" />
-        </Form.Item>
-        <Form.Item name="unassigned" valuePropName="checked">
-          <Checkbox data-testid="filter-unassigned">Только не включённые в реестр</Checkbox>
         </Form.Item>
         <Form.Item>
           <Space>

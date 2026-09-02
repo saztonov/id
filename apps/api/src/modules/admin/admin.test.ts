@@ -524,6 +524,31 @@ describe('маршруты администрирования зарегистр
     expect(body.items.find((item) => item.id === USER_ADMIN)?.roles).toEqual(['admin']);
   });
 
+  it('поиск фильтрует список, а не только меняет ключ кэша', async () => {
+    /**
+     * Экран администратора спрашивал подстроку с самого начала, но схема
+     * маршрута её не знала: zod срезал незнакомый ключ, список приходил
+     * нефильтрованным, и по нему делали вывод «такого пользователя нет».
+     * Поиск, который молча ничего не ищет, хуже отсутствующего.
+     */
+    const byName = await asAdmin('GET', `${P}/users?limit=50&search=Инженер объекта`);
+    expect(byName.statusCode).toBe(200);
+    const names = byName.json<{ items: { id: string }[] }>().items.map((item) => item.id);
+    expect(names).toContain(USER_ENGINEER);
+    expect(names).not.toContain(USER_PLAIN);
+
+    // Почта ищется тем же параметром: администратор помнит либо имя, либо адрес.
+    const byEmail = await asAdmin('GET', `${P}/users?limit=50&search=admin-primary`);
+    expect(byEmail.json<{ items: { id: string }[] }>().items.map((item) => item.id)).toEqual([
+      USER_ADMIN,
+    ]);
+
+    // Подчёркивание — обычный символ, а не «любой знак»: без экранирования LIKE
+    // такой запрос вернул бы посторонние строки.
+    const literal = await asAdmin('GET', `${P}/users?limit=50&search=_`);
+    expect(literal.json<{ items: unknown[] }>().items).toEqual([]);
+  });
+
   it('запись без CSRF-заголовка отклоняется', async () => {
     const session = await admin();
     const response = await app.inject({

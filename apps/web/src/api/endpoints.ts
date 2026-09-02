@@ -657,9 +657,18 @@ export const catalog = {
    * Списки разделов приходят массивом, а не конвертом: их два-три десятка, и
    * курсорная страница на такой размер была бы конструкцией без назначения.
    */
+  /**
+   * Разделы справочника.
+   *
+   * Имя параметра — из схемы сервера (`sectionListQuerySchema`): он спрашивает
+   * `isActive`, а не «включать ли неактивные». До S45 клиент слал
+   * `includeInactive`, zod срезал незнакомый ключ, и список приходил ПОЛНЫМ в
+   * обоих положениях галки: отключённый раздел предлагался для нового профиля,
+   * а «показать неактивные» ничего не меняло.
+   */
   sections: (includeInactive = false) =>
     get<Section[]>(`${V1}/catalog/sections`, {
-      query: includeInactive ? { includeInactive: 'true' } : {},
+      query: includeInactive ? {} : { isActive: 'true' },
     }),
 
   createSection: (body: { code: string; name: string; sortOrder?: number }) =>
