@@ -728,6 +728,105 @@ describe('AOSR.P4.080 — приложения присутствуют в ко�
     expect(messagesOf('AOSR.P4.080', graph)[0]).toContain('99999');
   });
 
+  it('номер схемы с хвостом захватки не теряется на пробеле', () => {
+    // В акте схема названа «№ 48.1-от/-1 этаж от 10.04.2026г.». Пока номер
+    // обрывался на первом пробеле, из него уходило «этаж», и схема, лежащая
+    // в комплекте, не находилась — двенадцать раз в одной папке.
+    const scheme = makeDocument({
+      docTypeCode: 'exec_scheme',
+      fields: [text(AOSR_FIELDS.number, '48.1-ОТ/-1 ЭТАЖ')],
+    });
+    const graph = makeGraph({
+      documents: [
+        makeAct([
+          ...healthyActFields(),
+          listField(AOSR_FIELDS.documents, [
+            'Исполнительная схема устройства стен № 48.1-от/-1 этаж от 10.04.2026г.',
+          ]),
+        ]),
+        scheme,
+      ],
+    });
+
+    expect(verdictOf('AOSR.P4.080', graph)).toBe('pass');
+  });
+
+  it('«Не» вместо «№» номером быть не перестаёт', () => {
+    const graph = makeGraph({
+      documents: [
+        makeAct([
+          ...healthyActFields(),
+          listField(AOSR_FIELDS.documents, ['Паспорт качества Не 16005']),
+        ]),
+        quality,
+      ],
+    });
+
+    expect(verdictOf('AOSR.P4.080', graph)).toBe('pass');
+  });
+
+  it('схема есть, но её номер прочитан иначе — undetermined, а не fail', () => {
+    // Верхняя надпись чертежа распознаётся хуже прочего текста: тот же номер
+    // приходит как «48.1-ОТП-1». Ведущее число «48.1» устойчиво, и по нему
+    // схема находится.
+    const scheme = makeDocument({
+      docTypeCode: 'exec_scheme',
+      fields: [text(AOSR_FIELDS.number, '48.1-ОТП-1')],
+    });
+    const graph = makeGraph({
+      documents: [
+        makeAct([
+          ...healthyActFields(),
+          listField(AOSR_FIELDS.documents, ['Исполнительная схема № 48.1-от/-1 этаж']),
+        ]),
+        scheme,
+      ],
+    });
+
+    expect(verdictOf('AOSR.P4.080', graph)).toBe('pass');
+  });
+
+  it('схема в комплекте есть, но ведущее число не сошлось — undetermined', () => {
+    const scheme = makeDocument({
+      docTypeCode: 'exec_scheme',
+      fields: [text(AOSR_FIELDS.number, '77:07:0010004:24')],
+    });
+    const graph = makeGraph({
+      documents: [
+        makeAct([
+          ...healthyActFields(),
+          listField(AOSR_FIELDS.documents, ['Исполнительная схема № 48.1-от/-1 этаж']),
+        ]),
+        scheme,
+      ],
+    });
+
+    // Утверждать отсутствие документа, глядя на плохо прочитанный номер,
+    // нельзя: схема в комплекте лежит.
+    expect(verdictOf('AOSR.P4.080', graph)).toBe('undetermined');
+  });
+
+  it('послабление не распространяется на прочие приложения', () => {
+    // Ступень по ведущему числу — про чертёж, у которого номер живёт в
+    // верхней надписи. У паспорта номер напечатан в тексте, и «нашлось
+    // похожее число» подтверждением наличия документа не является.
+    const scheme = makeDocument({
+      docTypeCode: 'exec_scheme',
+      fields: [text(AOSR_FIELDS.number, '48.1-ОТ/-1 ЭТАЖ')],
+    });
+    const graph = makeGraph({
+      documents: [
+        makeAct([
+          ...healthyActFields(),
+          listField(AOSR_FIELDS.documents, ['Паспорт качества № 48.1']),
+        ]),
+        scheme,
+      ],
+    });
+
+    expect(verdictOf('AOSR.P4.080', graph)).toBe('fail');
+  });
+
   it('приложение без номера даёт undetermined, а акт без перечня — n_a', () => {
     const graph = makeGraph({
       documents: [

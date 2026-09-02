@@ -310,13 +310,26 @@ function signerRolesFrom(params: RuleParams): readonly SignerRole[] {
   return AOSR_SIGNER_ROLES.filter((role) => codes.includes(role.field));
 }
 
-/** Номер документа, названный внутри строки перечня приложений. */
-const DOC_NO_IN_TEXT = /№\s*([^\s,;]+)/u;
+/**
+ * Номер документа, названный внутри строки перечня приложений.
+ *
+ * Границей служит то, что за номером ИДЁТ: предлог «от» перед датой, запятая,
+ * точка с запятой, скобка или конец строки. Пробелом граница быть не может —
+ * он встречается внутри номера («№ РОСС RU BY.HE06.H22245»), а в акте так
+ * записан и номер схемы: «№ 48.1-от/-1 этаж от 10.04.2026г.». Пока номер
+ * обрывался на первом пробеле, из него уходило «этаж», и схема, лежащая в
+ * комплекте, не находилась.
+ *
+ * «Не» и «No» — то, во что OCR превращает «№»: в папке так прочитано больше
+ * четверти номеров, и без них строка молча становилась «названной без номера».
+ */
+const DOC_NO_IN_TEXT =
+  /(?:№|Не(?=\s*[0-9A-ZА-Я])|No|N(?![p{L}]))\s*([^,;()]+?)(?=\s+от\s|\s*[,;()]|$)/u;
 
 function docNoOf(text: string): string | null {
   const raw = DOC_NO_IN_TEXT.exec(text)?.[1];
   if (raw === undefined) return null;
-  const trimmed = raw.replace(/[.,;:]+$/u, '');
+  const trimmed = raw.replace(/[.,;:]+$/u, '').trim();
   return trimmed === '' ? null : trimmed;
 }
 
@@ -327,7 +340,44 @@ function docNoOf(text: string): string | null {
  * подрядчик обобщает («Документ о качестве» на двенадцати разных формах), и
  * расхождение вида дефектом не является (`docs/CORPUS_FINDINGS.md`).
  */
-function hasDocumentNumbered(graph: CheckGraph, docNo: string): boolean {
+/**
+ * Ведущее число номера листа чертежа: «48.1» из «48.1-ОТ/-1 ЭТАЖ».
+ *
+ * Им схема названа в акте и им же подписана сама: остальное — обозначение
+ * захватки, которое подрядчик пишет как придётся («-1 этаж», «/1-1ЭТАЖ»,
+ * «1-1 ЭТАЖ»), а распознавание довершает разночтение.
+ */
+const SHEET_NUMBER_HEAD = /^\d+(?:\.\d+)+/u;
+
+function sheetNumberHead(value: string): string | null {
+  return SHEET_NUMBER_HEAD.exec(normalizeDocNo(value).folded)?.[0] ?? null;
+}
+
+/** Ссылается ли строка перечня на исполнительную схему. */
+const SCHEME_REFERENCE = /схем/iu;
+
+type NumberedLookup = 'found' | 'undetermined' | 'missing';
+
+/**
+ * Есть ли в комплекте документ с таким номером.
+ *
+ * Сверка идёт ТОЛЬКО по номеру: вид документа в реестре и в перечне приложений
+ * подрядчик обобщает («Документ о качестве» на двенадцати разных формах), и
+ * расхождение вида дефектом не является (`docs/CORPUS_FINDINGS.md`).
+ *
+ * Три исхода вместо двух — из-за исполнительных схем. У листа чертежа нет
+ * заголовка, свой номер он несёт верхней надписью над штампом, и распознаётся
+ * она хуже прочего текста: в папке «ИД Мастер апрель 2026» тот же номер
+ * прочитан как «48.1-ОТП-1», «49.1-от1-1», «521-от 1этмж». Точное сравнение
+ * объявляло отсутствующими двенадцать схем, которые лежат в комплекте, —
+ * то есть портал винил подрядчика в собственном чтении.
+ *
+ * Поэтому у ссылки на схему две дополнительные ступени. Сначала — ведущее
+ * число: «48.1» распознаётся устойчиво, а хвост захватки нет. Если и оно не
+ * сошлось, но схема в комплекте есть, вердикт `undetermined`: утверждать
+ * отсутствие документа, глядя на плохо прочитанный номер, нельзя.
+ */
+function hasDocumentNumbered(graph: CheckGraph, docNo: string, entry: string): NumberedLookup {
   const wanted = normalizeDocNo(docNo);
   const inDocuments = graph.documents.some((document) => {
     const number = textOf(document, AOSR_FIELDS.number);
@@ -335,12 +385,34 @@ function hasDocumentNumbered(graph: CheckGraph, docNo: string): boolean {
     const actual = normalizeDocNo(number);
     return actual.normalized === wanted.normalized || actual.folded === wanted.folded;
   });
-  if (inDocuments) return true;
-  return graph.registryRows.some(
+  if (inDocuments) return 'found';
+
+  const inRegistry = graph.registryRows.some(
     (row) =>
       row.matchedDocumentId !== null &&
       (row.docNoNorm === wanted.normalized || row.docNoFolded === wanted.folded),
   );
+  if (inRegistry) return 'found';
+
+  if (!SCHEME_REFERENCE.test(entry)) return 'missing';
+
+  const schemes = graph.documents.filter(
+    (document) => document.docTypeCode !== null && SCHEME_TYPE.test(document.docTypeCode),
+  );
+  if (schemes.length === 0) return 'missing';
+
+  const head = sheetNumberHead(docNo);
+  if (
+    head !== null &&
+    schemes.some((scheme) => {
+      const number = textOf(scheme, AOSR_FIELDS.number);
+      return number !== null && sheetNumberHead(number) === head;
+    })
+  ) {
+    return 'found';
+  }
+
+  return 'undetermined';
 }
 
 // ---------------------------------------------------------------------------
@@ -1189,7 +1261,20 @@ function evaluateAnnexesPresent(graph: CheckGraph): RuleResult {
       }
 
       checked += 1;
-      if (hasDocumentNumbered(graph, docNo)) continue;
+      const lookup = hasDocumentNumbered(graph, docNo, entry);
+      if (lookup === 'found') continue;
+
+      if (lookup === 'undetermined') {
+        findings.push(
+          unknown({
+            ...anchor,
+            origin: 'deterministic',
+            message: `Приложение «${entry}» из п. 4 акта ${actLabel(act)}: в комплекте есть исполнительная схема, но её номер распознан иначе, чем ${docNo}.`,
+            hint: 'Сверьте номер схемы с перечнем приложений акта вручную либо исправьте распознанный номер схемы.',
+          }),
+        );
+        continue;
+      }
 
       findings.push(
         defect({
