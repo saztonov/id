@@ -24,7 +24,13 @@
  * добавленное эксплуатацией, вставало рядом со своей группой, а не в конец.
  */
 import { DATE_RULES, SIGNATURE_RULES } from './dates.js';
-import { AOSR_RULES, CROSSCHECK_RULES, EXTERNAL_RULES, WORK_PERIOD_RULES } from './aosr.js';
+import {
+  AOSR_RULES,
+  CROSSCHECK_RULES,
+  EXTERNAL_RULES,
+  TRANSFER_REGISTRY_RULES,
+  WORK_PERIOD_RULES,
+} from './aosr.js';
 import { EVIDENCE_RULES } from './evidence.js';
 import { LLM_REVIEW_RULES } from './llm-review.js';
 import type { RuleSpec } from './types.js';
@@ -97,6 +103,14 @@ export const RULE_SEED_BATCHES: readonly RuleSeedBatch[] = [
       ['extraction_quality', 'crosscheck'],
     ],
     rules: LLM_REVIEW_RULES,
+  },
+  {
+    // Сверка состава папки с описью передачи (S47). Опись разбиралась
+    // парсером с S20, но её строки никуда не попадали и никем не читались:
+    // задача сверки была снята вместе с таблицами реестров (миграция 0058), а
+    // документ остался. Три правила возвращают ей роль эталона состава.
+    migration: '0067_seed_transfer_registry_rules',
+    rules: TRANSFER_REGISTRY_RULES,
   },
 ];
 

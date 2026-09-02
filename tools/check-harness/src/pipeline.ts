@@ -300,6 +300,9 @@ export function runPackage(dir: string, options: HarnessOptions): PackageRunResu
                 ? 'candidate'
                 : 'missing',
         candidateDocumentIds: (decision?.candidates ?? []).map((candidate) => candidate.documentId),
+        // Стенд разбирает только реестры приложений: у их строк комплект один
+        // на весь перечень и в строке не хранится (его несут строки описи).
+        complectId: null,
       });
     }
   }

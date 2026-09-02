@@ -532,8 +532,10 @@ export type {
 export {
   matchTransferGroups,
   parseTransferRegistry,
+  toRegistryRows,
   TRANSFER_MATCHER_VERSION,
   TRANSFER_PARSER_VERSION,
+  TRANSFER_TYPE,
 } from './segmentation/transfer-registry.js';
 export type {
   ParsedTransferGroup,

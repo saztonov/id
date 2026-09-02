@@ -61,8 +61,12 @@ import {
   JobDeferredError,
   LlmError,
   matchRegistryRows,
+  matchTransferGroups,
   pagesNeedingLlm,
   parseAnnexRegistry,
+  parseTransferRegistry,
+  toRegistryRows,
+  TRANSFER_TYPE,
   renderExtractUserPrompt,
   renderUserPrompt,
   promptDocTypeCodes,
@@ -74,6 +78,7 @@ import {
   type LlmProviderName,
   type LogicalDocumentView,
   type MatchableDocument,
+  type TransferGroupCandidate,
   type PageAssignmentView,
   type PageClassification,
   type PageClassificationView,
@@ -1447,6 +1452,7 @@ export function createParseRegistryHandler(
 
     const documents = await deps.listDocuments(folderId);
     const registries = documents.filter((document) => document.docTypeCode === REGISTRY_TYPE);
+    const transfers = documents.filter((document) => document.docTypeCode === TRANSFER_TYPE);
 
     const input = await deps.loadPages(folderId);
     const pageById = new Map(input.pages.map((page) => [page.sourcePageId, page]));
@@ -1454,11 +1460,10 @@ export function createParseRegistryHandler(
       (a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0),
     );
 
-    let rows = 0;
-    const warnings: string[] = [];
-    for (const registry of registries) {
-      const pages = assignments
-        .filter((assignment) => assignment.documentId === registry.id)
+    /** Страницы одного документа по порядку: перечень читается только по своим. */
+    const pagesOf = (documentId: string) =>
+      assignments
+        .filter((assignment) => assignment.documentId === documentId)
         .map((assignment) => pageById.get(assignment.sourcePageId))
         .filter((page): page is NonNullable<typeof page> => page !== undefined)
         .map((page) => ({
@@ -1467,7 +1472,10 @@ export function createParseRegistryHandler(
           text: page.text,
         }));
 
-      const parsed = parseAnnexRegistry({ pages });
+    let rows = 0;
+    const warnings: string[] = [];
+    for (const registry of registries) {
+      const parsed = parseAnnexRegistry({ pages: pagesOf(registry.id) });
       warnings.push(...parsed.warnings);
       const outcome = await deps.saveRegistryRows({
         folderId,
@@ -1477,8 +1485,74 @@ export function createParseRegistryHandler(
       rows += outcome.written;
     }
 
-    const counts = { registries: registries.length, rows, warnings: warnings.length };
-    ctx.logger.info({ counts, warnings }, 'реестры приложений разобраны');
+    /**
+     * Опись передачи — тот же перечень состава, только для всей папки.
+     *
+     * Разбирается тем же заданием и хранится теми же строками: разделять их
+     * значило бы завести вторую сверку с собственным устройством, а сверять
+     * надо ровно то же самое — назван ли документ перечнем и лежит ли он в
+     * папке. Отличие одно: раздел описи принадлежит своему акту, и комплект
+     * проставляется КАЖДОЙ строке — иначе двенадцать одинаковых паспортов
+     * одной папки сверялись бы со всей папкой сразу.
+     *
+     * Разделы сопоставляются с комплектами по номеру АОСР. Номера актов к
+     * этому моменту извлечены (задание 16 идёт раньше), поэтому кандидаты
+     * собираются здесь же, без отдельного порта.
+     */
+    let transferRows = 0;
+    let transferGroups = 0;
+    let transferMatched = 0;
+    for (const transfer of transfers) {
+      const parsed = parseTransferRegistry({ pages: pagesOf(transfer.id) });
+      warnings.push(...parsed.warnings);
+
+      const candidates: TransferGroupCandidate[] = [];
+      for (const document of documents) {
+        if (!isAnalysisAnchor(document.docTypeCode) || document.complectId === null) continue;
+        const values = await deps.listFieldValues(document.id);
+        candidates.push({
+          workId: document.complectId,
+          folderId,
+          contractorId: document.contractorId,
+          // Исполнитель и наименование работы в сопоставлении не участвуют:
+          // акты папки озаглавлены одинаково («освидетельствования скрытых
+          // работ»), и ступень по наименованию выбрала бы первый попавшийся.
+          // Номер АОСР различает их однозначно.
+          contractorName: null,
+          title: '',
+          actNumbers: documentNumbersOf(values),
+        });
+      }
+
+      const outcome = matchTransferGroups(parsed.groups, candidates);
+      for (const group of outcome.groups) {
+        if (group.state === 'matched') transferMatched += 1;
+        else {
+          warnings.push(`раздел описи ${group.groupOrdinal + 1}: ${group.reason}`);
+        }
+      }
+      if (outcome.extraWorkIds.length > 0) {
+        warnings.push(`комплектов, не названных описью: ${outcome.extraWorkIds.length}`);
+      }
+
+      const saved = await deps.saveRegistryRows({
+        folderId,
+        documentId: transfer.id,
+        rows: toRegistryRows(parsed, outcome),
+      });
+      transferRows += saved.written;
+      transferGroups += parsed.groups.length;
+    }
+
+    const counts = {
+      registries: registries.length,
+      rows,
+      warnings: warnings.length,
+      transferRows,
+      transferGroups,
+      transferMatched,
+    };
+    ctx.logger.info({ counts, warnings }, 'перечни состава разобраны');
     await ctx.emit('documents.registry_parsed', counts);
 
     await ctx.enqueue({
@@ -1563,18 +1637,33 @@ export function createMatchRegistryHandler(
      * комплектов (опись, титулы) в кандидаты не попадают вовсе: перечень
      * приложений акта их не называет.
      */
+    const matchable = (document: LogicalDocumentView): MatchableDocument => ({
+      documentId: document.id,
+      docTypeCode: document.docTypeCode,
+      numbers: numbers.get(document.id) ?? [],
+      issuedAt: issuedAt.get(document.id) ?? null,
+      title: document.title,
+    });
+
     const candidatesOf = (complectId: string | null): readonly MatchableDocument[] =>
       documents
         // Сам реестр в сверку не входит: он перечисляет приложения, а не себя.
         .filter((document) => !registryDocumentIds.has(document.id))
         .filter((document) => complectId !== null && document.complectId === complectId)
-        .map((document) => ({
-          documentId: document.id,
-          docTypeCode: document.docTypeCode,
-          numbers: numbers.get(document.id) ?? [],
-          issuedAt: issuedAt.get(document.id) ?? null,
-          title: document.title,
-        }));
+        .map(matchable);
+
+    /**
+     * Запасные кандидаты для строки описи, чей раздел не нашёл своего акта.
+     *
+     * Вся папка минус перечни: строка названа, документ у неё где-то есть, и
+     * отказываться искать его только потому, что не опознан раздел, значило бы
+     * объявить документ отсутствующим по своей же причине. Двойники в такой
+     * выборке дадут честное «неоднозначно» — это ответ о том, что портал не
+     * знает, к какому акту относится строка, и он вернее выдуманного.
+     */
+    const folderCandidates: readonly MatchableDocument[] = documents
+      .filter((document) => !registryDocumentIds.has(document.id))
+      .map(matchable);
 
     const matches: RegistryMatch[] = [];
     let matched = 0;
@@ -1587,43 +1676,86 @@ export function createMatchRegistryHandler(
     // комплекта — перечень принадлежит акту, и документы соседних актов ему
     // не отвечают.
     const complectOfDocument = new Map(documents.map((d) => [d.id, d.complectId]));
+    const isTransfer = new Map(
+      documents.map((d) => [d.id, d.docTypeCode === TRANSFER_TYPE] as const),
+    );
+
+    /**
+     * Строки одного перечня, разложенные на выборки кандидатов.
+     *
+     * У реестра приложений выборка одна на весь перечень — комплект его акта.
+     * У описи передачи их столько, сколько разделов: комплект несёт каждая
+     * строка, и строки раздела ищут свой документ среди документов своего
+     * акта. Раздел без акта отправляет строки искать по всей папке.
+     */
+    const partitionsOf = (
+      registryDocumentId: string,
+      rowsOfRegistry: readonly RegistryRowView[],
+    ): readonly (readonly [readonly MatchableDocument[], readonly RegistryRowView[]])[] => {
+      if (isTransfer.get(registryDocumentId) !== true) {
+        const own = candidatesOf(complectOfDocument.get(registryDocumentId) ?? null);
+        return [[own, rowsOfRegistry]];
+      }
+
+      const byComplect = new Map<string | null, RegistryRowView[]>();
+      for (const row of rowsOfRegistry) {
+        const bucket = byComplect.get(row.complectId);
+        if (bucket === undefined) byComplect.set(row.complectId, [row]);
+        else bucket.push(row);
+      }
+
+      return [...byComplect.entries()].map(([complectId, rowsOfComplect]) => [
+        complectId === null ? folderCandidates : candidatesOf(complectId),
+        rowsOfComplect,
+      ]);
+    };
+
     for (const registryDocumentId of registryDocumentIds) {
-      const matchable = candidatesOf(complectOfDocument.get(registryDocumentId) ?? null);
-      const rowsOfRegistry = stored.filter((row) => row.documentId === registryDocumentId);
-      const parsed: readonly ParsedRegistryRow[] = rowsOfRegistry.map((row) => ({
-        rowNo: row.rowNo,
-        sectionTitle: row.sectionTitle,
-        docNameRaw: row.docNameRaw,
-        docNoRaw: row.docNoRaw,
-        orgRaw: row.orgRaw,
-        docNoNorm: row.docNoNorm,
-        docNoFolded: row.docNoFolded,
-        validFrom: row.validFrom,
-        validTo: row.validTo,
-        issuedAt: row.issuedAt,
-      }));
+      const rowsOfDocument = stored.filter((row) => row.documentId === registryDocumentId);
+      for (const [matchableDocuments, rowsOfRegistry] of partitionsOf(
+        registryDocumentId,
+        rowsOfDocument,
+      )) {
+        const parsed: readonly ParsedRegistryRow[] = rowsOfRegistry.map((row) => ({
+          rowNo: row.rowNo,
+          sectionTitle: row.sectionTitle,
+          docNameRaw: row.docNameRaw,
+          docNoRaw: row.docNoRaw,
+          orgRaw: row.orgRaw,
+          docNoNorm: row.docNoNorm,
+          docNoFolded: row.docNoFolded,
+          validFrom: row.validFrom,
+          validTo: row.validTo,
+          issuedAt: row.issuedAt,
+        }));
 
-      const outcome = matchRegistryRows(parsed, matchable);
-      for (const id of outcome.extraDocumentIds) extra.add(id);
+        const outcome = matchRegistryRows(parsed, matchableDocuments);
+        // «Лишние» описи в общий счёт не идут: она перечисляет всю папку, и её
+        // остаток — это не то же самое, что документ, не названный перечнем
+        // своего акта. Объединять их значило бы сложить два разных вопроса.
+        if (isTransfer.get(registryDocumentId) !== true) {
+          for (const id of outcome.extraDocumentIds) extra.add(id);
+        }
 
-      for (const [index, decision] of outcome.rows.entries()) {
-        const row = rowsOfRegistry[index];
-        if (row === undefined) continue;
-        matches.push({
-          registryRowId: row.id,
-          matchedDocumentId: decision.matchedDocumentId,
-          matchScore: decision.matchScore,
-          matchState: decision.matchState,
-          candidates: decision.candidates.map((candidate) => ({
-            documentId: candidate.documentId,
-            basis: candidate.basis,
-            score: candidate.score,
-          })),
-        });
-        if (decision.matchState === 'matched') matched += 1;
-        else if (decision.matchState === 'ambiguous') ambiguous += 1;
-        else if (decision.matchState === 'candidate') candidate += 1;
-        else missing += 1;
+        for (const [index, decision] of outcome.rows.entries()) {
+          const row = rowsOfRegistry[index];
+          if (row === undefined) continue;
+          matches.push({
+            registryRowId: row.id,
+            matchedDocumentId: decision.matchedDocumentId,
+            matchScore: decision.matchScore,
+            matchState: decision.matchState,
+            candidates: decision.candidates.map((candidate) => ({
+              documentId: candidate.documentId,
+              basis: candidate.basis,
+              score: candidate.score,
+            })),
+          });
+          if (decision.matchState === 'matched') matched += 1;
+          else if (decision.matchState === 'ambiguous') ambiguous += 1;
+          else if (decision.matchState === 'candidate') candidate += 1;
+          else missing += 1;
+        }
       }
     }
 

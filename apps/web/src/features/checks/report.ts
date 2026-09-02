@@ -196,5 +196,14 @@ export function sectionTally(section: ReportSection): string | null {
   const counted = section.rows.filter((row) => row.status !== 'unchecked');
   if (counted.length === 0) return null;
   const ok = counted.filter((row) => row.status === 'ok').length;
+
+  // Опись передачи перечисляет ПАПКУ, и её счёт отвечает на другой вопрос:
+  // не «сколько строк без замечаний», а «сколько названного нашлось». Слово
+  // «найдено» здесь несёт смысл: строка описи либо нашла свой документ, либо
+  // нет, третьего у неё не бывает.
+  if (section.kind === 'transfer') {
+    return `${String(ok)} из ${String(counted.length)} строк найдено в папке`;
+  }
+
   return `${String(ok)} из ${String(counted.length)} без замечаний`;
 }

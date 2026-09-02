@@ -948,6 +948,10 @@ export const registryRowSchema = z.object({
   matchedDocumentId: uuidSchema.nullable(),
   matchScore: confidenceSchema.nullable(),
   matchState: matchStateSchema,
+  /** Комплект строки: у описи передачи — комплект её раздела, иначе null. */
+  complectId: uuidSchema.nullable(),
+  /** Перечень приложений к акту либо опись передачи всей папки. */
+  registryKind: z.enum(['annex', 'transfer']),
 });
 export type RegistryRow = z.infer<typeof registryRowSchema>;
 

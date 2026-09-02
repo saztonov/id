@@ -446,6 +446,8 @@ export interface RegistryRow {
   matchedDocumentId: string | null;
   matchScore: number | null;
   matchState: MatchState;
+  complectId: string | null;
+  registryKind: 'annex' | 'transfer';
 }
 
 export interface PageClassification {
@@ -610,7 +612,7 @@ export type ReportRowStatus =
 export type ReportItemStatus =
   'ok' | 'error' | 'warning' | 'undetermined' | 'not_applicable' | 'not_run';
 
-export type ReportSectionKind = 'act' | 'registry' | 'quality' | 'other' | 'unplaced';
+export type ReportSectionKind = 'act' | 'registry' | 'transfer' | 'quality' | 'other' | 'unplaced';
 
 export interface ReportItem {
   code: string;
@@ -660,7 +662,7 @@ export interface ReportSection {
  * Уровень появился в S44: до нарезки папки на комплекты отчёт был плоским
  * списком секций и складывал двенадцать актов в одну таблицу из 134 строк.
  */
-export type ReportGroupKind = 'complect' | 'outside' | 'unplaced' | 'extraction';
+export type ReportGroupKind = 'transfer' | 'complect' | 'outside' | 'unplaced' | 'extraction';
 
 export interface ReportGroup {
   kind: ReportGroupKind;

@@ -25,6 +25,7 @@ import {
   AOSR_SIGNER_ROLES,
   CROSSCHECK_RULES,
   EXTERNAL_RULES,
+  TRANSFER_REGISTRY_RULES,
 } from './aosr.js';
 import { RETIRED_RULES, RULE_CATALOG } from './catalog.js';
 import { periodOfEarliestAct } from './helpers.js';
@@ -48,6 +49,7 @@ import {
   snapshotOf,
 } from './testing.js';
 import type {
+  RegistryRowNode,
   CheckGraph,
   DocumentNode,
   ExternalRegistriesSnapshot,
@@ -61,7 +63,12 @@ import type {
   SroRecord,
 } from './types.js';
 
-const ALL_RULES: readonly RuleSpec[] = [...AOSR_RULES, ...CROSSCHECK_RULES, ...EXTERNAL_RULES];
+const ALL_RULES: readonly RuleSpec[] = [
+  ...AOSR_RULES,
+  ...CROSSCHECK_RULES,
+  ...TRANSFER_REGISTRY_RULES,
+  ...EXTERNAL_RULES,
+];
 
 // ---------------------------------------------------------------------------
 // Инструменты
@@ -1085,6 +1092,177 @@ describe('REG.100 / REG.101 / REG.102 — сверка с реестром пр�
 // ---------------------------------------------------------------------------
 // MAT
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// REG.110 / REG.111 / REG.112 — опись передачи
+// ---------------------------------------------------------------------------
+
+describe('REG.110 / REG.111 / REG.112 — сверка папки с описью передачи', () => {
+  const transfer = makeDocument({ docTypeCode: 'transfer_registry' });
+  const quality = makeDocument({
+    docTypeCode: 'mill_certificate',
+    title: 'СЕРТИФИКАТ КАЧЕСТВА',
+    fields: [text(AOSR_FIELDS.number, '16005')],
+  });
+
+  const transferRow = (patch: Partial<RegistryRowNode> = {}): RegistryRowNode =>
+    makeRegistryRow({
+      registryDocumentId: transfer.id,
+      sectionTitle: '1. Устройство шпатлевки стен (ООО «СИНТЕТИК»), поз. 1.3',
+      docNameRaw: 'Документ о качестве',
+      docNoRaw: '16005',
+      complectId: 'complect-1',
+      ...patch,
+    });
+
+  const transferGraph = (
+    rows: readonly RegistryRowNode[],
+    documents = [transfer, quality],
+  ): CheckGraph => makeGraph({ documents, transferRows: rows });
+
+  it('строка описи нашла свой документ — pass', () => {
+    const graph = transferGraph([
+      transferRow({ matchState: 'matched', matchedDocumentId: quality.id }),
+    ]);
+
+    expect(verdictOf('REG.110', graph)).toBe('pass');
+  });
+
+  it('строка описи не нашла документа — предупреждение', () => {
+    const graph = transferGraph([transferRow({ matchState: 'missing' })]);
+
+    expect(verdictOf('REG.110', graph)).toBe('fail');
+    expect(messagesOf('REG.110', graph)[0]).toContain('описью передачи');
+  });
+
+  it('строка описи без номера — «не проверено», а не «нет в папке»', () => {
+    const graph = transferGraph([
+      transferRow({ matchState: 'missing', docNoRaw: 'б/н', docNoNorm: null, docNoFolded: null }),
+    ]);
+
+    expect(verdictOf('REG.110', graph)).toBe('undetermined');
+  });
+
+  it('неразобранные листы понижают вывод до «не проверено»', () => {
+    const graph = makeGraph({
+      documents: [transfer, quality],
+      transferRows: [transferRow({ matchState: 'missing' })],
+      coverageGaps: 3,
+    });
+
+    expect(verdictOf('REG.110', graph)).toBe('undetermined');
+  });
+
+  it('без описи все три правила неприменимы', () => {
+    const graph = makeGraph({ documents: [quality] });
+
+    for (const code of ['REG.110', 'REG.111', 'REG.112']) {
+      expect(verdictOf(code, graph), code).toBe('n_a');
+    }
+  });
+});
+
+describe('REG.111 — документ папки не назван описью', () => {
+  const transfer = makeDocument({ docTypeCode: 'transfer_registry' });
+  const named = makeDocument({
+    docTypeCode: 'mill_certificate',
+    title: 'СЕРТИФИКАТ КАЧЕСТВА',
+    fields: [text(AOSR_FIELDS.number, '16005')],
+  });
+  const orphan = makeDocument({
+    docTypeCode: 'declaration',
+    title: 'ДЕКЛАРАЦИЯ О СООТВЕТСТВИИ',
+    fields: [text(AOSR_FIELDS.number, 'РОСС RU Д-RU.PA01.B.29363/25')],
+  });
+
+  const row = (matchedDocumentId: string) =>
+    makeRegistryRow({
+      registryDocumentId: transfer.id,
+      docNoRaw: '16005',
+      matchState: 'matched',
+      matchedDocumentId,
+    });
+
+  it('названный описью документ замечания не даёт', () => {
+    const graph = makeGraph({ documents: [transfer, named], transferRows: [row(named.id)] });
+
+    expect(verdictOf('REG.111', graph)).toBe('pass');
+  });
+
+  it('документ, которого в описи нет, — предупреждение', () => {
+    const graph = makeGraph({
+      documents: [transfer, named, orphan],
+      transferRows: [row(named.id)],
+    });
+
+    expect(verdictOf('REG.111', graph)).toBe('fail');
+    expect(messagesOf('REG.111', graph)[0]).toContain('ДЕКЛАРАЦИЯ О СООТВЕТСТВИИ');
+  });
+
+  it('документ без единого распознанного номера в счёт не идёт', () => {
+    // Сверка идёт по номеру: документ, у которого номер не прочитан, описью не
+    // ищется в принципе, и «не назван» о нём сказать нельзя.
+    const numberless = makeDocument({ docTypeCode: 'quality_passport', title: 'ПАСПОРТ' });
+    const graph = makeGraph({
+      documents: [transfer, named, numberless],
+      transferRows: [row(named.id)],
+    });
+
+    expect(verdictOf('REG.111', graph)).toBe('pass');
+  });
+
+  it('документ, названный кандидатом, считается названным', () => {
+    const candidate = makeRegistryRow({
+      registryDocumentId: transfer.id,
+      docNoRaw: 'РОСС RU Д-RU.PA01.B.29363/25',
+      matchState: 'candidate',
+      candidateDocumentIds: [orphan.id],
+    });
+    const graph = makeGraph({
+      documents: [transfer, named, orphan],
+      transferRows: [row(named.id), candidate],
+    });
+
+    expect(verdictOf('REG.111', graph)).toBe('pass');
+  });
+});
+
+describe('REG.112 — раздел описи не сопоставлен акту', () => {
+  const transfer = makeDocument({ docTypeCode: 'transfer_registry' });
+
+  const sectionRow = (sectionTitle: string, complectId: string | null) =>
+    makeRegistryRow({
+      registryDocumentId: transfer.id,
+      sectionTitle,
+      docNoRaw: '16005',
+      matchState: 'missing',
+      complectId,
+    });
+
+  it('раздел, нашедший свой акт, замечания не даёт', () => {
+    const graph = makeGraph({
+      documents: [transfer],
+      transferRows: [sectionRow('1. Устройство шпатлевки', 'complect-1')],
+    });
+
+    expect(verdictOf('REG.112', graph)).toBe('pass');
+  });
+
+  it('раздел без акта — одно замечание на раздел, а не на строку', () => {
+    const graph = makeGraph({
+      documents: [transfer],
+      transferRows: [
+        sectionRow('7. Устройство окраски потолка', null),
+        sectionRow('7. Устройство окраски потолка', null),
+        sectionRow('8. Устройство шпатлевки', 'complect-2'),
+      ],
+    });
+
+    expect(verdictOf('REG.112', graph)).toBe('fail');
+    expect(messagesOf('REG.112', graph)).toHaveLength(1);
+    expect(messagesOf('REG.112', graph)[0]).toContain('Устройство окраски потолка');
+  });
+});
 
 describe('MAT.110 — матрица документов раздела', () => {
   const matrixProfile = makeProfile({

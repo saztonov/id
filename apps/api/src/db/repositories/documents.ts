@@ -64,6 +64,7 @@ import {
 } from '@id/db';
 import type { DocumentRelation, MatchState, PageRoleCode } from '@id/contracts';
 import { planComplects } from '../../segmentation/complects.js';
+import { TRANSFER_TYPE } from '../../segmentation/transfer-registry.js';
 import type { AuthScope } from '../../auth/scope.js';
 import {
   conflict,
@@ -1620,6 +1621,22 @@ export interface RegistryRowView {
   readonly matchScore: number | null;
   readonly matchState: MatchState;
   /**
+   * Комплект строки.
+   *
+   * У реестра приложений он один на весь реестр; у описи передачи — свой у
+   * каждого раздела, и `null` означает, что раздел не сопоставлен ни одному
+   * акту папки.
+   */
+  readonly complectId: string | null;
+  /**
+   * Перечень какого рода: приложения к акту или передача всей папки.
+   *
+   * Выводится из вида документа-реестра, а не хранится колонкой: вид документа
+   * — единственный источник этого различия, и вторая его запись разошлась бы с
+   * первой при первом же переопределении типа человеком.
+   */
+  readonly registryKind: 'annex' | 'transfer';
+  /**
    * Документы, похожие на строку, но номером не подтверждённые.
    *
    * Отдаются вместе со строкой, а не отдельным запросом: их читают и правило
@@ -1683,6 +1700,10 @@ export async function saveRegistryRows(
           validFrom: row.validFrom,
           validTo: row.validTo,
           issuedAt: row.issuedAt,
+          // Комплект строки известен только описи передачи: её разделы делятся
+          // по актам. Реестр приложений весь принадлежит одному комплекту —
+          // тому же, что и сам реестр, — и колонку не заполняет.
+          complectId: row.complectId ?? null,
         });
         written += 1;
       }
@@ -1807,8 +1828,11 @@ export async function listRegistryRows(
       matchedDocumentId: registryRows.matchedDocumentId,
       matchScore: registryRows.matchScore,
       matchState: registryRows.matchState,
+      complectId: registryRows.complectId,
+      registryDocTypeCode: logicalDocuments.docTypeCode,
     })
     .from(registryRows)
+    .innerJoin(logicalDocuments, eq(registryRows.documentId, logicalDocuments.id))
     .innerJoin(folders, eq(registryRows.folderId, folders.id))
     .where(withScope(scope, FOLDER_SCOPE, eq(registryRows.folderId, folderId)))
     // Сортировка по сквозному порядку, а не по напечатанному номеру: разделы
@@ -1834,9 +1858,11 @@ export async function listRegistryRows(
     else bucket.push(candidate.documentId);
   }
 
-  return rows.map((row) => ({
+  return rows.map(({ registryDocTypeCode, ...row }) => ({
     ...row,
     matchState: row.matchState as MatchState,
+    registryKind:
+      registryDocTypeCode === TRANSFER_TYPE ? ('transfer' as const) : ('annex' as const),
     candidateDocumentIds: byRow.get(row.id) ?? [],
   }));
 }

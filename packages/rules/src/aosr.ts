@@ -72,6 +72,7 @@ import type {
   RuleFinding,
   RuleFn,
   RuleKind,
+  RegistryRowNode,
   RuleParams,
   RuleResult,
   RuleSpec,
@@ -2125,6 +2126,173 @@ function evaluateSchedule(graph: CheckGraph): RuleResult {
 // Реестр правил
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Опись передачи: состав ПАПКИ
+// ---------------------------------------------------------------------------
+
+/** Описи в папке нет — сверять состав не с чем. */
+const NO_TRANSFER = 'в папке нет описи передачи — сверять состав папки не с чем';
+
+/**
+ * Реквизиты, любым из которых документ может быть назван в перечне.
+ *
+ * Документ, у которого не распознан ни один из них, перечнем не ищется в
+ * принципе: сверка идёт по номеру. Объявлять его «не названным» значило бы
+ * винить папку за собственное чтение.
+ */
+const NUMBER_FIELDS: readonly string[] = ['number', 'blank_number', 'scheme_number', 'plan_number'];
+
+function hasAnyNumber(document: DocumentNode): boolean {
+  return document.fields.some(
+    (field) => NUMBER_FIELDS.includes(field.fieldCode) && trimmedText(field) !== null,
+  );
+}
+
+/** Подпись строки описи: раздел плюс наименование и номер документа. */
+function transferRowLabel(row: RegistryRowNode): string {
+  const section = row.sectionTitle ?? `строка ${String(row.rowNo)}`;
+  const number = row.docNoRaw === null ? '' : `, № ${row.docNoRaw}`;
+  return `${section}: «${row.docNameRaw}»${number}`;
+}
+
+/**
+ * REG.110 — строка описи не нашла своего документа в папке.
+ *
+ * Опись — эталон состава папки (ADR-0012): она перечисляет всё переданное и
+ * ничего не блокирует. Поэтому здесь предупреждение, а не ошибка: расхождение
+ * описи и папки решает человек.
+ */
+function evaluateTransferMissing(graph: CheckGraph): RuleResult {
+  if (graph.transferRows.length === 0) return notApplicable(NO_TRANSFER);
+
+  const gaps = graph.coverageGaps;
+  const findings = graph.transferRows
+    .filter((row) => row.matchState === 'missing')
+    .map((row) => {
+      const label = transferRowLabel(row);
+
+      // Строка без сравнимого номера отсутствия документа не доказывает —
+      // тот же довод, что и у REG.100.
+      if (row.docNoNorm === null) {
+        return unknown({
+          ...anchorOf('registry_row', row.id),
+          origin: 'deterministic',
+          message: `Строку описи передачи (${label}) сверить не с чем: номер в описи не указан.`,
+          hint: 'Сверьте строку описи с папкой вручную либо укажите номер документа в описи.',
+        });
+      }
+
+      if (gaps > 0) {
+        return unknown({
+          ...anchorOf('registry_row', row.id),
+          origin: 'deterministic',
+          message: `Документ, названный описью передачи (${label}), в разобранной части папки не найден.${coverageNote(gaps)}`,
+          hint: 'Разберите непривязанные листы папки либо приложите недостающий документ.',
+        });
+      }
+
+      return defect({
+        ...anchorOf('registry_row', row.id),
+        origin: 'deterministic',
+        message: `Документ, названный описью передачи (${label}), в папке не найден.`,
+        hint: 'Приложите недостающий документ к папке либо исправьте строку описи.',
+      });
+    });
+
+  return fromFindings(findings);
+}
+
+/**
+ * REG.111 — документ папки не назван описью.
+ *
+ * Обратный вопрос к REG.110 и вторая половина сверки состава: опись обязана
+ * перечислять всё переданное, и лист, которого в ней нет, — это либо забытая
+ * строка, либо лишний документ в папке.
+ */
+function evaluateTransferExtra(graph: CheckGraph): RuleResult {
+  if (graph.transferRows.length === 0) return notApplicable(NO_TRANSFER);
+
+  const named = new Set<string>();
+  for (const row of graph.transferRows) {
+    if (row.matchedDocumentId !== null) named.add(row.matchedDocumentId);
+    for (const id of row.candidateDocumentIds) named.add(id);
+  }
+
+  // Сама опись себя не перечисляет.
+  const transferDocumentIds = new Set(graph.transferRows.map((row) => row.registryDocumentId));
+
+  let unnumbered = 0;
+  let checked = 0;
+  const findings: RuleFinding[] = [];
+  for (const document of graph.documents) {
+    if (transferDocumentIds.has(document.id)) continue;
+    if (!hasAnyNumber(document)) {
+      unnumbered += 1;
+      continue;
+    }
+
+    checked += 1;
+    if (named.has(document.id)) continue;
+
+    findings.push(
+      defect({
+        ...anchorOf('document', document.id),
+        origin: 'deterministic',
+        message: `Документ папки «${document.title ?? document.docTypeCode ?? document.id}» не назван ни одной строкой описи передачи.`,
+        hint: 'Дополните опись строкой об этом документе либо исключите документ из папки.',
+      }),
+    );
+  }
+
+  // Неприменимо, только если проверить было НЕЧЕГО: у всех документов папки
+  // номер не распознан, и сверка по номеру невозможна ни для одного.
+  if (checked === 0) {
+    return notApplicable(
+      `номер не распознан ни у одного документа папки: ${String(unnumbered)} документов сверять с описью нечем`,
+    );
+  }
+
+  return fromFindings(findings);
+}
+
+/**
+ * REG.112 — раздел описи не сопоставлен ни одному акту папки.
+ *
+ * Раздел описи открывается работой и номером её акта. Если акта с таким
+ * номером в папке нет, ни одна строка раздела не знает своего комплекта, и
+ * сверка ищет их документы по всей папке — то есть заведомо хуже. Замечание
+ * адресовано первой строке раздела: своей строки в отчёте у раздела нет.
+ */
+function evaluateTransferSections(graph: CheckGraph): RuleResult {
+  if (graph.transferRows.length === 0) return notApplicable(NO_TRANSFER);
+
+  const sections = new Map<string, RegistryRowNode[]>();
+  for (const row of graph.transferRows) {
+    const key = row.sectionTitle ?? `__row_${String(row.ordinal)}`;
+    const bucket = sections.get(key);
+    if (bucket === undefined) sections.set(key, [row]);
+    else bucket.push(row);
+  }
+
+  const findings: RuleFinding[] = [];
+  for (const rows of sections.values()) {
+    if (rows.some((row) => row.complectId !== null)) continue;
+    const first = rows[0];
+    if (first === undefined) continue;
+
+    findings.push(
+      defect({
+        ...anchorOf('registry_row', first.id),
+        origin: 'deterministic',
+        message: `Раздел описи передачи «${first.sectionTitle ?? String(first.rowNo)}» не сопоставлен ни одному акту папки: его строки сверяются со всей папкой сразу.`,
+        hint: 'Проверьте номер акта в заголовке раздела описи либо приложите акт к папке.',
+      }),
+    );
+  }
+
+  return fromFindings(findings);
+}
+
 interface SpecInput {
   readonly code: string;
   readonly title: string;
@@ -2487,6 +2655,61 @@ export const CROSSCHECK_RULES: readonly RuleSpec[] = [
     requiresExternalRegistry: null,
     defaultParams: {},
     evaluate: (graph) => evaluateDuplicateActs(graph),
+  },
+];
+
+/**
+ * Сверка состава ПАПКИ с описью передачи.
+ *
+ * Отдельный набор, а не продолжение `CROSSCHECK_RULES`: тот застыл сид-миграцией
+ * 0017 и сверяется с ней тестом дрейфа. Уровень у всех трёх — папка: опись
+ * перечисляет её целиком, и на срезе комплекта её строк нет вовсе.
+ *
+ * Тяжесть — предупреждение, блокировки нет ни у одного правила: опись ничего не
+ * блокирует (ADR-0012), она эталон состава, а не разрешение.
+ */
+export const TRANSFER_REGISTRY_RULES: readonly RuleSpec[] = [
+  {
+    code: 'REG.110',
+    title: 'Строка описи передачи не найдена в папке',
+    docTypeCode: null,
+    level: 'folder',
+    kind: 'registry',
+    defaultSeverity: 'warning',
+    defaultBlocking: false,
+    waiverRoles: waiversFor(false),
+    requiresSectionProfile: false,
+    requiresExternalRegistry: null,
+    defaultParams: {},
+    evaluate: (graph) => evaluateTransferMissing(graph),
+  },
+  {
+    code: 'REG.111',
+    title: 'Документ папки не назван описью передачи',
+    docTypeCode: null,
+    level: 'folder',
+    kind: 'registry',
+    defaultSeverity: 'warning',
+    defaultBlocking: false,
+    waiverRoles: waiversFor(false),
+    requiresSectionProfile: false,
+    requiresExternalRegistry: null,
+    defaultParams: {},
+    evaluate: (graph) => evaluateTransferExtra(graph),
+  },
+  {
+    code: 'REG.112',
+    title: 'Раздел описи передачи не сопоставлен акту',
+    docTypeCode: null,
+    level: 'folder',
+    kind: 'registry',
+    defaultSeverity: 'warning',
+    defaultBlocking: false,
+    waiverRoles: waiversFor(false),
+    requiresSectionProfile: false,
+    requiresExternalRegistry: null,
+    defaultParams: {},
+    evaluate: (graph) => evaluateTransferSections(graph),
   },
 ];
 

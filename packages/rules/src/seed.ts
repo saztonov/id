@@ -15,7 +15,12 @@
  * требует ЯВНОЙ миграции. Молчаливое исчезновение правила из реестра — это
  * ровно тот отказ, из-за которого §9.6 требует двусторонней сверки.
  */
-import { RULE_CATALOG, RULE_CATALOG_WITH_RETIRED } from './catalog.js';
+import {
+  RETIRED_SEED_BATCHES,
+  RULE_CATALOG,
+  RULE_CATALOG_WITH_RETIRED,
+  RULE_SEED_BATCHES,
+} from './catalog.js';
 import type { RuleSpec } from './types.js';
 
 const TAG_BASE = 'rules';
@@ -134,6 +139,55 @@ export const BUILTIN_RULESET_MIGRATION = '0044_builtin_ruleset';
 /** Номер версии встроенного набора в `ruleset_versions.version`. */
 export const BUILTIN_RULESET_VERSION = 'builtin-1';
 
+/**
+ * Встроенные наборы правил — по одному на поставку, которая их меняет.
+ *
+ * Набор — это НЕ реестр правил (`rule_definitions`, партии выше), а снимок их
+ * настроек (`ruleset_versions` + `ruleset_rules`): что включено, с какой
+ * тяжестью и блокировкой. Снимок опубликованной версии неизменяем — триггер
+ * `ruleset_rules_published_immutable` запрещает вставку строк в него, — поэтому
+ * правило, появившееся после публикации, требует НОВОЙ версии набора, а не
+ * дополнения старой.
+ *
+ * Список append-only, как и партии сида: первый набор покрывает правила,
+ * существовавшие на момент своей миграции, каждый следующий — весь каталог
+ * целиком. Границей служит имя миграции: партия, засеянная позже файла набора,
+ * в его снимок войти не могла.
+ */
+export interface BuiltinRuleset {
+  readonly migration: string;
+  readonly version: string;
+  /**
+   * Первый набор: он же заводит колонку `origin`, снимает ограничение
+   * публикации и активируется безусловно (активной версии до него не было).
+   */
+  readonly bootstrap: boolean;
+  readonly specs: readonly RuleSpec[];
+}
+
+/** Правила, засеянные партиями ДО указанной миграции набора. */
+function seededBefore(migration: string): readonly RuleSpec[] {
+  return [...RULE_SEED_BATCHES, ...RETIRED_SEED_BATCHES]
+    .filter((batch) => batch.migration < migration)
+    .flatMap((batch) => batch.rules);
+}
+
+export const BUILTIN_RULESETS: readonly BuiltinRuleset[] = [
+  {
+    migration: BUILTIN_RULESET_MIGRATION,
+    version: BUILTIN_RULESET_VERSION,
+    bootstrap: true,
+    specs: seededBefore(BUILTIN_RULESET_MIGRATION),
+  },
+  {
+    // Сверка состава папки с описью передачи (S47): три правила REG.11x.
+    migration: '0068_builtin_ruleset_2',
+    version: 'builtin-2',
+    bootstrap: false,
+    specs: RULE_CATALOG_WITH_RETIRED,
+  },
+];
+
 const BUILTIN_HEADER = `-- Встроенный набор правил и его активация (§3.7, §9.6).
 --
 -- Файл сгенерирован generateBuiltinRulesetSql() из RULE_CATALOG. Править вручную
@@ -182,8 +236,32 @@ const BUILTIN_HEADER = `-- Встроенный набор правил и ег�
  * умолчаний разошлась бы с остальными молча, а разойтись ей нельзя: снимок
  * определяет, что именно проверял прогон месячной давности.
  */
+const BUILTIN_UPDATE_HEADER = `-- Новая версия встроенного набора правил (§3.7, §9.6).
+--
+-- Файл сгенерирован generateBuiltinRulesetSql() из RULE_CATALOG. Править вручную
+-- бессмысленно: следующая генерация вернёт содержимое каталога.
+-- Перегенерировать: pnpm rules:seed:generate.
+--
+-- ## Зачем новая версия, а не дополнение прежней
+--
+-- Снимок опубликованного набора неизменяем: триггер
+-- ruleset_rules_published_immutable запрещает вставку строк в него, и это не
+-- формальность. Правило, добавленное в действующий набор задним числом, меняет
+-- результат прогона так же, как изменённое, а прогоны уже сохранены и на них
+-- ссылаются замечания. Поэтому каждое пополнение каталога, которому нужен
+-- работающий набор, приезжает НОВОЙ версией.
+--
+-- ## Почему активация условная
+--
+-- Администратор мог опубликовать собственный набор — с другой тяжестью правил,
+-- со снятыми проверками — и переключить портал на него. Такое решение поставка
+-- отменять не вправе: указатель переводится, только если сейчас действует набор
+-- поставки (origin = 'builtin'). Иначе новая версия просто лежит рядом, и
+-- администратор выбирает её сам в справочнике правил.`;
+
 export function generateBuiltinRulesetSql(
   specs: readonly RuleSpec[] = RULE_CATALOG_WITH_RETIRED,
+  options?: { readonly version: string; readonly bootstrap: boolean },
 ): string {
   const rows = defaultSnapshotRows(specs)
     .map(
@@ -194,9 +272,16 @@ export function generateBuiltinRulesetSql(
     )
     .join(',\n');
 
-  const version = sqlLiteral(BUILTIN_RULESET_VERSION);
+  const version = sqlLiteral(options?.version ?? BUILTIN_RULESET_VERSION);
+  const bootstrap = options?.bootstrap ?? true;
 
-  return `${BUILTIN_HEADER}
+  /**
+   * DDL — только у первого набора: он заводит колонку `origin` и ослабляет
+   * ограничение публикации. Повторять его в каждой версии значило бы
+   * переписывать схему при каждом пополнении каталога.
+   */
+  const ddl = bootstrap
+    ? `
 ALTER TABLE ruleset_versions
   ADD COLUMN origin text NOT NULL DEFAULT 'manual';
 
@@ -206,7 +291,25 @@ ALTER TABLE ruleset_versions
 ALTER TABLE ruleset_versions DROP CONSTRAINT ruleset_versions_published_chk;
 ALTER TABLE ruleset_versions ADD CONSTRAINT ruleset_versions_published_chk
   CHECK (published_at IS NULL OR published_by IS NOT NULL OR origin = 'builtin');
+`
+    : '\n';
 
+  /**
+   * Активация. У первого набора действующей версии нет вовсе, поэтому
+   * DO NOTHING; у последующих указатель переводится, только если сейчас
+   * действует набор поставки.
+   */
+  const activation = bootstrap
+    ? `ON CONFLICT (key) DO NOTHING;`
+    : `ON CONFLICT (key) DO UPDATE
+   SET value = EXCLUDED.value, updated_at = now()
+ WHERE EXISTS (
+         SELECT 1 FROM ruleset_versions prev
+          WHERE to_jsonb(prev.id::text) = app_settings.value
+            AND prev.origin = $ruleset$builtin$ruleset$
+       );`;
+
+  return `${bootstrap ? BUILTIN_HEADER : BUILTIN_UPDATE_HEADER}${ddl}
 -- 1. Версия — НЕОПУБЛИКОВАННАЯ: пока published_at пуст, снимок можно набирать.
 INSERT INTO ruleset_versions (version, origin, notes)
 SELECT ${version}, $ruleset$builtin$ruleset$,
@@ -236,6 +339,6 @@ UPDATE ruleset_versions
 INSERT INTO app_settings (key, value)
 SELECT $ruleset$ruleset.active_version_id$ruleset$, to_jsonb(id::text)
   FROM ruleset_versions WHERE version = ${version}
-ON CONFLICT (key) DO NOTHING;
+${activation}
 `;
 }

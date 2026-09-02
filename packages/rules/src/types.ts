@@ -208,6 +208,14 @@ export interface RegistryRowNode {
   readonly docNameRaw: string;
   readonly docNoRaw: string | null;
   readonly docNoNorm: string | null;
+  /**
+   * Комплект строки.
+   *
+   * У строки реестра приложений он совпадает с комплектом самого реестра; у
+   * строки описи передачи это комплект её раздела, а `null` означает, что
+   * раздел не сопоставлен ни одному акту папки.
+   */
+  readonly complectId: string | null;
   readonly docNoFolded: string | null;
   readonly orgRaw: string | null;
   readonly validFrom: string | null;
@@ -400,6 +408,16 @@ export interface CheckGraph {
   readonly rdDocuments: readonly RdDocumentNode[];
   readonly documents: readonly DocumentNode[];
   readonly registryRows: readonly RegistryRowNode[];
+  /**
+   * Строки описи передачи — перечня состава ПАПКИ, а не комплекта.
+   *
+   * Отдельным полем, а не вместе со строками реестров приложений: правила
+   * REG.100–102 работают на срезе комплекта и спрашивают «назван ли документ
+   * перечнем СВОЕГО акта». Опись отвечает на другой вопрос — «весь ли состав
+   * папки на месте», — и, попав в общий список, она сыпала бы замечаниями в
+   * каждом срезе, где её строк быть не должно.
+   */
+  readonly transferRows: readonly RegistryRowNode[];
   readonly relations: readonly RelationNode[];
   readonly materials: readonly MaterialNode[];
   readonly external: ExternalRegistriesSnapshot;

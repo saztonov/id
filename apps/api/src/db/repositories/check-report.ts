@@ -47,6 +47,7 @@
 import { asc, eq } from 'drizzle-orm';
 import { complects, ruleDefinitions, folders } from '@id/db';
 import { isAnalysisAnchor, isQualityDocCode, isRegistryCode } from '@id/doc-types';
+import { TRANSFER_TYPE } from '../../segmentation/transfer-registry.js';
 
 import type { AuthScope } from '../../auth/scope.js';
 import { withScope, type ScopeTarget } from '../scoped.js';
@@ -91,7 +92,7 @@ export type ReportRowStatus = 'ok' | 'error' | 'warning' | 'undetermined' | 'mis
 export type ReportItemStatus =
   'ok' | 'error' | 'warning' | 'undetermined' | 'not_applicable' | 'not_run';
 
-export type ReportSectionKind = 'act' | 'registry' | 'quality' | 'other' | 'unplaced';
+export type ReportSectionKind = 'act' | 'registry' | 'transfer' | 'quality' | 'other' | 'unplaced';
 
 export interface ReportDates {
   readonly issuedAt: string | null;
@@ -170,7 +171,7 @@ export interface ReportSection {
  * складывал двенадцать разных комплектов в одну таблицу из 134 строк, и понять
  * по ней, у какого акта чего не хватает, было нельзя.
  */
-export type ReportGroupKind = 'complect' | 'outside' | 'unplaced' | 'extraction';
+export type ReportGroupKind = 'transfer' | 'complect' | 'outside' | 'unplaced' | 'extraction';
 
 export interface ReportGroup {
   readonly kind: ReportGroupKind;
@@ -277,8 +278,26 @@ export async function buildCheckReport(
      * остальных групп. Инвариант ADR-0018 держится именно порядком.
      */
     const groups: ReportGroup[] = [];
+
+    const transfer = facts.transferSection(
+      registry.filter((row) => row.registryKind === 'transfer'),
+    );
+    if (transfer.rows.length > 0) {
+      groups.push({
+        kind: 'transfer',
+        complectId: null,
+        title: 'Реестр передачи исполнительной документации',
+        sections: [transfer],
+      });
+    }
+
     for (const complect of complects) {
-      const sections = sectionsOf(facts, registry, complect.id, true);
+      const sections = sectionsOf(
+        facts,
+        registry.filter((row) => row.registryKind !== 'transfer'),
+        complect.id,
+        true,
+      );
       if (sections.length === 0) continue;
       groups.push({
         kind: 'complect',
@@ -288,7 +307,12 @@ export async function buildCheckReport(
       });
     }
 
-    const outside = sectionsOf(facts, registry, null, complects.length > 0);
+    const outside = sectionsOf(
+      facts,
+      registry.filter((row) => row.registryKind !== 'transfer'),
+      null,
+      complects.length > 0,
+    );
     if (outside.length > 0) {
       groups.push({
         kind: 'outside',
@@ -562,6 +586,40 @@ class ReportFacts {
    * осмысленными и до проверки, и гасить их в `unchecked` было бы враньём в
    * обратную сторону.
    */
+  /**
+   * Опись передачи: перечень состава ПАПКИ.
+   *
+   * Своей группой, а не строками в «Вне комплектов». Опись действительно лежит
+   * вне комплектов — она перечисляет всю папку, — но там она была бы разделом
+   * «Реестр приложений», то есть названа тем, чем не является, и её двести
+   * строк перемешались бы с сиротами чужих перечней.
+   *
+   * Ставится первой: сверка папки с описью отвечает на вопрос «всё ли на
+   * месте», а он предшествует вопросам о каждом комплекте.
+   */
+  transferSection(rows: readonly RegistryRowView[]): ReportSection {
+    const documents = [...this.context.documents.entries()]
+      .filter(([, facts]) => facts.docTypeCode === TRANSFER_TYPE)
+      .sort((a, b) => this.firstPageNumber(a[0]) - this.firstPageNumber(b[0]));
+
+    const out: ReportRow[] = [];
+    for (const [id, facts] of documents) {
+      out.push(this.documentRow(id, facts));
+      for (const row of rows.filter((candidate) => candidate.documentId === id)) {
+        out.push(this.registryRow(row));
+      }
+    }
+
+    const note =
+      documents.length === 0
+        ? null
+        : rows.length === 0
+          ? 'Опись передачи найдена, но ни одна её строка не разобрана.'
+          : null;
+
+    return { kind: 'transfer', title: 'Реестр передачи', note, rows: out };
+  }
+
   registrySection(
     rows: readonly RegistryRowView[],
     inGroup: (complectId: string | null) => boolean,
@@ -584,7 +642,14 @@ class ReportFacts {
     includeOrphans: boolean,
   ): ReportSection {
     const documents = [...this.context.documents.entries()]
-      .filter(([, facts]) => inGroup(facts.complectId) && isRegistryCode(facts.docTypeCode))
+      .filter(
+        ([, facts]) =>
+          inGroup(facts.complectId) &&
+          isRegistryCode(facts.docTypeCode) &&
+          // Опись передачи — тоже перечень, но своей группой: здесь она была бы
+          // названа реестром приложений, чем не является.
+          facts.docTypeCode !== TRANSFER_TYPE,
+      )
       .sort((a, b) => this.firstPageNumber(a[0]) - this.firstPageNumber(b[0]));
 
     const out: ReportRow[] = [];

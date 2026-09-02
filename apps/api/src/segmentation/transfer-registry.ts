@@ -42,6 +42,7 @@
 
 import { normalizeDocNo } from '@id/contracts';
 import { scanBlocks, type MdTable } from './md-table.js';
+import type { ParsedRegistryRow } from './types.js';
 import {
   DATE_PART,
   HAS_DATE,
@@ -52,6 +53,9 @@ import {
   VALIDITY_RANGE,
   type CellDates,
 } from './registry-cells.js';
+
+/** Код вида документа, который разбирает этот модуль. */
+export const TRANSFER_TYPE = 'transfer_registry';
 
 export const TRANSFER_PARSER_VERSION = 'registry.transfer.v1';
 export const TRANSFER_MATCHER_VERSION = 'registry.reconcile.v1';
@@ -858,4 +862,72 @@ export function matchTransferGroups(
     .map((candidate) => candidate.workId);
 
   return { groups: matches, extraWorkIds };
+}
+
+// =====================================================================
+// Опись в строках реестра
+// =====================================================================
+
+/**
+ * Строки описи в том же виде, в каком хранятся строки реестра приложений.
+ *
+ * Своей таблицы у описи нет и не будет: миграция 0058 сняла пять таблиц
+ * сверки, ни в одной из которых не было ни строки. Опись — такой же перечень
+ * состава, и хранится он там же, где перечень акта, отличаясь документом, на
+ * который ссылается: у строк описи это сама опись.
+ *
+ * Две подробности переноса.
+ *
+ * `rowNo` — сквозной порядок, а не напечатанный номер позиции. В описи
+ * позиция печатается как «6.23» (раздел и номер внутри него), а колонка
+ * хранит целое; напечатанный вид остаётся в `sectionTitle` и в тексте
+ * замечания. Сопоставлению номер позиции не нужен вовсе — оно идёт по номеру
+ * документа.
+ *
+ * `complectId` — комплект раздела, найденный сопоставлением групп. Строки
+ * раздела сверяются с документами своего комплекта, и это единственный способ
+ * различить двенадцать одинаковых паспортов одной папки. Раздел, не нашедший
+ * своего акта, оставляет строки без комплекта: они сверятся со всей папкой и
+ * честно получат «неоднозначно», если документов-двойников в ней несколько.
+ */
+export function toRegistryRows(
+  parsed: TransferParseResult,
+  outcome: TransferGroupsOutcome,
+): readonly ParsedRegistryRow[] {
+  const complectByGroup = new Map<number, string | null>(
+    outcome.groups.map((group) => [group.groupOrdinal, group.workId]),
+  );
+  const groupByOrdinal = new Map<number, ParsedTransferGroup>(
+    parsed.groups.map((group) => [group.ordinal, group]),
+  );
+
+  return parsed.rows.map((row) => {
+    const group = groupByOrdinal.get(row.groupOrdinal) ?? null;
+    return {
+      rowNo: row.ordinal + 1,
+      sectionTitle: group === null ? null : sectionTitleOf(group, row.rowNo),
+      docNameRaw: row.docNameRaw,
+      docNoRaw: row.docNoRaw,
+      orgRaw: row.orgRaw,
+      docNoNorm: row.docNoNorm,
+      docNoFolded: row.docNoFolded,
+      validFrom: row.validFrom,
+      validTo: row.validTo,
+      issuedAt: row.issuedAt,
+      complectId: complectByGroup.get(row.groupOrdinal) ?? null,
+    };
+  });
+}
+
+/**
+ * Подпись раздела: чем он назван в описи и какой позицией открыт.
+ *
+ * Номер позиции входит в подпись, потому что из строки он ушёл: человек ищет
+ * замечание глазами по «6.23», а не по сквозному порядку.
+ */
+function sectionTitleOf(group: ParsedTransferGroup, rowNo: string | null): string {
+  const number = group.groupNo ?? String(group.ordinal + 1);
+  const contractor = group.contractorRaw === null ? '' : ` (${group.contractorRaw})`;
+  const position = rowNo === null ? '' : `, поз. ${rowNo}`;
+  return `${number}. ${group.titleRaw}${contractor}${position}`;
 }

@@ -76,6 +76,7 @@ import type {
   RuleSnapshotEntry,
 } from '@id/rules';
 import { deriveMaterials, isFallbackCode } from '@id/rules';
+import { TRANSFER_TYPE } from '../../segmentation/transfer-registry.js';
 import type { AuthScope } from '../../auth/scope.js';
 import { conflict, internal, notFound } from '../../lib/problem.js';
 import { withScope, type ScopeTarget } from '../scoped.js';
@@ -429,6 +430,7 @@ export async function loadCheckGraph(
         matchedDocumentId: registryRows.matchedDocumentId,
         matchScore: registryRows.matchScore,
         matchState: registryRows.matchState,
+        complectId: registryRows.complectId,
       })
       .from(registryRows)
       .where(eq(registryRows.folderId, input.folderId))
@@ -452,10 +454,27 @@ export async function loadCheckGraph(
     else bucket.push(candidate.documentId);
   }
 
-  const registryRowNodes: readonly RegistryRowNode[] = registryRowsData.map((row) => ({
+  const allRegistryRows: readonly RegistryRowNode[] = registryRowsData.map((row) => ({
     ...row,
     candidateDocumentIds: candidatesByRow.get(row.id) ?? [],
   }));
+
+  /**
+   * Строки описи передачи отделяются от строк реестров приложений.
+   *
+   * Различие берётся из вида документа-перечня — единственного места, где оно
+   * записано. Смешивать их нельзя: перечни отвечают на разные вопросы, и
+   * правила у них разные.
+   */
+  const transferDocumentIds = new Set(
+    documents.filter((document) => document.docTypeCode === TRANSFER_TYPE).map((d) => d.id),
+  );
+  const registryRowNodes = allRegistryRows.filter(
+    (row) => !transferDocumentIds.has(row.registryDocumentId),
+  );
+  const transferRowNodes = allRegistryRows.filter((row) =>
+    transferDocumentIds.has(row.registryDocumentId),
+  );
 
   const documentIds = documents.map((document) => document.id);
   const relations: readonly RelationNode[] =
@@ -529,6 +548,7 @@ export async function loadCheckGraph(
     rdDocuments: rdRows,
     documents,
     registryRows: registryRowNodes,
+    transferRows: transferRowNodes,
     relations,
     materials: [],
     today: input.today,

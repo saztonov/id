@@ -282,6 +282,8 @@ function registerReadRoutes(app: AppInstance): void {
           matchedDocumentId: row.matchedDocumentId,
           matchScore: row.matchScore,
           matchState: row.matchState,
+          complectId: row.complectId,
+          registryKind: row.registryKind,
         })),
       });
     },

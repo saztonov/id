@@ -203,7 +203,7 @@ const reportRowSchema = z.object({
 });
 
 const reportSectionSchema = z.object({
-  kind: z.enum(['act', 'registry', 'quality', 'other', 'unplaced']),
+  kind: z.enum(['act', 'registry', 'transfer', 'quality', 'other', 'unplaced']),
   title: z.string(),
   note: z.string().nullable(),
   rows: z.array(reportRowSchema),
@@ -217,7 +217,7 @@ const reportSectionSchema = z.object({
  * складывал их в одну таблицу из 134 строк.
  */
 const reportGroupSchema = z.object({
-  kind: z.enum(['complect', 'outside', 'unplaced', 'extraction']),
+  kind: z.enum(['transfer', 'complect', 'outside', 'unplaced', 'extraction']),
   complectId: z.uuid().nullable(),
   title: z.string(),
   sections: z.array(reportSectionSchema),

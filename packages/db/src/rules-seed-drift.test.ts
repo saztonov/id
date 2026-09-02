@@ -23,7 +23,7 @@ import { createPgliteDatabase } from '@id/db-harness';
 import { applyMigrations, checksumOf, loadMigrations } from '@id/migrator';
 import type { SqlExecutor } from '@id/migrator';
 import {
-  BUILTIN_RULESET_MIGRATION,
+  BUILTIN_RULESETS,
   RETIRED_SEED_BATCHES,
   RULE_CATALOG,
   RULE_CATALOG_WITH_RETIRED,
@@ -125,12 +125,42 @@ describe('seed реестра правил не отстаёт от катало
     expect(duplicateRuleCodes()).toEqual([]);
   });
 
-  it('встроенный набор совпадает с текущим выводом generateBuiltinRulesetSql()', () => {
-    expect(
-      checksumOf(committedSeedOf(BUILTIN_RULESET_MIGRATION)),
-      `${BUILTIN_RULESET_MIGRATION}.sql разошёлся с умолчаниями каталога. ` +
-        'Перегенерируйте: pnpm rules:seed:generate',
-    ).toBe(checksumOf(generateBuiltinRulesetSql()));
+  it.each(BUILTIN_RULESETS.map((ruleset) => [ruleset.migration, ruleset] as const))(
+    '%s совпадает с текущим выводом generateBuiltinRulesetSql()',
+    (migration, ruleset) => {
+      expect(
+        checksumOf(committedSeedOf(migration)),
+        `${migration}.sql разошёлся с умолчаниями каталога. ` +
+          'Перегенерируйте: pnpm rules:seed:generate',
+      ).toBe(
+        checksumOf(
+          generateBuiltinRulesetSql(ruleset.specs, {
+            version: ruleset.version,
+            bootstrap: ruleset.bootstrap,
+          }),
+        ),
+      );
+    },
+  );
+
+  it('последний встроенный набор покрывает весь каталог', () => {
+    // Набор — это снимок настроек правила; правило без строки в снимке не
+    // исполняется вовсе. Пополнение каталога без новой версии набора означало
+    // бы правило, которое есть в реестре и молчит на каждом прогоне.
+    const latest = BUILTIN_RULESETS[BUILTIN_RULESETS.length - 1];
+    const covered = new Set((latest?.specs ?? []).map((spec) => spec.code));
+    const missing = RULE_CATALOG.map((spec) => spec.code).filter((code) => !covered.has(code));
+
+    expect(missing).toEqual([]);
+  });
+
+  it('каждый встроенный набор виден раннеру как миграция', () => {
+    const migrations = loadMigrations(MIGRATIONS_DIR);
+    for (const ruleset of BUILTIN_RULESETS) {
+      const seed = migrations.find((item) => item.fileName === `${ruleset.migration}.sql`);
+      expect(seed, `${ruleset.migration}.sql не найдена раннером`).toBeDefined();
+      expect(seed?.checksum).toBe(checksumOf(committedSeedOf(ruleset.migration)));
+    }
   });
 });
 
@@ -154,21 +184,26 @@ describe('встроенный набор правил применяется и
     await db?.close();
   });
 
-  it('версия опубликована поставкой, а не подделанным published_by', () => {
-    return db
-      .query<{ origin: string; published_at: string | null; published_by: string | null }>(
-        `SELECT origin, published_at, published_by FROM ruleset_versions WHERE version = 'builtin-1'`,
-      )
-      .then((rows) => {
-        expect(rows).toHaveLength(1);
-        expect(rows[0]?.origin).toBe('builtin');
-        // Опубликована: иначе снимок не действует и прогон правил не начнётся.
-        expect(rows[0]?.published_at).not.toBeNull();
-        // И БЕЗ автора: `published_by` читают как доказательство решения
-        // человека, а решения человека здесь не было.
-        expect(rows[0]?.published_by).toBeNull();
-      });
-  });
+  it.each(BUILTIN_RULESETS.map((ruleset) => [ruleset.version] as const))(
+    'версия %s опубликована поставкой, а не подделанным published_by',
+    async (version) => {
+      const rows = await db.query<{
+        origin: string;
+        published_at: string | null;
+        published_by: string | null;
+      }>(`SELECT origin, published_at, published_by FROM ruleset_versions WHERE version = $1`, [
+        version,
+      ]);
+
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.origin).toBe('builtin');
+      // Опубликована: иначе снимок не действует и прогон правил не начнётся.
+      expect(rows[0]?.published_at).not.toBeNull();
+      // И БЕЗ автора: `published_by` читают как доказательство решения
+      // человека, а решения человека здесь не было.
+      expect(rows[0]?.published_by).toBeNull();
+    },
+  );
 
   it('снимок покрывает весь каталог и повторяет умолчания правил', async () => {
     const rows = await db.query<{
@@ -180,7 +215,8 @@ describe('встроенный набор правил применяется и
       `SELECT r.rule_code, r.severity, r.is_blocking, r.is_enabled
          FROM ruleset_rules r
          JOIN ruleset_versions v ON v.id = r.ruleset_version_id
-        WHERE v.version = 'builtin-1'
+        WHERE v.id::text = (SELECT value #>> '{}' FROM app_settings
+                             WHERE key = 'ruleset.active_version_id')
         ORDER BY r.rule_code`,
     );
 
@@ -200,12 +236,16 @@ describe('встроенный набор правил применяется и
     }
   });
 
-  it('указатель активной версии показывает на него', async () => {
+  it('указатель активной версии показывает на последний набор поставки', async () => {
+    // Именно на последний: набор пополняется новой версией, и указатель
+    // переводится на неё, пока действует набор поставки, а не выбор человека.
+    const latest = BUILTIN_RULESETS[BUILTIN_RULESETS.length - 1];
     const setting = await db.query<{ value: string }>(
       `SELECT value #>> '{}' AS value FROM app_settings WHERE key = 'ruleset.active_version_id'`,
     );
     const version = await db.query<{ id: string }>(
-      `SELECT id FROM ruleset_versions WHERE version = 'builtin-1'`,
+      `SELECT id FROM ruleset_versions WHERE version = $1`,
+      [latest?.version],
     );
 
     expect(setting).toHaveLength(1);
