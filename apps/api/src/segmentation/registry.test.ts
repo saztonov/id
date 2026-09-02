@@ -19,6 +19,7 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { parseNumberCell } from './registry-cells.js';
 import { normalizeRegistryName, parseAnnexRegistry, type RegistryPageInput } from './registry.js';
 
 // =====================================================================
@@ -218,6 +219,24 @@ describe('parseAnnexRegistry', () => {
       expect(row?.docNoNorm).toBeNull();
       expect(row?.docNoFolded).toBeNull();
       expect(row?.issuedAt).toBe('2025-04-17');
+    });
+
+    it('«6/н» и «6/п» — то же «б/н», прочитанное распознаванием', () => {
+      // Не опечатка подрядчика, а чтение: цифра «6» вместо «б» и «п» вместо
+      // «н». Пока формы не совпадали, такая ячейка считалась настоящим
+      // номером, строка искала документ «№ 6/Н» и получала «нет в комплекте»
+      // вместо честного «сверить не с чем».
+      for (const raw of ['6/н', '6/п', '6 / н']) {
+        const cell = parseNumberCell(raw);
+        expect(cell.comparable).toBe(false);
+        // Значение приводится к канонической записи: на листе напечатано
+        // «б/н», а «6/н» — то, как это прочитано.
+        expect(cell.docNoRaw).toBe('б/н');
+      }
+    });
+
+    it('«б/д» номером остаётся: это «без даты», а не «без номера»', () => {
+      expect(parseNumberCell('б/д').comparable).toBe(true);
     });
 
     it('номер сохраняется в трёх формах', () => {
