@@ -92,6 +92,7 @@ function harness(behaviour: (index: number) => Promise<LlmCallResult>, pageCount
     listFieldValues: () => Promise.resolve([]),
     loadDocumentText: () => Promise.resolve([]),
     extractFanState: () => Promise.resolve({ live: 0, dead: 0, done: 0, total: 0 }),
+    saveComplectActFields: () => Promise.resolve(false),
     saveFieldValues: () => Promise.resolve({ removed: 0, written: 0 }),
     saveRegistryRows: () => Promise.resolve({ removed: 0, written: 0 }),
     listRegistryRows: () => Promise.resolve([]),

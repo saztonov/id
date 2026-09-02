@@ -633,9 +633,24 @@ export interface ReportSection {
   rows: ReportRow[];
 }
 
+/**
+ * Группа отчёта: комплект, документы вне комплектов либо замечания без адреса.
+ *
+ * Уровень появился в S44: до нарезки папки на комплекты отчёт был плоским
+ * списком секций и складывал двенадцать актов в одну таблицу из 134 строк.
+ */
+export type ReportGroupKind = 'complect' | 'outside' | 'unplaced';
+
+export interface ReportGroup {
+  kind: ReportGroupKind;
+  complectId: string | null;
+  title: string;
+  sections: ReportSection[];
+}
+
 export interface CheckReport {
   runId: string | null;
-  sections: ReportSection[];
+  groups: ReportGroup[];
 }
 
 export interface RuleCatalogEntry {

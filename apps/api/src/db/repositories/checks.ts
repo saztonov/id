@@ -354,6 +354,7 @@ export async function loadCheckGraph(
     .select({
       id: logicalDocuments.id,
       ordinal: logicalDocuments.ordinal,
+      complectId: logicalDocuments.complectId,
       docTypeCode: logicalDocuments.docTypeCode,
       title: logicalDocuments.title,
       typeConfidence: logicalDocuments.typeConfidence,
@@ -386,6 +387,7 @@ export async function loadCheckGraph(
     return {
       id: row.id,
       ordinal: row.ordinal,
+      complectId: row.complectId,
       docTypeCode: code,
       // Резервный тип и неуверенный тип оба закрывают типо-специфичные правила
       // (§9.1, строка 1), но остаются различимы: первый — открытый мир,
@@ -877,6 +879,15 @@ export interface RuleExecutionJournal {
     readonly verdict: string;
     readonly reason: string | null;
     readonly findingCount: number;
+    /**
+     * Комплект, на котором правило исполнялось; `null` — папка целиком (S44).
+     *
+     * Разрез, названный долгом в ADR-0018: до нарезки на комплекты «правило
+     * пройдено» было одним ответом на папку, а на двенадцати актах смешивало бы
+     * двенадцать разных. Поле необязательное: журналы прогонов до S44 его не
+     * содержат, и читатель обязан пережить их без выдумывания комплекта.
+     */
+    readonly complectId?: string | null;
   }[];
   readonly skippedCodes: Readonly<Record<string, string>>;
   readonly externalRegistriesUnavailable: readonly string[];
@@ -1484,6 +1495,8 @@ export interface DocumentFacts {
   readonly label: string;
   readonly docTypeCode: string | null;
   readonly firstPageId: string | null;
+  /** Комплект документа; `null` — опись, титул, всё до первого акта (S44). */
+  readonly complectId: string | null;
 }
 
 export interface FindingContext {
@@ -1555,6 +1568,7 @@ export async function loadFindingContext(
     .select({
       id: logicalDocuments.id,
       docTypeCode: logicalDocuments.docTypeCode,
+      complectId: logicalDocuments.complectId,
       title: logicalDocuments.title,
       typeName: sql<string | null>`coalesce(${docTypeOverrides.name}, ${docTypes.name})`,
       firstPageId: sql<string | null>`(
@@ -1577,6 +1591,7 @@ export async function loadFindingContext(
       label: row.typeName ?? row.title ?? 'Вид документа не определён',
       docTypeCode: row.docTypeCode,
       firstPageId: row.firstPageId,
+      complectId: row.complectId,
     });
   }
 

@@ -185,6 +185,7 @@ describe('doc.extract_finalize ждёт свой веер', () => {
       listDocuments: () => Promise.resolve(documentsOf(specs)),
       listFieldValues: (documentId: string) =>
         Promise.resolve(fieldsOf(specs.find((spec) => spec.id === documentId) as DocumentSpec)),
+      saveComplectActFields: () => Promise.resolve(true),
       fillFolderPeriod: (_folderId: string, period: string) => {
         if (input.sink !== undefined) input.sink.period = period;
         return Promise.resolve(true);

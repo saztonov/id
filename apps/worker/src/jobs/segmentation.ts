@@ -234,6 +234,19 @@ export interface SegmentationDeps {
   ): Promise<readonly { readonly pageTextVersionId: string | null; readonly text: string }[]>;
 
   /**
+   * Записать номер и дату акта в его комплект (S44).
+   *
+   * Денормализация ради заголовка секции отчёта. Пишет барьер, а не сегментация:
+   * на момент нарезки реквизиты акта ещё не прочитаны.
+   */
+  saveComplectActFields(input: {
+    readonly folderId: string;
+    readonly complectId: string;
+    readonly actNumber: string | null;
+    readonly actDate: string | null;
+  }): Promise<boolean>;
+
+  /**
    * Состояние веера извлечения: чем барьер отличает «идёт» от «некому считать».
    *
    * Разрез по `generation` обязателен: повторная сегментация ставит веер заново,
@@ -1145,9 +1158,21 @@ export function createExtractFinalizeHandler(
       const textOfField = (code: string): string | null =>
         values.find((value) => value.fieldCode === code)?.valueText ?? null;
 
-      actDates.push(
-        values.find((value) => value.fieldCode === AOSR_FIELDS.actDate)?.valueDate ?? null,
-      );
+      const actDate =
+        values.find((value) => value.fieldCode === AOSR_FIELDS.actDate)?.valueDate ?? null;
+      actDates.push(actDate);
+
+      // Заголовок комплекта — то, чем инженер его называет: «АОСР № 48-ОТ/-1 от
+      // 10.04.2026». Пишется здесь, потому что здесь реквизиты акта уже
+      // прочитаны, а комплект уже существует.
+      if (document.complectId !== null) {
+        await deps.saveComplectActFields({
+          folderId,
+          complectId: document.complectId,
+          actNumber: textOfField(AOSR_FIELDS.actNumber),
+          actDate,
+        });
+      }
 
       // Тройка исполнителя берётся с ПЕРВОГО акта, у которого она непуста.
       // Актов в папке бывает несколько, но работу выполняет одна организация:

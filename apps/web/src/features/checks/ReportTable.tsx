@@ -26,15 +26,24 @@
  * не пересортировывает: вторая сортировка либо повторила бы серверную, либо
  * разошлась бы с ней.
  *
+ * ## Комплекты — отдельными группами (S44)
+ *
+ * Загружают папку ИД: опись передачи и двенадцать актов, у каждого свои
+ * приложения. Плоская таблица на 134 строки отвечала на вопрос «что в папке», но
+ * не на вопрос «чего не хватает вот этому акту» — а спрашивают именно его.
+ * Порядок групп: комплекты по номеру акта, затем «Вне комплектов» (опись,
+ * титулы), затем замечания без адреса.
+ *
  * ## Контракт `data-testid`
  *
- * `checks-report` · `checks-report-section-{kind}` · `checks-report-row-{id}`
+ * `checks-report` · `checks-report-group-{kind}` ·
+ * `checks-report-section-{kind}` · `checks-report-row-{id}`
  */
 import type { ReactNode } from 'react';
 import { Space, Table, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 
-import type { CheckReport, ReportRow, ReportSection } from '../../api/types.js';
+import type { CheckReport, ReportGroup, ReportRow, ReportSection } from '../../api/types.js';
 import { Link } from '../../app/router.js';
 import { ToneTag } from '../../shared/tags.js';
 import {
@@ -56,20 +65,49 @@ export function ReportTable({
   folderId: string;
   report: CheckReport;
 }): ReactNode {
-  if (report.sections.length === 0) {
+  if (report.groups.length === 0) {
     return (
       <Typography.Paragraph type="secondary" data-testid="checks-report">
-        Портал ещё не разобрал комплект на документы: состав появится после распознавания.
+        Портал ещё не разобрал папку на документы: состав появится после распознавания.
       </Typography.Paragraph>
     );
   }
 
   return (
     <div data-testid="checks-report">
-      {report.sections.map((section) => (
-        <SectionBlock key={section.kind} folderId={folderId} section={section} />
+      {report.groups.map((group, index) => (
+        <GroupBlock
+          key={group.complectId ?? `${group.kind}-${String(index)}`}
+          folderId={folderId}
+          group={group}
+        />
       ))}
     </div>
+  );
+}
+
+/**
+ * Блок одного комплекта.
+ *
+ * Заголовок — то, чем инженер комплект называет: «Акт освидетельствования
+ * № 48-ОТ/-1 от 10.04.2026». Приходит с сервера готовым: номер и дату акта
+ * пишет в комплект барьер извлечения, и второе место, собирающее тот же
+ * заголовок, разошлось бы с первым.
+ */
+function GroupBlock({ folderId, group }: { folderId: string; group: ReportGroup }): ReactNode {
+  return (
+    <section
+      data-testid={`checks-report-group-${group.kind}`}
+      style={{ marginBottom: 32 }}
+      aria-label={group.title}
+    >
+      <Typography.Title level={2} style={{ fontSize: 18, marginTop: 0, marginBottom: 12 }}>
+        {group.title}
+      </Typography.Title>
+      {group.sections.map((section) => (
+        <SectionBlock key={section.kind} folderId={folderId} section={section} />
+      ))}
+    </section>
   );
 }
 

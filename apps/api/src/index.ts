@@ -462,6 +462,8 @@ export type { DetectionProviderSettings } from './config/portal-settings.js';
  * компилируется, покрыт тестами и никогда не выполняется (урок S3).
  */
 export { classifyPages, PHASE1_CONFIDENCE } from './segmentation/classify.js';
+export { planComplects } from './segmentation/complects.js';
+export type { ComplectCandidate, ComplectGroup, ComplectPlan } from './segmentation/complects.js';
 export type { Phase1Options } from './segmentation/classify.js';
 export {
   classifyPageWithLlm,
@@ -584,6 +586,7 @@ export {
   loadSegmentationPages,
   savePageClassifications,
   saveDocumentRelations,
+  saveComplectActFields,
   saveFieldValues,
   saveRegistryMatches,
   saveRegistryRows,

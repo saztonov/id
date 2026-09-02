@@ -24,6 +24,7 @@ import {
   matchRegistryRows,
   pagesNeedingLlm,
   parseAnnexRegistry,
+  planComplects,
   type ExtractedField,
   type MatchableDocument,
   type MatchRegistryResult,
@@ -41,7 +42,7 @@ import {
   makeUnavailableRegistries,
   makeUnconfiguredProfile,
   RULE_CATALOG,
-  runRules,
+  runRulesByComplect,
   snapshotOf,
   type CheckGraph,
   type DocumentNode,
@@ -195,6 +196,26 @@ export function runPackage(dir: string, options: HarnessOptions): PackageRunResu
     fieldsByDocument.set(documentId, fields);
   }
 
+  /**
+   * Нарезка на комплекты — зеркало `applySegmentation` (S44).
+   *
+   * Стенд обязан судить папку тем же разбиением, что и портал: без него проверки
+   * шли бы по всей папке разом, и числа стенда разошлись бы с боевыми ровно там,
+   * где разбиение и заведено.
+   */
+  const complectPlan = planComplects(
+    segmentation.documents.map((document) => ({
+      ordinal: document.ordinal,
+      docTypeCode: document.docTypeCode,
+    })),
+  );
+  const complectByOrdinal = new Map<number, string>();
+  for (const group of complectPlan.groups) {
+    for (const ordinal of group.documentOrdinals) {
+      complectByOrdinal.set(ordinal, `complect-${String(group.ordinal)}`);
+    }
+  }
+
   // Узлы документов — зеркало `loadCheckGraph` (checks.ts:376-404).
   const documents: readonly DocumentNode[] = segmentation.documents.map((document) => {
     const documentId = `doc-${document.ordinal}`;
@@ -208,6 +229,7 @@ export function runPackage(dir: string, options: HarnessOptions): PackageRunResu
     return {
       id: documentId,
       ordinal: document.ordinal,
+      complectId: complectByOrdinal.get(document.ordinal) ?? null,
       docTypeCode: code,
       isKnownType: code !== null && !fallback && confident && !document.needsReview,
       isFallbackType: fallback,
@@ -322,7 +344,7 @@ export function runPackage(dir: string, options: HarnessOptions): PackageRunResu
 
   // Задача 20: полный каталог, все правила включены (`enabledRuleCodes: null`
   // — «ограничений нет», см. `checks.run` в apps/worker/src/jobs/checks.ts).
-  const rules = runRules(graph, {
+  const rules = runRulesByComplect(graph, {
     specs: RULE_CATALOG,
     snapshot: snapshotOf(RULE_CATALOG),
     enabledRuleCodes: null,

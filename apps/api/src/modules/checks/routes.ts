@@ -158,12 +158,15 @@ export function registerCheckRoutes(app: AppInstance): void {
       const report = await buildCheckReport(app.db, scope, folderId);
       return {
         runId: report.runId,
-        sections: report.sections.map((section) => ({
-          ...section,
-          rows: section.rows.map((row) => ({
-            ...row,
-            findingIds: [...row.findingIds],
-            items: row.items.map((item) => ({ ...item })),
+        groups: report.groups.map((group) => ({
+          ...group,
+          sections: group.sections.map((section) => ({
+            ...section,
+            rows: section.rows.map((row) => ({
+              ...row,
+              findingIds: [...row.findingIds],
+              items: row.items.map((item) => ({ ...item })),
+            })),
           })),
         })),
       };

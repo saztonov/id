@@ -114,6 +114,7 @@ import {
   recordAiRun,
   savePageClassifications,
   saveDocumentRelations,
+  saveComplectActFields,
   saveFieldValues,
   rememberContractorRaw,
   replaceAssumedContractor,
@@ -1824,6 +1825,8 @@ function segmentationDeps(options: PipelineJobsOptions): SegmentationDeps {
     // Область не нужна: состояние веера читается по идентификаторам задач, а не
     // по данным папки, и спрашивает его конвейер, а не человек.
     extractFanState: async (folderId, generation) => readExtractFanState(db, folderId, generation),
+
+    saveComplectActFields: async (input) => saveComplectActFields(db, input),
 
     savePageClassifications: async (input) =>
       savePageClassifications(db, await scopeOf(input.folderId), input),

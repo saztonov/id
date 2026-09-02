@@ -67,6 +67,7 @@ export function makeDocument(patch: Partial<DocumentNode> = {}): DocumentNode {
   return {
     id: testId('doc'),
     ordinal: 1,
+    complectId: null,
     docTypeCode: code,
     isKnownType: code !== null,
     isFallbackType: false,

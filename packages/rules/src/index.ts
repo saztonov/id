@@ -14,6 +14,7 @@ export * from './tolerance.js';
 export * from './materials.js';
 export * from './external.js';
 export * from './engine.js';
+export * from './complect-run.js';
 export * from './catalog.js';
 export * from './seed.js';
 export * from './testing.js';

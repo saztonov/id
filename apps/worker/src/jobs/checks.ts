@@ -31,7 +31,7 @@ import {
   RULE_CATALOG,
   assertRuleRegistryMatches,
   resolveExternalRegistries,
-  runRules,
+  runRulesByComplect,
   type CheckGraph,
   type ExternalRegistryProviders,
   type MaterialNode,
@@ -221,7 +221,16 @@ export function createChecksRunHandler(deps: ChecksDeps): JobHandler<'checks.run
       objectRuleProfileId: graph.profile.objectProfileIds.at(-1) ?? null,
     });
 
-    const result: RuleRunResult = runRules(graph, {
+    /**
+     * Прогон идёт ПО КОМПЛЕКТАМ, а не по всей папке разом (S44).
+     *
+     * Правила уровня папки исполняются один раз по всему графу, остальные — на
+     * подграфе своего комплекта плюс один раз на документах вне комплектов.
+     * Разбиение живёт в `@id/rules`: разрез задан уровнем правила из каталога,
+     * и второе место, знающее этот список, разошлось бы с каталогом при первом
+     * же добавлении правила.
+     */
+    const result: RuleRunResult = runRulesByComplect(graph, {
       specs: RULE_CATALOG,
       snapshot: snapshot.rules,
       // Пустой список профиля и отсутствие списка — РАЗНОЕ (§9.1, строка 4):

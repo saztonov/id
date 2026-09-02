@@ -1032,13 +1032,20 @@ interface ReportRowBody {
   readonly items: readonly ReportItemBody[];
 }
 
+interface ReportSectionBody {
+  readonly kind: string;
+  readonly title: string;
+  readonly note: string | null;
+  readonly rows: readonly ReportRowBody[];
+}
+
 interface ReportBody {
   readonly runId: string | null;
-  readonly sections: readonly {
+  readonly groups: readonly {
     readonly kind: string;
+    readonly complectId: string | null;
     readonly title: string;
-    readonly note: string | null;
-    readonly rows: readonly ReportRowBody[];
+    readonly sections: readonly ReportSectionBody[];
   }[];
 }
 
@@ -1048,8 +1055,13 @@ async function report(kcSub: string, folderId: string): Promise<ReportBody> {
   return response.json<ReportBody>();
 }
 
-function sectionOf(body: ReportBody, kind: string): ReportBody['sections'][number] {
-  const found = body.sections.find((section) => section.kind === kind);
+/** Все секции отчёта подряд: их порядок задаёт порядок групп (S44). */
+function sectionsOf(body: ReportBody): readonly ReportSectionBody[] {
+  return body.groups.flatMap((group) => group.sections);
+}
+
+function sectionOf(body: ReportBody, kind: string): ReportSectionBody {
+  const found = sectionsOf(body).find((section) => section.kind === kind);
   if (found === undefined) throw new Error(`в отчёте нет секции ${kind}`);
   return found;
 }
@@ -1059,7 +1071,7 @@ describe('GET /folders/:id/check-report', () => {
     const body = await report(KC.a, FOLDER_D);
     // Пересортировка на клиенте либо повторила бы этот порядок, либо разошлась
     // бы с ним, поэтому его держит сервер.
-    expect(body.sections.map((section) => section.kind)).toEqual([
+    expect(sectionsOf(body).map((section) => section.kind)).toEqual([
       'act',
       'registry',
       'quality',
@@ -1160,7 +1172,7 @@ describe('GET /folders/:id/check-report', () => {
   it('ни одно видимое замечание не теряется: чему не нашлось строки — в отдельной секции', async () => {
     const body = await report(KC.a, FOLDER_D);
     const placed = new Set(
-      body.sections.flatMap((section) => section.rows.flatMap((row) => row.findingIds)),
+      sectionsOf(body).flatMap((section) => section.rows.flatMap((row) => row.findingIds)),
     );
 
     // Инвариант полноты: молча потерянное замечание хуже показанного дважды.
@@ -1193,12 +1205,144 @@ describe('GET /folders/:id/check-report', () => {
     const body = await report(KC.b, FOLDER_D);
     // Положительный контроль стоит выше: владелец получает непустой отчёт, и
     // только поэтому пустота у соседа доказывает изоляцию, а не сломанный запрос.
-    expect(body.sections).toHaveLength(0);
+    expect(body.groups).toHaveLength(0);
     expect(body.runId).toBeNull();
   });
 
   it('отчёт открыт любому инженеру, а не только назначенному на объект', async () => {
     const body = await report(KC.engineerNoScope, FOLDER_D);
-    expect(body.sections.length).toBeGreaterThan(0);
+    expect(sectionsOf(body).length).toBeGreaterThan(0);
+  });
+
+  it('чек-лист акта читает вердикт СВОЕГО комплекта, а не последнего в журнале', async () => {
+    /**
+     * После нарезки одно правило исполняется по разу на комплект, и журнал
+     * содержит несколько записей с одним кодом. Карта по одному коду оставила бы
+     * последнюю, и чек-лист КАЖДОГО акта показывал бы вердикт последнего
+     * комплекта — тихо и правдоподобно.
+     */
+    const complectOne = id(120);
+    const complectTwo = id(121);
+    const secondAct = id(122);
+    await db.query(
+      `INSERT INTO complects (id, folder_id, object_id, contractor_id, ordinal)
+       VALUES ('${complectOne}', '${FOLDER_D}', '${OBJECT}', '${ORG_A}', 1),
+              ('${complectTwo}', '${FOLDER_D}', '${OBJECT}', '${ORG_A}', 2)`,
+    );
+    await db.query(
+      `INSERT INTO logical_documents
+         (id, folder_id, object_id, contractor_id, doc_type_code, ordinal, title, complect_id)
+       VALUES ('${secondAct}', '${FOLDER_D}', '${OBJECT}', '${ORG_A}', 'aosr', 4, 'АОСР № 2',
+               '${complectTwo}')`,
+    );
+    await db.query(
+      `UPDATE logical_documents SET complect_id = '${complectOne}' WHERE id = '${DOC_D_ACT}'`,
+    );
+    // Один и тот же код: в первом комплекте пройден, во втором — нет.
+    await db.query(
+      `UPDATE validation_runs
+          SET counts = jsonb_set(counts, '{journal,executions}', $1::jsonb)
+        WHERE id = '${RUN_D}'`,
+      [
+        JSON.stringify([
+          {
+            ruleCode: 'AOSR.HDR.010',
+            verdict: 'pass',
+            reason: null,
+            findingCount: 0,
+            complectId: complectOne,
+          },
+          {
+            ruleCode: 'AOSR.HDR.010',
+            verdict: 'undetermined',
+            reason: null,
+            findingCount: 0,
+            complectId: complectTwo,
+          },
+        ]),
+      ],
+    );
+
+    try {
+      const body = await report(KC.a, FOLDER_D);
+      const acts = body.groups
+        .filter((group) => group.kind === 'complect')
+        .map((group) => group.sections.find((section) => section.kind === 'act'));
+
+      const itemOf = (index: number): ReportItemBody | undefined =>
+        acts[index]?.rows[0]?.items.find((item) => item.code === 'AOSR.HDR.010');
+
+      expect(itemOf(0)?.status).toBe('ok');
+      expect(itemOf(1)?.status).toBe('undetermined');
+    } finally {
+      await db.query(`DELETE FROM logical_documents WHERE id = '${secondAct}'`);
+      await db.query(
+        `UPDATE logical_documents SET complect_id = NULL WHERE folder_id = '${FOLDER_D}'`,
+      );
+      await db.query(`DELETE FROM complects WHERE folder_id = '${FOLDER_D}'`);
+    }
+  });
+
+  it('каждый комплект — своя группа, а опись остаётся вне комплектов', async () => {
+    /**
+     * Ровно то, ради чего нарезка заведена: у двух актов свои приложения, и
+     * отчёт обязан отвечать «чего не хватает вот этому акту», а не «что лежит
+     * в папке». Комплекты заводятся здесь же — общая фикстура их не содержит,
+     * потому что соседние наборы проверяют плоский состав.
+     */
+    const complectOne = id(123);
+    const complectTwo = id(124);
+    await db.query(
+      `INSERT INTO complects (id, folder_id, object_id, contractor_id, ordinal, act_number, act_date)
+       VALUES ('${complectOne}', '${FOLDER_D}', '${OBJECT}', '${ORG_A}', 1, '48-ОТ/-1',
+               DATE '2026-04-10')`,
+    );
+    await db.query(
+      `INSERT INTO complects (id, folder_id, object_id, contractor_id, ordinal)
+       VALUES ('${complectTwo}', '${FOLDER_D}', '${OBJECT}', '${ORG_A}', 2)`,
+    );
+    await db.query(
+      `UPDATE logical_documents SET complect_id = '${complectOne}'
+        WHERE id IN ('${DOC_D_ACT}', '${DOC_D_REGISTRY}')`,
+    );
+    await db.query(
+      `UPDATE logical_documents SET complect_id = '${complectTwo}' WHERE id = '${DOC_D_CERT}'`,
+    );
+
+    try {
+      const body = await report(KC.a, FOLDER_D);
+
+      const complectGroups = body.groups.filter((group) => group.kind === 'complect');
+      expect(complectGroups).toHaveLength(2);
+      // Заголовок — то, чем инженер комплект называет. Второй комплект
+      // реквизитов акта не получил, и «Комплект 2» честнее выдуманного номера.
+      expect(complectGroups[0]?.title).toBe('Акт освидетельствования № 48-ОТ/-1 от 10.04.2026');
+      expect(complectGroups[1]?.title).toBe('Комплект 2');
+
+      // Акт и его перечень — в первом комплекте, сертификат — во втором.
+      expect(complectGroups[0]?.sections.map((section) => section.kind)).toEqual([
+        'act',
+        'registry',
+      ]);
+      // У второго комплекта перечня приложений нет, и он об этом ГОВОРИТ: это
+      // заявление о комплекте, а не пустая секция.
+      expect(complectGroups[1]?.sections.map((section) => section.kind)).toEqual([
+        'registry',
+        'quality',
+      ]);
+      expect(complectGroups[1]?.sections[0]?.note).toContain('не найден');
+
+      // Паспорт комплекта не получил и остался вне их — это законное состояние.
+      const outside = body.groups.find((group) => group.kind === 'outside');
+      expect(outside?.title).toBe('Вне комплектов');
+      expect(outside?.sections.flatMap((section) => section.rows.map((row) => row.id))).toEqual([
+        DOC_D_PASSPORT,
+      ]);
+    } finally {
+      await db.query(
+        `UPDATE logical_documents SET complect_id = NULL WHERE folder_id = '${FOLDER_D}'`,
+      );
+      await db.query(`DELETE FROM complects WHERE folder_id = '${FOLDER_D}'`);
+    }
   });
 });

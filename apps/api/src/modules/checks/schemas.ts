@@ -207,9 +207,23 @@ const reportSectionSchema = z.object({
   rows: z.array(reportRowSchema),
 });
 
+/**
+ * Группа отчёта: комплект, документы вне комплектов либо замечания без адреса.
+ *
+ * Уровень появился в S44 вместе с нарезкой папки на комплекты: плоский список
+ * секций описывал папку как один комплект одной работы, и на двенадцати актах
+ * складывал их в одну таблицу из 134 строк.
+ */
+const reportGroupSchema = z.object({
+  kind: z.enum(['complect', 'outside', 'unplaced']),
+  complectId: z.uuid().nullable(),
+  title: z.string(),
+  sections: z.array(reportSectionSchema),
+});
+
 export const checkReportSchema = z.object({
   runId: z.uuid().nullable(),
-  sections: z.array(reportSectionSchema),
+  groups: z.array(reportGroupSchema),
 });
 
 export const findingQuerySchema = z.object({ validationRunId: z.uuid().optional() });

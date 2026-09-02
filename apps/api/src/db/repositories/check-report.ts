@@ -45,7 +45,7 @@
  * дважды. Проверяется тестом, а не намерением.
  */
 import { asc, eq } from 'drizzle-orm';
-import { ruleDefinitions, folders } from '@id/db';
+import { complects, ruleDefinitions, folders } from '@id/db';
 import { isAnalysisAnchor, isQualityDocCode, isRegistryCode } from '@id/doc-types';
 
 import type { AuthScope } from '../../auth/scope.js';
@@ -161,10 +161,28 @@ export interface ReportSection {
   readonly rows: readonly ReportRow[];
 }
 
+/**
+ * Группа отчёта: комплект, документы вне комплектов либо замечания без адреса.
+ *
+ * До S44 отчёт был плоским списком секций — он и описывал папку как один
+ * комплект одной работы. На боевой папке с двенадцатью актами такой отчёт
+ * складывал двенадцать разных комплектов в одну таблицу из 134 строк, и понять
+ * по ней, у какого акта чего не хватает, было нельзя.
+ */
+export type ReportGroupKind = 'complect' | 'outside' | 'unplaced';
+
+export interface ReportGroup {
+  readonly kind: ReportGroupKind;
+  /** Комплект группы; `null` у «вне комплектов» и у замечаний без адреса. */
+  readonly complectId: string | null;
+  readonly title: string;
+  readonly sections: readonly ReportSection[];
+}
+
 export interface CheckReportView {
   /** Прогон, по которому собран отчёт; `null` — проверки не было. */
   readonly runId: string | null;
-  readonly sections: readonly ReportSection[];
+  readonly groups: readonly ReportGroup[];
 }
 
 /**
@@ -217,7 +235,7 @@ export async function buildCheckReport(
       .from(folders)
       .where(withScope(scope, FOLDER_SCOPE, eq(folders.id, folderId)))
       .limit(1);
-    if (visible.length === 0) return { runId: null, sections: [] };
+    if (visible.length === 0) return { runId: null, groups: [] };
 
     const { shownRunId } = await resolveShownRun(tx, scope, folderId, undefined);
 
@@ -247,22 +265,139 @@ export async function buildCheckReport(
       checked: shownRunId !== null,
     });
 
-    const sections = [
-      facts.documentSection('act', 'Акт освидетельствования', (code) => isAnalysisAnchor(code)),
-      facts.registrySection(registry),
-      facts.documentSection('quality', 'Паспорта, сертификаты и документы о качестве', (code) =>
-        isQualityDocCode(code),
-      ),
-      facts.documentSection(
-        'other',
-        'Прочие документы комплекта',
-        (code) => !isAnalysisAnchor(code) && !isQualityDocCode(code) && !isRegistryCode(code),
-      ),
-      facts.unplacedSection(),
-    ].filter((section) => section.rows.length > 0 || section.note !== null);
+    const complects = await listComplects(tx, folderId);
 
-    return { runId: shownRunId, sections };
+    /**
+     * Порядок групп: комплекты по номеру акта, затем «вне комплектов», затем
+     * замечания без адреса.
+     *
+     * `unplaced` считается ПОСЛЕДНЕЙ и это не косметика: она собирает всё, чему
+     * не нашлось строки, а «нашлось» становится известно только после сборки
+     * остальных групп. Инвариант ADR-0018 держится именно порядком.
+     */
+    const groups: ReportGroup[] = [];
+    for (const complect of complects) {
+      const sections = sectionsOf(facts, registry, complect.id, true);
+      if (sections.length === 0) continue;
+      groups.push({
+        kind: 'complect',
+        complectId: complect.id,
+        title: titleOfComplect(complect),
+        sections,
+      });
+    }
+
+    const outside = sectionsOf(facts, registry, null, complects.length > 0);
+    if (outside.length > 0) {
+      groups.push({
+        kind: 'outside',
+        complectId: null,
+        // Опись передачи, титульные листы и всё, что лежит до первого акта. Это
+        // законное состояние, а не остаток: приписать опись первому попавшемуся
+        // акту значило бы соврать о составе.
+        title: 'Вне комплектов',
+        sections: outside,
+      });
+    }
+
+    const unplaced = facts.unplacedSection();
+    if (unplaced.rows.length > 0) {
+      groups.push({
+        kind: 'unplaced',
+        complectId: null,
+        title: unplaced.title,
+        sections: [unplaced],
+      });
+    }
+
+    return { runId: shownRunId, groups };
   });
+}
+
+/** Секции одной группы в порядке, названном заказчиком. */
+function sectionsOf(
+  facts: ReportFacts,
+  registry: readonly RegistryRowView[],
+  complectId: string | null,
+  /**
+   * Нарезана ли папка на комплекты вовсе.
+   *
+   * От этого зависит, к чему относится заявление «перечень приложений не
+   * найден». В нарезанной папке перечень принадлежит АКТУ, и требовать его от
+   * группы «вне комплектов» (опись, титулы) бессмысленно. В ненарезанной вся
+   * папка — один мешок, и заявление относится к ней целиком, как до S44.
+   */
+  hasComplects: boolean,
+): readonly ReportSection[] {
+  const belongs = (docComplectId: string | null): boolean => docComplectId === complectId;
+  return [
+    facts.documentSection('act', 'Акт освидетельствования', belongs, (code) =>
+      isAnalysisAnchor(code),
+    ),
+    facts.registrySection(
+      registry,
+      belongs,
+      complectId !== null || !hasComplects,
+      // Сироты показываются один раз — в группе «вне комплектов»; в
+      // ненарезанной папке она же и единственная.
+      complectId === null,
+    ),
+    facts.documentSection(
+      'quality',
+      'Паспорта, сертификаты и документы о качестве',
+      belongs,
+      (code) => isQualityDocCode(code),
+    ),
+    facts.documentSection(
+      'other',
+      'Прочие документы',
+      belongs,
+      (code) => !isAnalysisAnchor(code) && !isQualityDocCode(code) && !isRegistryCode(code),
+    ),
+  ].filter((section) => section.rows.length > 0 || section.note !== null);
+}
+
+/**
+ * Заголовок комплекта — то, чем инженер его называет.
+ *
+ * Номер и дату акта пишет в комплект барьер извлечения. Пока их нет (прогон не
+ * дошёл до реквизитов, акт не прочитался), заголовком остаётся порядковый
+ * номер: «Комплект 3» честнее, чем «АОСР № — от —».
+ */
+function titleOfComplect(complect: ComplectRow): string {
+  const parts: string[] = [];
+  if (complect.actNumber !== null) parts.push(`№ ${complect.actNumber}`);
+  if (complect.actDate !== null) parts.push(`от ${formatDate(complect.actDate)}`);
+  return parts.length === 0
+    ? `Комплект ${String(complect.ordinal)}`
+    : `Акт освидетельствования ${parts.join(' ')}`;
+}
+
+function formatDate(value: string): string {
+  const [year, month, day] = value.slice(0, 10).split('-');
+  return year === undefined || month === undefined || day === undefined
+    ? value
+    : `${day}.${month}.${year}`;
+}
+
+interface ComplectRow {
+  readonly id: string;
+  readonly ordinal: number;
+  readonly actNumber: string | null;
+  readonly actDate: string | null;
+}
+
+async function listComplects(db: ReadExecutor, folderId: string): Promise<readonly ComplectRow[]> {
+  return db
+    .select({
+      id: complects.id,
+      ordinal: complects.ordinal,
+      actNumber: complects.actNumber,
+      actDate: complects.actDate,
+    })
+    .from(complects)
+    .where(eq(complects.folderId, folderId))
+    .orderBy(asc(complects.ordinal));
 }
 
 async function loadRuleTitles(db: ReadExecutor): Promise<ReadonlyMap<string, string>> {
@@ -294,6 +429,11 @@ interface Execution {
   readonly reason: string | null;
 }
 
+/** Ключ исполнения: комплект и код. `null` — прогон уровня папки. */
+function executionKey(complectId: string | null, ruleCode: string): string {
+  return `${complectId ?? ''}|${ruleCode}`;
+}
+
 /**
  * Разложенные по документам факты и сборка строк.
  *
@@ -306,6 +446,8 @@ class ReportFacts {
   private readonly checked: boolean;
   private readonly titles: ReadonlyMap<string, string>;
   private readonly executions = new Map<string, Execution>();
+  /** Коды, исполнявшиеся хоть где-то: состав чек-листа не зависит от комплекта. */
+  private readonly executedCodes = new Set<string>();
   private readonly skipped = new Map<string, string>();
   private readonly fieldsByDocument = new Map<string, Map<string, FieldRow>>();
   private readonly findingsByDocument = new Map<string, FindingView[]>();
@@ -319,11 +461,21 @@ class ReportFacts {
     this.checked = input.checked;
     this.titles = input.titles;
 
+    /**
+     * Ключ — ПАРА «комплект + код правила» (S44).
+     *
+     * После нарезки папки на комплекты одно и то же правило исполняется по
+     * разу на каждый комплект, и журнал содержит двенадцать записей с одним
+     * кодом. Карта по одному коду оставила бы последнюю из них, и чек-лист
+     * КАЖДОГО акта показывал бы вердикт последнего комплекта — тихо и
+     * правдоподобно.
+     */
     for (const execution of asExecutions(input.journal?.executions)) {
-      this.executions.set(execution.ruleCode, {
+      this.executions.set(executionKey(execution.complectId ?? null, execution.ruleCode), {
         verdict: execution.verdict,
         reason: execution.reason,
       });
+      this.executedCodes.add(execution.ruleCode);
     }
     for (const [code, reason] of Object.entries(asRecord(input.journal?.skippedCodes))) {
       this.skipped.set(code, String(reason));
@@ -358,10 +510,11 @@ class ReportFacts {
   documentSection(
     kind: ReportSectionKind,
     title: string,
+    inGroup: (complectId: string | null) => boolean,
     belongs: (docTypeCode: string | null) => boolean,
   ): ReportSection {
     const rows = [...this.context.documents.entries()]
-      .filter(([, facts]) => belongs(facts.docTypeCode))
+      .filter(([, facts]) => inGroup(facts.complectId) && belongs(facts.docTypeCode))
       .sort((a, b) => this.firstPageNumber(a[0]) - this.firstPageNumber(b[0]))
       .map(([id, facts]) => this.documentRow(id, facts));
     return { kind, title, note: null, rows };
@@ -380,9 +533,29 @@ class ReportFacts {
    * осмысленными и до проверки, и гасить их в `unchecked` было бы враньём в
    * обратную сторону.
    */
-  registrySection(rows: readonly RegistryRowView[]): ReportSection {
+  registrySection(
+    rows: readonly RegistryRowView[],
+    inGroup: (complectId: string | null) => boolean,
+    /**
+     * Ждать ли перечень в этой группе.
+     *
+     * Перечень приложений принадлежит АКТУ, поэтому его отсутствие — заявление о
+     * комплекте. У группы «вне комплектов» (опись, титулы) акта нет по
+     * построению, и фраза «реестр приложений в комплекте не найден» была бы там
+     * утверждением о том, чего в этой группе и не должно быть.
+     */
+    expectRegistry: boolean,
+    /**
+     * Показывать ли строки, чей документ-реестр не нашёлся.
+     *
+     * Ровно в ОДНОЙ группе: до S44 отчёт был один, и вопроса не возникало, а с
+     * группами такая строка иначе повторилась бы в каждой — и инвариант «ровно
+     * один раз» превратился бы в «столько раз, сколько комплектов».
+     */
+    includeOrphans: boolean,
+  ): ReportSection {
     const documents = [...this.context.documents.entries()]
-      .filter(([, facts]) => isRegistryCode(facts.docTypeCode))
+      .filter(([, facts]) => inGroup(facts.complectId) && isRegistryCode(facts.docTypeCode))
       .sort((a, b) => this.firstPageNumber(a[0]) - this.firstPageNumber(b[0]));
 
     const out: ReportRow[] = [];
@@ -397,7 +570,13 @@ class ReportFacts {
     // Строки без своего документа-реестра быть не должно (внешний ключ), но
     // терять её при рассинхроне нельзя: пропавшая строка реестра читается как
     // «реестр сошёлся».
-    for (const row of rows.filter((candidate) => !taken.has(candidate.id))) {
+    const orphans = includeOrphans
+      ? rows.filter(
+          (candidate) =>
+            !taken.has(candidate.id) && !this.context.documents.has(candidate.documentId),
+        )
+      : [];
+    for (const row of orphans) {
       out.push(this.registryRow(row));
     }
 
@@ -409,8 +588,9 @@ class ReportFacts {
      * полноте обязано отличать «искали и не нашли» от «не искали» — та же
      * граница, из-за которой переделан текст сводки.
      */
-    const note =
-      this.context.documents.size === 0
+    const note = !expectRegistry
+      ? null
+      : this.context.documents.size === 0
         ? null
         : documents.length === 0
           ? 'Реестр приложений в комплекте не найден: сверять состав не с чем.'
@@ -468,7 +648,9 @@ class ReportFacts {
     const own = this.findingsByDocument.get(id) ?? [];
     for (const finding of own) this.placed.add(finding.id);
 
-    const checklist = isAnalysisAnchor(facts.docTypeCode) ? this.checklistItems(own) : [];
+    const checklist = isAnalysisAnchor(facts.docTypeCode)
+      ? this.checklistItems(own, facts.complectId)
+      : [];
     const items = [...checklist, ...this.findingItems(own, checklist)];
     const verdict = this.verdictOf(own, checklist);
 
@@ -575,16 +757,21 @@ class ReportFacts {
   /**
    * Пункты чек-листа акта из журнала исполнения правил.
    *
-   * Журнал ведётся по КОДУ ПРАВИЛА, а не по документу: при двух актах в
-   * комплекте пройденное правило считается пройденным для обоих, а
-   * провалившееся привязывается к акту замечанием (`finding.document`). Для
-   * комплекта одной работы (ADR-0011: «один АОСР со своими приложениями»)
-   * неоднозначности нет вовсе.
+   * Журнал ведётся по паре «комплект + код правила» (S44). До нарезки он вёлся
+   * по одному коду, и ADR-0018 называл это ограничением с оговоркой «для
+   * комплекта одной работы неоднозначности нет». На папке с двенадцатью актами
+   * её нет уже не по построению: один код — двенадцать разных ответов.
+   *
+   * Внутри одного комплекта акт по-прежнему может быть не один. Там ограничение
+   * остаётся: пройденное правило считается пройденным для обоих актов, а
+   * провалившееся привязывается к своему акту замечанием (`finding.document`).
    */
-  private checklistItems(own: readonly FindingView[]): readonly ReportItem[] {
+  private checklistItems(
+    own: readonly FindingView[],
+    complectId: string | null,
+  ): readonly ReportItem[] {
     const codes = new Set<string>();
-    for (const code of this.executions.keys())
-      if (code.startsWith(CHECKLIST_PREFIX)) codes.add(code);
+    for (const code of this.executedCodes) if (code.startsWith(CHECKLIST_PREFIX)) codes.add(code);
     for (const code of this.skipped.keys()) if (code.startsWith(CHECKLIST_PREFIX)) codes.add(code);
     for (const finding of own) {
       if (finding.ruleCode.startsWith(CHECKLIST_PREFIX)) codes.add(finding.ruleCode);
@@ -594,7 +781,11 @@ class ReportFacts {
       .sort((a, b) => a.localeCompare(b, 'ru'))
       .map<ReportItem>((code) => {
         const failed = own.filter((finding) => finding.ruleCode === code);
-        const execution = this.executions.get(code);
+        // Вердикт СВОЕГО комплекта; папочный (`null`) — запасной вариант для
+        // правил уровня папки и для журналов прогонов до S44.
+        const execution =
+          this.executions.get(executionKey(complectId, code)) ??
+          this.executions.get(executionKey(null, code));
         const skip = this.skipped.get(code);
 
         if (failed.length > 0) {
@@ -804,11 +995,22 @@ function skipReason(reason: string): string {
   }
 }
 
-function asExecutions(
-  value: unknown,
-): readonly { ruleCode: string; verdict: string; reason: string | null }[] {
+function asExecutions(value: unknown): readonly {
+  ruleCode: string;
+  verdict: string;
+  reason: string | null;
+  // Журналы прогонов до S44 комплекта не называют: поле необязательное, и
+  // выдумывать его за них нельзя — тогда вердикт папочного прогона приписался
+  // бы первому попавшемуся комплекту.
+  complectId?: string | null;
+}[] {
   return Array.isArray(value)
-    ? (value as { ruleCode: string; verdict: string; reason: string | null }[])
+    ? (value as {
+        ruleCode: string;
+        verdict: string;
+        reason: string | null;
+        complectId?: string | null;
+      }[])
     : [];
 }
 

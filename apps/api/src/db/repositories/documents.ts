@@ -752,6 +752,35 @@ export async function loadSegmentationPages(
   };
 }
 
+/**
+ * Записать номер и дату акта в его комплект (S44).
+ *
+ * Денормализация ради заголовка: отчёт и списки печатают «АОСР № 48-ОТ/-1 от
+ * 10.04.2026» на каждую секцию, и собирать этот заголовок соединением через
+ * `field_values` на каждый показ значило бы платить за него запросом.
+ *
+ * Пишет барьер извлечения (`doc.extract_finalize`), а не сегментация: на момент
+ * нарезки реквизиты акта ещё не прочитаны, и подставить их было бы выдумкой.
+ * Условие принадлежности комплекта папке — в самом операторе, а не у
+ * вызывающего.
+ */
+export async function saveComplectActFields(
+  db: Database,
+  input: {
+    readonly folderId: string;
+    readonly complectId: string;
+    readonly actNumber: string | null;
+    readonly actDate: string | null;
+  },
+): Promise<boolean> {
+  const updated = await db
+    .update(complects)
+    .set({ actNumber: input.actNumber, actDate: input.actDate })
+    .where(and(eq(complects.id, input.complectId), eq(complects.folderId, input.folderId)))
+    .returning({ id: complects.id });
+  return updated.length > 0;
+}
+
 /** Страница документа в том виде, в каком её читает извлечение реквизитов. */
 export interface DocumentPageText {
   readonly pageTextVersionId: string | null;
@@ -953,6 +982,8 @@ export async function applySegmentation(
         })),
       );
       const complectByDocument = new Map<number, string>();
+      /** Комплект → порядковый номер его акта: ссылка проставляется после вставки. */
+      const anchorOrdinalOf = new Map<string, number>();
       for (const group of plan.groups) {
         const insertedComplect = await tx
           .insert(complects)
@@ -970,9 +1001,16 @@ export async function applySegmentation(
         for (const documentOrdinal of group.documentOrdinals) {
           complectByDocument.set(documentOrdinal, complectId);
         }
+        // Первый документ группы — сам акт: правило нарезки открывает комплект
+        // именно им, и второго источника «какой документ здесь якорь» заводить
+        // нельзя.
+        const anchorOrdinal = group.documentOrdinals[0];
+        if (anchorOrdinal !== undefined) anchorOrdinalOf.set(complectId, anchorOrdinal);
       }
 
       const documentIds: string[] = [];
+      /** Порядковый номер → идентификатор строки: нужен ссылке комплекта на акт. */
+      const idByOrdinal = new Map<number, string>();
       let pagesAssigned = 0;
       for (const document of input.documents) {
         const inserted = await tx
@@ -999,6 +1037,7 @@ export async function applySegmentation(
           throw internal({ logDetail: 'INSERT логического документа не вернул строку' });
         }
         documentIds.push(documentId);
+        idByOrdinal.set(document.ordinal, documentId);
 
         for (const page of document.pages) {
           await tx.insert(pageAssignments).values({
@@ -1024,6 +1063,19 @@ export async function applySegmentation(
           needsReview: page.needsReview,
         });
         pagesUnassigned += 1;
+      }
+
+      // Ссылка комплекта на свой акт проставляется ПОСЛЕ вставки документов:
+      // до неё идентификатора строки акта ещё не существует. Номер и дата акта
+      // остаются пустыми здесь — их читает извлечение реквизитов, которое
+      // выполняется позже, и подставить их сейчас значило бы выдумать.
+      for (const [complectId, anchorOrdinal] of anchorOrdinalOf) {
+        const anchorId = idByOrdinal.get(anchorOrdinal);
+        if (anchorId === undefined) continue;
+        await tx
+          .update(complects)
+          .set({ actDocumentId: anchorId })
+          .where(eq(complects.id, complectId));
       }
 
       // Границы, собранные конвейером, подтверждает конвейер (S27).
