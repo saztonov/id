@@ -35,7 +35,7 @@ done
 
 [ -r "$ENV_FILE" ] || { echo "Нет доступа к $ENV_FILE (права 640 root:docker; см. deploy/README.md)" >&2; exit 1; }
 
-echo "==> [1/6] git pull ($PORTAL_DIR)"
+echo "==> [1/7] git pull ($PORTAL_DIR)"
 if git -C "$PORTAL_DIR" rev-parse --abbrev-ref --symbolic-full-name '@{u}' >/dev/null 2>&1; then
   git -C "$PORTAL_DIR" pull --ff-only
 else
@@ -58,7 +58,7 @@ export ID_TAG
 APP_RELEASE="${APP_RELEASE:-$ID_TAG}"
 export APP_RELEASE
 
-echo "==> [2/6] build (тег $ID_TAG)"
+echo "==> [2/7] build (тег $ID_TAG)"
 # Образы собираются ПО ОЧЕРЕДИ, а не одной командой `compose build`.
 #
 # Одна команда отдаёт сборку buildx bake, и тот запускает обе цели параллельно.
@@ -83,7 +83,7 @@ done
 
 MIGRATE_STATUS="нет"
 if [ "$MIGRATE" = 1 ]; then
-  echo "==> [3/6] migrate"
+  echo "==> [3/7] migrate"
   # Воркер останавливается ДО наката. Миграции переименовывают таблицы (0028:
   # submissions -> works), и работающий воркер старого образа продолжал бы
   # обращаться к именам, которых уже нет: задачи падали бы, а следы этого
@@ -98,13 +98,13 @@ if [ "$MIGRATE" = 1 ]; then
   unset MIGRATE_DATABASE_URL
   MIGRATE_STATUS="да"
 else
-  echo "==> [3/6] migrate пропущен (флаг --migrate не передан)"
+  echo "==> [3/7] migrate пропущен (флаг --migrate не передан)"
 fi
 
-echo "==> [4/6] up"
+echo "==> [4/7] up"
 "${COMPOSE[@]}" up -d id-api id-worker id-web
 
-echo "==> [5/6] health (изнутри контейнера — публичный домен не требуется)"
+echo "==> [5/7] health (изнутри контейнера — публичный домен не требуется)"
 health_ok=""
 for _ in $(seq 1 40); do
   if "${COMPOSE[@]}" exec -T id-api wget -qO- http://127.0.0.1:3000/health/ready >/dev/null 2>&1; then
@@ -114,15 +114,41 @@ for _ in $(seq 1 40); do
   sleep 2
 done
 
-echo "==> [6/6] отчёт"
+echo "==> [6/7] смоук маршрутов API"
+# /health/ready живёт независимо от бизнес-маршрутов: выкатка с полностью
+# выпиленным /api/v1 отчиталась бы «health: ok». Так и вышло в S44 —
+# переименование маршрутов дошло до прода, и портал молча отвечал 404 на
+# каждый список комплектов.
+#
+# Проверяется НАЛИЧИЕ маршрута, а не доступ: без сессии живой адрес отвечает
+# 401, и это правильный ответ. Плохой ответ ровно один — 404.
+ROUTES_OK=""
+if [ -n "$health_ok" ]; then
+  ROUTES_OK=1
+  for route in /api/v1/folders /api/v1/catalog/objects /api/v1/admin/jobs; do
+    headers="$("${COMPOSE[@]}" exec -T id-api wget -qS --spider --tries=1 \
+      --timeout=5 "http://127.0.0.1:3000$route" 2>&1 || true)"
+    code="$(echo "$headers" | awk '/HTTP\// { print $2; exit }')"
+    if [ "$code" = "404" ] || [ -z "$code" ]; then
+      echo "  МАРШРУТ НЕ ОТВЕЧАЕТ: $route (код ${code:-нет ответа})" >&2
+      ROUTES_OK=""
+    else
+      echo "  $route → $code"
+    fi
+  done
+fi
+
+echo "==> [7/7] отчёт"
 echo
 echo "===== ОТЧЁТ О ДЕПЛОЕ (id) ====="
 echo "время:    $(date -Is)"
 echo "коммит:   $(git -C "$PORTAL_DIR" rev-parse HEAD) (тег образа $ID_TAG)"
 echo "миграции: $MIGRATE_STATUS"
 echo "health:   $([ -n "$health_ok" ] && echo ok || echo 'НЕ готов — docker compose -p id logs id-api')"
+echo "маршруты: $([ -n "$ROUTES_OK" ] && echo ok || echo 'НЕ отвечают — портал поднялся, но /api/v1 недоступен')"
 "${COMPOSE[@]}" ps --format 'table {{.Service}}\t{{.Status}}'
 echo "================================"
 
 [ -n "$health_ok" ] || exit 1
+[ -n "$ROUTES_OK" ] || exit 1
 echo "Готово."
