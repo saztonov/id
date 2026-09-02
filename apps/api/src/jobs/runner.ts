@@ -47,6 +47,7 @@ import {
   normalizeErrorMessage,
   type ErrorReporter,
 } from '../observability/errors.js';
+import { readableJobReason } from '../observability/job-reason.js';
 import type { Metrics } from '../observability/metrics.js';
 import {
   claimJobs,
@@ -116,9 +117,20 @@ const QUEUE_PAUSE_CAP_MS = 600_000;
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 8_000;
 
 export class JobTimeoutError extends Error {
+  /**
+   * Потолок аренды, в который попытка не уложилась.
+   *
+   * Полем, а не только внутри сообщения (S44): сообщение уходит в журнал через
+   * `normalizeErrorMessage`, который числа вычёркивает намеренно, и восстановить
+   * потолок из «не уложилась в <n> мс» уже нечем. `readableJobReason` собирает
+   * человекочитаемую причину именно отсюда.
+   */
+  readonly timeoutMs: number;
+
   constructor(timeoutMs: number) {
     super(`попытка не уложилась в ${timeoutMs} мс`);
     this.name = 'JobTimeout';
+    this.timeoutMs = timeoutMs;
   }
 }
 
@@ -1150,6 +1162,10 @@ export class JobRunner {
       durationMs,
       errorClass: failure.errorClass,
       errorMessage: failure.message,
+      // Причина словами — рядом с отпечатком, а не вместо него (S44).
+      // `null` означает «отказ не нашего класса», и плашка останется на
+      // нормализованном сообщении.
+      reasonText: readableJobReason(failure.error),
       retryDelayMs,
       permanent: failure.permanent,
     });

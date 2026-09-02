@@ -1189,6 +1189,7 @@ export const jobRuns = pgTable("job_runs", {
 	errorClass: text("error_class"),
 	errorMessage: text("error_message"),
 	payloadDigest: text("payload_digest"),
+	reasonText: text("reason_text"),
 }, (table) => [
 	index("ix_job_runs_folder").using("btree", table.folderId.asc().nullsLast().op("uuid_ops"), table.startedAt.desc().nullsFirst().op("timestamptz_ops")),
 	index("ix_job_runs_in_flight").using("btree", table.startedAt.asc().nullsLast().op("timestamptz_ops")).where(sql`(outcome IS NULL)`),

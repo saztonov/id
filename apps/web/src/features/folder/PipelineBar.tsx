@@ -533,6 +533,7 @@ function failureOf(
           dead: number;
           lastErrorClass: string | null;
           lastErrorMessage: string | null;
+          lastReasonText: string | null;
         }[];
       }
     | undefined,
@@ -542,7 +543,18 @@ function failureOf(
   const worst = [...data.jobTypes].filter((row) => row.dead > 0).sort((a, b) => b.dead - a.dead)[0];
   if (worst === undefined) return null;
 
+  /**
+   * Причина словами предпочтительнее нормализованного сообщения (S44).
+   *
+   * `lastErrorMessage` — ключ агрегации журнала, и числа из него вычеркнуты
+   * намеренно (ADR-0010): человек читал «попытка не уложилась в <n> мс» и не мог
+   * ответить на вопрос «сколько ждали». `lastReasonText` заполняется только
+   * своими классами ошибок из их типизированных полей, поэтому число в нём
+   * настоящее. `null` там означает «причина не наша» — тогда шаблон, как
+   * раньше.
+   */
   const reason =
+    worst.lastReasonText ??
     worst.lastErrorMessage ??
     (worst.lastErrorClass === null
       ? 'Сервер не назвал причину; подробности — в журнале задач.'

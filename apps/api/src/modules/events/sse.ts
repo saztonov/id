@@ -101,6 +101,7 @@ const jobTypeSummarySchema = z.object({
   lastFinishedAt: z.string().nullable(),
   lastErrorClass: z.string().nullable(),
   lastErrorMessage: z.string().nullable(),
+  lastReasonText: z.string().nullable(),
 });
 
 const processingStatusSchema = z.object({

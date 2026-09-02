@@ -246,7 +246,15 @@ function JobTypeBreakdown({
               <Typography.Text type="secondary">отказов не было</Typography.Text>
             ) : (
               <Space direction="vertical" size={0}>
-                <Typography.Text>{row.lastErrorMessage ?? 'текст не записан'}</Typography.Text>
+                {/*
+                  Причина словами предпочтительнее нормализованного текста (S44):
+                  в отпечатке журнала числа вычеркнуты намеренно (ADR-0010), и
+                  «не уложилась в <n> мс» не отвечает на вопрос «сколько ждали».
+                  `null` там означает «причина не нашего класса» — тогда шаблон.
+                */}
+                <Typography.Text>
+                  {row.lastReasonText ?? row.lastErrorMessage ?? 'текст не записан'}
+                </Typography.Text>
                 {row.lastErrorClass !== null && (
                   <Typography.Text type="secondary">класс: {row.lastErrorClass}</Typography.Text>
                 )}

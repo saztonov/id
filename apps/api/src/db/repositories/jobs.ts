@@ -477,6 +477,14 @@ export interface FailJobParams extends FinishJobParams {
   readonly errorClass: string;
   /** Уже нормализованное сообщение: значения параметров сюда попадать не должны. */
   readonly errorMessage: string;
+  /**
+   * Причина словами из закрытого набора СВОИХ классов ошибок (S44).
+   *
+   * `undefined` — причина не наша, и пересказывать её портал не вправе: плашка
+   * покажет нормализованный `errorMessage`, как показывала. Собирает строку
+   * `readableJobReason`, и только оттуда сюда что-либо попадает.
+   */
+  readonly reasonText?: string | null | undefined;
   readonly retryDelayMs: number;
   /** Не повторять независимо от числа попыток: неизвестный тип, битый payload. */
   readonly permanent?: boolean | undefined;
@@ -522,7 +530,8 @@ export async function failJob(db: Database, params: FailJobParams): Promise<Fail
              duration_ms = ${params.durationMs},
              outcome = 'failed',
              error_class = ${params.errorClass},
-             error_message = ${params.errorMessage}
+             error_message = ${params.errorMessage},
+             reason_text = ${params.reasonText ?? null}
        where ${jobRuns.id} = ${params.runId} and ${jobRuns.outcome} is null
     `);
 
@@ -1473,6 +1482,14 @@ export interface JobTypeSummary {
   readonly lastFinishedAt: string | null;
   readonly lastErrorClass: string | null;
   readonly lastErrorMessage: string | null;
+  /**
+   * Причина отказа словами; `null` — причина не из своих классов (S44).
+   *
+   * Отдельно от `lastErrorMessage`, потому что это разные требования к одной
+   * строке: сообщение — ключ агрегации журнала и потому без чисел, причина —
+   * ответ человеку и потому с ними.
+   */
+  readonly lastReasonText: string | null;
 }
 
 export interface StageSummary {
@@ -1598,6 +1615,7 @@ export async function computeProcessingStatus(
     last_finished_at: string | null;
     last_error_class: string | null;
     last_error_message: string | null;
+    last_reason_text: string | null;
   }>(sql`
     select job_type,
            count(*)::int as attempts,
@@ -1619,7 +1637,11 @@ export async function computeProcessingStatus(
            (array_agg(error_class order by started_at desc)
               filter (where outcome = 'failed'))[1] as last_error_class,
            (array_agg(error_message order by started_at desc)
-              filter (where outcome = 'failed'))[1] as last_error_message
+              filter (where outcome = 'failed'))[1] as last_error_message,
+           -- Причина словами той же последней неудачной попытки (S44). NULL —
+           -- отказ не нашего класса, и показывать надо нормализованный текст.
+           (array_agg(reason_text order by started_at desc)
+              filter (where outcome = 'failed'))[1] as last_reason_text
       from ${jobRuns}
      where ${jobRuns.folderId} = ${folderId}
      group by job_type
@@ -1685,6 +1707,7 @@ export async function computeProcessingStatus(
       lastFinishedAt: row?.last_finished_at ?? null,
       lastErrorClass: row?.last_error_class ?? null,
       lastErrorMessage: row?.last_error_message ?? null,
+      lastReasonText: row?.last_reason_text ?? null,
     };
   });
 

@@ -715,6 +715,8 @@ export interface ProcessingStatus {
     lastFinishedAt: string | null;
     lastErrorClass: string | null;
     lastErrorMessage: string | null;
+    /** Причина словами; `null` — отказ не из своих классов (S44). */
+    lastReasonText: string | null;
   }[];
   /**
    * Постраничный ход выделения блоков; `null` — считать нечего: рабочего
