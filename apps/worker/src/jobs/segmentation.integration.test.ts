@@ -971,46 +971,64 @@ describe('провайдер модели', () => {
 // Повтор задач: успех, ничего не изменивший или потерявший данные, — отказ
 // =====================================================================
 
+/**
+ * Здесь тесты гоняют ЦЕПОЧКУ целиком, поэтому у каждого свой таймаут.
+ *
+ * Умолчание vitest — пять секунд, а один `drainQueue` по всей цепочке на
+ * pglite укладывается в них впритык: 5075 мс при пороге 5000 — и набор краснел
+ * на исправном коде. Значение взято от `beforeAll` этого же файла: он поднимает
+ * ту же машинерию и давно объявлен долгим.
+ */
+const CHAIN_TIMEOUT_MS = 600_000;
+
 describe('повтор задач безопасен', () => {
-  it('повторный прогон всей цепочки даёт тот же учёт страниц', async () => {
-    const before = await listPageAssignments(db, SCOPE, FOLDER);
-    const documentsBefore = (await listLogicalDocuments(db, SCOPE, FOLDER)).length;
+  it(
+    'повторный прогон всей цепочки даёт тот же учёт страниц',
+    async () => {
+      const before = await listPageAssignments(db, SCOPE, FOLDER);
+      const documentsBefore = (await listLogicalDocuments(db, SCOPE, FOLDER)).length;
 
-    await enqueueSystemJob(db, {
-      type: 'doc.classify_pages',
-      payload: { folderId: FOLDER },
-      dedupeKey: `doc.classify_pages:${FOLDER}:repeat`,
-    });
-    await drainQueue();
+      await enqueueSystemJob(db, {
+        type: 'doc.classify_pages',
+        payload: { folderId: FOLDER },
+        dedupeKey: `doc.classify_pages:${FOLDER}:repeat`,
+      });
+      await drainQueue();
 
-    const after = await listPageAssignments(db, SCOPE, FOLDER);
-    expect(after).toHaveLength(before.length);
-    expect((await listLogicalDocuments(db, SCOPE, FOLDER)).length).toBe(documentsBefore);
-    expect(await listUnaccountedPages(db, SCOPE, FOLDER)).toEqual([]);
-    // Реестр переразобран, а не потерян: 29 строк на месте.
-    expect(await listRegistryRows(db, SCOPE, FOLDER)).toHaveLength(29);
-  });
+      const after = await listPageAssignments(db, SCOPE, FOLDER);
+      expect(after).toHaveLength(before.length);
+      expect((await listLogicalDocuments(db, SCOPE, FOLDER)).length).toBe(documentsBefore);
+      expect(await listUnaccountedPages(db, SCOPE, FOLDER)).toEqual([]);
+      // Реестр переразобран, а не потерян: 29 строк на месте.
+      expect(await listRegistryRows(db, SCOPE, FOLDER)).toHaveLength(29);
+    },
+    CHAIN_TIMEOUT_MS,
+  );
 
-  it('пересегментация при пустом наборе решений отвергается, а не стирает документы', async () => {
-    const before = (await listLogicalDocuments(db, SCOPE, FOLDER)).length;
-    expect(before).toBeGreaterThan(0);
+  it(
+    'пересегментация при пустом наборе решений отвергается, а не стирает документы',
+    async () => {
+      const before = (await listLogicalDocuments(db, SCOPE, FOLDER)).length;
+      expect(before).toBeGreaterThan(0);
 
-    await testDb.query(`DELETE FROM page_classifications WHERE folder_id = '${FOLDER}'`);
-    await enqueueSystemJob(db, {
-      type: 'doc.segment',
-      payload: { folderId: FOLDER },
-      dedupeKey: `doc.segment:${FOLDER}:empty`,
-    });
-    await drainQueue();
+      await testDb.query(`DELETE FROM page_classifications WHERE folder_id = '${FOLDER}'`);
+      await enqueueSystemJob(db, {
+        type: 'doc.segment',
+        payload: { folderId: FOLDER },
+        dedupeKey: `doc.segment:${FOLDER}:empty`,
+      });
+      await drainQueue();
 
-    // Задача обязана упасть, а документы — остаться. Успешная задача,
-    // «правильно» применившая пустоту, уничтожила бы всю сборку (урок S6).
-    const failed = await count(
-      `SELECT count(*) AS count FROM job_runs
+      // Задача обязана упасть, а документы — остаться. Успешная задача,
+      // «правильно» применившая пустоту, уничтожила бы всю сборку (урок S6).
+      const failed = await count(
+        `SELECT count(*) AS count FROM job_runs
         WHERE job_type = 'doc.segment' AND outcome <> 'succeeded'`,
-    );
-    expect(failed).toBeGreaterThan(0);
-    expect((await listLogicalDocuments(db, SCOPE, FOLDER)).length).toBe(before);
-    expect(await listUnaccountedPages(db, SCOPE, FOLDER)).toEqual([]);
-  });
+      );
+      expect(failed).toBeGreaterThan(0);
+      expect((await listLogicalDocuments(db, SCOPE, FOLDER)).length).toBe(before);
+      expect(await listUnaccountedPages(db, SCOPE, FOLDER)).toEqual([]);
+    },
+    CHAIN_TIMEOUT_MS,
+  );
 });
