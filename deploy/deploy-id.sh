@@ -35,7 +35,7 @@ done
 
 [ -r "$ENV_FILE" ] || { echo "Нет доступа к $ENV_FILE (права 640 root:docker; см. deploy/README.md)" >&2; exit 1; }
 
-echo "==> [1/7] git pull ($PORTAL_DIR)"
+echo "==> [1/8] git pull ($PORTAL_DIR)"
 if git -C "$PORTAL_DIR" rev-parse --abbrev-ref --symbolic-full-name '@{u}' >/dev/null 2>&1; then
   git -C "$PORTAL_DIR" pull --ff-only
 else
@@ -58,7 +58,29 @@ export ID_TAG
 APP_RELEASE="${APP_RELEASE:-$ID_TAG}"
 export APP_RELEASE
 
-echo "==> [2/7] build (тег $ID_TAG)"
+echo "==> [2/8] сверка ключей $ENV_FILE с примером"
+# /etc/id/id.env ставится один раз копией примера (deploy/README.md) и дальше
+# живёт своей жизнью: спринт добавляет ключ в пример, до сервера он не доезжает,
+# и код молча работает на умолчаниях. Так пропала вся порция S41 — сторож памяти
+# воркера был выключен на проде, а видно это было только по строке worker_ready.
+#
+# Сверяются ИМЕНА ключей, значения не читаются и не печатаются: этот скрипт
+# секретов не показывает. Сверка идёт после pull — пример берётся уже новый.
+#
+# Не фатально: у большинства ключей есть умолчания, и валить выкатку из-за
+# нового необязательного ключа хуже, чем выпустить её с предупреждением.
+missing_keys="$(comm -23 \
+  <(grep -oE '^[A-Z][A-Z0-9_]*=' "$PORTAL_DIR/deploy/id.env.example" | tr -d '=' | sort -u) \
+  <(grep -oE '^[A-Z][A-Z0-9_]*=' "$ENV_FILE" | tr -d '=' | sort -u) \
+  | tr '\n' ' ' | sed 's/ *$//')"
+if [ -n "$missing_keys" ]; then
+  echo "  В $ENV_FILE нет ключей из примера: $missing_keys" >&2
+  echo "  Значения и комментарии к ним — deploy/id.env.example" >&2
+else
+  echo "  все ключи примера на месте"
+fi
+
+echo "==> [3/8] build (тег $ID_TAG)"
 # Образы собираются ПО ОЧЕРЕДИ, а не одной командой `compose build`.
 #
 # Одна команда отдаёт сборку buildx bake, и тот запускает обе цели параллельно.
@@ -83,7 +105,7 @@ done
 
 MIGRATE_STATUS="нет"
 if [ "$MIGRATE" = 1 ]; then
-  echo "==> [3/7] migrate"
+  echo "==> [4/8] migrate"
   # Воркер останавливается ДО наката. Миграции переименовывают таблицы (0028:
   # submissions -> works), и работающий воркер старого образа продолжал бы
   # обращаться к именам, которых уже нет: задачи падали бы, а следы этого
@@ -98,13 +120,13 @@ if [ "$MIGRATE" = 1 ]; then
   unset MIGRATE_DATABASE_URL
   MIGRATE_STATUS="да"
 else
-  echo "==> [3/7] migrate пропущен (флаг --migrate не передан)"
+  echo "==> [4/8] migrate пропущен (флаг --migrate не передан)"
 fi
 
-echo "==> [4/7] up"
+echo "==> [5/8] up"
 "${COMPOSE[@]}" up -d id-api id-worker id-web
 
-echo "==> [5/7] health (изнутри контейнера — публичный домен не требуется)"
+echo "==> [6/8] health (изнутри контейнера — публичный домен не требуется)"
 health_ok=""
 for _ in $(seq 1 40); do
   if "${COMPOSE[@]}" exec -T id-api wget -qO- http://127.0.0.1:3000/health/ready >/dev/null 2>&1; then
@@ -114,7 +136,7 @@ for _ in $(seq 1 40); do
   sleep 2
 done
 
-echo "==> [6/7] смоук маршрутов API"
+echo "==> [7/8] смоук маршрутов API"
 # /health/ready живёт независимо от бизнес-маршрутов: выкатка с полностью
 # выпиленным /api/v1 отчиталась бы «health: ok». Так и вышло в S44 —
 # переименование маршрутов дошло до прода, и портал молча отвечал 404 на
@@ -138,7 +160,18 @@ if [ -n "$health_ok" ]; then
   done
 fi
 
-echo "==> [7/7] отчёт"
+echo "==> [8/8] отчёт"
+# Здоровье воркера отдельной строкой, а не только колонкой в таблице ниже:
+# `unhealthy` у службы без публичных портов теряется среди прочих статусов, и
+# именно так он и терялся — воркер месяцами считал задачи с красной пометкой.
+worker_cid="$("${COMPOSE[@]}" ps -q id-worker 2>/dev/null || true)"
+if [ -n "$worker_cid" ]; then
+  worker_health="$(docker inspect \
+    --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}проверки нет{{end}}' \
+    "$worker_cid" 2>/dev/null || echo 'не удалось спросить')"
+else
+  worker_health="контейнера нет"
+fi
 echo
 echo "===== ОТЧЁТ О ДЕПЛОЕ (id) ====="
 echo "время:    $(date -Is)"
@@ -146,6 +179,8 @@ echo "коммит:   $(git -C "$PORTAL_DIR" rev-parse HEAD) (тег образ�
 echo "миграции: $MIGRATE_STATUS"
 echo "health:   $([ -n "$health_ok" ] && echo ok || echo 'НЕ готов — docker compose -p id logs id-api')"
 echo "маршруты: $([ -n "$ROUTES_OK" ] && echo ok || echo 'НЕ отвечают — портал поднялся, но /api/v1 недоступен')"
+echo "воркер:   $worker_health (служебный /metrics; starting сразу после выкатки — норма)"
+echo "env-ключи: ${missing_keys:-ok}${missing_keys:+ — нет в $ENV_FILE, см. deploy/id.env.example}"
 "${COMPOSE[@]}" ps --format 'table {{.Service}}\t{{.Status}}'
 echo "================================"
 
