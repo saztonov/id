@@ -208,7 +208,7 @@ const NUMERIC_CORE_SCORE = 0.7;
  * пункт перечня встречаются в номерах комплекта постоянно, и совпадение по ним
  * означало бы «у обоих документов есть цифры».
  */
-const MIN_NUMERIC_CORE_LENGTH = 6;
+export const MIN_NUMERIC_CORE_LENGTH = 6;
 
 /**
  * Счёт частичного совпадения номера.
@@ -251,7 +251,7 @@ const MIN_ONE_CHAR_LENGTH = 12;
  * значило бы выдавать случайные пары за находки. Ступень существует ради
  * длинных шифров, где потерян префикс или хвост.
  */
-const MIN_PARTIAL_LENGTH = 4;
+export const MIN_PARTIAL_LENGTH = 4;
 
 /**
  * Счёт кандидата: строго ниже частичного совпадения и НЕ равен совпадению.
@@ -433,7 +433,7 @@ function indexBy(
  * Выбор по длине даёт ту единственную, ради которой ступень существует, и не
  * требует знать раскладку конкретного бланка.
  */
-function numericCoreOf(folded: string): string | null {
+export function numericCoreOf(folded: string): string | null {
   let longest = '';
   for (const match of folded.matchAll(/\d+/gu)) {
     if (match[0].length > longest.length) longest = match[0];
@@ -481,7 +481,7 @@ function partialCandidates(
 }
 
 /** Различаются ли строки ровно одной заменой, вставкой или пропуском знака. */
-function differsByOneChar(a: string, b: string): boolean {
+export function differsByOneChar(a: string, b: string): boolean {
   if (Math.abs(a.length - b.length) > 1) return false;
   if (a === b) return false;
 

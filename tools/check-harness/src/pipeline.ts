@@ -22,9 +22,13 @@ import {
   KNOWN_TYPE_MIN_CONFIDENCE,
   documentNumbersOf,
   matchRegistryRows,
+  matchTransferGroups,
   pagesNeedingLlm,
   parseAnnexRegistry,
+  parseTransferRegistry,
   planComplects,
+  toRegistryRows,
+  TRANSFER_TYPE,
   type ExtractedField,
   type MatchableDocument,
   type MatchRegistryResult,
@@ -32,7 +36,11 @@ import {
   type PageInput,
   type RegistryParseResult,
   type Segmentation,
+  type TransferGroupCandidate,
+  type TransferGroupsOutcome,
+  type TransferParseResult,
 } from '@id/api';
+import { isAnalysisAnchor } from '@id/doc-types';
 import {
   deriveMaterials,
   isFallbackCode,
@@ -77,6 +85,22 @@ export interface RegistryRunView {
   readonly match: MatchRegistryResult;
 }
 
+/**
+ * Разбор описи передачи и сопоставление её разделов с комплектами (S50).
+ *
+ * До S50 стенд описи не касался вовсе: правила REG.110–112 на нём всегда
+ * отвечали «в папке нет описи», и главный вопрос — «сходится ли состав папки с
+ * тем, что перечислено в общем реестре» — офлайн не проверялся ни разу. Разбор
+ * тот же, что в задаче 17 воркера, и берётся он из портала, а не пишется здесь
+ * заново.
+ */
+export interface TransferRunView {
+  readonly documentId: string;
+  readonly documentOrdinal: number;
+  readonly parsed: TransferParseResult;
+  readonly outcome: TransferGroupsOutcome;
+}
+
 export interface PackageRunResult {
   readonly packageDir: string;
   readonly packageName: string;
@@ -89,6 +113,7 @@ export interface PackageRunResult {
   readonly typeConfidentByDocument: ReadonlyMap<string, boolean>;
   readonly fieldsByDocument: ReadonlyMap<string, readonly ExtractedField[]>;
   readonly registries: readonly RegistryRunView[];
+  readonly transfers: readonly TransferRunView[];
   readonly graph: CheckGraph;
   readonly rules: RuleRunResult;
   readonly anomalies: readonly string[];
@@ -307,6 +332,124 @@ export function runPackage(dir: string, options: HarnessOptions): PackageRunResu
     }
   }
 
+  /**
+   * Опись передачи: разбор и привязка её разделов к комплектам (S50).
+   *
+   * Кандидатами идут комплекты — по одному на акт, — и номера берутся из
+   * реквизитов акта, как в задаче 17 воркера. Наименование работы и исполнитель
+   * передаются настоящими: без них у сопоставления живёт только ступень номера,
+   * и раздел, номер которого распознан с ошибкой, теряет комплект вместе со
+   * всеми своими строками.
+   */
+  const transfers: TransferRunView[] = [];
+  const transferRows: RegistryRowNode[] = [];
+
+  for (const document of documents) {
+    if (document.docTypeCode !== TRANSFER_TYPE) continue;
+    const parsed = parseTransferRegistry({ pages: extractionPagesOf.get(document.id) ?? [] });
+
+    const candidates: TransferGroupCandidate[] = documents
+      .filter(
+        (candidate) => isAnalysisAnchor(candidate.docTypeCode) && candidate.complectId !== null,
+      )
+      .map((candidate) => ({
+        workId: candidate.complectId as string,
+        folderId: 'folder-1',
+        // Контрагентов у стенда нет: справочник — свойство базы, а не разбора.
+        contractorId: 'contractor-1',
+        contractorName:
+          candidate.fields.find((field) => field.fieldCode === 'contractor_name')?.valueText ??
+          null,
+        title: candidate.fields.find((field) => field.fieldCode === 'p1_works')?.valueText ?? '',
+        actNumbers: documentNumbersOf(candidate.fields),
+      }));
+
+    const outcome = matchTransferGroups(parsed.groups, candidates);
+    transfers.push({
+      documentId: document.id,
+      documentOrdinal: document.ordinal,
+      parsed,
+      outcome,
+    });
+
+    for (const [index, row] of toRegistryRows(parsed, outcome).entries()) {
+      transferRows.push({
+        id: `transfer-${document.ordinal}-${index + 1}`,
+        registryDocumentId: document.id,
+        ordinal: index + 1,
+        rowNo: row.rowNo,
+        sectionTitle: row.sectionTitle,
+        docNameRaw: row.docNameRaw,
+        docNoRaw: row.docNoRaw,
+        docNoNorm: row.docNoNorm,
+        docNoFolded: row.docNoFolded,
+        orgRaw: row.orgRaw,
+        validFrom: row.validFrom,
+        validTo: row.validTo,
+        issuedAt: row.issuedAt,
+        // Сверка строк описи с документами — задача 18 воркера; стенд считает
+        // её отдельно ниже, чтобы кандидаты ограничивались своим комплектом.
+        matchedDocumentId: null,
+        matchScore: null,
+        matchState: 'missing',
+        candidateDocumentIds: [],
+        complectId: row.complectId ?? null,
+      });
+    }
+  }
+
+  /**
+   * Строки описи сверяются ВНУТРИ своего комплекта (S50).
+   *
+   * Раздел, привязанный к комплекту, ищет свои документы только среди его
+   * документов: двенадцать одинаковых паспортов одной папки иначе дают
+   * «неоднозначно» на каждой строке. Строки раздела без комплекта остаются
+   * несопоставленными — искать их по всей папке значило бы гадать.
+   */
+  for (const [index, row] of transferRows.entries()) {
+    if (row.complectId === null) continue;
+    const scoped: readonly MatchableDocument[] = documents
+      .filter((candidate) => candidate.complectId === row.complectId)
+      .map((candidate) => ({
+        documentId: candidate.id,
+        docTypeCode: candidate.docTypeCode,
+        numbers: documentNumbersOf(candidate.fields),
+        issuedAt: candidate.fields.find((f) => f.fieldCode === 'issued_at')?.valueDate ?? null,
+        title: candidate.title,
+      }));
+    const decision = matchRegistryRows(
+      [
+        {
+          rowNo: row.rowNo,
+          sectionTitle: row.sectionTitle,
+          docNameRaw: row.docNameRaw,
+          docNoRaw: row.docNoRaw,
+          docNoNorm: row.docNoNorm,
+          docNoFolded: row.docNoFolded,
+          orgRaw: row.orgRaw,
+          validFrom: row.validFrom,
+          validTo: row.validTo,
+          issuedAt: row.issuedAt,
+        },
+      ],
+      scoped,
+    ).rows[0];
+    if (decision === undefined) continue;
+    transferRows[index] = {
+      ...row,
+      matchedDocumentId: decision.matchedDocumentId,
+      matchScore: decision.matchScore,
+      matchState:
+        decision.matchState === 'matched'
+          ? 'matched'
+          : decision.matchState === 'ambiguous'
+            ? 'ambiguous'
+            : decision.matchState === 'candidate'
+              ? 'candidate'
+              : 'missing',
+      candidateDocumentIds: decision.candidates.map((candidate) => candidate.documentId),
+    };
+  }
   // Задача 19: связи. Затем материалы — как в задаче 20 (checks.ts:507).
   const relations = deriveOfflineRelations(documents, registryRows);
 
@@ -329,6 +472,7 @@ export function runPackage(dir: string, options: HarnessOptions): PackageRunResu
     folder: makeFolder(),
     documents,
     registryRows,
+    transferRows,
     relations,
     materials,
     external: makeUnavailableRegistries(),
@@ -375,6 +519,7 @@ export function runPackage(dir: string, options: HarnessOptions): PackageRunResu
     typeConfidentByDocument,
     fieldsByDocument,
     registries,
+    transfers,
     graph,
     rules,
     anomalies,

@@ -41,6 +41,7 @@
  */
 
 import { normalizeDocNo } from '@id/contracts';
+import { MIN_PARTIAL_LENGTH, numericCoreOf } from './match.js';
 import { scanBlocks, type MdTable } from './md-table.js';
 import type { ParsedRegistryRow } from './types.js';
 import {
@@ -376,8 +377,54 @@ function isVolumesTable(table: MdTable): boolean {
   return header.some((cell) => VOLUMES_HEADER.test(cell));
 }
 
-function cellAt(cells: readonly string[], index: number | null): string {
-  return index === null ? '' : (cells[index] ?? '');
+function cellAt(cells: readonly string[], index: number | null, shift = 0): string {
+  return index === null ? '' : (cells[index + shift] ?? '');
+}
+
+/**
+ * Номер позиции с иерархией: «1.1», «12.14». Целая часть — номер раздела.
+ *
+ * Иерархия — это и есть структура описи, напечатанная в самой таблице: раздел
+ * работы получает номер, а его документы — номера вида «раздел.позиция».
+ * Опираясь на неё, разбор не зависит от того, как OCR прочитал заголовок
+ * раздела и прочитал ли вообще.
+ */
+const HIERARCHICAL_POSITION = /^(\d{1,4})\.(\d{1,4})\.?$/u;
+
+/**
+ * Сдвиг раскладки для строки, у которой граф на одну больше или меньше (S50).
+ *
+ * Графы считает OCR, и на длинной описи он теряет крайнюю: на боевой папке
+ * третий и четвёртый листы пришли с семью графами вместо восьми — пропал
+ * счётчик разделов слева. Прежде такая строка отбрасывалась целиком с
+ * предупреждением, и опись из 180 строк разбиралась на 81.
+ *
+ * Сдвиг подтверждается ЯКОРЕМ: на своём месте после сдвига обязан оказаться
+ * номер позиции. Без якоря сдвиг был бы догадкой, и наименование уехало бы в
+ * графу номера — то есть портал записал бы в базу неверный факт описи.
+ *
+ * Возвращает `null`, когда выровнять нечем: строка отбрасывается, как и до S50.
+ */
+function alignmentShift(cells: readonly string[], layout: TransferColumns): number | null {
+  if (cells.length === layout.count) return 0;
+  if (Math.abs(cells.length - layout.count) > 1) return null;
+  if (layout.pos === null) return null;
+
+  /**
+   * Лишняя графа бывает и в начале строки, и в конце, и это разные сдвиги.
+   *
+   * Пустая графа справа раскладку не двигает вовсе (сдвиг 0), потерянная
+   * слева двигает всё на единицу. Различает их якорь: номер позиции обязан
+   * оказаться на своём месте. Порядок проверки — от «ничего не сдвинулось» к
+   * сдвигу, потому что первое и вероятнее, и безопаснее.
+   */
+  for (const shift of [0, cells.length - layout.count]) {
+    const candidate = cells[layout.pos + shift];
+    if (candidate === undefined) continue;
+    const value = candidate.replace(/\.$/u, '');
+    if (value !== '' && POSITION_NO.test(value)) return shift;
+  }
+  return null;
 }
 
 function toCount(value: string): number | null {
@@ -412,6 +459,7 @@ function buildRow(
   layout: TransferColumns,
   groupOrdinal: number,
   pageId: string,
+  shift = 0,
 ): void {
   if (state.rows.length >= MAX_ROWS) {
     if (!state.truncated) {
@@ -424,8 +472,8 @@ function buildRow(
   }
 
   const ordinal = state.rows.length;
-  const number = parseNumberCell(cellAt(cells, layout.number));
-  const dateCell = cellAt(cells, layout.date);
+  const number = parseNumberCell(cellAt(cells, layout.number, shift));
+  const dateCell = cellAt(cells, layout.date, shift);
   const dates = parseTransferDateCell(dateCell);
 
   if (dates.monthOnly) {
@@ -441,15 +489,15 @@ function buildRow(
 
   const normalized =
     number.comparable && number.docNoRaw !== null ? normalizeDocNo(number.docNoRaw) : null;
-  const orgRaw = cellAt(cells, layout.org);
-  const rowNoRaw = cellAt(cells, layout.pos).replace(/\.$/u, '');
-  const pagesRaw = cellAt(cells, layout.pages);
+  const orgRaw = cellAt(cells, layout.org, shift);
+  const rowNoRaw = cellAt(cells, layout.pos, shift).replace(/\.$/u, '');
+  const pagesRaw = cellAt(cells, layout.pages, shift);
 
   state.rows.push({
     ordinal,
     groupOrdinal,
     rowNo: rowNoRaw === '' ? null : rowNoRaw,
-    docNameRaw: cellAt(cells, layout.name),
+    docNameRaw: cellAt(cells, layout.name, shift),
     docNoRaw: number.docNoRaw,
     docNoNorm: normalized?.normalized ?? null,
     docNoFolded: normalized?.folded ?? null,
@@ -458,8 +506,8 @@ function buildRow(
     issuedAt: number.issuedAt ?? dates.issuedAt,
     validFrom: number.validFrom ?? dates.validFrom,
     validTo: number.validTo ?? dates.validTo,
-    sheets: toCount(cellAt(cells, layout.sheets)),
-    copies: toCount(cellAt(cells, layout.copies)),
+    sheets: toCount(cellAt(cells, layout.sheets, shift)),
+    copies: toCount(cellAt(cells, layout.copies, shift)),
     pagesRaw: pagesRaw === '' ? null : pagesRaw,
   });
 }
@@ -582,7 +630,8 @@ export function parseTransferRegistry(input: {
           continue;
         }
 
-        if (cells.length !== layout.count) {
+        const shift = alignmentShift(cells, layout);
+        if (shift === null) {
           state.warnings.push(
             `страница ${page.sourcePageId}: строка описи из ${cells.length} граф ` +
               `вместо ${layout.count} отброшена`,
@@ -591,20 +640,71 @@ export function parseTransferRegistry(input: {
         }
         if (cells.every((cell, index) => cell === String(index + 1))) continue;
 
-        const posRaw = cellAt(cells, layout.pos).replace(/\.$/u, '');
+        const posRaw = cellAt(cells, layout.pos, shift).replace(/\.$/u, '');
+
+        /**
+         * Раздел описи узнаётся по НОМЕРУ ПОЗИЦИИ, а не только по заголовку (S50).
+         *
+         * Опись нумерует свои строки иерархически: «1.1»…«1.16» — документы
+         * первого раздела, «2.1» — начало второго. Это структура самой
+         * таблицы, и она переживает то, чего не переживает заголовок: OCR
+         * отдал его обычным абзацем вместо жирного, разорвал на две строки,
+         * не прочитал вовсе. На боевой папке первые два раздела остались без
+         * заголовков — и тридцать их строк уходили в предупреждение «строка
+         * встретилась до первой группы», то есть не разбирались никак.
+         *
+         * Заголовок при этом не теряет смысла: он даёт разделу название и
+         * исполнителя. Он просто перестал быть ЕДИНСТВЕННЫМ способом узнать,
+         * что раздел начался.
+         */
+        const hierarchical = HIERARCHICAL_POSITION.exec(posRaw);
+        const sectionNo = hierarchical?.[1] ?? null;
+        if (layout.form === 'b' && sectionNo !== null) {
+          const known = state.groups.findIndex((group) => group.groupNo === sectionNo);
+          if (known >= 0) {
+            openGroupOrdinal = known;
+          } else {
+            const open = openGroupOrdinal === null ? undefined : state.groups[openGroupOrdinal];
+            if (open !== undefined && open.groupNo === null) {
+              // Раздел открыт заголовком, а номер его строк стал известен
+              // только сейчас: заголовок печатается ПЕРЕД таблицей.
+              state.groups[openGroupOrdinal as number] = { ...open, groupNo: sectionNo };
+            } else {
+              const opened = openGroup(
+                state,
+                {
+                  groupNo: sectionNo,
+                  titleRaw: '',
+                  actNoRaw: null,
+                  actNoNorm: null,
+                  actNoFolded: null,
+                  contractorRaw: null,
+                  actRowOrdinal: null,
+                },
+                page.sourcePageId,
+              );
+              if (!opened) break;
+              openGroupOrdinal = state.groups.length - 1;
+              state.warnings.push(
+                `страница ${page.sourcePageId}: раздел ${sectionNo} начался без заголовка — ` +
+                  'название работы у него пустое',
+              );
+            }
+          }
+        }
 
         if (layout.form === 'a' && posRaw !== '' && POSITION_NO.test(posRaw)) {
           // Форма А: строка с непустым «№ п/п» — это САМА РАБОТА, её графа
           // «№ документа» несёт номер АОСР, а следующие строки с пустым «№ п/п»
           // суть приложения этой работы.
-          const number = parseNumberCell(cellAt(cells, layout.number));
+          const number = parseNumberCell(cellAt(cells, layout.number, shift));
           const normalized =
             number.comparable && number.docNoRaw !== null ? normalizeDocNo(number.docNoRaw) : null;
           const opened = openGroup(
             state,
             {
               groupNo: posRaw,
-              titleRaw: normalizeRegistryName(cellAt(cells, layout.name)),
+              titleRaw: normalizeRegistryName(cellAt(cells, layout.name, shift)),
               actNoRaw: number.docNoRaw,
               actNoNorm: normalized?.normalized ?? null,
               actNoFolded: normalized?.folded ?? null,
@@ -619,14 +719,14 @@ export function parseTransferRegistry(input: {
 
         if (openGroupOrdinal === null) {
           state.warnings.push(
-            `страница ${page.sourcePageId}: строка описи «${cellAt(cells, layout.name)}» ` +
+            `страница ${page.sourcePageId}: строка описи «${cellAt(cells, layout.name, shift)}» ` +
               'встретилась до первой группы — отнести её к комплекту не к чему',
           );
           continue;
         }
 
         const before = state.rows.length;
-        buildRow(state, cells, layout, openGroupOrdinal, page.sourcePageId);
+        buildRow(state, cells, layout, openGroupOrdinal, page.sourcePageId, shift);
         const added = state.rows[before];
         if (added !== undefined && layout.form === 'b') {
           attachActNo(state, openGroupOrdinal, added);
@@ -695,6 +795,25 @@ export interface TransferGroupsOutcome {
 const ACT_EXACT_SCORE = 1;
 /** Совпадение номера после фолдинга гомоглифов: строго меньше точного (§8.3). */
 const ACT_FOLDED_SCORE = 0.85;
+/**
+ * Совпадение по числовому ядру номера (S50).
+ *
+ * Та же ступень и тот же счёт, что у сверки строк перечня (`match.ts`), и это
+ * не совпадение: вопрос один и тот же — «один ли это документ», — а различие в
+ * ответах означало бы, что портал сверяет опись строже или мягче, чем реестр
+ * приложений, без единого содержательного повода.
+ */
+const ACT_NUMERIC_CORE_SCORE = 0.7;
+/** Номер раздела содержится в номере акта или наоборот. */
+const ACT_PARTIAL_SCORE = 0.6;
+/**
+ * Привязка по порядку следования: самое слабое основание из возможных.
+ *
+ * Ниже всех остальных ступеней намеренно — это не совпадение реквизитов, а
+ * вывод из того, что описи составляют по порядку папки. Экран показывает такую
+ * привязку с оговоркой, а не как факт.
+ */
+const ORDER_SCORE = 0.4;
 /** Совпадение по наименованию работы: номера не было или он не сошёлся. */
 const TITLE_SCORE = 0.9;
 /** Коллизия, различённая исполнителем: самый слабый способ выбрать один. */
@@ -826,6 +945,41 @@ export function matchTransferGroups(
               ACT_FOLDED_SCORE,
               'номер АОСР совпал после фолдинга гомоглифов',
             ),
+      /**
+       * Номер акта в описи и в самом акте пишутся по-разному (S50).
+       *
+       * В описи напечатано «№ 48-ОТ/-1 этаж», на бланке акта — «№ 48-ОТ/-1»,
+       * а «этаж» стоит отдельным словом строкой ниже. Точное сравнение и
+       * фолдинг гомоглифов такую пару не сводят, и на боевой папке ни один из
+       * двенадцати разделов не нашёл своего комплекта: строки описи остались
+       * без комплекта, а правила REG.110–112 — без предмета.
+       *
+       * Ступени те же, что у сверки строк перечня, и в том же порядке:
+       * числовое ядро, затем частичное вхождение. Обе требуют единственности
+       * кандидата — двусмысленный ответ остаётся двусмысленным.
+       */
+      () => {
+        const core = group.actNoFolded === null ? null : numericCoreOf(group.actNoFolded);
+        if (core === null) return null;
+        const found = candidates.filter((candidate) =>
+          candidate.actNumbers.some(
+            (number) => numericCoreOf(normalizeDocNo(number).folded) === core,
+          ),
+        );
+        return decide(group, found, ACT_NUMERIC_CORE_SCORE, 'числовое ядро номера АОСР совпало');
+      },
+      () => {
+        const folded = group.actNoFolded;
+        if (folded === null || folded.length < MIN_PARTIAL_LENGTH) return null;
+        const found = candidates.filter((candidate) =>
+          candidate.actNumbers.some((number) => {
+            const key = normalizeDocNo(number).folded;
+            if (key.length < MIN_PARTIAL_LENGTH) return false;
+            return key.includes(folded) || folded.includes(key);
+          }),
+        );
+        return decide(group, found, ACT_PARTIAL_SCORE, 'номер АОСР совпал частично');
+      },
       () =>
         decide(
           group,
@@ -855,6 +1009,47 @@ export function matchTransferGroups(
             : 'комплекта с таким номером АОСР в папке нет',
       },
     );
+  }
+
+  /**
+   * Последняя ступень — ПОРЯДОК следования (S50).
+   *
+   * Номер акта в описи и на его бланке пишет один человек, а читают два разных
+   * прохода распознавания, и расходятся они на знак: «52-ОТ/-1 этаж» против
+   * «52-ОТ/1», «53-ОТ/-1» против «53-ОТ/-I». Ни фолдинг, ни числовое ядро,
+   * ни частичное вхождение такую пару не сводят: ядро у номера двузначное, а
+   * подстрокой одно в другое не входит.
+   *
+   * Зато остаётся структура: опись перечисляет работы в том же порядке, в
+   * котором акты лежат в папке, — иначе по ней нельзя было бы искать бумагу.
+   * Поэтому, когда неотвеченных разделов ровно столько же, сколько комплектов,
+   * не названных описью, они сопоставляются попарно по порядку.
+   *
+   * Условие «ровно столько же» — не осторожность, а смысл ступени: при разном
+   * числе сторон порядок ничего не доказывает, потому что неизвестно, какая из
+   * сторон лишняя. Счёт у неё низкий, а причина названа словами: человек
+   * увидит, что комплект привязан не номером, и проверит.
+   */
+  const undecided = matches
+    .map((match, index) => ({ match, index }))
+    .filter((entry) => entry.match.state === 'missing');
+  const unnamed = candidates.filter((candidate) => !named.has(candidate.workId));
+
+  if (undecided.length > 0 && undecided.length === unnamed.length) {
+    for (const [at, entry] of undecided.entries()) {
+      const candidate = unnamed[at] as TransferGroupCandidate;
+      named.add(candidate.workId);
+      matches[entry.index] = {
+        groupOrdinal: entry.match.groupOrdinal,
+        state: 'matched',
+        workId: candidate.workId,
+        folderId: candidate.folderId,
+        contractorId: candidate.contractorId,
+        score: ORDER_SCORE,
+        reason:
+          'номер АОСР не сошёлся ни одной ступенью; раздел привязан по порядку следования — проверьте',
+      };
+    }
   }
 
   const extraWorkIds = candidates

@@ -325,7 +325,10 @@ describe('parseTransferRegistry, открытый мир', () => {
     expect(result.warnings.some((text) => text.includes('шапка описи не распознана'))).toBe(true);
   });
 
-  it('строка до первой группы не пропадает молча', () => {
+  it('раздел без заголовка открывается номером позиции, а не теряется (S50)', () => {
+    // До S50 такая строка отбрасывалась: раздел открывал только заголовок. На
+    // боевой папке первые три раздела заголовков не получили — распознавание
+    // отдало их обычным абзацем, — и тридцать строк описи не разбирались.
     const result = parseTransferRegistry({
       pages: [
         page(
@@ -339,8 +342,53 @@ describe('parseTransferRegistry, открытый мир', () => {
       ],
     });
 
-    expect(result.rows).toHaveLength(0);
-    expect(result.warnings.some((text) => text.includes('до первой группы'))).toBe(true);
+    expect(result.rows).toHaveLength(1);
+    expect(result.groups).toHaveLength(1);
+    expect(result.groups[0]?.groupNo).toBe('1');
+    // Потеря заголовка названа: раздел есть, а как называется работа — неизвестно.
+    expect(result.groups[0]?.titleRaw).toBe('');
+    expect(result.warnings.some((text) => text.includes('без заголовка'))).toBe(true);
+  });
+
+  it('строка с иным числом граф выравнивается по номеру позиции (S50)', () => {
+    // Графы считает OCR: на третьем и четвёртом листах боевой описи пропала
+    // крайняя левая, и сто строк отбрасывались целиком.
+    const result = parseTransferRegistry({
+      pages: [
+        page(
+          'y-2',
+          [
+            FORM_B_HEADER,
+            '|---|---|---|---|---|---|---|---|',
+            '|  | 1.1 | Сертификат | №77 | ООО "Тест" | от 01.02.2024 | 1 | 1 |',
+            '| 1.2 | Паспорт | №88 | ООО "Тест" | от 02.02.2024 | 1 | 2 |',
+          ].join('\n'),
+        ),
+      ],
+    });
+
+    expect(result.rows).toHaveLength(2);
+    expect(result.rows[1]?.docNameRaw).toBe('Паспорт');
+    expect(result.rows[1]?.docNoRaw).toBe('88');
+  });
+
+  it('строку, которую выровнять нечем, разбор по-прежнему отбрасывает', () => {
+    const result = parseTransferRegistry({
+      pages: [
+        page(
+          'y-3',
+          [
+            FORM_B_HEADER,
+            '|---|---|---|---|---|---|---|---|',
+            '|  | 1.1 | Сертификат | №77 | ООО "Тест" | от 01.02.2024 | 1 | 1 |',
+            '| Паспорт | №88 | ООО "Тест" | от 02.02.2024 | 1 |',
+          ].join('\n'),
+        ),
+      ],
+    });
+
+    expect(result.rows).toHaveLength(1);
+    expect(result.warnings.some((text) => text.includes('отброшена'))).toBe(true);
   });
 
   it('группа без номера АОСР названа предупреждением', () => {
@@ -430,14 +478,17 @@ describe('matchTransferGroups', () => {
 
   it('группа без комплекта — missing, комплект без группы — extra', () => {
     const { groups } = formB();
+    // Комплектов без раздела ДВА, а неотвеченных разделов один: при разном
+    // числе сторон порядок ничего не доказывает, и ступень по порядку молчит.
     const outcome = matchTransferGroups(groups, [
       candidate({}),
       candidate({ workId: 'work-9', actNumbers: ['09-ХХ'], title: 'Работа, которой нет в описи' }),
+      candidate({ workId: 'work-8', actNumbers: ['08-ХХ'], title: 'И этой работы в описи нет' }),
     ]);
 
     // Вторая группа описи («Опорная стойка») комплекта не нашла.
     expect(outcome.groups[1]?.state).toBe('missing');
-    expect(outcome.extraWorkIds).toStrictEqual(['work-9']);
+    expect(outcome.extraWorkIds).toStrictEqual(['work-9', 'work-8']);
   });
 
   it('проигравшая ступень не гасит расхождение «комплект не назван описью»', () => {
@@ -448,9 +499,36 @@ describe('matchTransferGroups', () => {
     const outcome = matchTransferGroups(groups, [
       candidate({ workId: 'work-1', actNumbers: ['04-ШО'], title: 'Совсем другая работа' }),
       candidate({ workId: 'work-2', actNumbers: ['нет такого'] }),
+      candidate({ workId: 'work-3', actNumbers: ['и такого нет'] }),
     ]);
 
     expect(outcome.groups[0]?.workId).toBe('work-1');
     expect(outcome.extraWorkIds).toContain('work-2');
+  });
+
+  it('равное число неотвеченных разделов и комплектов сопоставляется по порядку (S50)', () => {
+    // Номер акта в описи и на бланке читают два разных прохода распознавания,
+    // и расходятся они на знак: «52-ОТ/-1 этаж» против «52-ОТ/1». Ни одна
+    // ступень реквизитов такую пару не сводит, а порядок — сводит: описи
+    // составляют по порядку папки.
+    const { groups } = formB();
+    const outcome = matchTransferGroups(groups, [
+      candidate({
+        workId: 'work-1',
+        actNumbers: ['номер прочитан иначе'],
+        title: 'Наименование тоже не сошлось',
+      }),
+      candidate({
+        workId: 'work-2',
+        actNumbers: ['и этот тоже'],
+        title: 'И у второго не сошлось',
+      }),
+    ]);
+
+    expect(outcome.groups.map((group) => group.state)).toStrictEqual(['matched', 'matched']);
+    expect(outcome.groups.map((group) => group.workId)).toStrictEqual(['work-1', 'work-2']);
+    // Оговорка обязательна: привязка не по реквизитам, и человек это увидит.
+    expect(outcome.groups[0]?.reason).toContain('по порядку следования');
+    expect(outcome.extraWorkIds).toHaveLength(0);
   });
 });

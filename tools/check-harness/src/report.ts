@@ -172,6 +172,63 @@ function fieldsSection(result: PackageRunResult): string {
   return parts.join('\n');
 }
 
+/**
+ * Опись передачи: цепочка «раздел → комплект → строка → документ» (S50).
+ *
+ * Раздел отдельный от реестров приложений, потому что вопрос другой. Реестр
+ * приложений спрашивает «назван ли документ перечнем СВОЕГО акта», опись — «на
+ * месте ли весь состав папки». До S50 стенд её не разбирал вовсе, и главный
+ * вопрос заказчика — сходится ли папка с общим реестром — офлайн не проверялся.
+ */
+function transfersSection(result: PackageRunResult): string {
+  if (result.transfers.length === 0) {
+    return '## 3а. Опись передачи\n\nОписи передачи в пакете нет.';
+  }
+  const parts: string[] = ['## 3а. Опись передачи', ''];
+  for (const transfer of result.transfers) {
+    const { parsed, outcome } = transfer;
+    const matched = outcome.groups.filter((group) => group.state === 'matched').length;
+    const ambiguous = outcome.groups.filter((group) => group.state === 'ambiguous').length;
+    const missing = outcome.groups.filter((group) => group.state === 'missing').length;
+    const rows = result.graph.transferRows.filter(
+      (row) => row.registryDocumentId === transfer.documentId,
+    );
+    const rowState = (state: string): number =>
+      rows.filter((row) => row.matchState === state).length;
+
+    parts.push(
+      `### ${transfer.documentId}`,
+      '',
+      `Разделов: ${parsed.groups.length} (комплект найден у ${matched}, неоднозначно ${ambiguous}, ` +
+        `не найден у ${missing}); комплектов вне описи: ${outcome.extraWorkIds.length}.`,
+      '',
+      `Строк: ${rows.length}; сверка внутри комплекта: matched ${rowState('matched')}, ` +
+        `candidate ${rowState('candidate')}, ambiguous ${rowState('ambiguous')}, ` +
+        `missing ${rowState('missing')}.`,
+      '',
+      table(
+        ['раздел', 'номер АОСР', 'наименование работы', 'строк', 'комплект', 'основание'],
+        parsed.groups.map((group) => {
+          const decision = outcome.groups.find((match) => match.groupOrdinal === group.ordinal);
+          return [
+            cell(group.groupNo ?? group.ordinal + 1),
+            cell(group.actNoRaw),
+            cell(clip(group.titleRaw, 50)),
+            cell(parsed.rows.filter((row) => row.groupOrdinal === group.ordinal).length),
+            cell(decision?.workId ?? '—'),
+            cell(clip(decision?.reason ?? '—', 60)),
+          ];
+        }),
+      ),
+      '',
+    );
+    if (parsed.warnings.length > 0) {
+      parts.push('Предупреждения разбора:', '', ...parsed.warnings.map((w) => `- ${w}`), '');
+    }
+  }
+  return parts.join('\n');
+}
+
 function registriesSection(result: PackageRunResult): string {
   if (result.registries.length === 0) {
     return '## 3. Реестры приложений\n\nРеестров в пакете не распознано.';
@@ -320,6 +377,8 @@ export function renderPackageReport(result: PackageRunResult): string {
     '',
     registriesSection(result),
     '',
+    transfersSection(result),
+    '',
     rulesSection(result),
     '',
     anomaliesSection(result),
@@ -384,6 +443,13 @@ export function renderSummary(results: readonly PackageRunResult[]): string {
       cell(result.segmentation.unassigned.length),
       cell(result.llmPending),
       cell(registryRowCount),
+      // Опись одной колонкой: «строк — из них с найденным комплектом». Ноль
+      // слева означает «описи в пакете нет», ноль справа — «есть, но ни один
+      // её раздел к комплекту не привязался», и это разные беды.
+      cell(
+        `${result.graph.transferRows.length}/` +
+          `${result.graph.transferRows.filter((row) => row.complectId !== null).length}`,
+      ),
       cell(result.rules.counts.failed),
       cell(result.rules.counts.undetermined),
       cell(open),
@@ -401,6 +467,7 @@ export function renderSummary(results: readonly PackageRunResult[]): string {
         'непривяз.',
         'LLM-ожид.',
         'строк реестров',
+        'опись: строк/в комплектах',
         'fail',
         'undet.',
         'открытых замечаний',
