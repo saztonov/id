@@ -2447,13 +2447,20 @@ export function createVlmFinalizeHandler(deps: VlmRecognitionDeps): JobHandler<'
     }
 
     /**
-     * Неполное покрытие: отказ или частичный результат.
+     * Неполное покрытие публикуется частично — в обоих режимах (S50).
      *
-     * В строгом режиме «распознали не всё» — это провал прогона: неполный набор
-     * блоков нельзя выдавать за результат, по которому потом принимают решение.
-     * В режиме тестирования запрет мешает ровно тому, ради чего режим и заведён:
-     * восемьдесят распознанных страниц полезнее нуля, а какая именно страница
-     * отвалилась — видно поимённо.
+     * Прежде строгий режим считал «распознали не всё» провалом прогона: неполный
+     * набор блоков нельзя выдавать за результат, по которому принимают решение.
+     * Довод остаётся верным ровно наполовину. Он верен для ВЫВОДА о комплекте —
+     * и там ничего не меняется: непрочитанные листы попадают в пробелы покрытия,
+     * а правила полноты по ним отвечают «не проверено», а не «документа нет».
+     * Он неверен для самой работы: две страницы из двухсот двадцати, упавшие на
+     * сетевом отказе, обнуляли два часа вызовов модели и оставляли человека
+     * вовсе без разбора — вместо разбора с честно названной дырой.
+     *
+     * Прогон падает по-прежнему, но только когда публиковать НЕЧЕГО: ни одного
+     * покрытого блока, расхождение доказательств (`integrity_error` ниже) или
+     * отказ, останавливающий весь обход (бюджет, выключенная модель).
      *
      * Публикуется при этом СОГЛАСОВАННОЕ подмножество: `assemble` требует точной
      * биекции «замороженный блок ↔ результат», поэтому в сборку уходят только те
@@ -2464,7 +2471,9 @@ export function createVlmFinalizeHandler(deps: VlmRecognitionDeps): JobHandler<'
     const covered = new Set(envelopes.map((envelope) => envelope.layoutBlockId));
     const frozen = incomplete ? frozenAll.filter((block) => covered.has(block.id)) : frozenAll;
 
-    if (incomplete && !(await deps.enforceGates())) {
+    // Пригодных блоков нет вовсе: публиковать нечего, и «частичный результат»
+    // из нуля был бы отказом с другой формулировкой.
+    if (incomplete && envelopes.length > 0) {
       ctx.logger.warn(
         {
           event: 'vlm_recognition_partial_publish',
@@ -2473,7 +2482,7 @@ export function createVlmFinalizeHandler(deps: VlmRecognitionDeps): JobHandler<'
           blocks_expected: frozenAll.length,
           blocks_covered: envelopes.length,
         },
-        'покрытие неполно, но режим тестирования публикует распознанное',
+        'покрытие неполно: публикуется распознанное, непрочитанные листы названы',
       );
     } else if (incomplete) {
       await deps.finishRun({
@@ -2593,13 +2602,45 @@ export function createVlmFinalizeHandler(deps: VlmRecognitionDeps): JobHandler<'
 
     const finalCounts = {
       ...counts,
-      blocksExpected: frozen.length,
+      // Знаменатель — ВЕСЬ набор, а не опубликованное подмножество (S50):
+      // «покрыто 291 из 293» и «покрыто 291 из 291» читаются одинаково
+      // спокойно, но означают разное, и второе скрывает дыру.
+      blocksExpected: frozenAll.length,
       blocksCovered: envelopes.length,
       pagesWritten: published.pagesWritten,
       pagesAlreadyPresent: published.pagesAlreadyPresent,
     };
 
-    await deps.finishRun({ runId: run.runId, status: 'done', counts: finalCounts });
+    /**
+     * Частичная публикация помечается предупреждением прогона (S50).
+     *
+     * Без него неполное покрытие отличалось бы от полного только парой чисел в
+     * счётчиках — то есть на экране никак. Предупреждение называет и число
+     * непрочитанных листов, и их номера: по ним человек решает, дочитывать ли
+     * их отдельно или комплект годится как есть.
+     */
+    const failedPages = pages
+      .filter((page) => page.status === 'failed')
+      .map((page) => page.workingPageIndex);
+    const warnings = incomplete
+      ? [
+          {
+            code: 'partial_publish',
+            pagesFailed: counts.pagesFailed,
+            pagesTotal: counts.pagesTotal,
+            pages: failedPages,
+            blocksExpected: frozenAll.length,
+            blocksCovered: envelopes.length,
+          },
+        ]
+      : [];
+
+    await deps.finishRun({
+      runId: run.runId,
+      status: 'done',
+      counts: finalCounts,
+      ...(warnings.length > 0 ? { warnings } : {}),
+    });
 
     ctx.logger.info(
       { event: 'recognition_export_stored', artifact_sha256: sha256, ...finalCounts },

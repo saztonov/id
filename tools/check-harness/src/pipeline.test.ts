@@ -6,9 +6,10 @@
  * гейт §1.6 (каждая страница ровно один раз), доказательства полей, полнота
  * журнала исполнения правил и PII-guard записи отчётов.
  */
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterAll, describe, expect, it } from 'vitest';
 
 import { RULE_CATALOG } from '@id/rules';
@@ -144,6 +145,7 @@ describe('runPackage', () => {
       '## 1. Сегментация',
       '## 2. Реквизиты',
       '## 3. Реестры приложений',
+      '## 3а. Опись передачи',
       '## 4. Правила',
       '## 5. Аномалии разбора',
     ]) {
@@ -154,5 +156,88 @@ describe('runPackage', () => {
   it('запись отчёта вне temp/ отклоняется (PII-guard)', () => {
     expect(() => assertUnderTemp(dir)).toThrow(/temp/u);
     expect(() => writePackageReport(join(dir, 'out'), result)).toThrow(/temp/u);
+  });
+});
+
+// =====================================================================
+// Регресс на настоящей папке (S50)
+// =====================================================================
+
+/**
+ * Гейт разбора боевой папки на 220 листов.
+ *
+ * Синтетика проверяет инварианты конвейера, но не отвечает на вопрос, ради
+ * которого S50 делался: разбирается ли настоящий комплект так, как он
+ * напечатан. Числа здесь — не «сколько получилось», а границы, ниже которых
+ * результат считается сломанным: двенадцать актов, двенадцать реестров
+ * приложений, одна опись на четырёх листах, её двенадцать разделов и сто
+ * восемьдесят строк.
+ *
+ * Папка живёт только в `temp/` и в репозиторий не входит (§1.4, ПДн), поэтому
+ * набор пропускается там, где её нет, — тем же приёмом, что и корпусный тест
+ * реестра приложений в `@id/api`.
+ */
+const MASTER_DIR = fileURLToPath(
+  new URL('../../../temp/MD/new/ИД_Мастер_апрель_2026', import.meta.url),
+);
+
+const masterAvailable = existsSync(MASTER_DIR);
+
+describe.skipIf(!masterAvailable)('папка «ИД Мастер апрель 2026» на настоящей выгрузке', () => {
+  const master = runPackage(MASTER_DIR, { today: '2026-04-30', unconfiguredProfile: false });
+
+  it('все 220 листов разобраны, ничьих почти нет', () => {
+    expect(master.pages).toHaveLength(220);
+    // До S50 неотнесённых было двенадцать: приложения не находили родителя,
+    // а листы описи рвались на числе граф.
+    expect(master.segmentation.unassigned.length).toBeLessThanOrEqual(2);
+  });
+
+  it('двенадцать актов, двенадцать реестров приложений, одна опись на четырёх листах', () => {
+    const byType = new Map<string, number>();
+    for (const document of master.segmentation.documents) {
+      const code = document.docTypeCode ?? '—';
+      byType.set(code, (byType.get(code) ?? 0) + 1);
+    }
+
+    expect(byType.get('aosr')).toBe(12);
+    expect(byType.get('annex_registry')).toBe(12);
+    expect(byType.get('transfer_registry')).toBe(1);
+
+    const transfer = master.segmentation.documents.find(
+      (document) => document.docTypeCode === 'transfer_registry',
+    );
+    expect(transfer?.pages).toHaveLength(4);
+  });
+
+  it('вид документа подтверждён почти у всех: ничья якорей разведена', () => {
+    const known = master.graph.documents.filter((document) => document.isKnownType).length;
+    expect(known / master.graph.documents.length).toBeGreaterThan(0.95);
+  });
+
+  it('опись разобрана целиком и каждый её раздел привязан к комплекту', () => {
+    const transfer = master.transfers[0];
+    expect(transfer).toBeDefined();
+    expect(transfer?.parsed.groups).toHaveLength(12);
+    expect(transfer?.parsed.rows).toHaveLength(180);
+    expect(transfer?.outcome.groups.every((group) => group.state === 'matched')).toBe(true);
+    expect(transfer?.outcome.extraWorkIds).toHaveLength(0);
+    expect(master.graph.transferRows.every((row) => row.complectId !== null)).toBe(true);
+  });
+
+  it('правила по описи исполняются, а не отвечают «неприменимо»', () => {
+    for (const code of ['REG.110', 'REG.111', 'REG.112']) {
+      const execution = master.rules.executions.find((item) => item.ruleCode === code);
+      expect(execution?.verdict, code).not.toBe('n_a');
+    }
+  });
+
+  it('пробел покрытия числится за своим комплектом, а не за всей папкой', () => {
+    const owners = Object.keys(master.graph.coverageGapsByComplect);
+    expect(owners.length).toBeLessThanOrEqual(1);
+    expect(master.graph.coverageGaps).toBe(
+      Object.values(master.graph.coverageGapsByComplect).reduce((sum, value) => sum + value, 0) +
+        master.graph.coverageGapsOutside,
+    );
   });
 });

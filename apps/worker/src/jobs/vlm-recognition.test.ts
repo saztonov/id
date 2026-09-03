@@ -1562,6 +1562,19 @@ describe('createVlmFinalizeHandler', () => {
         );
       },
       listBlockEnvelopes: async () => [envelope(frozenBlock())],
+      assemble: () => fakeAssembled(),
+      writeArtifactBytes: async () => {},
+      recordArtifact: async (input) => ({
+        kind: 'recorded' as const,
+        artifactSha256: input.artifactSha256,
+      }),
+      artifactId: async () => 'artifact-partial',
+      publishResults: async () => ({
+        pagesWritten: 1,
+        pagesAlreadyPresent: 0,
+        pagesOutOfRange: 0,
+        pointersMoved: 1,
+      }),
       finishRun,
     });
     const sink = makeSink();
@@ -1574,16 +1587,19 @@ describe('createVlmFinalizeHandler', () => {
     /**
      * Ожидание закончилось, и прогон пошёл своим обычным путём.
      *
-     * Здесь это честный отказ по покрытию: страница осталась нераспознанной, и
-     * прогон закрывается с названной причиной. Важно не то, каким именно
-     * исходом он кончился, а то, что он кончился, — до S41 на этом месте были
-     * четыре часа молчания.
+     * С S50 это частичная публикация: одна страница осталась нераспознанной,
+     * вторая прочитана, и её текст полезнее отказа. Важно не то, каким именно
+     * исходом кончился прогон, а то, что он кончился, — до S41 на этом месте
+     * были четыре часа молчания.
      */
-    await expect(handler(ctx)).rejects.toThrow(VlmRecognitionCoverageError);
+    await handler(ctx);
     expect(marked).toHaveLength(1);
     expect(marked[0]).toMatchObject({ workingPageIndex: 1, status: 'failed' });
     expect(finishCalls).toHaveLength(1);
-    expect(finishCalls[0]?.['status']).toBe('failed');
+    expect(finishCalls[0]?.['status']).toBe('done');
+    expect(
+      (finishCalls[0]?.['warnings'] as readonly Record<string, unknown>[])?.[0]?.['code'],
+    ).toBe('partial_publish');
 
     // Уже распознанные блоки страницы не теряются: счётчики переносятся как есть.
     expect(marked[0]?.['blocksRecognized']).toBe(0);
@@ -1729,11 +1745,57 @@ describe('createVlmFinalizeHandler', () => {
     expect(finishCalls).toHaveLength(0);
   });
 
-  it('есть страницы failed — тоже failed, даже при полном покрытии конвертов', async () => {
+  it('упавшая страница при пригодных блоках даёт частичную публикацию (S50)', async () => {
+    // Прежде прогон закрывался отказом: «распознали не всё» считалось провалом.
+    // На боевой папке из 220 листов это означало, что две страницы, упавшие на
+    // сетевом отказе, обнуляют два часа вызовов модели. Вывод о комплекте от
+    // публикации не страдает: непрочитанный лист попадает в пробелы покрытия, и
+    // правила полноты по нему отвечают «не проверено».
     const finishCalls: Record<string, unknown>[] = [];
     const d = deps({
       listRunPages: async () => [donePage({ status: 'failed', blocksRecognized: 0 })],
       listBlockEnvelopes: async () => [envelope(frozenBlock())],
+      assemble: () => fakeAssembled(),
+      writeArtifactBytes: async () => {},
+      recordArtifact: async (input) => ({
+        kind: 'recorded' as const,
+        artifactSha256: input.artifactSha256,
+      }),
+      artifactId: async () => 'artifact-partial',
+      publishResults: async () => ({
+        pagesWritten: 1,
+        pagesAlreadyPresent: 0,
+        pagesOutOfRange: 0,
+        pointersMoved: 1,
+      }),
+      finishRun: async (input) => {
+        finishCalls.push(input);
+        return { changed: true };
+      },
+    });
+    const sink = makeSink();
+    const handler = createVlmFinalizeHandler(d);
+    const ctx = makeContext('vlm.finalize_run', { folderId: FOLDER, recognitionRunId: RUN }, sink);
+
+    await handler(ctx);
+
+    expect(finishCalls[0]?.['status']).toBe('done');
+    // Дыра названа, а не спрятана: предупреждение несёт и число, и номера.
+    const warnings = finishCalls[0]?.['warnings'] as readonly Record<string, unknown>[];
+    expect(warnings?.[0]?.['code']).toBe('partial_publish');
+    expect(warnings?.[0]?.['pages']).toStrictEqual([0]);
+    // Знаменатель остался полным: «покрыто 1 из 1» скрыло бы потерянный лист.
+    const counts = finishCalls[0]?.['counts'] as Record<string, number>;
+    expect(counts['pagesFailed']).toBe(1);
+  });
+
+  it('пригодных блоков нет вовсе — по-прежнему отказ', async () => {
+    // Граница правила: публиковать нечего, и «частичный результат» из нуля был
+    // бы отказом с другой формулировкой.
+    const finishCalls: Record<string, unknown>[] = [];
+    const d = deps({
+      listRunPages: async () => [donePage({ status: 'failed', blocksRecognized: 0 })],
+      listBlockEnvelopes: async () => [],
       finishRun: async (input) => {
         finishCalls.push(input);
         return { changed: true };
