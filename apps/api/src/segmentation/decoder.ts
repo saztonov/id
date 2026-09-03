@@ -231,13 +231,80 @@ function foldNumber(value: string): string {
  */
 const SUBSTRING_MATCH_MIN_CHARS = 6;
 
-/** Подтверждает ли текст родительской страницы ссылку приложения. */
-function confirmsParent(parentText: string, parentRef: string): boolean {
+/**
+ * Длина, начиная с которой номер сравнивается с допуском в один знак.
+ *
+ * Двенадцать: короче — и допуск начинает склеивать номера, различающиеся
+ * законно («48.1-ОТ» и «48.2-ОТ»). В номере из двадцати знаков расхождение
+ * ровно в одном — это чтение, а не другой документ.
+ */
+const ONE_CHAR_MATCH_MIN_CHARS = 12;
+
+/** Различаются ли строки ровно одной заменой, вставкой или пропуском знака. */
+function differsByOneChar(a: string, b: string): boolean {
+  if (Math.abs(a.length - b.length) > 1) return false;
+  if (a === b) return false;
+
+  // Одна замена: длины равны, расхождение одно.
+  if (a.length === b.length) {
+    let seen = 0;
+    for (let i = 0; i < a.length; i += 1) {
+      if (a[i] !== b[i] && (seen += 1) > 1) return false;
+    }
+    return seen === 1;
+  }
+
+  // Один пропуск: короткая строка получается из длинной выбросом знака.
+  const [long, short] = a.length > b.length ? [a, b] : [b, a];
+  let i = 0;
+  let j = 0;
+  let skipped = false;
+  while (i < long.length && j < short.length) {
+    if (long[i] === short[j]) {
+      i += 1;
+      j += 1;
+      continue;
+    }
+    if (skipped) return false;
+    skipped = true;
+    i += 1;
+  }
+  return true;
+}
+
+/**
+ * Чем текст родительской страницы подтверждает ссылку приложения.
+ *
+ * Три исхода вместо двух — из-за пар, которые OCR путает не по сходству
+ * начертаний, а по соседству штрихов. В папке «ИД Мастер апрель 2026»
+ * сертификат пожарной безопасности АРТАЛИКС напечатан номером
+ * `РОСС RU.32311.ОС01.ПВ01.0539`, а его приложения ссылаются на
+ * `…ПБ01…` — одна буква из двадцати знаков. Фолдинг гомоглифов такую пару не
+ * сводит и сводить не должен: он про НЕРАЗЛИЧИМОСТЬ начертаний, а «Б» и «В»
+ * различимы. Четыре листа из-за этого остались ничьими.
+ *
+ * Поэтому допуск в один знак вынесен в отдельный исход: присоединять по нему
+ * можно, но выдавать за точное совпадение нельзя — страница помечается
+ * `needsReview` со своей причиной, и человек видит, чем она подтверждена.
+ */
+type ParentMatch = 'exact' | 'one_char' | 'none';
+
+function confirmsParent(parentText: string, parentRef: string): ParentMatch {
   const needle = foldNumber(parentRef);
-  if (needle.length === 0) return false;
-  if (pageNumbers(parentText).some((n) => foldNumber(n) === needle)) return true;
-  if (needle.length < SUBSTRING_MATCH_MIN_CHARS) return false;
-  return foldNumber(parentText).includes(needle);
+  if (needle.length === 0) return 'none';
+
+  const numbers = pageNumbers(parentText).map(foldNumber);
+  if (numbers.some((n) => n === needle)) return 'exact';
+  if (needle.length >= SUBSTRING_MATCH_MIN_CHARS && foldNumber(parentText).includes(needle)) {
+    return 'exact';
+  }
+  if (
+    needle.length >= ONE_CHAR_MATCH_MIN_CHARS &&
+    numbers.some((n) => differsByOneChar(n, needle))
+  ) {
+    return 'one_char';
+  }
+  return 'none';
 }
 
 // ── Сборка ────────────────────────────────────────────────────────────────
@@ -460,14 +527,17 @@ export function decodeSegmentation(
           continue;
         }
         const parentText = current.texts.join('\n');
+        let approximate = false;
         if (pageNumbers(parentText).length > 0) {
-          if (!confirmsParent(parentText, c.parentRef)) {
+          const confirmed = confirmsParent(parentText, c.parentRef);
+          if (confirmed === 'none') {
             drop(
               page,
               `приложение ссылается на документ № ${c.parentRef}, но этот номер на страницах текущего документа не назван`,
             );
             continue;
           }
+          approximate = confirmed === 'one_char';
         } else if (!previousInCurrent) {
           // На страницах текущего документа не названо ни одного номера, и
           // приложение идёт НЕ сразу за ним — сверить нечем и опереться не на что.
@@ -477,7 +547,14 @@ export function decodeSegmentation(
           );
           continue;
         }
-        attach(current, page, c);
+        attach(
+          current,
+          page,
+          c,
+          approximate
+            ? `номер родительского документа отличается на один знак: на приложении «${c.parentRef}»`
+            : undefined,
+        );
         previousInCurrent = true;
         continue;
       }

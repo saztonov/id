@@ -254,6 +254,47 @@ describe('приложение-продолжение', () => {
     expect(result.unassigned).toHaveLength(0);
   });
 
+  it('одна буква расхождения в длинном номере привязку не рвёт, но помечает лист', () => {
+    // Боевой случай той же папки: на сертификате пожарной безопасности
+    // напечатано «…ОС01.ПВ01.0539», на приложениях — «…ОС01.ПБ01.0539».
+    // «Б» и «В» различимы, поэтому фолдинг гомоглифов такую пару не сводит
+    // и не должен; четыре листа из-за этого оставались ничьими.
+    const parentSheet = page(
+      'p1',
+      `##### СЕРТИФИКАТ СООТВЕТСТВИЯ ПОЖАРНОЙ БЕЗОПАСНОСТИ\n№ РОСС RU.32311.ОС01.ПВ01.0539`,
+    );
+    const result = decodeSegmentation(
+      [parentSheet, page('p2')],
+      [opensKnown('p1', 'cert_conformity'), annexTo('p2', 'РОСС RU.32311.ОС01.ПБ01.0539')],
+    );
+
+    expect(result.documents[0]?.pages).toHaveLength(2);
+    // Допуск не выдаётся за точное совпадение: лист помечен своей причиной.
+    const attached = result.documents[0]?.pages[1];
+    expect(attached?.needsReview).toBe(true);
+    expect(attached?.reviewReason).toContain('отличается на один знак');
+  });
+
+  it('расхождение в два знака привязку рвёт', () => {
+    const parentSheet = page('p1', `СЕРТИФИКАТ СООТВЕТСТВИЯ\n№ РОСС RU.32311.ОС01.ПВ01.0539`);
+    const result = decodeSegmentation(
+      [parentSheet, page('p2')],
+      [opensKnown('p1', 'cert_conformity'), annexTo('p2', 'РОСС RU.32311.ОС01.ПБ01.0577')],
+    );
+
+    expect(result.documents[0]?.pages).toHaveLength(1);
+  });
+
+  it('допуск не действует на коротких номерах', () => {
+    // «A-1» и «A-2» — разные документы, а не разное чтение одного.
+    const result = decodeSegmentation(
+      [parent, page('p2')],
+      [opensKnown('p1', 'cert_conformity'), annexTo('p2', 'A-2')],
+    );
+
+    expect(result.documents[0]?.pages).toHaveLength(1);
+  });
+
   it('приставка «Не» вместо «№» на приложении привязку не рвёт', () => {
     // Та же общая нормализация: «Не» — то, во что OCR превращает «№», и в
     // папке так прочитано 35 номеров из 138.

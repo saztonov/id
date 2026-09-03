@@ -285,6 +285,55 @@ describe('matchRegistryRows', () => {
       expect(result.rows[0]?.matchState).toBe('missing');
     });
   });
+
+  describe('допуск в один знак', () => {
+    const CERT = 'РОСС RU.32311.ОС01.ПВ01.0539';
+    const REGISTRY = 'РОСС RU.32311.ОС01.ПБ01.0539';
+
+    it('одна буква расхождения — matched с низким счётом', () => {
+      // Сертификат пожарной безопасности АРТАЛИКС: на листе «ПВ01», в реестре
+      // «ПБ01». Фолдинг такую пару не сводит — «Б» и «В» различимы, — а
+      // числового ядра длиной от шести знаков в номере нет.
+      const result = matchRegistryRows([row(1, REGISTRY)], [doc('d1', CERT)]);
+
+      expect(result.rows[0]).toMatchObject({
+        matchState: 'matched',
+        matchedDocumentId: 'd1',
+        matchScore: 0.5,
+      });
+      expect(result.rows[0]?.reason).toContain('одним знаком');
+    });
+
+    it('счёт ниже частичного: решение принято с допуском', () => {
+      const near = matchRegistryRows([row(1, REGISTRY)], [doc('d1', CERT)]);
+      const partial = matchRegistryRows([row(1, '№ К14/ДК2-СЦ4')], [doc('d1', 'ДК2-СЦ4')]);
+
+      expect(near.rows[0]?.matchScore).toBeLessThan(partial.rows[0]?.matchScore ?? 1);
+    });
+
+    it('два документа в одном знаке — ambiguous, а не выбор наугад', () => {
+      const result = matchRegistryRows(
+        [row(1, REGISTRY)],
+        [doc('d1', CERT), doc('d2', 'РОСС RU.32311.ОС01.ПГ01.0539')],
+      );
+
+      expect(result.rows[0]?.matchState).toBe('ambiguous');
+      expect(result.rows[0]?.matchedDocumentId).toBeNull();
+    });
+
+    it('короткие номера с допуском не сравниваются', () => {
+      // «A-1» и «A-2» — разные документы, а не разное чтение одного.
+      const result = matchRegistryRows([row(1, 'A-2')], [doc('d1', 'A-1')]);
+
+      expect(result.rows[0]?.matchState).toBe('missing');
+    });
+
+    it('точное совпадение сильнее допуска', () => {
+      const result = matchRegistryRows([row(1, REGISTRY)], [doc('d1', CERT), doc('d2', REGISTRY)]);
+
+      expect(result.rows[0]).toMatchObject({ matchedDocumentId: 'd2', matchScore: 1 });
+    });
+  });
 });
 
 describe('documentNumbersOf', () => {

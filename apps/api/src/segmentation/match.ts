@@ -221,6 +221,30 @@ const MIN_NUMERIC_CORE_LENGTH = 6;
 const PARTIAL_SCORE = 0.6;
 
 /**
+ * Счёт совпадения с допуском в один знак.
+ *
+ * Ниже частичного: там совпал КУСОК номера целиком, здесь же не совпало
+ * ничего — расходится знак внутри. Ступень заведена по замеру, как и числовое
+ * ядро. Сертификат пожарной безопасности АРТАЛИКС в папке «ИД Мастер апрель
+ * 2026» напечатан номером `РОСС RU.32311.ОС01.ПВ01.0539`, а реестр и его
+ * приложения называют `…ПБ01…`. Фолдинг такую пару не сводит и не должен: он
+ * про неразличимость начертаний, а «Б» и «В» различимы. Числовое ядро тоже не
+ * помогает — длинных цифровых серий в этом номере нет.
+ *
+ * Счёт низкий намеренно: §9.1 обязан видеть, что решение принято с допуском.
+ */
+const ONE_CHAR_SCORE = 0.5;
+
+/**
+ * Короче этого номер с допуском не сравнивается.
+ *
+ * Двенадцать знаков: короче — и допуск начнёт склеивать номера, различающиеся
+ * законно («48.1-ОТ» против «48.2-ОТ»). В шифре из двадцати знаков расхождение
+ * ровно в одном — это чтение, а не другой документ.
+ */
+const MIN_ONE_CHAR_LENGTH = 12;
+
+/**
  * Короче этого номера в частичном сравнении не участвуют.
  *
  * «1», «7», «А» входят подстрокой в половину номеров комплекта, и разрешить их
@@ -450,6 +474,61 @@ function partialCandidates(
       const key = normalizeDocNo(number).folded;
       if (key.length < MIN_PARTIAL_LENGTH) return false;
       return key.includes(rowFolded) || rowFolded.includes(key);
+    });
+    if (hit && !found.includes(document.documentId)) found.push(document.documentId);
+  }
+  return found;
+}
+
+/** Различаются ли строки ровно одной заменой, вставкой или пропуском знака. */
+function differsByOneChar(a: string, b: string): boolean {
+  if (Math.abs(a.length - b.length) > 1) return false;
+  if (a === b) return false;
+
+  if (a.length === b.length) {
+    let seen = 0;
+    for (let i = 0; i < a.length; i += 1) {
+      if (a[i] !== b[i] && (seen += 1) > 1) return false;
+    }
+    return seen === 1;
+  }
+
+  const [long, short] = a.length > b.length ? [a, b] : [b, a];
+  let i = 0;
+  let j = 0;
+  let skipped = false;
+  while (i < long.length && j < short.length) {
+    if (long[i] === short[j]) {
+      i += 1;
+      j += 1;
+      continue;
+    }
+    if (skipped) return false;
+    skipped = true;
+    i += 1;
+  }
+  return true;
+}
+
+/**
+ * Документы, чей номер отличается от номера строки ровно одним знаком.
+ *
+ * Последняя ступень номера: она отвечает там, где не ответили ни точное
+ * сравнение, ни фолдинг, ни числовое ядро, ни кусок, — то есть на паре букв,
+ * которые распознавание путает по соседству штрихов, а не по сходству
+ * начертаний.
+ */
+function oneCharCandidates(
+  rowFolded: string,
+  documents: readonly MatchableDocument[],
+): readonly string[] {
+  if (rowFolded.length < MIN_ONE_CHAR_LENGTH) return [];
+
+  const found: string[] = [];
+  for (const document of documents) {
+    const hit = document.numbers.some((number) => {
+      const key = normalizeDocNo(number).folded;
+      return key.length >= MIN_ONE_CHAR_LENGTH && differsByOneChar(key, rowFolded);
     });
     if (hit && !found.includes(document.documentId)) found.push(document.documentId);
   }
@@ -710,6 +789,38 @@ export function matchRegistryRows(
           documentId,
           basis: 'doc_no' as const,
           score: PARTIAL_SCORE,
+        })),
+      });
+      continue;
+    }
+
+    const nearby = oneCharCandidates(row.docNoFolded, documents);
+    for (const id of nearby) named.add(id);
+
+    if (nearby.length === 1) {
+      matches.push({
+        rowNo: row.rowNo,
+        matchState: 'matched',
+        matchedDocumentId: nearby[0] ?? null,
+        matchScore: ONE_CHAR_SCORE,
+        reason:
+          'номер отличается одним знаком: полного совпадения в комплекте нет, кандидат единственный',
+        candidates: [],
+      });
+      continue;
+    }
+
+    if (nearby.length > 1) {
+      matches.push({
+        rowNo: row.rowNo,
+        matchState: 'ambiguous',
+        matchedDocumentId: null,
+        matchScore: null,
+        reason: `номер с допуском в один знак совпал у ${nearby.length} документов: выбрать один сверка не вправе`,
+        candidates: nearby.map((documentId) => ({
+          documentId,
+          basis: 'doc_no' as const,
+          score: ONE_CHAR_SCORE,
         })),
       });
       continue;
