@@ -169,13 +169,31 @@ describe('незнакомый раздел без опубликованног�
     }
   });
 
-  it('типо-специфичные правила дают n_a, а не ошибку', () => {
+  it('типо-специфичные правила молчат: n_a либо «не проверено», но не ошибка', () => {
     const typed = RULE_CATALOG.filter((spec) => spec.docTypeCode !== null);
     expect(typed.length).toBeGreaterThan(0);
 
     for (const spec of typed) {
       const execution = noProfile.executions.find((item) => item.ruleCode === spec.code);
-      expect(execution?.verdict, spec.code).toBe('n_a');
+      // С S50 ответов два, и они означают разное: вида в комплекте нет вовсе
+      // (`n_a`) либо документ вида есть, но его вид не подтверждён
+      // (`undetermined`). Оба — молчание, ни один — не обвинение комплекта.
+      expect([...['n_a', 'undetermined']], spec.code).toContain(execution?.verdict);
+    }
+  });
+
+  it('вид, который есть, но не подтверждён, даёт «не проверено» (S50)', () => {
+    // В графе лежит паспорт с уверенностью 0.55: документ есть, вид не
+    // подтверждён. Прежде правила по паспортам отвечали «неприменимо» — то
+    // есть комплект выглядел так, будто паспортов в нём нет вовсе.
+    const passportRules = RULE_CATALOG.filter((spec) => spec.docTypeCode === 'quality_passport');
+    expect(passportRules.length).toBeGreaterThan(0);
+
+    for (const spec of passportRules) {
+      const execution = noProfile.executions.find((item) => item.ruleCode === spec.code);
+      if (execution?.verdict === 'n_a') continue;
+      expect(execution?.verdict, spec.code).toBe('undetermined');
+      expect(execution?.reason ?? '', spec.code).toContain('не подтверждён');
     }
   });
 

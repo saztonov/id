@@ -503,8 +503,7 @@ export async function loadCheckGraph(
   // нём действительно ничего нет.
   const coverage = await db
     .select({
-      gaps: sql<number>`count(*) filter (
-        where (
+      isGap: sql<boolean>`(
           not exists (
             select 1 from page_text_versions ptv
             where ptv.source_page_id = source_pages.id and length(btrim(ptv.text_md)) > 0
@@ -522,11 +521,43 @@ export async function loadCheckGraph(
           and not exists (
             select 1 from page_assignments pa where pa.source_page_id = source_pages.id
           )
-        )
-      )::int`,
+        )`,
+      complectId: sql<string | null>`(
+        select d.complect_id
+          from page_assignments pa
+          join logical_documents d on d.id = pa.document_id
+         where pa.source_page_id = source_pages.id
+      )`,
     })
     .from(sourcePages)
-    .where(eq(sourcePages.folderId, input.folderId));
+    .where(eq(sourcePages.folderId, input.folderId))
+    .orderBy(asc(sourcePages.folderOrdinal));
+
+  /**
+   * Пробел покрытия получает АДРЕС: комплект, внутри которого он лежит (S50).
+   *
+   * Комплект — непрерывный отрезок листов папки: акт, за ним его приложения,
+   * дальше следующий акт. Неразобранный лист принадлежит тому комплекту, чьи
+   * страницы идут перед ним; лист до первого акта ничей — он относится к
+   * папке целиком. Так один потерянный лист перестаёт гасить выводы о полноте
+   * в одиннадцати комплектах, к которым отношения не имеет.
+   *
+   * Считается здесь, а не в SQL: правило «ближайший предшествующий комплект»
+   * читается одной строкой на языке, где есть порядок, и не требует оконных
+   * функций ради того же ответа.
+   */
+  const gapsByComplect: Record<string, number> = {};
+  let gapsOutside = 0;
+  let currentComplect: string | null = null;
+  for (const page of coverage) {
+    if (page.complectId !== null) currentComplect = page.complectId;
+    if (!page.isGap) continue;
+    if (currentComplect === null) {
+      gapsOutside += 1;
+      continue;
+    }
+    gapsByComplect[currentComplect] = (gapsByComplect[currentComplect] ?? 0) + 1;
+  }
 
   return {
     folder,
@@ -553,7 +584,9 @@ export async function loadCheckGraph(
     materials: [],
     today: input.today,
     hasRecognizedText: Number(hasText[0]?.count ?? 0) > 0,
-    coverageGaps: Number(coverage[0]?.gaps ?? 0),
+    coverageGaps: coverage.filter((page) => page.isGap).length,
+    coverageGapsByComplect: gapsByComplect,
+    coverageGapsOutside: gapsOutside,
   };
 }
 

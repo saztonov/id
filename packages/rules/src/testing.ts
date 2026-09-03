@@ -237,6 +237,8 @@ export function makeGraph(patch: Partial<CheckGraph> = {}): CheckGraph {
     // Комплект разобран целиком: пробелы покрытия — отдельный случай, и тест,
     // который их проверяет, объявляет их явно.
     coverageGaps: 0,
+    coverageGapsByComplect: {},
+    coverageGapsOutside: 0,
     ...patch,
   };
 }

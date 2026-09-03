@@ -88,7 +88,10 @@ describe('применимость (§9.1)', () => {
     const graph = makeGraph({ profile: makeUnconfiguredProfile() });
     const rule = spec({ code: 'MAT.X', requiresSectionProfile: true });
 
-    expect(decideApplicability(rule, graph)).toBe('профиль раздела не настроен');
+    expect(decideApplicability(rule, graph)).toStrictEqual({
+      kind: 'n_a',
+      reason: 'профиль раздела не настроен',
+    });
   });
 
   it('настроенный профиль правило не закрывает', () => {
@@ -99,9 +102,11 @@ describe('применимость (§9.1)', () => {
 
   it('типо-специфичное правило неприменимо без документов этого вида', () => {
     const graph = makeGraph({ documents: [makeDocument({ docTypeCode: 'declaration' })] });
-    const reason = decideApplicability(spec({ code: 'AOSR.X', docTypeCode: 'aosr' }), graph);
+    const decision = decideApplicability(spec({ code: 'AOSR.X', docTypeCode: 'aosr' }), graph);
 
-    expect(reason).toContain('aosr');
+    // Вида в комплекте нет вовсе: спрашивать не о чем, это законное «неприменимо».
+    expect(decision?.kind).toBe('n_a');
+    expect(decision?.reason).toContain('aosr');
   });
 
   it('резервный и неуверенный тип НЕ считаются документом своего вида', () => {
@@ -112,6 +117,23 @@ describe('применимость (§9.1)', () => {
     expect(
       decideApplicability(spec({ code: 'AOSR.X', docTypeCode: 'aosr' }), graph),
     ).not.toBeNull();
+  });
+
+  it('неподтверждённый вид даёт «не проверено», а не «неприменимо» (S50)', () => {
+    // Разница в предмете отказа. «Неприменимо» — про папку: такого вида в ней
+    // нет. «Не проверено» — про портал: документ есть, а вид его не подтверждён.
+    // Пока оба отвечали «неприменимо», одна неуверенная страница акта гасила
+    // весь чек-лист комплекта, и отчёт при этом выглядел спокойным.
+    const graph = makeGraph({
+      documents: [
+        makeDocument({ docTypeCode: 'aosr', isKnownType: false, title: 'АКТ без титула' }),
+      ],
+    });
+    const decision = decideApplicability(spec({ code: 'AOSR.X', docTypeCode: 'aosr' }), graph);
+
+    expect(decision?.kind).toBe('undetermined');
+    expect(decision?.reason).toContain('не подтверждён');
+    expect(decision?.reason).toContain('АКТ без титула');
   });
 });
 

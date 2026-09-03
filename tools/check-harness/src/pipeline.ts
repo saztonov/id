@@ -467,6 +467,44 @@ export function runPackage(dir: string, options: HarnessOptions): PackageRunResu
     },
   });
 
+  /**
+   * Пробелы покрытия с адресом комплекта — зеркало `checks.ts` (S50).
+   *
+   * Комплект здесь тоже непрерывный отрезок листов: лист без документа
+   * принадлежит комплекту, чьи страницы идут перед ним. Стенд обязан считать
+   * это тем же правилом, что и портал, иначе его числа разойдутся с боевыми
+   * ровно там, где проверяется устойчивость к потерянному листу.
+   */
+  const coverage = ((): {
+    total: number;
+    byComplect: Record<string, number>;
+    outside: number;
+  } => {
+    const complectOfPage = new Map<string, string | null>();
+    for (const document of documents) {
+      for (const page of document.pages) complectOfPage.set(page.sourcePageId, document.complectId);
+    }
+    const gaps = new Set(
+      segmentation.unassigned
+        .filter((page) => (textBySourcePage.get(page.sourcePageId) ?? '').trim() !== '')
+        .map((page) => page.sourcePageId),
+    );
+
+    const byComplect: Record<string, number> = {};
+    let outside = 0;
+    let current: string | null = null;
+    for (const page of pages) {
+      const own = complectOfPage.get(page.sourcePageId);
+      if (own !== undefined && own !== null) current = own;
+      if (!gaps.has(page.sourcePageId)) continue;
+      if (current === null) {
+        outside += 1;
+        continue;
+      }
+      byComplect[current] = (byComplect[current] ?? 0) + 1;
+    }
+    return { total: gaps.size, byComplect, outside };
+  })();
   const graph = makeGraph({
     profile: options.unconfiguredProfile ? makeUnconfiguredProfile() : makeProfile(),
     folder: makeFolder(),
@@ -484,9 +522,9 @@ export function runPackage(dir: string, options: HarnessOptions): PackageRunResu
     // не отнесённый ни к одному документу, при том что содержание на нём есть.
     // Пустой оборот не считается: он разобран, и на нём действительно ничего
     // нет.
-    coverageGaps: segmentation.unassigned.filter(
-      (page) => (textBySourcePage.get(page.sourcePageId) ?? '').trim() !== '',
-    ).length,
+    coverageGaps: coverage.total,
+    coverageGapsByComplect: coverage.byComplect,
+    coverageGapsOutside: coverage.outside,
   });
 
   // Задача 20: полный каталог, все правила включены (`enabledRuleCodes: null`

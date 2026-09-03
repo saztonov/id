@@ -92,11 +92,30 @@ export function groupByComplect(
 export function subgraphOfDocuments(
   graph: CheckGraph,
   documents: readonly DocumentNode[],
+  complectId: string | null = null,
 ): CheckGraph {
   const ids = new Set(documents.map((document) => document.id));
+  /**
+   * Пробелы покрытия режутся по комплекту (S50).
+   *
+   * До S50 срез получал число по ВСЕЙ папке, и это было записано намеренно:
+   * «обнулить его для комплекта значило бы разрешить вывод там, где оснований
+   * нет». Довод верен ровно наполовину. Он верен для комплекта, в котором лист
+   * потерян, и неверен для остальных одиннадцати: их состав разобран целиком, и
+   * молчать по чужой беде им незачем. На боевой папке один неразобранный лист
+   * переводил правило полноты в «не проверено» во всех двенадцати комплектах.
+   *
+   * Лист без комплекта (до первого акта, между комплектами) в срез не попадает
+   * вовсе: он принадлежит папке, и его видят правила уровня папки.
+   */
+  const ownGaps =
+    complectId === null
+      ? graph.coverageGapsOutside
+      : (graph.coverageGapsByComplect[complectId] ?? 0);
   return {
     ...graph,
     documents,
+    coverageGaps: ownGaps,
     registryRows: graph.registryRows.filter((row) => ids.has(row.registryDocumentId)),
     // Опись передачи в срез не режется и остаётся целой: она перечисляет
     // ПАПКУ, а не комплект, и на срезе комплекта её нет ни в каком виде.
@@ -139,7 +158,7 @@ export function runRulesByComplect(graph: CheckGraph, options: RunRulesOptions):
         scope: group.complectId === null ? 'outside' : 'complect',
         complectId: group.complectId,
         result: stamp(
-          runRules(subgraphOfDocuments(graph, group.documents), {
+          runRules(subgraphOfDocuments(graph, group.documents, group.complectId), {
             ...options,
             specs: scopedSpecs,
           }),

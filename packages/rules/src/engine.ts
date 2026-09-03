@@ -28,6 +28,7 @@ import {
   inconsistencyOf,
   minConfidenceOf,
   notApplicable,
+  undeterminedByApplicability,
   severityRank,
   softenByConfidence,
 } from './result.js';
@@ -172,7 +173,11 @@ export function runRules(graph: CheckGraph, options: RunRulesOptions): RuleRunRe
     const applicability = decideApplicability(spec, graph);
 
     const result =
-      applicability === null ? evaluateGuarded(spec, graph, params) : notApplicable(applicability);
+      applicability === null
+        ? evaluateGuarded(spec, graph, params)
+        : applicability.kind === 'n_a'
+          ? notApplicable(applicability.reason)
+          : undeterminedByApplicability(applicability.reason);
 
     const inconsistency = inconsistencyOf(result);
     if (inconsistency !== null) {
@@ -206,6 +211,16 @@ export function runRules(graph: CheckGraph, options: RunRulesOptions): RuleRunRe
 }
 
 /**
+ * Ответ о применимости: «нечего проверять» либо «не на чем строить вывод».
+ *
+ * `null` — правило исполняется.
+ */
+export type Applicability =
+  | { readonly kind: 'n_a'; readonly reason: string }
+  | { readonly kind: 'undetermined'; readonly reason: string }
+  | null;
+
+/**
  * Универсальная применимость (§9.1).
  *
  * Возвращает причину `n_a` либо `null`, если правило надо исполнять. Здесь
@@ -214,9 +229,9 @@ export function runRules(graph: CheckGraph, options: RunRulesOptions): RuleRunRe
  * профиля разрешается внутри правил материалов — она относится к отдельному
  * материалу, а не ко всему правилу.
  */
-export function decideApplicability(spec: RuleSpec, graph: CheckGraph): string | null {
+export function decideApplicability(spec: RuleSpec, graph: CheckGraph): Applicability {
   if (spec.requiresSectionProfile && !graph.profile.completenessConfigured) {
-    return 'профиль раздела не настроен';
+    return { kind: 'n_a', reason: 'профиль раздела не настроен' };
   }
 
   if (spec.docTypeCode !== null) {
@@ -224,7 +239,40 @@ export function decideApplicability(spec: RuleSpec, graph: CheckGraph): string |
       (document) => document.isKnownType && document.docTypeCode === spec.docTypeCode,
     );
     if (!present) {
-      return `в комплекте нет документов вида «${spec.docTypeCode}» с уверенно определённым типом`;
+      /**
+       * «Вида нет» и «вид не подтверждён» — разные ответы (S50).
+       *
+       * Прежде оба давали `n_a`, и это ровно тот случай, когда одна неуверенная
+       * страница гасит целый чек-лист. На боевой папке акт освидетельствования
+       * получал тип по форме бланка с двумя маркерами вместо трёх — уверенность
+       * 0.6, — и все девятнадцать правил AOSR по комплекту отвечали
+       * «неприменимо». Отчёт при этом выглядел спокойным: неприменимое правило
+       * не спрашивают, почему оно молчит.
+       *
+       * Различие простое: документов вида нет вовсе — правилу нечего проверять,
+       * это законное `n_a`. Документы есть, но ни у одного вид не подтверждён —
+       * проверять ЕСТЬ что, просто не на чем строить вывод; это `undetermined`,
+       * и он виден в отчёте как «не проверено» с причиной.
+       */
+      const uncertain = graph.documents.filter(
+        (document) => !document.isKnownType && document.docTypeCode === spec.docTypeCode,
+      );
+      if (uncertain.length > 0) {
+        const names = uncertain
+          .slice(0, 3)
+          .map((document) => document.title ?? `документ ${String(document.ordinal)}`)
+          .join(', ');
+        return {
+          kind: 'undetermined',
+          reason:
+            `вид «${spec.docTypeCode}» в комплекте есть, но не подтверждён ` +
+            `(${String(uncertain.length)}: ${names}) — проверка по нему не выполнялась`,
+        };
+      }
+      return {
+        kind: 'n_a',
+        reason: `в комплекте нет документов вида «${spec.docTypeCode}» с уверенно определённым типом`,
+      };
     }
   }
 

@@ -104,13 +104,25 @@ describe('subgraphOfDocuments', () => {
     ]);
   });
 
-  it('число неразобранных листов остаётся папочным', () => {
-    // Обнулить его для комплекта значило бы разрешить правилам полноты вывод
-    // «документа нет» как раз там, где оснований для него нет.
-    const graph = { ...graphOf(), coverageGaps: 27 };
-    const sub = subgraphOfDocuments(graph, [graph.documents[0]!]);
+  it('комплект получает СВОИ неразобранные листы, а не папочные (S50)', () => {
+    // Прежде срез получал число по всей папке: один потерянный лист переводил
+    // правила полноты в «не проверено» во всех двенадцати комплектах боевой
+    // папки. Довод «иначе разрешим вывод там, где оснований нет» верен только
+    // для комплекта, в котором лист потерян.
+    const base = graphOf();
+    const graph = {
+      ...base,
+      coverageGaps: 27,
+      coverageGapsByComplect: { 'complect-1': 2 },
+      coverageGapsOutside: 25,
+    };
+    const own = subgraphOfDocuments(graph, [graph.documents[0]!], 'complect-1');
+    const other = subgraphOfDocuments(graph, [graph.documents[0]!], 'complect-2');
+    const outside = subgraphOfDocuments(graph, [graph.documents[0]!], null);
 
-    expect(sub.coverageGaps).toBe(27);
+    expect(own.coverageGaps).toBe(2);
+    expect(other.coverageGaps).toBe(0);
+    expect(outside.coverageGaps).toBe(25);
   });
 });
 

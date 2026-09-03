@@ -26,6 +26,34 @@ export function notApplicable(reason: string): RuleResult {
   return { verdict: 'n_a', reason };
 }
 
+/**
+ * Правило исполнить не на чем: данные есть, но им нельзя верить (S50).
+ *
+ * Отличается от `notApplicable` предметом отказа. «Неприменимо» говорит о
+ * ПАПКЕ: такого вида документов в ней нет, спрашивать не о чем. «Не проверено»
+ * говорит о ПОРТАЛЕ: документ есть, а вид его не подтверждён, и вывод по нему
+ * был бы выводом по догадке. Первое человеку чинить нечем, второе — повод
+ * посмотреть на документ.
+ *
+ * Замечание одно и без цели: оно описывает не дефект бумаги, а границу
+ * проверки, и привязывать его к документу значило бы обвинить документ.
+ */
+export function undeterminedByApplicability(reason: string): RuleResult {
+  return {
+    verdict: 'undetermined',
+    findings: [
+      unknown({
+        origin: 'deterministic',
+        targetType: 'folder',
+        targetId: null,
+        message: reason,
+        hint: 'Проверьте вид документа на экране разметки и подтвердите его.',
+      }),
+    ],
+    reason,
+  };
+}
+
 /** Правило применимо, дефектов нет. */
 export function passed(reason?: string): RuleResult {
   return reason === undefined
