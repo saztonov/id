@@ -1877,6 +1877,7 @@ function segmentationDeps(options: PipelineJobsOptions): SegmentationDeps {
 
     saveDocumentRelations: async (input) =>
       saveDocumentRelations(db, await scopeOf(input.folderId), input),
+    readAutoContinue: async (jobId) => readJobAutoContinue(db, jobId),
 
     observeCandidate: async (input) => {
       const outcome = await observeDocTypeCandidate(db, await scopeOf(input.folderId), input);

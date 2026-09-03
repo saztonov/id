@@ -53,16 +53,20 @@
  * секунд отвечает на «оно живое?» дешевле любой анимации.
  */
 import { useEffect, useState, type ReactNode } from 'react';
-import { App as AntApp, Alert, Button, Dropdown, Progress, Space, Tooltip, Typography } from 'antd';
+import {
+  App as AntApp,
+  Alert,
+  Button,
+  Dropdown,
+  Popconfirm,
+  Progress,
+  Space,
+  Tooltip,
+  Typography,
+} from 'antd';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 
-import {
-  pipeline,
-  recognition,
-  folderEvents,
-  type CheckPipelineResult,
-  type RecheckMode,
-} from '../../api/endpoints.js';
+import { pipeline, recognition, folderEvents, type RecheckMode } from '../../api/endpoints.js';
 import { pipelineKeys, folderKeys } from '../../api/keys.js';
 import { describeError } from '../../api/problem.js';
 import { useSession } from '../../app/session.js';
@@ -70,12 +74,7 @@ import { Link } from '../../app/router.js';
 import { usePollingInterval } from './stream.js';
 import { isDryRun, newestRecognitionRun, runningRecognitionRun } from './runs.js';
 import { activeStageOf, isBusy } from './busy.js';
-
-const STAGE_STARTED_LABEL: Readonly<Record<string, string>> = {
-  recognition: 'Распознавание запущено: дальше анализ и проверки пойдут сами',
-  analysis: 'Распознано; запущены разбор документов и реквизитов, за ними — проверки',
-  checks: 'Запущен прогон правил по уже разобранным документам',
-};
+import { startedLabel } from './started.js';
 
 /** Опрос постраничного прогресса, пока прогон идёт. */
 const PROGRESS_POLL_MS = 5_000;
@@ -188,6 +187,26 @@ export function PipelineBar({ folderId, editable }: PipelineBarProps): ReactNode
     onError: (error) => message.error(describeError(error)),
   });
 
+  /**
+   * Остановка обработки (S50).
+   *
+   * Подтверждение обязательно: нажатие прекращает работу, которая идёт часами,
+   * и промах по соседней кнопке стоил бы её целиком. Формулировка называет
+   * последствие честно — распознанное остаётся, продолжить можно.
+   */
+  const stop = useMutation({
+    mutationFn: () => pipeline.stop(folderId),
+    onSuccess: async (result) => {
+      message.success(
+        result.cancelledJobs === 0
+          ? 'Останавливать было нечего: очередь уже пуста'
+          : `Обработка остановлена: снято ${String(result.cancelledJobs)} ${plural(result.cancelledJobs, 'задача', 'задачи', 'задач')}`,
+      );
+      await refresh();
+    },
+    onError: (error) => message.error(describeError(error)),
+  });
+
   const data = status.data;
   const stage = data?.stage ?? null;
   const queued = data?.queued ?? 0;
@@ -284,6 +303,27 @@ export function PipelineBar({ folderId, editable }: PipelineBarProps): ReactNode
               2. Распознать ▾
             </Button>
           </Dropdown>
+        )}
+
+        {/*
+          «Стоп» показывается только тогда, когда есть что останавливать:
+          кнопка, которая всегда на экране и почти всегда бесполезна, приучает
+          её не замечать — а нужна она в тот единственный раз, когда человек
+          понял, что запустил не то.
+        */}
+        {busy && (
+          <Popconfirm
+            title="Остановить обработку?"
+            description="Распознанное сохранится. Продолжить можно кнопкой «2. Распознать»."
+            okText="Остановить"
+            okButtonProps={{ danger: true }}
+            cancelText="Отмена"
+            onConfirm={() => stop.mutate()}
+          >
+            <Button danger loading={stop.isPending} disabled={!canRun} data-testid="pipeline-stop">
+              Стоп
+            </Button>
+          </Popconfirm>
         )}
 
         {/*
@@ -414,24 +454,6 @@ export function PipelineBar({ folderId, editable }: PipelineBarProps): ReactNode
       )}
     </div>
   );
-}
-
-/**
- * Что сказать после нажатия — с числом перечитываемых листов (S40).
- *
- * Число обязательно там, где оно ноль: «Распознать только ошибки» на комплекте
- * без ошибок ничего не перечитывает и уходит на прогон правил. Без этой фразы
- * нажатие выглядело бы как бездействие кнопки, и человек нажал бы ещё раз.
- */
-function startedLabel(result: CheckPipelineResult): string {
-  if (result.stage === 'recognition' && (result.retriedPages ?? 0) > 0) {
-    const pages = result.retriedPages ?? 0;
-    return `Перечитываем ${String(pages)} ${plural(pages, 'лист', 'листа', 'листов')}: остальное перенесётся из прошлого прогона`;
-  }
-  if (result.stage !== 'recognition' && result.retriedPages === 0) {
-    return 'Перечитывать нечего: запущен прогон правил по уже распознанному комплекту';
-  }
-  return STAGE_STARTED_LABEL[result.stage] ?? 'Обработка запущена';
 }
 
 interface StateInput {

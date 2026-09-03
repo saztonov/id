@@ -46,15 +46,50 @@ import { Alert, Collapse, Space, Typography } from 'antd';
 import { useQuery } from '@tanstack/react-query';
 import { bundles, checks, folderEvents } from '../../api/endpoints.js';
 import { folderKeys } from '../../api/keys.js';
-import { activeStageOf, checksAhead } from '../folder/busy.js';
+import { activeStageOf, checksAhead, isBusy } from '../folder/busy.js';
+import { usePollingInterval } from '../folder/stream.js';
 import { ErrorState, LoadingState } from '../../shared/ui.js';
 import { coverageGap, runStateOf, splitFindings, summaryText, type RunState } from './grouping.js';
 import { ReportTable } from './ReportTable.js';
 
 export function ChecksTab({ folderId }: { folderId: string }): ReactNode {
+  const pollingInterval = usePollingInterval();
+  // Тот же ключ, что у полосы конвейера над вкладками: сводка уже в кэше, и
+  // второго запроса не будет. Без неё вкладка объявляет «проверка не
+  // выполнялась» ровно тогда, когда конвейер к ней идёт.
+  const processing = useQuery({
+    queryKey: folderKeys.processingStatus(folderId),
+    queryFn: ({ signal }) => folderEvents.processingStatus(folderId, signal),
+    // Сводка опрашивается по СВОЕМУ ответу, а не по чужому: пока она молчит,
+    // никто не знает, занят конвейер или нет.
+    refetchInterval: (query) => {
+      if (query.state.error !== null) return false;
+      const data = query.state.data;
+      if (data === undefined) return pollingInterval;
+      return isBusy(data.stage, data.queued, data.running) ? pollingInterval : false;
+    },
+  });
+  const busy = isBusy(
+    processing.data?.stage ?? null,
+    processing.data?.queued ?? 0,
+    processing.data?.running ?? 0,
+  );
+  /**
+   * Опрос состава и замечаний, пока конвейер идёт (S50).
+   *
+   * До S50 у вкладки не было ни одного `refetchInterval`: свежесть держал
+   * только поток событий, а он умолкает после пяти неудачных попыток
+   * переподключения. Тогда вкладка застывала на том, что успела прочитать при
+   * открытии, — и на боевой папке это был пустой состав, прочитанный до того,
+   * как разбор нашёл первый документ. Поток остаётся основным способом
+   * обновления; опрос — страховка, и он замолкает вместе с конвейером.
+   */
+  const refetchWhileBusy = (): number | false => (busy ? pollingInterval : false);
+
   const findings = useQuery({
     queryKey: folderKeys.findings(folderId),
     queryFn: () => checks.findings(folderId),
+    refetchInterval: refetchWhileBusy,
   });
   // Отдельный запрос от замечаний: состав комплекта не обязан ехать заново
   // после снятия одного замечания, а список замечаний — после пересборки
@@ -62,6 +97,7 @@ export function ChecksTab({ folderId }: { folderId: string }): ReactNode {
   const reportQuery = useQuery({
     queryKey: folderKeys.checkReport(folderId),
     queryFn: () => checks.report(folderId),
+    refetchInterval: refetchWhileBusy,
   });
   // Тот же ключ, что у вкладки «Файлы»: признак «состав изменился после
   // проверки» считает сервер, и второго запроса при переходе между вкладками
@@ -70,14 +106,6 @@ export function ChecksTab({ folderId }: { folderId: string }): ReactNode {
     queryKey: folderKeys.bundles(folderId),
     queryFn: () => bundles.list(folderId),
   });
-  // Тот же ключ, что у полосы конвейера над вкладками: сводка уже в кэше, и
-  // второго запроса не будет. Без неё вкладка объявляет «проверка не
-  // выполнялась» ровно тогда, когда конвейер к ней идёт.
-  const processing = useQuery({
-    queryKey: folderKeys.processingStatus(folderId),
-    queryFn: ({ signal }) => folderEvents.processingStatus(folderId, signal),
-  });
-
   if (findings.isPending || reportQuery.isPending)
     return <LoadingState label="Загрузка проверки…" />;
   if (findings.isError) return <ErrorState error={findings.error} />;

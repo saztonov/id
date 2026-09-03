@@ -657,10 +657,20 @@ export const JOB_DEFINITIONS = {
     leaseMs: DEFAULT_LEASE_MS,
     priority: DEFAULT_PRIORITY,
   },
+  /**
+   * Нарезка производных PDF — стадия АНАЛИЗА, а не выдачи (S50).
+   *
+   * Она и была объявлена `ready`, пока ставилась последней. Сегментация ставит
+   * её ПАРАЛЛЕЛЬНО извлечению реквизитов, и «самая дальняя стадия с
+   * активностью» становилась `ready` в тот момент, когда до проверок было ещё
+   * полчаса: полоса конвейера показывала «готово», а вкладка «Проверка» —
+   * «проверка не выполнялась», и обе фразы были правдой по отдельности и ложью
+   * вместе. `ready` теперь наступает только после сводки прогона правил.
+   */
   'doc.materialize_pdf': {
     queue: 'cpu',
     payload: folderPayload.extend({ documentId: uuid.optional() }),
-    stage: 'ready',
+    stage: 'analysis',
     maxAttempts: 3,
     leaseMs: 900_000,
     priority: DEFAULT_PRIORITY,

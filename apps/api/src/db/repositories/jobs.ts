@@ -606,10 +606,23 @@ export async function deferJob(db: Database, params: DeferJobParams): Promise<bo
  * Без продления пришлось бы ставить аренду по самому долгому мыслимому времени
  * выполнения — а тогда задача умершего воркера ждала бы освобождения столько же.
  */
+/**
+ * Чем кончился стук аренды.
+ *
+ * Три исхода вместо `boolean`, потому что причин потерять аренду две, и они
+ * означают разное (S50): `lost` — задачу подобрал другой воркер, это гонка;
+ * `cancelled` — человек нажал «Стоп», и это штатное завершение работы. До S50
+ * отмена работала ПОБОЧНЫМ эффектом: она обнуляла `locked_by`, стук не находил
+ * своей строки и рапортовал «аренду перехватили». Журнал при этом писал о
+ * гонке, которой не было, а любая правка условия `renewLease` молча сломала бы
+ * единственный способ остановить работу.
+ */
+export type LeaseRenewal = 'held' | 'lost' | 'cancelled';
+
 export async function renewLease(
   db: JobExecutor,
   params: { readonly jobId: string; readonly workerId: string; readonly leaseMs: number },
-): Promise<boolean> {
+): Promise<LeaseRenewal> {
   const updated = await db.execute<{ id: string }>(sql`
     update ${jobs}
        set locked_until = now() + ${params.leaseMs}::int * interval '1 millisecond'
@@ -618,7 +631,14 @@ export async function renewLease(
        and ${jobs.status} = 'running'
     returning id
   `);
-  return updated.rows.length > 0;
+  if (updated.rows.length > 0) return 'held';
+
+  // Второй запрос делается только на неудачном стуке, то есть редко: в норме
+  // аренда продлевается, и цена контракта равна нулю.
+  const current = await db.execute<{ status: string }>(sql`
+    select status from ${jobs} where ${jobs.id} = ${params.jobId}
+  `);
+  return current.rows[0]?.status === 'cancelled' ? 'cancelled' : 'lost';
 }
 
 export interface ReapResult {
@@ -1733,7 +1753,11 @@ export async function computeProcessingStatus(
 
   return {
     folderId,
-    stage: summaryStage(stages, dead),
+    stage: summaryStage(
+      stages,
+      dead,
+      [...pendingByStage.entries()].filter(([, count]) => count > 0).map(([stage]) => stage),
+    ),
     queued,
     running,
     dead,
@@ -1905,8 +1929,26 @@ async function computeLayoutProgress(
 export function summaryStage(
   stages: readonly { readonly stage: ProcessingStage }[],
   dead: number,
+  pending: readonly ProcessingStage[] = [],
 ): ProcessingStage {
   if (dead > 0) return 'failed';
+  /**
+   * Идущая работа важнее пройденной (S50).
+   *
+   * Прежде бралась самая ДАЛЬНЯЯ стадия с активностью, и это верно ровно до
+   * того момента, когда конвейер перестаёт быть линейным. Он перестал: нарезка
+   * производных PDF ставится сегментацией ПАРАЛЛЕЛЬНО анализу, и её стадия
+   * оказывалась самой дальней. Папка на 220 страниц двадцать восемь минут
+   * показывала «готово», пока шло извлечение реквизитов, а вкладка «Проверка»
+   * по той же причине советовала нажать «Распознать» — нажатие, которое
+   * начинает всё заново.
+   *
+   * Самая РАННЯЯ стадия с очередью и есть то, что происходит сейчас: конвейер
+   * идёт слева направо, и работа, стоящая раньше, ещё не сделана.
+   */
+  for (const stage of STAGE_ORDER) {
+    if (pending.includes(stage)) return stage;
+  }
   let result: ProcessingStage = 'uploaded';
   for (const stage of STAGE_ORDER) {
     if (stages.some((summary) => summary.stage === stage)) result = stage;
@@ -1990,6 +2032,15 @@ export async function summarizeFolderStages(
     stagesOf.set(folderId, bucket);
   };
 
+  /** Стадии с НЕЗАКОНЧЕННОЙ работой: по ним сводка называет идущее (S50). */
+  const pendingOf = new Map<string, Set<ProcessingStage>>();
+  const addPending = (folderId: string, stage: ProcessingStage | null): void => {
+    if (stage === null) return;
+    const bucket = pendingOf.get(folderId) ?? new Set<ProcessingStage>();
+    bucket.add(stage);
+    pendingOf.set(folderId, bucket);
+  };
+
   for (const row of runRows) {
     // `job_runs.folder_id` объявлен nullable (системные задачи ревизии не
     // имеют), но отбор выше оставил только те строки, чей идентификатор в
@@ -2010,7 +2061,9 @@ export async function summarizeFolderStages(
     // Ждущая задача — это тоже активность стадии: комплект, у которого
     // распознавание только поставлено в очередь, уже не «на разметке».
     if (row.status !== 'failed') {
-      add(row.folderId, isJobType(row.type) ? stageOf(row.type) : null);
+      const stage = isJobType(row.type) ? stageOf(row.type) : null;
+      add(row.folderId, stage);
+      addPending(row.folderId, stage);
     }
   }
 
@@ -2019,7 +2072,7 @@ export async function summarizeFolderStages(
     const stages = [...(stagesOf.get(folderId) ?? [])].map((stage) => ({ stage }));
     return {
       folderId,
-      stage: summaryStage(stages, bucket.dead),
+      stage: summaryStage(stages, bucket.dead, [...(pendingOf.get(folderId) ?? [])]),
       queued: bucket.queued,
       running: bucket.running,
       dead: bucket.dead,

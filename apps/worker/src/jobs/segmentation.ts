@@ -290,6 +290,18 @@ export interface SegmentationDeps {
     readonly relations: readonly DocumentRelationInput[];
   }): Promise<{ readonly removed: number; readonly written: number; readonly skipped: number }>;
 
+  /**
+   * Свежий заказ «доведи до конца» у СТРОКИ задачи; `null` — строки уже нет.
+   *
+   * Как wired: `readJobAutoContinue(db, jobId)`. Тот же порт, что у финализации
+   * распознавания, и по той же причине (S50): `ctx.payload` — снимок, сделанный
+   * при захвате попытки, а между захватом и решением человек успевает нажать
+   * «2. Распознать». Хвост цепочки — последнее место, где заказ ещё можно
+   * прочитать, и обрыв здесь тихий: задача успешна, конвейер «готов», прогона
+   * правил нет.
+   */
+  readAutoContinue(jobId: string): Promise<boolean | null>;
+
   /** Наблюдение незнакомого заголовка: цикл роста каталога (§3.2). */
   observeCandidate(input: {
     readonly observedTitle: string;
@@ -1989,20 +2001,34 @@ export function createGraphBuildHandler(deps: SegmentationDeps): JobHandler<'gra
     }
 
     const saved = await deps.saveDocumentRelations({ folderId, relations });
+
+    /**
+     * Хвост цепочки анализа: заказ перечитывается из БД, а не из снимка (S50).
+     *
+     * `ctx.payload` берётся при ЗАХВАТЕ попытки, а цепочка анализа на боевой
+     * папке шла двадцать восемь минут. Нажатие «2. Распознать», сделанное
+     * посреди неё, поднимает флаг у строки задачи — снимок этого не видит, и
+     * обрыв выходит тихим: задача успешна, полоса показывает «готово», прогона
+     * правил нет. То же чтение и по той же причине делает финализация
+     * распознавания (`vlm-recognition.ts`, `continueWithAnalysis`).
+     */
+    const ordered = (await deps.readAutoContinue(ctx.jobId)) ?? ctx.payload.autoContinue === true;
+
     const counts = {
       documents: documents.length,
       relations: saved.written,
       skipped: saved.skipped,
       duplicates: relations.filter((relation) => relation.relation === 'duplicate').length,
+      // «Дошло до проверок» и «встало на графе» иначе различаются только
+      // отсутствием строки в другой таблице — то есть по журналу неотличимы.
+      checksEnqueued: ordered,
     };
     ctx.logger.info({ counts }, 'граф документов построен');
     await ctx.emit('documents.graph_built', counts);
 
-    // Хвост цепочки анализа. До S21 он был терминальным, и прогон правил
-    // человек запускал шестой кнопкой; теперь при сквозном прогоне он идёт
-    // сам. Ключ идемпотентности — по ревизии: пересобранная нарезка не должна
+    // Ключ идемпотентности — по ревизии: пересобранная нарезка не должна
     // порождать второй прогон правил, пока первый ещё в очереди.
-    if (ctx.payload.autoContinue === true) {
+    if (ordered) {
       await ctx.enqueue({
         type: 'checks.run',
         payload: { folderId },

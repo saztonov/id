@@ -95,9 +95,13 @@ async function relationsOf(
       saved = input.relations;
       return Promise.resolve({ removed: 0, written: input.relations.length, skipped: 0 });
     },
+    // Строки задачи в тесте нет: заказ читается из payload, как и в проде,
+    // когда строку уже удалили.
+    readAutoContinue: () => Promise.resolve(null),
   } as unknown as SegmentationDeps;
 
   const ctx = {
+    jobId: 'job-graph',
     payload: { folderId: 'rev-1' },
     logger: { info: () => undefined, warn: () => undefined },
     emit: () => Promise.resolve(),

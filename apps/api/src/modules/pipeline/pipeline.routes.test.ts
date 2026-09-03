@@ -559,16 +559,29 @@ describe('POST /folders/{id}/check', () => {
     expect(head?.payload.autoContinue).toBe(true);
   });
 
-  it('повторное нажатие при идущем распознавании не плодит второй прогон', async () => {
+  it('повторное нажатие при идущем распознавании заказывает ему довести до проверки', async () => {
+    // До S50 здесь был отказ 409, и это оставляло человека без проверок ровно в
+    // том случае, ради которого он нажимает кнопку: распознавание запущено
+    // экраном разметки, до проверок дело не дойдёт, и сказать об этом порталу
+    // нечем. Теперь нажатие поднимает заказ у финализации идущего прогона.
     const response = await as(KC.a, 'POST', `/api/v1/folders/${FOLDER_READY}/check`, {
       idempotencyKey: 'check-ready-2',
     });
-    expect(response.statusCode).toBe(409);
+    expect(response.statusCode).toBe(202);
 
+    const body = response.json<{ stage: string; continuedRun?: boolean }>();
+    expect(body.stage).toBe('recognition');
+    expect(body.continuedRun).toBe(true);
+
+    // Второго прогона нет: работа та же, изменился только её заказ.
     const runs = await db.query<{ count: string | number }>(
       `SELECT count(*) AS count FROM recognition_runs WHERE folder_id = '${FOLDER_READY}'`,
     );
     expect(Number(runs[0]?.count ?? 0)).toBe(1);
+
+    // Заказ записан туда, где его прочитает финализация.
+    const finalize = (await jobsOf(FOLDER_READY)).find((job) => job.type === 'vlm.finalize_run');
+    expect(finalize?.payload.autoContinue).toBe(true);
   });
 
   it('заголовок идемпотентности обязателен', async () => {
@@ -583,6 +596,86 @@ describe('POST /folders/{id}/check', () => {
     // 409 «разметки нет» тоже был бы утечкой: он отличал бы существующую чужую
     // ревизию от несуществующей. Область отсекает раньше.
     expect(response.statusCode).toBe(404);
+  });
+});
+
+// =====================================================================
+// Кнопка «Стоп»
+// =====================================================================
+
+describe('POST /folders/{id}/stop', () => {
+  it('снимает очередь конвейера, закрывает прогон и оставляет разметку', async () => {
+    // Состояние на входе: у FOLDER_READY идёт прогон распознавания и стоят
+    // задачи, поставленные предыдущими нажатиями.
+    const runningBefore = await db.query<{ id: string }>(
+      `SELECT id FROM recognition_runs WHERE folder_id = '${FOLDER_READY}' AND status = 'running'`,
+    );
+    expect(runningBefore).toHaveLength(1);
+
+    const response = await as(KC.a, 'POST', `/api/v1/folders/${FOLDER_READY}/stop`, {
+      idempotencyKey: 'stop-ready-1',
+    });
+    expect(response.statusCode).toBe(200);
+
+    const body = response.json<{
+      cancelledJobs: number;
+      recognitionRunId: string | null;
+      runFinished: boolean;
+    }>();
+    expect(body.cancelledJobs).toBeGreaterThan(0);
+    expect(body.recognitionRunId).toBe(runningBefore[0]?.id);
+    expect(body.runFinished).toBe(true);
+
+    // Прогон закрыт причиной словами: иначе он вечно выглядит идущим, а новый
+    // запуск переиспользует его вместо старта.
+    const run = await db.query<{ status: string; finished_at: string | null }>(
+      `SELECT status, finished_at FROM recognition_runs WHERE id = '${runningBefore[0]?.id ?? ''}'`,
+    );
+    expect(run[0]?.status).toBe('failed');
+    expect(run[0]?.finished_at).not.toBeNull();
+
+    // Задач стадий конвейера в очереди не осталось.
+    const pending = await db.query<{ count: string | number }>(
+      `SELECT count(*) AS count FROM jobs
+        WHERE payload->>'folderId' = '${FOLDER_READY}'
+          AND status IN ('queued', 'running')
+          AND type NOT LIKE 'layout.%' AND type NOT LIKE 'rd.%'`,
+    );
+    expect(Number(pending[0]?.count ?? 0)).toBe(0);
+
+    // Разметка остановкой не трогается: её результат нужен следующему запуску.
+    expect(await layoutStateOf(LAYOUT_READY)).toBe('draft');
+    expect(await blocksHashOf(LAYOUT_READY)).not.toBeNull();
+
+    // Событие есть: без него остановка не отличима от тишины конвейера.
+    const events = await db.query<{ count: string | number }>(
+      `SELECT count(*) AS count FROM folder_events
+        WHERE folder_id = '${FOLDER_READY}' AND event_type = 'pipeline.stopped'`,
+    );
+    expect(Number(events[0]?.count ?? 0)).toBe(1);
+  });
+
+  it('повторное нажатие безопасно и честно отвечает нулём', async () => {
+    const response = await as(KC.a, 'POST', `/api/v1/folders/${FOLDER_READY}/stop`, {
+      idempotencyKey: 'stop-ready-2',
+    });
+    expect(response.statusCode).toBe(200);
+
+    const body = response.json<{ cancelledJobs: number; runFinished: boolean }>();
+    expect(body.cancelledJobs).toBe(0);
+    expect(body.runFinished).toBe(false);
+  });
+
+  it('чужая ревизия недостижима', async () => {
+    const response = await as(KC.a, 'POST', `/api/v1/folders/${FOLDER_OTHER}/stop`, {
+      idempotencyKey: 'stop-other-1',
+    });
+    expect(response.statusCode).toBe(404);
+  });
+
+  it('заголовок идемпотентности обязателен', async () => {
+    const response = await as(KC.a, 'POST', `/api/v1/folders/${FOLDER_READY}/stop`);
+    expect(response.statusCode).toBe(400);
   });
 });
 
@@ -904,15 +997,31 @@ describe('POST /folders/{id}/check при выключенной неизмен�
     expect(Number(layoutPending[0]?.count ?? 0)).toBe(0);
   });
 
-  it('повторное распознавание заменяет прежний прогон, а не отказывает', async () => {
+  it('«Распознать полностью» заменяет идущий прогон, а обычное нажатие — продолжает его', async () => {
     const before = await db.query<{ id: string }>(
       `SELECT id FROM recognition_runs
         WHERE folder_id = '${FOLDER_STUCK}' AND status = 'running'`,
     );
     expect(before).toHaveLength(1);
 
-    const response = await as(KC.a, 'POST', `/api/v1/folders/${FOLDER_STUCK}/check`, {
+    // Обычное нажатие идущую работу не выбрасывает (S50): два часа вызовов
+    // модели стоят дороже, чем ожидание, а заказ «доведи до проверки» на них
+    // и так распространяется.
+    const continued = await as(KC.a, 'POST', `/api/v1/folders/${FOLDER_STUCK}/check`, {
       idempotencyKey: 'check-soft-2',
+    });
+    expect(continued.statusCode).toBe(202);
+    expect(continued.json<{ continuedRun?: boolean }>().continuedRun).toBe(true);
+    const kept = await db.query<{ id: string }>(
+      `SELECT id FROM recognition_runs WHERE folder_id = '${FOLDER_STUCK}' AND status = 'running'`,
+    );
+    expect(kept[0]?.id).toBe(before[0]?.id);
+
+    // «Полностью» означает «прежний результат больше не описывает то, что
+    // получится сейчас», и только он начинает прогон заново.
+    const response = await as(KC.a, 'POST', `/api/v1/folders/${FOLDER_STUCK}/check`, {
+      idempotencyKey: 'check-soft-3',
+      body: { mode: 'full' },
     });
     expect(response.statusCode).toBe(202);
     expect(response.json<{ stage: string }>().stage).toBe('recognition');

@@ -256,6 +256,18 @@ export interface CheckPipelineResult {
   readonly repairOfRunId?: string | null;
   /** Сколько листов ушло на повторное распознавание (S40). */
   readonly retriedPages?: number;
+  /**
+   * Нажатие пришлось на идущий прогон и заказало довести его до проверки (S50).
+   *
+   * Новая работа при этом не начиналась: ждать столько же, сколько оставалось.
+   */
+  readonly continuedRun?: boolean;
+}
+
+export interface StopPipelineResult {
+  readonly cancelledJobs: number;
+  readonly recognitionRunId: string | null;
+  readonly runFinished: boolean;
 }
 
 export interface RecognitionProgress {
@@ -296,6 +308,18 @@ export const pipeline = {
     request<CheckPipelineResult>('POST', `${V1}/folders/${folderId}/check`, {
       idempotencyKey: newIdempotencyKey('pipeline-check'),
       body: { mode },
+    }).then((r) => r.data),
+
+  /**
+   * Остановка обработки папки (S50).
+   *
+   * Распознанное остаётся: остановка прекращает работу, а не отменяет её
+   * результат. Ключ идемпотентности обязателен, как у любого дорогого действия
+   * (§14) — повторное нажатие не должно снимать задачи следующего запуска.
+   */
+  stop: (folderId: string) =>
+    request<StopPipelineResult>('POST', `${V1}/folders/${folderId}/stop`, {
+      idempotencyKey: newIdempotencyKey('pipeline-stop'),
     }).then((r) => r.data),
 
   /** Постраничный прогресс распознавания: «идёт» без числа страниц бесполезно. */

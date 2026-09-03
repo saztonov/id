@@ -832,6 +832,20 @@ function stopsBatch(error: unknown): boolean {
  * внутри обработчика (гейты с конкретной причиной) делает повторный вызов здесь
  * идемпотентным no-op — `finishRecognitionRun` пишет только из `running`.
  */
+/**
+ * Работу прекратил человек, а не сломала ошибка (S50).
+ *
+ * Нажатие «Стоп» снимает задачи и САМО закрывает прогон с причиной словами.
+ * Отставшая попытка узнаёт об отмене стуком аренды и падает `JobCancelled`;
+ * если это случилось на последней попытке, прежний код объявил бы прогон
+ * упавшим по своей причине — «попытки задачи исчерпаны» — и затёр бы настоящую.
+ * Прогон к этому моменту уже терминален, так что вреда данным нет, но журнал
+ * врал бы о причине остановки, а это единственное, ради чего его читают.
+ */
+function cancelledByHuman(error: unknown): boolean {
+  return error instanceof Error && error.name === 'JobCancelled';
+}
+
 function withVlmRunTermination<T extends VlmJobType>(
   deps: VlmRecognitionDeps,
   handler: JobHandler<T>,
@@ -841,6 +855,13 @@ function withVlmRunTermination<T extends VlmJobType>(
       await handler(ctx);
     } catch (error) {
       const exhausted = ctx.attempt >= ctx.maxAttempts;
+      if (cancelledByHuman(error)) {
+        ctx.logger.info(
+          { event: 'vlm_recognition_job_cancelled', job_type: ctx.type, attempt: ctx.attempt },
+          'задача снята остановкой: прогон закрывает маршрут, а не она',
+        );
+        throw error;
+      }
       if (exhausted || stopsBatch(error)) {
         const payload = ctx.payload as { readonly recognitionRunId: string };
         try {

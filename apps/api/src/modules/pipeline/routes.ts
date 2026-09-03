@@ -56,10 +56,14 @@ import { assertPlanBuildable, listBundles, loadBundlePlan } from '../../db/repos
 import { listLogicalDocuments } from '../../db/repositories/documents.js';
 import { findFolderForFiles } from '../../db/repositories/files.js';
 import {
+  appendFolderEvent,
+  cancelJobsOfFolder,
   cancelPendingJobsOfStage,
   computeProcessingStatus,
   enqueueJob,
 } from '../../db/repositories/jobs.js';
+import { appendAudit } from '../../db/repositories/audit.js';
+import { auditEmailHmac } from '../../db/repositories/admin.js';
 import { resetPipelineForFolder } from '../../db/repositories/purge.js';
 import {
   applyTextCoverageFallback,
@@ -91,6 +95,7 @@ import {
   folderIdParamSchema,
   runIdParamSchema,
   startMarkupPipelineResponseSchema,
+  stopResponseSchema,
 } from './schemas.js';
 
 const PREFIX = '/api/v1';
@@ -101,7 +106,126 @@ const readPipeline = requirePermission('markup.read');
 export function registerPipelineRoutes(app: AppInstance): void {
   registerMarkupRoute(app);
   registerCheckRoute(app);
+  registerStopRoute(app);
   registerProgressRoute(app);
+}
+
+// =====================================================================
+// Кнопка «Стоп»
+// =====================================================================
+
+/**
+ * Остановка обработки папки по требованию человека (S50).
+ *
+ * ## Зачем она нужна
+ *
+ * Комплект на 220 страниц занимает конвейер несколько часов и стоит денег за
+ * каждый вызов модели. До S50 остановить это было нечем: единственным способом
+ * оставалась админ-консоль задач, где их снимают по одной, а идущую не снять
+ * вовсе. Человек, увидевший, что запустил не тот файл или не ту разметку, мог
+ * только ждать.
+ *
+ * ## Что она НЕ делает
+ *
+ * Не сносит распознанное. Остановка — это «прекрати тратить время и деньги», а
+ * не «забудь сделанное»: страницы, которые модель уже прочитала, остаются
+ * опубликованными, и повторное «2. Распознать» продолжит с них. Снос прежнего
+ * результата — отдельное осознанное действие, пункт «Распознать полностью».
+ *
+ * ## Как останавливается ИДУЩАЯ задача
+ *
+ * Отмена обнуляет `locked_by`, поэтому следующий стук аренды не находит своей
+ * строки, движок взводит `AbortSignal`, и обработчики его уважают — вплоть до
+ * прерывания HTTP-вызова модели. Задержка равна интервалу стука.
+ *
+ * ## Почему прогон закрывается здесь, а не воркером
+ *
+ * Задачу, которая закрыла бы прогон (`vlm.finalize_run`), это же нажатие и
+ * снимает. Оставить прогон в `running` нельзя: он вечно выглядит идущим, новый
+ * запуск переиспользует его вместо старта, а полоса конвейера показывает
+ * работу, которой нет. Статус — `failed` с причиной словами: отдельного
+ * `cancelled` у прогонов нет, и заводить его миграцией ради одного слова
+ * дороже, чем назвать причину, которую всё равно печатает экран.
+ */
+function registerStopRoute(app: AppInstance): void {
+  app.post(
+    `${PREFIX}/folders/:folderId/stop`,
+    {
+      preHandler: runPipeline,
+      schema: {
+        params: folderIdParamSchema,
+        response: { 200: stopResponseSchema },
+      },
+    },
+    async (request, reply) => {
+      const { scope } = currentAuth(request);
+      const { folderId } = request.params;
+      requireIdempotencyKey(request);
+
+      const folder = await findFolderForFiles(app.db, scope, folderId);
+      if (folder === null) throw notFound('Ревизия поставки не найдена.');
+      updateContext({ folderId, objectId: folder.objectId });
+
+      /**
+       * Стадии перечислены явно, а не «все»: разметка и выдача к нажатию
+       * отношения не имеют. Остановить детекцию — другое действие с другой
+       * ценой (её результат нужен распознаванию), и путать их одной кнопкой
+       * значило бы отнимать работу, о которой человек не просил.
+       */
+      const cancelledJobs = await cancelJobsOfFolder(app.db, folderId, {
+        stages: ['recognition', 'analysis', 'checks'],
+      });
+
+      const runs = await listRecognitionRuns(app.db, scope, folderId);
+      const active = runs.find((run) => run.status === 'running') ?? null;
+      let runFinished = false;
+      if (active !== null) {
+        const outcome = await finishRecognitionRun(app.db, scope, {
+          runId: active.id,
+          status: 'failed',
+          reason: 'остановлено пользователем',
+        });
+        runFinished = outcome.changed;
+      }
+
+      await appendFolderEvent(app.db, {
+        folderId,
+        eventType: 'pipeline.stopped',
+        payload: {
+          cancelledJobs,
+          recognitionRunId: active?.id ?? null,
+          runFinished,
+        },
+      });
+
+      await appendAudit(app.db, scope, {
+        emailHmac: auditEmailHmac(app.env.AUDIT_HMAC_KEY, currentAuth(request).user.email),
+        ip: request.ip,
+        requestId: request.id,
+        action: 'pipeline.stopped',
+        entityType: 'folder',
+        entityId: folderId,
+        objectId: folder.objectId,
+        payload: { cancelledJobs, recognitionRunId: active?.id ?? null, runFinished },
+      });
+
+      request.log.info(
+        {
+          event: 'pipeline_stopped',
+          folder_id: folderId,
+          cancelled_jobs: cancelledJobs,
+          recognition_run_id: active?.id ?? null,
+        },
+        'обработка комплекта остановлена человеком',
+      );
+
+      return reply.code(200).send({
+        cancelledJobs,
+        recognitionRunId: active?.id ?? null,
+        runFinished,
+      });
+    },
+  );
 }
 
 // =====================================================================
@@ -256,11 +380,58 @@ function registerCheckRoute(app: AppInstance): void {
       const runs = await listRecognitionRuns(app.db, scope, folderId);
       const runOfLayout = runs.filter((run) => run.layoutRevisionId === layout.id);
       const active = runOfLayout.find((run) => run.status === 'running');
+      /**
+       * Нажатие поверх ИДУЩЕГО прогона — это заказ «доведи до проверки» (S50).
+       *
+       * Прежде маршрут отвечал отказом (строгий режим) либо закрывал прогон и
+       * начинал заново (мягкий), и оба ответа неверны для самого частого
+       * случая: человек запустил распознавание кнопкой экрана разметки, увидел,
+       * что проверок не будет, и нажал «2. Распознать». Отказ оставлял его без
+       * проверок; повторный старт выбрасывал два часа работы модели.
+       *
+       * Заказ записывается туда, где его прочитают: `enqueueSystemJob` поднимает
+       * `autoContinue` у уже стоящей финализации монотонно (`jobs.ts`), а сама
+       * финализация перечитывает флаг из БД в момент решения
+       * (`vlm-recognition.ts`, `continueWithAnalysis`). Поэтому нажатие
+       * действует и на прогон, который вот-вот закончится.
+       *
+       * «Распознать полностью» сюда не попадает: он и означает «прежний
+       * результат больше не нужен», и его ветка ниже осталась прежней.
+       */
+      if (active !== undefined && mode !== 'full') {
+        const continued = await enqueueJob(app.db, scope, {
+          type: 'vlm.finalize_run',
+          payload: tracePayload({
+            folderId,
+            recognitionRunId: active.id,
+            autoContinue: true,
+          }),
+          dedupeKey: dedupeKeyFor('vlm.finalize_run', active.id),
+        });
+        request.log.info(
+          {
+            event: 'recognition_run_continued',
+            folder_id: folderId,
+            run_id: active.id,
+            job_id: continued.jobId,
+            job_created: continued.created,
+          },
+          'идущий прогон распознавания получил заказ довести комплект до проверки',
+        );
+        return reply.code(202).send({
+          stage: 'recognition',
+          recognitionRunId: active.id,
+          jobId: continued.jobId,
+          jobCreated: continued.created,
+          retriedPages: 0,
+          continuedRun: true,
+        });
+      }
       if (active !== undefined) {
         if (enforceGates) {
           throw conflict(
-            'Распознавание этой разметки уже идёт. Дождитесь его завершения — ' +
-              'анализ и проверки пойдут следом сами.',
+            'Распознавание этой разметки уже идёт. Дождитесь его завершения, ' +
+              'затем нажмите «Распознать полностью» — прежний результат будет снесён.',
           );
         }
         /**

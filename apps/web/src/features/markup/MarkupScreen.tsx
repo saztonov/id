@@ -58,7 +58,7 @@ import {
   type MarkupPolicy,
 } from '@id/contracts';
 
-import { bundles, catalog, documents, layout, recognition } from '../../api/endpoints.js';
+import { bundles, catalog, documents, layout, pipeline, recognition } from '../../api/endpoints.js';
 import { catalogKeys, layoutKeys, recognitionKeys, folderKeys } from '../../api/keys.js';
 import { describeError } from '../../api/problem.js';
 import type { LayoutBlock, PageClassification } from '../../api/types.js';
@@ -66,6 +66,7 @@ import { files as filesApi } from '../../api/endpoints.js';
 import { useSession } from '../../app/session.js';
 import { RecognizedText } from './RecognizedText.js';
 import { useQueryParam } from '../../app/router.js';
+import { startedLabel } from '../folder/started.js';
 import { ErrorState, LoadingState } from '../../shared/ui.js';
 import { LAYOUT_STATE_LABELS } from '../../shared/labels.js';
 import { PageCanvas } from './PageCanvas.js';
@@ -158,7 +159,7 @@ export function MarkupScreen({ folderId }: MarkupScreenProps): ReactNode {
       folderId={folderId}
       layoutId={layoutId}
       canEdit={can('markup.edit')}
-      canRecognize={can('recognition.start')}
+      canRecognize={can('pipeline.run')}
       canLabelPages={can('document.edit')}
       onAfterRecognize={() => {
         void queryClient.invalidateQueries({
@@ -305,18 +306,24 @@ function LayoutWorkspace(props: WorkspaceProps): ReactNode {
     onError: (error) => notify.error(describeError(error)),
   });
 
+  /**
+   * Кнопка разметки ведёт СКВОЗНОЙ прогон, а не одно распознавание (S50).
+   *
+   * Прежде она звала гранулярный маршрут, который ставит распознавание и
+   * останавливается на нём. Для нажавшего разницы с «2. Распознать» нет: он
+   * отдал комплект порталу и ждёт списка ошибок. Разница была только в
+   * последствиях — на боевой папке распознавание кончилось в 18:03, анализ не
+   * начался вовсе, и вкладка «Проверка» два часа говорила «портал ещё не
+   * разобрал папку», пока человек не нажал вторую кнопку.
+   *
+   * Маршрут `check` сам выбирает, с чего продолжить, поэтому кнопке не нужно
+   * знать, распознан комплект или нет; `layoutId` ему тоже не нужен — он берёт
+   * последнюю пригодную разметку сам.
+   */
   const recognize = useMutation({
-    mutationFn: () => recognition.start(folderId, layoutId),
+    mutationFn: () => pipeline.check(folderId, 'auto'),
     onSuccess: (result) => {
-      // Режим называется сразу, а не выясняется потом по снимку прогона: в
-      // shadow-режиме результат не публикуется вовсе, и «отправлен на
-      // распознавание» без оговорки обещало бы распознанный текст.
-      const shadow = result.dryRun ? ' (теневой режим: результат не публикуется)' : '';
-      notify.success(
-        result.created
-          ? `Комплект отправлен на распознавание${shadow}`
-          : `Прогон распознавания по этой разметке уже идёт${shadow}`,
-      );
+      notify.success(startedLabel(result));
       props.onAfterRecognize();
     },
     onError: (error) => notify.error(describeError(error)),

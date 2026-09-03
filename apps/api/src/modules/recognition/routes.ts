@@ -134,14 +134,20 @@ function registerStartRoute(app: AppInstance): void {
       const idempotencyKey = requireIdempotencyKey(request);
       updateContext({ folderId });
 
-      // Гранулярный маршрут ручного пути: он ставит РАСПОЗНАВАНИЕ и ничего
-      // больше. Анализ дальше не идёт — его инженер запускает своей кнопкой,
-      // как и до S21. Сквозной прогон живёт в `POST /folders/{id}/check`.
+      /**
+       * Сквозной прогон по умолчанию (S50).
+       *
+       * До S50 маршрут всегда ставил `autoContinue: false`, и это было верно,
+       * пока его звал только ручной путь. Но кнопку «Распознать» на экране
+       * разметки он же и обслуживает, а она для человека неотличима от
+       * «2. Распознать»: он отдал комплект и ждёт списка ошибок. Заказ теперь
+       * приходит в теле запроса, а умолчание отвечает тому, чего ждёт нажавший.
+       */
       const started = await startRecognition(app.db, app.env, scope, {
         folderId,
         layoutId: request.body.layoutId,
         idempotencyKey,
-        autoContinue: false,
+        autoContinue: request.body.autoContinue,
       });
 
       request.log.info(

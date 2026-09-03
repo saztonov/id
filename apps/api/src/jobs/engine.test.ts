@@ -760,6 +760,72 @@ async function readStream(
 // Остановка воркера
 // =====================================================================
 
+describe('отмена идущей задачи', () => {
+  /**
+   * Кнопка «Стоп» останавливает работу, которая уже идёт (S50).
+   *
+   * До S50 это держалось на побочном эффекте: отмена обнуляла `locked_by`,
+   * стук аренды не находил своей строки и рапортовал «аренду перехватили».
+   * Работало, но случайно — и первая же правка условия `renewLease` сломала бы
+   * единственный способ прекратить прогон на сотни вызовов модели.
+   *
+   * Ждать приходится до одного интервала стука (`MAX_HEARTBEAT_MS`): другого
+   * способа узнать об отмене у идущей задачи нет и быть не должно — опрос
+   * состояния на каждом шаге обработчика стоил бы дороже, чем сама отмена.
+   */
+  it('снятая задача взводит сигнал отмены и остаётся снятой', async () => {
+    const cancelRegistry = new JobRegistry();
+    let entered = false;
+    let aborted: string | null = null;
+    cancelRegistry.register('graph.build', async (ctx: JobContext): Promise<void> => {
+      entered = true;
+      await new Promise<void>((resolve) => {
+        ctx.signal.addEventListener('abort', () => {
+          aborted = (ctx.signal.reason as Error | undefined)?.name ?? 'unknown';
+          resolve();
+        });
+      });
+      ctx.signal.throwIfAborted();
+    });
+
+    const cancelRunner = new JobRunner({
+      db: app.db,
+      registry: cancelRegistry,
+      logger: createLogger({ service: 'test-worker-cancel', level: 'silent', env: 'test' }),
+      metrics: createMetrics({ enabled: false, service: 'test-worker-cancel' }),
+      errorReporter: new NoopErrorReporter(),
+      workerId: 'worker-cancel',
+      pollIntervalMs: 60_000,
+    });
+
+    const job = await enqueueSystemJob(app.db, {
+      type: 'graph.build',
+      payload: { folderId: FOLDER_A },
+    });
+
+    cancelRunner.start();
+    await waitUntil(() => entered);
+
+    // Ровно то, что делает маршрут «Стоп».
+    await db.query(
+      `UPDATE jobs SET status = 'cancelled', locked_by = null, locked_until = null WHERE id = $1`,
+      [job.jobId],
+    );
+
+    await waitUntil(() => aborted !== null, 20_000);
+    // Причина названа отменой, а не гонкой воркеров: журнал эксплуатации
+    // читают именно ради этого различия.
+    expect(aborted).toBe('JobCancelled');
+
+    await cancelRunner.stop();
+
+    // Снятая задача снятой и остаётся: движок не имеет права вернуть её в
+    // очередь и не имеет права объявить упавшей.
+    const raw = await rawJob(job.jobId);
+    expect(raw.status).toBe('cancelled');
+  }, 40_000);
+});
+
 describe('остановка воркера', () => {
   /**
    * Проверяется само требование §12, а не намерение: текущая задача

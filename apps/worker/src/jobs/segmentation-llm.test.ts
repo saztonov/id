@@ -74,6 +74,10 @@ function harness(behaviour: (index: number) => Promise<LlmCallResult>, pageCount
   let saved: readonly PageClassification[] = [];
 
   const deps: SegmentationDeps = {
+    // Классификации заказ сквозного прогона не касается: она его только несёт
+    // дальше в payload. Порт объявлен интерфейсом целиком, поэтому двойник
+    // отвечает «строки задачи нет».
+    readAutoContinue: () => Promise.resolve(null),
     loadPages: () => Promise.resolve(pagesWithoutSignal(pageCount)),
     savePageClassifications: (input) => {
       saved = input.classifications;
