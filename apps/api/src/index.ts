@@ -146,6 +146,7 @@ export {
   listLayoutBlocks,
   listLayoutRevisions,
   listPageAttentionFlags,
+  listPagesWithBlocks,
   loadProfileForLayout,
   parseThresholds,
   replacePageWithFullPageBlock,

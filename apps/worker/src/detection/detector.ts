@@ -23,7 +23,15 @@ import {
   type TileInferenceResult,
 } from '@id/detection';
 
-import { preprocessTile, readTileRgb, tileLumaStats } from './preprocess.js';
+import {
+  cropTileRgb,
+  FULL_DECODE_MAX_PIXELS,
+  preprocessTile,
+  readPageRgb,
+  readTileRgb,
+  tileLumaStats,
+  type PageRgb,
+} from './preprocess.js';
 import type { OnnxSessionPort } from './session.js';
 
 export interface DetectPageInput {
@@ -106,14 +114,37 @@ export async function detectPage(input: DetectPageInput): Promise<DetectPageResu
   // из-за своего же единственного «тайла», принятого за пустой.
   const isTiledMode = plannedTiles.length > 1;
 
+  /**
+   * Кадр разворачивается ОДИН раз, если влезает в память (S50).
+   *
+   * Сетка 1024/128 на A4-скане даёт двенадцать плиток, и прежде каждая
+   * открывала PNG заново: страница декодировалась около восьми раз целиком —
+   * при том, что весь её растр это 26 МБ. На боевой папке из 220 таких листов
+   * детекция шла 39 минут, и заметная часть этого времени уходила на повторный
+   * декод одного и того же файла.
+   *
+   * Крупный формат идёт прежним путём: там довод про память остаётся в силе
+   * (см. `FULL_DECODE_MAX_PIXELS`). Одна плитка на страницу тоже: разворачивать
+   * кадр целиком, чтобы вырезать из него всю страницу, — лишняя копия.
+   */
+  const fullFrame: PageRgb | null =
+    isTiledMode && widthPx * heightPx <= FULL_DECODE_MAX_PIXELS ? await readPageRgb(pngPath) : null;
+  // Растр разошёлся с ожидаемым размером страницы — режем прежним способом:
+  // вырезка из чужого кадра дала бы модели сдвинутую картинку молча.
+  const frame =
+    fullFrame !== null && fullFrame.width === widthPx && fullFrame.height === heightPx
+      ? fullFrame
+      : null;
+
   const tiles: TileInferenceResult[] = [];
   for (const tile of plannedTiles) {
-    const rgb = await readTileRgb(pngPath, {
+    const region = {
       x0: tile.x0,
       y0: tile.y0,
       width: tile.width,
       height: tile.height,
-    });
+    };
+    const rgb = frame === null ? await readTileRgb(pngPath, region) : cropTileRgb(frame, region);
 
     if (isTiledMode) {
       const luma = tileLumaStats(rgb);

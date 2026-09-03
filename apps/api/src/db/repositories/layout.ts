@@ -792,6 +792,29 @@ const BLOCK_SELECTION = {
  * прямоугольник на число точек его бывшей формы, а полигонов в комплекте
  * единицы. Порядок точек берётся из `point_no` — он и есть форма.
  */
+/**
+ * Номера страниц, на которых у ревизии уже есть блоки (S50).
+ *
+ * Отдельный запрос вместо `listLayoutBlocks`, потому что вопрос другой:
+ * детекции нужно знать, размечена ли страница, а не какие на ней фигуры. Читая
+ * блоки целиком, задача на 220-страничной папке тянула к концу прогона тысячи
+ * строк вместе с их точками — и делала это на КАЖДОЙ странице, то есть объём
+ * рос квадратично по ходу разметки.
+ */
+export async function listPagesWithBlocks(
+  db: Database,
+  scope: AuthScope,
+  layoutRevisionId: string,
+): Promise<ReadonlySet<number>> {
+  const rows = await db
+    .selectDistinct({ workingPageIndex: layoutBlocks.workingPageIndex })
+    .from(layoutBlocks)
+    .innerJoin(folders, eq(layoutBlocks.folderId, folders.id))
+    .where(withScope(scope, FOLDER_SCOPE, eq(layoutBlocks.layoutRevisionId, layoutRevisionId)));
+
+  return new Set(rows.map((row) => row.workingPageIndex));
+}
+
 export async function listLayoutBlocks(
   db: Database,
   scope: AuthScope,

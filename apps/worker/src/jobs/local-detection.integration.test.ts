@@ -427,10 +427,13 @@ function sleep(ms: number): Promise<void> {
 /**
  * Гоняет очередь до опустошения (паттерн `markup.integration.test.ts`).
  *
- * Пустой проход НЕ означает «очередь встала»: `layout.analyze_coverage`
- * ставится с `runAfterMs: 1_000` (см. `local-detection.ts`), и наивный «один
- * пустой проход — стоп» иногда попадал бы РАНЬШЕ, чем `next_run_at` наступит,
- * молча пропуская отложенную задачу.
+ * Пустой проход НЕ означает «очередь встала»: часть задач ставится с
+ * отсрочкой, и наивный «один пустой проход — стоп» попадал бы РАНЬШЕ, чем
+ * наступит их `next_run_at`, молча пропуская отложенную задачу.
+ *
+ * Анализ покрытия при этом сюда не попадает вовсе: с S50 он отложен на
+ * полминуты (см. `local-detection.ts`), и тесты, которым нужен его результат,
+ * зовут обработчик напрямую.
  */
 async function drainQueue(runner: JobRunner, maxRounds = 20): Promise<void> {
   let idle = 0;
@@ -820,6 +823,12 @@ describe('layout.detect_local с моделью', () => {
       errorReporter: new NoopErrorReporter(),
       workerId: 'worker-detect-local-analyze',
     });
+    // Отсрочка анализа покрытия (S50) снимается явно: проверяется его РЕЗУЛЬТАТ,
+    // а не то, через сколько секунд он наступит. Ждать полминуты в тесте значило
+    // бы проверять таймер.
+    await testDb.query(
+      `UPDATE jobs SET next_run_at = now() WHERE type = 'layout.analyze_coverage'`,
+    );
     await drainQueue(runner);
     await runner.stop();
 

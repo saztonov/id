@@ -7,7 +7,13 @@ import sharp from 'sharp';
 import { describe, expect, it } from 'vitest';
 import { isBlankTile, pilGrayscaleLuma } from '@id/detection';
 
-import { preprocessTile, readTileRgb, tileLumaStats } from './preprocess.js';
+import {
+  cropTileRgb,
+  preprocessTile,
+  readPageRgb,
+  readTileRgb,
+  tileLumaStats,
+} from './preprocess.js';
 
 async function solidPng(
   width: number,
@@ -47,6 +53,52 @@ describe('readTileRgb', () => {
     } finally {
       await fs.rm(file, { force: true });
     }
+  });
+});
+
+describe('декод страницы целиком', () => {
+  /** Шахматная страница: однотонная не отличила бы сдвиг вырезки от совпадения. */
+  async function checkerPng(width: number, height: number): Promise<Buffer> {
+    const raw = Buffer.allocUnsafe(width * height * 3);
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const at = (y * width + x) * 3;
+        raw[at] = (x * 7 + y * 13) % 256;
+        raw[at + 1] = (x * 3 + y * 5) % 256;
+        raw[at + 2] = (x + y) % 256;
+      }
+    }
+    return sharp(raw, { raw: { width, height, channels: 3 } }).png().toBuffer();
+  }
+
+  it('вырезка из развёрнутого кадра совпадает с вырезкой из файла до байта', async () => {
+    // Ради этого равенства режим и выбирается по площади, а не по случаю: два
+    // пути декода обязаны давать модели одни и те же пиксели, иначе детекции
+    // разошлись бы только на части листов и только на проде.
+    const png = await checkerPng(40, 32);
+    const page = await readPageRgb(png);
+    expect(page.width).toBe(40);
+    expect(page.height).toBe(32);
+
+    for (const region of [
+      { x0: 0, y0: 0, width: 16, height: 16 },
+      { x0: 12, y0: 7, width: 20, height: 11 },
+      { x0: 24, y0: 16, width: 16, height: 16 },
+    ]) {
+      const fromFile = await readTileRgb(png, region);
+      const fromFrame = cropTileRgb(page, region);
+      expect(fromFrame.width).toBe(fromFile.width);
+      expect(fromFrame.height).toBe(fromFile.height);
+      expect(fromFrame.rgb.equals(fromFile.rgb)).toBe(true);
+    }
+  });
+
+  it('область за краем кадра усекается, а не читает соседнюю строку', async () => {
+    const page = await readPageRgb(await checkerPng(20, 20));
+    const tile = cropTileRgb(page, { x0: 16, y0: 16, width: 8, height: 8 });
+    expect(tile.width).toBe(4);
+    expect(tile.height).toBe(4);
+    expect(tile.rgb.byteLength).toBe(4 * 4 * 3);
   });
 });
 

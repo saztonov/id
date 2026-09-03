@@ -80,6 +80,7 @@ import {
   listBundlePages,
   listBundles,
   listLayoutBlocks,
+  listPagesWithBlocks,
   loadBundlePlan,
   loadProfileForLayout,
   startMarkupOnBundle,
@@ -845,6 +846,27 @@ function createPdfCache(options: PipelineJobsOptions): WorkingPdfCache | null {
 }
 
 /**
+ * Кэш на процесс — по одному на набор настроек (S50).
+ *
+ * Докстринг выше объявлял «один на процесс, общий для всех трёх стадий», а
+ * код звал `createPdfCache` трижды: получались три экземпляра с ОБЩИМ
+ * каталогом и раздельными картами аренд. Вытеснение одного не видит аренд
+ * другого и вправе удалить файл, который прямо сейчас читает `pdftoppm`
+ * соседней стадии. На одном комплекте это не стреляло — потолок кэша больше
+ * документа, — но на двух-трёх сразу выстрелило бы отказом рендера без
+ * единого следа о причине.
+ *
+ * Ключ — сам объект настроек: в проде он один на процесс, а в тестах их
+ * несколько, и общий кэш склеил бы независимые прогоны.
+ */
+const pdfCaches = new WeakMap<PipelineJobsOptions, WorkingPdfCache | null>();
+
+function sharedPdfCache(options: PipelineJobsOptions): WorkingPdfCache | null {
+  if (!pdfCaches.has(options)) pdfCaches.set(options, createPdfCache(options));
+  return pdfCaches.get(options) ?? null;
+}
+
+/**
  * Аренда рабочего PDF: из кэша, если он есть, иначе своя временная копия.
  *
  * Одна функция на все три стадии — иначе выключенный кэш вёл бы себя в них
@@ -866,7 +888,7 @@ async function leaseWorkingPdf(
 
 function localDetectionDeps(options: PipelineJobsOptions): LocalDetectionDeps {
   const { db, storage } = options;
-  const pdfCache = createPdfCache(options);
+  const pdfCache = sharedPdfCache(options);
 
   const cacheDir =
     options.detectionCacheDir ?? join(options.workDirBase ?? tmpdir(), 'detection-models');
@@ -923,8 +945,7 @@ function localDetectionDeps(options: PipelineJobsOptions): LocalDetectionDeps {
     existingBlockPages: async ({ folderId, layoutRevisionId }) => {
       const scope = await pinScope(db, folderId);
       if (scope === null) return new Set();
-      const blocks = await listLayoutBlocks(db, scope, layoutRevisionId);
-      return new Set(blocks.map((block) => block.workingPageIndex));
+      return listPagesWithBlocks(db, scope, layoutRevisionId);
     },
 
     workingPdf: (key) => leaseWorkingPdf(options, pdfCache, key, 'id-detect-pdf-'),
@@ -1152,7 +1173,7 @@ function recognitionDeps(options: PipelineJobsOptions): RecognitionDeps {
  */
 function orientationProbeDeps(options: PipelineJobsOptions): OrientationProbeDeps {
   const { db } = options;
-  const pdfCache = createPdfCache(options);
+  const pdfCache = sharedPdfCache(options);
 
   const scopeOf = async (folderId: string): Promise<AuthScope> => {
     const scope = await pinScope(db, folderId);
@@ -1348,7 +1369,7 @@ function orientationProbeDeps(options: PipelineJobsOptions): OrientationProbeDep
 
 function vlmRecognitionDeps(options: PipelineJobsOptions): VlmRecognitionDeps {
   const { db, storage } = options;
-  const pdfCache = createPdfCache(options);
+  const pdfCache = sharedPdfCache(options);
 
   const scopeOf = async (folderId: string): Promise<AuthScope> => {
     const scope = await pinScope(db, folderId);
