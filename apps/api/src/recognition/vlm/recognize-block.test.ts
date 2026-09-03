@@ -291,14 +291,40 @@ ${RETRY_INSTRUCTION[RETRYABLE_TABLE_EMPTY_ROWS] ?? ''}`,
     );
   });
 
-  it('пустая таблица дважды → ok с warning, а не отказ', async () => {
-    // Упрямая пустота остаётся ответом модели. Отказ здесь стоил бы страницы,
-    // а в строгом режиме — всего прогона: покрытие стало бы неполным.
+  it('пустая таблица дважды → invalid_response: у портала остался раунд', async () => {
+    // Блок не записывается намеренно. Записанный закрыл бы страницу
+    // чекпоинтом, и раунду дораспознавания нечего было бы переигрывать —
+    // а именно там модель получает другой system-промпт и отвечает мимо кэша.
     const vlm = new FakeVlm([reply(emptyTableJson), reply(emptyTableJson)]);
     const outcome = await recognizeBlock(inputFor(vlm, 'text'));
 
+    expect(outcome.kind).toBe('invalid_response');
+    if (outcome.kind === 'invalid_response') {
+      expect(outcome.reason).toBe(RETRYABLE_TABLE_EMPTY_ROWS);
+    }
+    expect(vlm.requests).toHaveLength(2);
+  });
+
+  it('пустая таблица дважды на раунде → ok с warning, а не отказ', async () => {
+    // Переспрашивать больше нечем. Упрямая пустота остаётся ответом модели, и
+    // отказ здесь стоил бы страницы, а в строгом режиме — всего прогона:
+    // покрытие стало бы неполным из-за одного блока.
+    const vlm = new FakeVlm([reply(emptyTableJson), reply(emptyTableJson)]);
+    const outcome = await recognizeBlock(inputFor(vlm, 'text', { acceptRetryable: true }));
+
     expect(outcome.kind).toBe('ok');
     if (outcome.kind === 'ok') expect(outcome.warnings).toEqual([RETRYABLE_TABLE_EMPTY_ROWS]);
+    expect(vlm.requests).toHaveLength(2);
+  });
+
+  it('на раунде корректирующий повтор по-прежнему делается первым', async () => {
+    // `acceptRetryable` — про приёмку исхода, а не про отмену повтора: сначала
+    // адресная инструкция, и только потом приёмка того, что вышло.
+    const vlm = new FakeVlm([reply(emptyTableJson), reply(filledTableJson)]);
+    const outcome = await recognizeBlock(inputFor(vlm, 'text', { acceptRetryable: true }));
+
+    expect(outcome.kind).toBe('ok');
+    if (outcome.kind === 'ok') expect(outcome.warnings).toEqual([]);
     expect(vlm.requests).toHaveLength(2);
   });
 

@@ -328,6 +328,14 @@ export interface VlmRecognizeBlockInput {
     ((rect: readonly [number, number, number, number]) => Promise<Uint8Array | null>) | undefined;
   /** Потолок кругов дозапроса для этого блока; отсутствие — умолчание порта. */
   readonly maxCropRequests?: number | undefined;
+  /**
+   * Принимать ли дефект, переживший корректирующий повтор (S48).
+   *
+   * Ставится на раунде дораспознавания: до него у портала есть чем
+   * переспросить страницу, и упрямая таблица без строк остаётся непригодным
+   * результатом.
+   */
+  readonly acceptRetryable?: boolean | undefined;
   /** Отмена попытки: доезжает до каждого физического вызова модели (S41). */
   readonly signal?: AbortSignal | undefined;
 }
@@ -1903,6 +1911,16 @@ export function createVlmRecognizePageHandler(
               ...(block.detectorProvenance === 'full_page'
                 ? { maxCropRequests: FULL_PAGE_MAX_CROP_REQUESTS }
                 : {}),
+              /**
+               * На раунде дораспознавания упрямый `retryable` принимается.
+               *
+               * До раунда он означает «есть чем переспросить»: блок не
+               * записывается, страница уходит в раунд, и там system-промпт
+               * несёт `RECOVERY_INSTRUCTION` — то есть другой `input_hash` и
+               * ответ мимо кэша. На самом раунде переспрашивать больше нечем,
+               * и результат принимается с предупреждением.
+               */
+              acceptRetryable: recoveryRound > 0,
               signal: ctx.signal,
               downscale: deps.downscale,
               /**
@@ -2359,6 +2377,14 @@ export function createVlmFinalizeHandler(deps: VlmRecognitionDeps): JobHandler<'
      * (`blocksInvalid`/`blocksRefused`). Страница, упавшая на расхождении
      * геометрии рендера, детерминирована: второй проход даст тот же отказ,
      * оплатив его заново.
+     *
+     * С S48 в эти пробелы входит и блок, чью таблицу без единой строки не
+     * исправил корректирующий повтор (`acceptRetryable`): такой блок не
+     * записывается, страница становится `failed` и попадает сюда. Раунд для
+     * него — не третий взгляд на то же самое: system-промпт несёт
+     * `RECOVERY_INSTRUCTION`, а внутри блока снова доступен повтор с табличной
+     * инструкцией, то есть лестница другая. На боевой папке так потерялись
+     * две страницы описи передачи из четырёх.
      *
      * Раунд идёт при обоих режимах неизменяемости: дочитать выгоднее, чем
      * публиковать неполное. Ни один инвариант публикации это не ослабляет —

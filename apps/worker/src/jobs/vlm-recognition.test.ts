@@ -1216,6 +1216,39 @@ describe('createVlmRecognizePageHandler', () => {
     // Версия промпта при этом та же: раунд — это тот же промт, выполненный
     // второй раз, и приписывать ему отдельную версию значило бы врать каталогу.
     expect(inputs[0]?.prompt.version).toBe(1);
+    // На раунде переспрашивать больше нечем, и дефект, переживший
+    // корректирующий повтор, принимается вместо того, чтобы ронять страницу.
+    expect(inputs[0]?.acceptRetryable).toBe(true);
+  });
+
+  it('до раунда упрямый дефект блока не принимается: есть чем переспросить', async () => {
+    const inputs: VlmRecognizeBlockInput[] = [];
+    const d = deps({
+      workingPdfToFile: async () => ({ path: '/tmp/work.pdf', cleanup: async () => {} }),
+      rasterizer: {
+        kind: 'pdftoppm',
+        version: '1.0',
+        renderPage: async () => ({ widthPx: 595, heightPx: 842 }),
+      },
+      crop: async () => ({ png: new Uint8Array([9, 9, 9]), widthPx: 50, heightPx: 50 }),
+      recognizeBlock: async (input: VlmRecognizeBlockInput) => {
+        inputs.push(input);
+        return okOutcome(frozenBlock({ id: input.block.layoutBlockId }));
+      },
+      insertBlockResult: async () => ({ written: true }),
+      markRunPage: async () => {},
+    });
+    const handler = createVlmRecognizePageHandler(d);
+
+    await handler(
+      makeContext(
+        'vlm.recognize_page',
+        { folderId: FOLDER, recognitionRunId: RUN, pageIndex: 0 },
+        makeSink(),
+      ),
+    );
+
+    expect(inputs[0]?.acceptRetryable).toBe(false);
   });
 
   it('stopsBatch-подобная ошибка (retriable:false) закрывает прогон через withVlmRunTermination', async () => {
