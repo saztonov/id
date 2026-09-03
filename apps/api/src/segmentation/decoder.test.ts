@@ -219,6 +219,39 @@ describe('приложение-продолжение', () => {
     expect(result.unassigned).toHaveLength(0);
   });
 
+  it('ссылка из нескольких слов подтверждается своим номером (S50)', () => {
+    // Ссылку приложение печатает строкой, и рядом с номером стоят слова
+    // системы сертификации. Сверка строки ЦЕЛИКОМ требовала от родителя того
+    // же порядка слов — и приложения к свидетельству о госрегистрации
+    // оставались ничьими при родителе, лежащем страницей выше.
+    const parentDoc = page(
+      'p1',
+      '##### СВИДЕТЕЛЬСТВО о государственной регистрации\n№ RU.77.01.34.008.E.006609.08.12',
+    );
+    const result = decodeSegmentation(
+      [parentDoc, page('p2')],
+      [
+        opensKnown('p1', 'state_registration_certificate'),
+        annexTo('p2', 'RU.77.01.34.008.E.006609.08.12'),
+      ],
+    );
+
+    expect(result.documents[0]?.pages).toHaveLength(2);
+    expect(result.unassigned).toHaveLength(0);
+  });
+
+  it('короткие куски ссылки подтверждением не считаются', () => {
+    // «РОСС» и «RU» стоят на каждой второй странице комплекта: приняв их за
+    // подтверждение, портал присоединил бы приложение к чужому документу.
+    const result = decodeSegmentation(
+      [page('p1', '##### СЕРТИФИКАТ СООТВЕТСТВИЯ\n№ РОСС RU.12345.ОС01.ПБ01.1111'), page('p2')],
+      [opensKnown('p1', 'cert_conformity'), annexTo('p2', 'РОСС RU.99999.ОС01.ПБ01.9999')],
+    );
+
+    expect(result.documents[0]?.pages).toHaveLength(1);
+    expect(result.unassigned[0]?.reason).toContain('не назван');
+  });
+
   it('сверяет номер со ВСЕМИ номерами страниц документа, а не с первым', () => {
     // Прямая находка замера на корпусе: первым по тексту сертификата стоит
     // номер аттестата аккредитации органа по сертификации, а собственный
@@ -394,6 +427,63 @@ describe('страница без сигнала внутри документа
     );
     expect(result.documents[0]?.pages).toHaveLength(2);
     expect(result.unassigned).toHaveLength(0);
+  });
+
+  it('лишняя пустая графа у безголового продолжения не рвёт документ (S50)', () => {
+    // Ширину таблицы считает OCR, и на длинной описи он ошибается на одну
+    // графу. На боевой папке ширина шла 8 → 9 → 8 → 7, четырёхлистовая опись
+    // распадалась на два документа, а двести её строк не разбирались вовсе.
+    const first = page(
+      'p1',
+      'Реестр передачи\n| № | Документ | Номер |\n| --- | --- | --- |\n| 1 | Сертификат | A-1 |',
+    );
+    const second = page('p2', '| | | | |\n| --- | --- | --- | --- |\n| 2 | Паспорт | П-2 | 1 |');
+    const result = decodeSegmentation(
+      [first, second],
+      [opensKnown('p1', 'transfer_registry'), cls('p2')],
+    );
+
+    expect(result.documents).toHaveLength(1);
+    expect(result.documents[0]?.pages).toHaveLength(2);
+    expect(result.unassigned).toHaveLength(0);
+  });
+
+  it('расхождение в две графы продолжением не считается', () => {
+    // Допуск лечит след распознавания, а не описывает другую таблицу: две
+    // графы разницы — это уже другой документ, и склеивать их нельзя.
+    const first = page(
+      'p1',
+      'Реестр передачи\n| № | Документ | Номер |\n| --- | --- | --- |\n| 1 | Сертификат | A-1 |',
+    );
+    const second = page(
+      'p2',
+      '| | | | | |\n| --- | --- | --- | --- | --- |\n| 2 | П | 1 | 2 | 3 |',
+    );
+    const result = decodeSegmentation(
+      [first, second],
+      [opensKnown('p1', 'transfer_registry'), cls('p2')],
+    );
+
+    expect(result.documents[0]?.pages).toHaveLength(1);
+    expect(result.unassigned).toHaveLength(1);
+  });
+
+  it('таблица с ЗАПОЛНЕННОЙ шапкой другой ширины — новая таблица', () => {
+    const first = page(
+      'p1',
+      'Реестр передачи\n| № | Документ | Номер |\n| --- | --- | --- |\n| 1 | Сертификат | A-1 |',
+    );
+    const second = page(
+      'p2',
+      '| № | Материал | Партия | Дата |\n| --- | --- | --- | --- |\n| 1 | Бетон | 12 | 01.02.2026 |',
+    );
+    const result = decodeSegmentation(
+      [first, second],
+      [opensKnown('p1', 'transfer_registry'), cls('p2')],
+    );
+
+    expect(result.documents[0]?.pages).toHaveLength(1);
+    expect(result.unassigned).toHaveLength(1);
   });
 
   it('пустая «шапка» перед разделителем — это продолжение, а не новая таблица', () => {

@@ -202,6 +202,123 @@ export interface DocTypeMatch {
   readonly lineIndex: number;
   /** Сколько подсказок из тела дополнительно подтвердились. */
   readonly bodyHitCount: number;
+  /**
+   * Якорь сработал по слову с опечаткой распознавания (S50).
+   *
+   * Вызывающий обязан различать это от точного совпадения: такое решение
+   * слабее, и уверенность у него ниже. Различие несёт поле, а не отдельный
+   * список, чтобы «совпало» и «совпало приблизительно» нельзя было перепутать
+   * при чтении результата.
+   */
+  readonly fuzzy: boolean;
+}
+
+// =====================================================================
+// Якорь с опечаткой распознавания (S50)
+// =====================================================================
+
+/**
+ * Минимальная длина слова, которое стоит сверять приблизительно.
+ *
+ * Короткие слова («акт», «лист», «№») ошибка чтения превращает в другие
+ * короткие слова, и допуск на них означал бы совпадение чего угодно с чем
+ * угодно.
+ */
+const FUZZY_MIN_WORD_LENGTH = 6;
+
+/**
+ * Сколько знаков слова вправе разойтись.
+ *
+ * Два, а не один, и это выведено из наблюдений, а не из осторожности: OCR
+ * читает «Реестр» как «Регистр» (вставка и замена) и «УЧЁТНЫЙ» как
+ * «УЧЕБНЫЙ» (замена, плюс ё/е, которую снимает нормализация). Одного знака
+ * не хватило бы ни там, ни там.
+ *
+ * Плата за это ограничена тремя условиями, которые проверяются ВМЕСТЕ с
+ * допуском: слово стоит в начале строки заголовка, ОСТАЛЬНАЯ часть якоря
+ * совпала точно («№ 1.1 к АОСР» у реестра приложений), и в теле страницы
+ * подтвердилась хотя бы одна подсказка вида. Заголовок чужого документа всеми
+ * тремя условиями не проходит.
+ */
+const FUZZY_MAX_DISTANCE = 2;
+
+/** «ё» и «е» — одна буква для сравнения: их различие не ошибка чтения. */
+function foldYo(value: string): string {
+  return value.toLowerCase().replaceAll('ё', 'е');
+}
+
+/** Расстояние Левенштейна; больше `limit` не считается — ответ всё равно «нет». */
+function editDistance(a: string, b: string, limit: number): number {
+  if (Math.abs(a.length - b.length) > limit) return limit + 1;
+  let previous = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i += 1) {
+    const current = [i];
+    let best = i;
+    for (let j = 1; j <= b.length; j += 1) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      const value = Math.min(
+        (current[j - 1] as number) + 1,
+        (previous[j] as number) + 1,
+        (previous[j - 1] as number) + cost,
+      );
+      current.push(value);
+      best = Math.min(best, value);
+    }
+    if (best > limit) return limit + 1;
+    previous = current;
+  }
+  return previous[b.length] as number;
+}
+
+/**
+ * Ведущее буквенное слово шаблона якоря: «Реестр» у `Реестр\s*№\s*…`.
+ *
+ * Шаблон читается как текст намеренно: перебирать варианты регулярного
+ * выражения нельзя, а первое слово у якорей вида — всегда литерал, потому что
+ * с него начинается напечатанный на бланке заголовок.
+ */
+function anchorHeadWord(source: string): string | null {
+  let word = '';
+  let at = source.startsWith('^') ? 1 : 0;
+  while (at < source.length) {
+    const char = source[at] as string;
+    if (/\p{L}/u.test(char)) {
+      word += char;
+      at += 1;
+      continue;
+    }
+    // Класс из одних букв — это ОДНА буква слова, записанная вариантами
+    // («УЧ[ЕЁ]ТНЫЙ»). Берётся первый вариант: сравнение всё равно идёт с
+    // допуском, а «ё» и «е» сводятся в одну букву отдельно.
+    const set = /^\[(\p{L}+)\]/u.exec(source.slice(at));
+    const letters = set?.[1];
+    if (letters === undefined) break;
+    word += letters[0] as string;
+    at += set?.[0].length ?? 0;
+  }
+  return word.length >= FUZZY_MIN_WORD_LENGTH ? word : null;
+}
+
+/**
+ * Строка с исправленным первым словом — либо `null`, если исправлять нечего.
+ *
+ * Возвращается именно ПОДМЕНА, а не «да/нет»: дальше строку проверяет тот же
+ * якорь целиком, и остальная его часть обязана совпасть точно. Так допуск
+ * распространяется ровно на одно слово, а не на весь заголовок.
+ */
+function lineWithFixedHead(line: string, headWord: string): string | null {
+  const first = /^([\p{L}]+)/u.exec(line)?.[1];
+  // Длина ПРОЧИТАННОГО слова может быть меньше эталонной ровно на допуск:
+  // «Рестр» — это «Реестр» с потерянной буквой, и требовать от него шести
+  // знаков значило бы отсекать самый частый вид опечатки — пропуск.
+  if (first === undefined || first.length < FUZZY_MIN_WORD_LENGTH - FUZZY_MAX_DISTANCE) {
+    return null;
+  }
+  const folded = foldYo(first);
+  const target = foldYo(headWord);
+  if (folded === target) return null;
+  if (editDistance(folded, target, FUZZY_MAX_DISTANCE) > FUZZY_MAX_DISTANCE) return null;
+  return headWord + line.slice(first.length);
 }
 
 /**
@@ -262,13 +379,51 @@ export function matchDocTypes(
         break;
       }
     }
-    if (!hit) continue;
 
     const bodyHitCount = (type.matchHints.bodyHints ?? []).filter((s) =>
       compile(s).test(body),
     ).length;
 
-    matches.push({ code: type.code, line: hit.line, lineIndex: hit.index, bodyHitCount });
+    /**
+     * Второй проход: якорь с опечаткой в первом слове (S50).
+     *
+     * Только когда точный не сработал и только при подтверждении из ТЕЛА
+     * страницы. На боевой папке распознавание прочитало «Реестр № 1.1 к АОСР»
+     * как «Регистр» и «Рестр», а «УЧЁТНЫЙ ЛИСТ» — как «УЧЕБНЫЙ»: три реестра
+     * приложений из двенадцати и все шесть журналов авторского надзора теряли
+     * вид, а с ним — и правила, и строки перечня.
+     *
+     * Подмена делается на СТРОКЕ, а не на шаблоне: остальная часть якоря
+     * проверяется точно, поэтому «Регистр» без «к АОСР» кандидатом не станет.
+     */
+    let fuzzy = false;
+    if (hit === null && bodyHitCount > 0) {
+      for (const source of type.matchHints.anchors) {
+        const headWord = anchorHeadWord(source);
+        if (headWord === null) continue;
+        const re = compile(source);
+        const idx = headingZone.findIndex((line, i) => {
+          if (isEnumerationItem[i]) return false;
+          const fixed = lineWithFixedHead(line, headWord);
+          return fixed !== null && matchesAsHeading(re, fixed);
+        });
+        if (idx >= 0) {
+          hit = { line: headingZone[idx] as string, index: idx };
+          fuzzy = true;
+          break;
+        }
+      }
+    }
+
+    if (!hit) continue;
+
+    matches.push({
+      code: type.code,
+      line: hit.line,
+      lineIndex: hit.index,
+      bodyHitCount,
+      fuzzy,
+    });
   }
 
   return matches;
@@ -297,6 +452,24 @@ export interface ResolvedDocType {
  * первый из двух равноправных кандидатов означало бы скрыть от инженера,
  * что классификация ненадёжна.
  */
+/**
+ * Похожа ли строка на ССЫЛКУ на документ, а не на его заголовок (S50).
+ *
+ * Признак — номер и дата в одной строке: «Сертификат соответствия
+ * № RU.CMIK.001.H.00270 от 17.05.2023 г.» — это упоминание внутри чужого
+ * бланка, а «СЕРТИФИКАТ СООТВЕТСТВИЯ» — заголовок. Собственный титул несёт
+ * реквизиты ОТДЕЛЬНЫМИ строками, потому что так устроены бланки: название
+ * набрано крупно, номер стоит ниже, часто в другой графе.
+ *
+ * Признак слабый и решает только НИЧЬЮ — там, где иначе выбор случаен.
+ * Самостоятельно он тип не снимает: строку «Паспорт № 357 от 21.04.2025»
+ * настоящего паспорта он тоже считает ссылкой, и это ничему не мешает, пока
+ * второго кандидата нет.
+ */
+function looksLikeReference(line: string): boolean {
+  return /№|\bN\s*\d/u.test(line) && /\d{1,2}[./]\d{1,2}[./]\d{2,4}/u.test(line);
+}
+
 export function resolveDocType(
   matches: readonly DocTypeMatch[],
   types: readonly DocTypeDefinition[],
@@ -304,18 +477,54 @@ export function resolveDocType(
   if (matches.length === 0) return { code: null, alternatives: [], ambiguous: false };
 
   const priorityOf = new Map(types.map((t) => [t.code, t.priority ?? 0]));
-  const ranked = [...matches].sort(
-    (a, b) => (priorityOf.get(b.code) ?? 0) - (priorityOf.get(a.code) ?? 0),
-  );
+  /**
+   * Ничья равных приоритетов разводится содержанием страницы (S50).
+   *
+   * Прежде при равенстве брался первый попавшийся, а исход объявлялся
+   * `ambiguous` — то есть тип получал уверенность 0.5, и документ уезжал в
+   * «требует проверки». На боевой папке так вышло с паспортом грунтовки: в его
+   * теле напечатаны ссылки на сертификат соответствия, свидетельство о
+   * госрегистрации и экспертное заключение, все три якоря сработали, и восемь
+   * документов из двенадцати комплектов стали «свидетельством о
+   * госрегистрации» с уверенностью 0.5. Это не косметика: неуверенный вид
+   * гасит типовые правила комплекта и уводит строки реестра.
+   *
+   * Доводов два, и оба содержательны: подсказки ТЕЛА (их уже посчитал
+   * `matchDocTypes`, и они прямо говорят, чей это бланк) и «строка похожа на
+   * ссылку, а не на заголовок». Позиция строки в доводы НЕ входит намеренно:
+   * «кто выше, тот и прав» развело бы и настоящую ничью — две разные бумаги,
+   * напечатанные на одном листе, — а её решать должен человек. Молчат доводы —
+   * ответ прежний, `ambiguous`.
+   */
+  const ranked = [...matches].sort((a, b) => {
+    const byPriority = (priorityOf.get(b.code) ?? 0) - (priorityOf.get(a.code) ?? 0);
+    if (byPriority !== 0) return byPriority;
+    // Точное совпадение всегда сильнее приблизительного, какими бы ни были
+    // остальные доводы: это разные степени уверенности, а не равные мнения.
+    if (a.fuzzy !== b.fuzzy) return a.fuzzy ? 1 : -1;
+    if (a.bodyHitCount !== b.bodyHitCount) return b.bodyHitCount - a.bodyHitCount;
+    const aReference = looksLikeReference(a.line);
+    const bReference = looksLikeReference(b.line);
+    if (aReference !== bReference) return aReference ? 1 : -1;
+    return 0;
+  });
 
   const winner = ranked[0] as DocTypeMatch;
   const topPriority = priorityOf.get(winner.code) ?? 0;
   const tied = ranked.filter((m) => (priorityOf.get(m.code) ?? 0) === topPriority);
+  // Ничья осталась ничьёй, только если её не развёл НИ ОДИН довод: у равных
+  // кандидатов то же число подсказок тела и тот же характер строки.
+  const undecided = tied.filter(
+    (m) =>
+      m.fuzzy === winner.fuzzy &&
+      m.bodyHitCount === winner.bodyHitCount &&
+      looksLikeReference(m.line) === looksLikeReference(winner.line),
+  );
 
   return {
     code: winner.code,
     alternatives: ranked.slice(1).map((m) => m.code),
-    ambiguous: tied.length > 1,
+    ambiguous: undecided.length > 1,
   };
 }
 

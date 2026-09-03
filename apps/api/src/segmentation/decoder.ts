@@ -289,20 +289,46 @@ function differsByOneChar(a: string, b: string): boolean {
  */
 type ParentMatch = 'exact' | 'one_char' | 'none';
 
+/**
+ * Ссылка целиком и её значащие куски по отдельности (S50).
+ *
+ * Ссылка приходит строкой, а не полем бланка, и в ней рядом с номером
+ * оказываются слова: «РОСС RU.32311.ОС01.ПБ01.0539» — это два токена, из
+ * которых номером является второй, а первый — обозначение системы. Сверять
+ * такую строку целиком значит требовать от родителя ровно того же порядка
+ * слов; на боевой папке этого хватило, чтобы потерять приложения к
+ * свидетельству о госрегистрации.
+ *
+ * Короткие куски отбрасываются: «РОСС», «RU» и «от» встречаются на каждой
+ * второй странице и дали бы ложное подтверждение кому угодно.
+ */
+function parentRefParts(parentRef: string): readonly string[] {
+  const whole = foldNumber(parentRef);
+  const parts = parentRef
+    .split(/\s+/u)
+    .map(foldNumber)
+    .filter((part) => part.length >= SUBSTRING_MATCH_MIN_CHARS && /\d/u.test(part));
+  return whole.length === 0 ? parts : [whole, ...parts.filter((part) => part !== whole)];
+}
+
 function confirmsParent(parentText: string, parentRef: string): ParentMatch {
-  const needle = foldNumber(parentRef);
-  if (needle.length === 0) return 'none';
+  const parts = parentRefParts(parentRef);
+  if (parts.length === 0) return 'none';
 
   const numbers = pageNumbers(parentText).map(foldNumber);
-  if (numbers.some((n) => n === needle)) return 'exact';
-  if (needle.length >= SUBSTRING_MATCH_MIN_CHARS && foldNumber(parentText).includes(needle)) {
-    return 'exact';
+  const folded = foldNumber(parentText);
+
+  for (const needle of parts) {
+    if (numbers.some((n) => n === needle)) return 'exact';
+    if (needle.length >= SUBSTRING_MATCH_MIN_CHARS && folded.includes(needle)) return 'exact';
   }
-  if (
-    needle.length >= ONE_CHAR_MATCH_MIN_CHARS &&
-    numbers.some((n) => differsByOneChar(n, needle))
-  ) {
-    return 'one_char';
+  for (const needle of parts) {
+    if (
+      needle.length >= ONE_CHAR_MATCH_MIN_CHARS &&
+      numbers.some((n) => differsByOneChar(n, needle))
+    ) {
+      return 'one_char';
+    }
   }
   return 'none';
 }

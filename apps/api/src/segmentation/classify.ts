@@ -78,6 +78,20 @@ export const PHASE1_CONFIDENCE = {
   anchor: 0.9,
   /** Якорь сработал, но кандидатов равного приоритета несколько. */
   anchorAmbiguous: 0.5,
+  /**
+   * Якорь сработал по слову с опечаткой распознавания (S50).
+   *
+   * Ровно `KNOWN_TYPE_MIN_CONFIDENCE` (0.8), и это выбор, а не совпадение:
+   * такой вид считается уверенно определённым, иначе правки не было бы смысла
+   * — документ всё равно уезжал бы в «требует проверки» и гасил правила
+   * комплекта. Ниже точного якоря (0.9) — потому что доказательство слабее:
+   * одно слово заголовка совпало приблизительно.
+   *
+   * Приблизительное совпадение принимается только вместе с подтверждением из
+   * тела страницы (`matchDocTypes`), поэтому 0.8 здесь — не «почти уверен по
+   * одному признаку», а «два независимых признака, один из них неточный».
+   */
+  anchorFuzzy: 0.8,
   /** Якорь сработал на СКЛЕЕННОЙ строке — реконструкция, а не факт текста. */
   gluedAnchor: 0.6,
   /** Счётчик листов «Лист N из M», N > 1. */
@@ -588,16 +602,51 @@ const DATE_ONLY = /^\d{1,2}[./]\d{1,2}[./]\d{2,4}\s*(?:г\.?)?$/u;
  * сверяет номер с текстом родительского документа и при несовпадении не
  * присоединяет лист.
  */
+/**
+ * Что OCR ставит на месте «№» в начале ссылки.
+ *
+ * Кириллические «Но»/«На»/«Не» — это прочитанный знак номера, а не слово:
+ * на боевой папке приложение к сертификату пришло как «Но РОСС RU.32311…».
+ * Латинские `No`/`N` законны сами по себе и режутся только перед цифрой —
+ * тем же правилом, что и в `normalizeDocNo`.
+ */
+const PARENT_NUMBER_PREFIX = /^(?:№|Н[оае](?=\s*[0-9A-ZА-Я])|No(?=\s*\d)|N(?=\s*\d))\s*/iu;
+
+/** Дата в хвосте ссылки: «RU.77…08.12 03.08.2012 г.» — номер кончился раньше. */
+const PARENT_DATE_TAIL = /\s*(?:от\s*)?\d{1,2}[./]\d{1,2}[./]\d{2,4}\s*(?:г\.?)?\s*$/u;
+
+/**
+ * Очистить ссылку приложения от того, что номером не является (S50).
+ *
+ * Ссылку собирает якорь роли или строка под ним, и в неё попадает всё, что
+ * OCR положил рядом: прочитанный буквами знак номера, дата выдачи, номер
+ * бланка. Дальше эту строку сверяют с текстом родителя — и не находят, потому
+ * что на родителе напечатан только номер. На боевой папке так потерялись пять
+ * приложений из шести: «Но РОСС RU.32311.0С01.ПБ01.0539 000345» против
+ * «РОСС RU.32311.ОС01.ПБ01.0539» на самом сертификате.
+ *
+ * Хвостовой номер бланка отрезается вместе с датой: он принадлежит ПРИЛОЖЕНИЮ
+ * («учётный номер бланка» печатается на нём самом), а не родителю.
+ */
+function cleanParentRef(raw: string): string | null {
+  let value = raw.trim().replace(PARENT_NUMBER_PREFIX, '');
+  value = value.replace(PARENT_DATE_TAIL, '').trim();
+  // Хвост из одних цифр после пробела — учётный номер бланка приложения.
+  value = value.replace(/\s+\d{4,8}$/u, '').trim();
+  return value.length >= 5 && /\d/u.test(value) ? value : null;
+}
+
 function parentRefBelow(normalized: readonly string[], anchorLine: string): string | null {
   const at = normalized.indexOf(anchorLine);
   if (at < 0 || !/^К\s/iu.test(anchorLine)) return null;
   for (let i = at + 1; i <= at + PARENT_LOOKAHEAD_LINES && i < normalized.length; i += 1) {
-    const candidate = (normalized[i] as string).replace(/^№\s*/u, '').trim();
-    if (candidate.length < 5 || candidate.length > 60) continue;
-    if (!/\d/u.test(candidate)) continue;
-    if (DATE_ONLY.test(candidate)) continue;
-    if (candidate.split(/\s+/u).length > PARENT_MAX_TOKENS) continue;
-    return candidate;
+    const line = (normalized[i] as string).trim();
+    if (line.length < 5 || line.length > 60) continue;
+    if (!/\d/u.test(line)) continue;
+    if (DATE_ONLY.test(line)) continue;
+    if (line.split(/\s+/u).length > PARENT_MAX_TOKENS) continue;
+    const candidate = cleanParentRef(line);
+    if (candidate !== null) return candidate;
   }
   return null;
 }
@@ -738,10 +787,16 @@ function classifyOne(
       observedTitle: evidence?.quote ?? hit?.line ?? null,
       pageRoleCode: null,
       parentRef: null,
-      confidence: resolved.ambiguous ? PHASE1_CONFIDENCE.anchorAmbiguous : PHASE1_CONFIDENCE.anchor,
+      confidence: resolved.ambiguous
+        ? PHASE1_CONFIDENCE.anchorAmbiguous
+        : hit?.fuzzy === true
+          ? PHASE1_CONFIDENCE.anchorFuzzy
+          : PHASE1_CONFIDENCE.anchor,
       reason: resolved.ambiguous
         ? `якорь заголовка сработал у нескольких типов равного приоритета: ${[resolved.code, ...resolved.alternatives].join(', ')}${note}`
-        : `якорь заголовка типа ${resolved.code}${note}`,
+        : hit?.fuzzy === true
+          ? `якорь заголовка типа ${resolved.code} сработал по слову с опечаткой распознавания, вид подтверждён телом страницы${note}`
+          : `якорь заголовка типа ${resolved.code}${note}`,
       source: 'anchor',
       alternatives: resolved.alternatives,
       ambiguous: resolved.ambiguous,
@@ -913,8 +968,12 @@ function classifyOne(
       ROLE_PRECEDENCE.map((code) => roles.find((r) => r.code === code)).find((r) => r) ??
       (roles[0] as (typeof roles)[number]);
     const isContinuation = chosen.code === DOC_CONTINUATION;
+    // Ссылка чистится и когда её выдал сам якорь: в захват попадает всё, что
+    // OCR положил в ту же строку, — знак номера буквами, дата, номер бланка.
     const parentRef =
-      chosen.parentRef ??
+      (chosen.parentRef === undefined || chosen.parentRef === null
+        ? null
+        : cleanParentRef(chosen.parentRef)) ??
       (chosen.code === 'annex_continuation' ? parentRefBelow(normalized, chosen.line) : null);
     return {
       ...NO_SIGNAL,

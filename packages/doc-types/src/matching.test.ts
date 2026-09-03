@@ -16,6 +16,7 @@ import {
   matchPageRoles,
   normalizeLine,
   normalizeLines,
+  resolveDocType,
 } from './matching.js';
 import type { DocTypeMatch } from './matching.js';
 import type { DocTypeDefinition, MatchHints, PageRoleCode, PageRoleDefinition } from './types.js';
@@ -293,6 +294,110 @@ describe('matchDocTypes — резервные типы', () => {
     expect(codesOf(matchDocTypes('ДОКУМЕНТ О КАЧЕСТВЕ №8985/Б', [FALLBACK, QUALITY_DOC]))).toEqual([
       'fake_quality_doc',
     ]);
+  });
+});
+
+describe('matchDocTypes — якорь с опечаткой распознавания (S50)', () => {
+  const REGISTRY = fakeType('fake_registry', {
+    anchors: ['Реестр\\s*№\\s*[\\d.]+\\s+к\\s+(?:АОСР|акту)'],
+    bodyHints: ['Организация,\\s*составившая\\s+документ'],
+  });
+  const JOURNAL = fakeType('fake_journal', {
+    anchors: ['УЧ[ЕЁ]ТНЫЙ\\s+ЛИСТ'],
+    bodyHints: ['Выявленные\\s+отступления'],
+  });
+
+  it('пропуск буквы в первом слове не теряет вид, если тело подтверждает', () => {
+    // «Рестр № 1.1 к АОСР» — распознавание боевой папки. Прежде такой лист
+    // оставался ничьим, а с ним терялись и строки перечня.
+    const text = 'Рестр № 1.1 к АОСР № 52-ОТ\n| Организация, составившая документ |';
+    const matches = matchDocTypes(text, [REGISTRY]);
+
+    expect(codesOf(matches)).toEqual(['fake_registry']);
+    expect(matches[0]?.fuzzy).toBe(true);
+  });
+
+  it('замена буквы разбирается так же: «УЧЕБНЫЙ» вместо «УЧЁТНЫЙ»', () => {
+    const text = 'УЧЕБНЫЙ ЛИСТ № 118\n| Выявленные отступления от проекта |';
+    const matches = matchDocTypes(text, [JOURNAL]);
+
+    expect(codesOf(matches)).toEqual(['fake_journal']);
+    expect(matches[0]?.fuzzy).toBe(true);
+  });
+
+  it('без подтверждения из тела приблизительный якорь не срабатывает', () => {
+    // Одного похожего слова мало: страница, где «Регистр» — это начало фразы,
+    // а не заголовок бланка, видом не типизируется.
+    expect(matchDocTypes('Регистр № 1.1 к АОСР № 52-ОТ', [REGISTRY])).toEqual([]);
+  });
+
+  it('остальная часть якоря обязана совпасть точно', () => {
+    const text = 'Рестр материалов на объекте\n| Организация, составившая документ |';
+    expect(matchDocTypes(text, [REGISTRY])).toEqual([]);
+  });
+
+  it('точное совпадение не помечается приблизительным', () => {
+    const text = 'Реестр № 1.1 к АОСР № 52-ОТ\n| Организация, составившая документ |';
+    expect(matchDocTypes(text, [REGISTRY])[0]?.fuzzy).toBe(false);
+  });
+});
+
+describe('resolveDocType — ничья равных приоритетов (S50)', () => {
+  const PASSPORT = fakeType('fake_passport', {
+    anchors: ['Паспорт\\s*№\\s*\\S'],
+    bodyHints: ['Дата\\s+изготовления'],
+  });
+  const CERTIFICATE = fakeType('fake_certificate', {
+    anchors: ['Сертификат\\s+соответствия'],
+    bodyHints: ['ОРГАН\\s+ПО\\s+СЕРТИФИКАЦИИ'],
+  });
+
+  /**
+   * Паспорт материала, в теле которого перечислены его документы качества.
+   *
+   * Ровно этот лист на боевой папке получал чужой вид с уверенностью 0.5 в
+   * восьми комплектах из двенадцати — и гасил вместе с собой правила по
+   * паспортам и строки перечня, ссылавшиеся на его номер.
+   */
+  const PASSPORT_PAGE = [
+    'Паспорт № 357',
+    'Дата изготовления 21.04.2025',
+    'Сертификат соответствия № RU.CMIK.001.H.00270 от 17.05.2023 г.',
+  ].join('\n');
+
+  it('подсказка тела решает ничью в пользу хозяина бланка', () => {
+    const resolved = resolveDocType(matchDocTypes(PASSPORT_PAGE, [PASSPORT, CERTIFICATE]), [
+      PASSPORT,
+      CERTIFICATE,
+    ]);
+
+    expect(resolved.code).toBe('fake_passport');
+    expect(resolved.ambiguous).toBe(false);
+    // Проигравший назван: решение объяснимо, а не молчаливо.
+    expect(resolved.alternatives).toEqual(['fake_certificate']);
+  });
+
+  it('строка с номером И датой считается ссылкой, а не заголовком', () => {
+    const page = ['Сертификат соответствия', 'Паспорт № 357 от 21.04.2025 г.'].join('\n');
+    const resolved = resolveDocType(matchDocTypes(page, [PASSPORT, CERTIFICATE]), [
+      PASSPORT,
+      CERTIFICATE,
+    ]);
+
+    expect(resolved.code).toBe('fake_certificate');
+    expect(resolved.ambiguous).toBe(false);
+  });
+
+  it('настоящая ничья остаётся ничьёй', () => {
+    // Два заголовка без подсказок тела и без признаков ссылки: разводить их
+    // позицией строки портал не вправе — это две разные бумаги на одном листе.
+    const page = 'Паспорт № 7\nСертификат соответствия';
+    const resolved = resolveDocType(matchDocTypes(page, [PASSPORT, CERTIFICATE]), [
+      PASSPORT,
+      CERTIFICATE,
+    ]);
+
+    expect(resolved.ambiguous).toBe(true);
   });
 });
 

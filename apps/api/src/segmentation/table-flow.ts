@@ -81,6 +81,22 @@ export function opensWithTable(text: string): boolean {
  * Различает их СОДЕРЖИМОЕ первой строки: у настоящей шапки ячейки заполнены
  * («№ п/п», «Наименование документа»), у продолжения — пусты.
  */
+/**
+ * На сколько граф ширина таблицы вправе разойтись между листами (S50).
+ *
+ * Ноль был бы верен, если бы графы считались по бумаге. Их считает OCR, и на
+ * длинной таблице он ошибается на одну: теряет пустую крайнюю графу или
+ * добавляет её. На описи передачи боевой папки ширина шла 8 → 9 → 8 → 7, и
+ * каждое расхождение рвало документ — четырёхлистовая опись распадалась, а
+ * двести её строк не разбирались вовсе.
+ *
+ * Одна графа, а не «примерно столько же»: расхождение в две графы уже
+ * означает другую таблицу, и признак, который это допускает, склеит соседние
+ * документы. Допуск действует ТОЛЬКО вместе с пустой первой строкой —
+ * то есть там, где OCR прямо говорит «шапки здесь нет».
+ */
+const COLUMN_DRIFT_TOLERANCE = 1;
+
 export function continuesTable(previousText: string, text: string): boolean {
   const before = tableRows(previousText);
   const after = tableRows(text);
@@ -88,8 +104,14 @@ export function continuesTable(previousText: string, text: string): boolean {
   const first = after[0];
   const second = after[1];
   if (!last || !first) return false;
-  if (last.columns !== first.columns) return false;
   if (first.isSeparator) return false;
+
+  const drift = Math.abs(last.columns - first.columns);
+  if (drift > COLUMN_DRIFT_TOLERANCE) return false;
+  // Расхождение допускается только у безголового продолжения: у таблицы с
+  // собственной шапкой ширина — это её описание, а не след распознавания.
+  if (drift > 0 && !first.isEmpty) return false;
+
   // Шапка со значащими ячейками — новая таблица, то есть, скорее всего, новый
   // документ. Пустая «шапка» перед разделителем — та же таблица без шапки.
   if (second?.isSeparator === true && !first.isEmpty) return false;
