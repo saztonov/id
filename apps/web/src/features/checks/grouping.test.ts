@@ -283,6 +283,27 @@ describe('runStateOf', () => {
   });
 });
 
+describe('runStateOf: конвейер идёт сам', () => {
+  it('без прогонов, но с идущим анализом — «портал ещё читает», а не «нажмите»', () => {
+    // Двадцать четыре минуты на боевой папке из 153 документов вкладка
+    // советовала нажать «2. Распознать»: совет не просто лишний — нажатие
+    // начинает всё заново.
+    const state = runStateOf(summary({ latestRun: null }), true, 'analysis');
+
+    expect(state).toEqual({ kind: 'ahead', stage: 'analysis' });
+  });
+
+  it('свободный конвейер и без прогонов — по-прежнему «проверка не выполнялась»', () => {
+    expect(runStateOf(summary({ latestRun: null }), true, null)).toEqual({ kind: 'never' });
+  });
+
+  it('после законченного прогона новый круг важнее прежнего итога', () => {
+    const state = runStateOf(summary({}), true, 'recognition');
+
+    expect(state).toEqual({ kind: 'ahead', stage: 'recognition' });
+  });
+});
+
 describe('summaryText', () => {
   const DONE = { kind: 'done_clean' } as const;
 

@@ -69,9 +69,7 @@ import { useSession } from '../../app/session.js';
 import { Link } from '../../app/router.js';
 import { usePollingInterval } from './stream.js';
 import { isDryRun, newestRecognitionRun, runningRecognitionRun } from './runs.js';
-
-/** Стадии, на которых конвейер что-то делает прямо сейчас. */
-const BUSY_STAGES: readonly string[] = ['uploaded', 'layout', 'recognition', 'analysis', 'checks'];
+import { activeStageOf, isBusy } from './busy.js';
 
 const STAGE_STARTED_LABEL: Readonly<Record<string, string>> = {
   recognition: 'Распознавание запущено: дальше анализ и проверки пойдут сами',
@@ -200,17 +198,7 @@ export function PipelineBar({ folderId, editable }: PipelineBarProps): ReactNode
   // считается и виновник остановки.
   const deferred = (data?.jobTypes ?? []).reduce((total, row) => total + row.deferred, 0);
   const busy = isBusy(stage, queued, running);
-  /**
-   * Стадия, которая идёт ПРЯМО СЕЙЧАС, — самая ранняя с задачами в очереди.
-   *
-   * `stage` из сводки отвечает на другой вопрос: это самая ДАЛЬНЯЯ стадия с
-   * активностью, и для фразы «идёт: …» она неверна. Пока пересобирается рабочий
-   * документ, дальней остаётся разметка от прошлого прогона — и экран писал
-   * «идёт: выделение блоков на страницах», хотя шёл приём файлов. Список стадий
-   * приходит отсортированным по порядку конвейера, поэтому первая ждущая в нём
-   * и есть текущая.
-   */
-  const activeStage = (data?.stages ?? []).find((summary) => summary.pending > 0)?.stage ?? null;
+  const activeStage = activeStageOf(data);
   // Постраничный счётчик разметки приезжает в той же сводке: своего запроса и
   // своего опроса у него нет намеренно (см. `LayoutProgress` на сервере).
   const layout = data?.layout ?? null;
@@ -444,20 +432,6 @@ function startedLabel(result: CheckPipelineResult): string {
     return 'Перечитывать нечего: запущен прогон правил по уже распознанному комплекту';
   }
   return STAGE_STARTED_LABEL[result.stage] ?? 'Обработка запущена';
-}
-
-/**
- * Занят ли конвейер.
- *
- * Очередь считается занятостью наравне с выполнением: задача, ждущая
- * исполнителя, — это работа, которая идёт, просто ещё не начатая. Прежнее
- * условие смотрело только на `running`, и время ожидания воркера экран
- * показывал как простой.
- */
-function isBusy(stage: string | null, queued: number, running: number): boolean {
-  if (stage === null) return false;
-  if (!BUSY_STAGES.includes(stage)) return false;
-  return queued > 0 || running > 0;
 }
 
 interface StateInput {

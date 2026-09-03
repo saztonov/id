@@ -44,8 +44,9 @@
 import { type ReactNode } from 'react';
 import { Alert, Collapse, Space, Typography } from 'antd';
 import { useQuery } from '@tanstack/react-query';
-import { bundles, checks } from '../../api/endpoints.js';
+import { bundles, checks, folderEvents } from '../../api/endpoints.js';
 import { folderKeys } from '../../api/keys.js';
+import { activeStageOf, checksAhead } from '../folder/busy.js';
 import { ErrorState, LoadingState } from '../../shared/ui.js';
 import { coverageGap, runStateOf, splitFindings, summaryText, type RunState } from './grouping.js';
 import { ReportTable } from './ReportTable.js';
@@ -69,6 +70,13 @@ export function ChecksTab({ folderId }: { folderId: string }): ReactNode {
     queryKey: folderKeys.bundles(folderId),
     queryFn: () => bundles.list(folderId),
   });
+  // Тот же ключ, что у полосы конвейера над вкладками: сводка уже в кэше, и
+  // второго запроса не будет. Без неё вкладка объявляет «проверка не
+  // выполнялась» ровно тогда, когда конвейер к ней идёт.
+  const processing = useQuery({
+    queryKey: folderKeys.processingStatus(folderId),
+    queryFn: ({ signal }) => folderEvents.processingStatus(folderId, signal),
+  });
 
   if (findings.isPending || reportQuery.isPending)
     return <LoadingState label="Загрузка проверки…" />;
@@ -78,7 +86,11 @@ export function ChecksTab({ folderId }: { folderId: string }): ReactNode {
   const { items, summary } = findings.data;
   const sections = splitFindings(items);
   const bundle = (bundleList.data ?? []).at(-1) ?? null;
-  const runState = runStateOf(summary, bundle?.matchesCurrentFiles ?? true);
+  const runState = runStateOf(
+    summary,
+    bundle?.matchesCurrentFiles ?? true,
+    checksAhead(processing.data) ? activeStageOf(processing.data) : null,
+  );
   const gap = coverageGap(summary);
 
   return (
@@ -175,6 +187,19 @@ interface AlertView {
   readonly description: string;
 }
 
+/**
+ * Чем занят конвейер, словами вкладки «Проверка».
+ *
+ * Своя таблица, а не общая с полосой конвейера: там фраза встраивается в
+ * «идёт: …» и описывает стадию, здесь — объясняет человеку, почему проверки
+ * ещё нет и почему ждать правильнее, чем нажимать кнопку.
+ */
+const STAGE_AHEAD_LABEL: Readonly<Record<string, string>> = {
+  recognition: 'распознавание страниц',
+  analysis: 'разбор документов и реквизитов',
+  checks: 'прогон правил',
+};
+
 function alertOf(state: RunState): AlertView {
   switch (state.kind) {
     case 'done_clean':
@@ -199,6 +224,14 @@ function alertOf(state: RunState): AlertView {
         description:
           'Нажмите «2. Распознать» над вкладками: портал прочитает комплект и найдёт ошибки. ' +
           'Ниже — состав, который он уже разобрал.',
+      };
+    case 'ahead':
+      return {
+        type: 'info',
+        message: 'Портал ещё читает комплект',
+        description:
+          `Идёт ${STAGE_AHEAD_LABEL[state.stage ?? ''] ?? 'обработка'}; проверка запустится сама, ` +
+          'нажимать ничего не нужно. Ниже — состав, который портал уже разобрал.',
       };
     case 'running':
       return {

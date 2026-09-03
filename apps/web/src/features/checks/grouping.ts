@@ -92,6 +92,8 @@ export function markupHref(folderId: string, finding: Finding): string | null {
  */
 export type RunState =
   | { readonly kind: 'never' }
+  /** Конвейер занят и сам дойдёт до проверки: звать человека не нужно. */
+  | { readonly kind: 'ahead'; readonly stage: string | null }
   | { readonly kind: 'running' }
   | { readonly kind: 'running_over_previous'; readonly since: string }
   | { readonly kind: 'stale' }
@@ -174,14 +176,32 @@ function reservationsOf(summary: ChecksSummary): readonly string[] {
   return parts;
 }
 
-export function runStateOf(summary: ChecksSummary, matchesCurrentFiles: boolean): RunState {
+export function runStateOf(
+  summary: ChecksSummary,
+  matchesCurrentFiles: boolean,
+  /**
+   * Стадия, которой конвейер занят прямо сейчас, если он сам дойдёт до
+   * проверки; `null` — не занят либо занят тем, что проверкой не кончится.
+   *
+   * Без неё вкладка отвечала «проверка ещё не выполнялась» и советовала нажать
+   * кнопку — двадцать четыре минуты на боевой папке из 153 документов, пока
+   * конвейер шёл сам. Совет был не просто лишним: нажатие начинает всё заново.
+   */
+  runningStage: string | null = null,
+): RunState {
   const latest = summary.latestRun;
-  if (latest === null) return { kind: 'never' };
+  if (latest === null) {
+    return runningStage === null ? { kind: 'never' } : { kind: 'ahead', stage: runningStage };
+  }
   if (latest.finishedAt === null) {
     return summary.shownRunId === null
       ? { kind: 'running' }
       : { kind: 'running_over_previous', since: latest.startedAt };
   }
+  // Прогон правил закончен, но конвейер снова идёт — значит идёт НОВЫЙ круг, и
+  // прежний результат вот-вот сменится. Показывать его как итог можно, обещать
+  // им покой — нет.
+  if (runningStage !== null) return { kind: 'ahead', stage: runningStage };
   // Состав изменился после проверки — догрузили файл. Удаление и замена сносят
   // прогоны вместе с производным, поэтому сюда попадает только догрузка.
   if (!matchesCurrentFiles) return { kind: 'stale' };
