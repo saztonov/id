@@ -32,7 +32,7 @@
  * готовность разметки в момент нажатия нельзя.
  */
 import { useRef, useState, type ReactNode } from 'react';
-import { Alert, App as AntApp, Button, Space, Table, Tag, Typography } from 'antd';
+import { Alert, App as AntApp, Button, Space, Table, Typography } from 'antd';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { bundles, files, layout } from '../../api/endpoints.js';
 import { folderKeys, layoutKeys } from '../../api/keys.js';
@@ -41,6 +41,7 @@ import type { SourceFile } from '../../api/types.js';
 import { useSession } from '../../app/session.js';
 import { ErrorState, LoadingState } from '../../shared/ui.js';
 import { VERIFY_STATE_LABELS } from '../../shared/labels.js';
+import { ToneTag } from '../../shared/tags.js';
 import { ConfirmIconAction, IconAction, RowActions } from '../../shared/RowActions.js';
 import { MoveDownIcon, MoveUpIcon, OpenIcon, TrashIcon } from '../../shared/icons.js';
 import { ReplaceFileAction } from './ReplaceFileAction.js';
@@ -329,10 +330,16 @@ export function FilesTab({ folderId, editable }: FilesTabProps): ReactNode {
             title: 'Состояние',
             dataIndex: 'verifyState',
             key: 'verifyState',
+            // Пресеты antd не проходят WCAG AA: `color="green"` даёт 3.9:1 при
+            // требуемых 4.5:1, и axe ловит это как `color-contrast` (§17).
+            // Состояние проверки файла — не украшение: по нему читают, принят
+            // файл или отправлен в карантин. Тона живут в `shared/tags.tsx`.
             render: (state: SourceFile['verifyState']) => (
-              <Tag color={state === 'ok' ? 'green' : state === 'quarantined' ? 'red' : 'blue'}>
+              <ToneTag
+                tone={state === 'ok' ? 'success' : state === 'quarantined' ? 'danger' : 'info'}
+              >
                 {VERIFY_STATE_LABELS[state]}
-              </Tag>
+              </ToneTag>
             ),
           },
           { title: 'Страниц', dataIndex: 'pageCount', key: 'pageCount' },

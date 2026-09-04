@@ -121,14 +121,31 @@ async function startApi() {
   for (const migration of loadMigrations(MIGRATIONS_DIR)) {
     await db.exec(migration.sql);
   }
-  for (const statement of fixtureSql({ sha, size: pdfBytes.byteLength })) {
-    await db.query(statement);
-  }
-
   const { buildApp } = await import(pathToFileURL(API_APP).href);
-  const { loadEnv } = await import(
+  const { loadEnv, computeAggregateManifestHash } = await import(
     pathToFileURL(join(REPO_ROOT, 'apps', 'api', 'dist', 'index.js')).href
   );
+
+  /*
+   * Хэш состава файлов берётся у ПОРТАЛА, а не считается фикстурой заново.
+   *
+   * Признак «рабочий документ отвечает текущему составу» сервер вычисляет
+   * сравнением этого хэша, и экран проверки по нему решает, показывать ли плашку
+   * «комплект изменился». Вторая реализация канонической формы разошлась бы с
+   * первой на первой же правке, и стенд молча показывал бы плашку всегда.
+   *
+   * Функция передаётся ИЗВНЕ, а не импортируется фикстурой: тогда сам посев не
+   * зависит от `apps/api/dist`, и его можно приложить к схеме без сборки —
+   * см. `fixture.test.mjs`. Требование «`pnpm -r build` до прогона» остаётся у
+   * стенда, где оно и проверяется несколькими строками выше.
+   */
+  for (const statement of fixtureSql({
+    sha,
+    size: pdfBytes.byteLength,
+    aggregateHash: computeAggregateManifestHash,
+  })) {
+    await db.query(statement);
+  }
 
   /**
    * Режим стенда задаётся снаружи.

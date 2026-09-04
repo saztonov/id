@@ -99,7 +99,14 @@ test('откат промта возвращает прежнюю версию �
 
   await expect
     .poll(async () => {
-      const response = await page.request.get('/api/v1/admin/prompts?limit=100');
+      // Отбор ПО КОДУ обязателен: реестр промтов давно не состоит из одной пары.
+      // Сид-миграции (0037, 0043, 0049, 0053) завели черновики стадий
+      // recognize/extract/check с версиями 1–4, и карта «версия → состояние» без
+      // отбора складывала их вместе с нашими — последний по списку побеждал, и
+      // утверждение говорило о чужом промте.
+      const response = await page.request.get(
+        '/api/v1/admin/prompts?code=page_classify_base&limit=100',
+      );
       const body = (await response.json()) as { items: { version: number; state: string }[] };
       return Object.fromEntries(body.items.map((item) => [String(item.version), item.state]));
     })

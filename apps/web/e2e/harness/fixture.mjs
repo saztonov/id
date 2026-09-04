@@ -7,38 +7,28 @@
  * ошибки в пути, ни несовпадения формы ответа, ни отсутствия права — то есть
  * ровно те дефекты, которые ловились восемь этапов подряд.
  *
- * Три ревизии, каждая под свой сценарий:
+ * Три ПАПКИ, каждая под свой сценарий:
  *
- * * `REVISION_EMPTY` — черновик без файлов: сценарий приёма файла целиком,
- *   от `init` до появления строки в списке;
- * * `REVISION_MARKUP` — черновик с настоящим PDF в хранилище, картой страниц и
+ * * `FOLDER_EMPTY` — папка без файлов: сценарий приёма файла целиком, от `init`
+ *   до появления строки в списке, и «проверка ещё не выполнялась»;
+ * * `FOLDER_MARKUP` — папка с настоящим PDF в хранилище, картой страниц и
  *   черновой разметкой: экран разметки, правка блоков, конфликт версий,
- *   заморозка и отправка на распознавание;
- * * `REVISION_REVIEW` — ревизия на проверке, готовая к согласованию: замечания
- *   и переход approve.
+ *   тип страницы и отправка на распознавание;
+ * * `FOLDER_REVIEW` — папка с разобранным документом и замечанием: экран
+ *   проверки, отчёт, группировка по комплектам.
+ *
+ * ## Ревизий и реестров здесь больше нет
+ *
+ * До S44 фикстура сеяла `works` + `submission_revisions` + `registries`.
+ * Миграции 0058 и 0059 сняли реестры и работы, схлопнули ревизию в саму папку и
+ * ввели уровень `complects`. Порядок вставки при этом перестал что-либо значить:
+ * двадцать один триггер `*_revision_locked`, из-за которого содержимое набивали
+ * черновиком, а статус переводили последним шагом, снят вместе со статусом.
+ * Класть строки можно в любом порядке, лишь бы соблюдались внешние ключи.
  */
 import { createHash } from 'node:crypto';
-import { dirname, join } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
 
-/**
- * Хэш состава файлов берётся у ПОРТАЛА, а не считается здесь заново.
- *
- * Признак «рабочий документ отвечает текущему составу» сервер вычисляет
- * сравнением этого хэша, и экран проверки по нему решает, показывать ли плашку
- * «комплект изменился». Вторая реализация канонической формы разошлась бы с
- * первой на первой же правке, и стенд молча показывал бы плашку всегда — то
- * есть проверял бы не поведение портала, а свою собственную опечатку.
- *
- * Импорт из `apps/api/dist` — тем же приёмом, что `buildApp` в `serve.mjs`:
- * карта экспортов пакета закрывает подпути, а требование «`pnpm -r build` до
- * прогона» у стенда и так есть.
- */
-const { computeAggregateManifestHash } = await import(
-  pathToFileURL(
-    join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'api', 'dist', 'index.js'),
-  ).href
-);
+import { folderTreeSql } from '@id/db-harness';
 
 /** Идентификаторы фиксированные: тест ссылается на них по имени. */
 export function id(n) {
@@ -49,31 +39,17 @@ export const IDS = {
   orgCustomer: id(1),
   orgContractor: id(2),
   object: id(4),
-  /** Организация генподрядчика объекта: из неё выводится область ПТО. */
+  /** Организация генподрядчика объекта: из неё выводится исполнитель папки. */
   orgGeneral: id(5),
-  /** Реестр-черновик за январь: на нём проверяется сборка и препятствия. */
-  registry: id(6),
-  /**
-   * Реестр, готовый к передаче: номер присвоен, комплект включён, опись подана.
-   *
-   * Отдельный реестр, а не тот же самый, потому что стенд поднимается БЕЗ
-   * воркера: подать ревизию описи через интерфейс нельзя — для этого нужен
-   * собранный рабочий документ, который строит задача очереди. Состояние
-   * «опись подана» задаётся строкой, как и всё прочее в фикстуре.
-   */
-  registryReady: id(7),
-  registryFileWork: id(8),
-  registryFileRevision: id(9),
 
-  workEmpty: id(10),
-  revisionEmpty: id(11),
-  workMarkup: id(12),
-  revisionMarkup: id(13),
-  workReview: id(14),
-  revisionReview: id(15),
-  /** Комплект, уже поданный и включённый в готовый к передаче реестр. */
-  workIssued: id(16),
-  revisionIssued: id(17),
+  /**
+   * Папки. Идентификаторы сохранены от прежних РЕВИЗИЙ, а не от работ: после
+   * S44 рабочее место открывается по адресу `/ids/folders/{id}`, и спеки вместе
+   * с `support/session.ts` ссылаются именно на эти UUID.
+   */
+  folderEmpty: id(11),
+  folderMarkup: id(13),
+  folderReview: id(15),
 
   userContractor: id(20),
   userEngineer: id(21),
@@ -82,13 +58,12 @@ export const IDS = {
   /**
    * Роли `contractor` + `engineer` у одного человека.
    *
-   * Право `submission.upload` у него есть — оно выдано роли подрядчика, — а
-   * область видимости строится по СТАРШЕЙ роли и организации не содержит.
-   * Создание поставки от такого пользователя отвергается, и портал обязан
-   * сказать это до нажатия, а не показать непонятный отказ после.
+   * Область видимости строится по СТАРШЕЙ роли и организации не содержит,
+   * поэтому исполнителя портал выводит из карточки объекта и поднимает признак
+   * «названо не человеком». Это и проверяется.
    */
   userMixed: id(24),
-  /** Инженер ПТО генподрядчика: собирает реестры и заводит комплекты за других. */
+  /** Инженер ПТО генподрядчика: заводит папки за других. */
   userGeneral: id(25),
 
   fileMarkup: id(30),
@@ -120,6 +95,8 @@ export const IDS = {
   /** Замечание с адресом блока: навигация «finding → evidence» (§16). */
   validationRunMarkup: id(85),
   findingWithBlock: id(86),
+  /** Комплект папки на проверке: отчёт группируется по комплектам (S44). */
+  complectReview: id(90),
 };
 
 /** Проблемы журнала ошибок (§11): экрану нужны данные, а вызвать 500 из теста нечем. */
@@ -198,18 +175,47 @@ function blobKey(sha) {
   return `blobs/${sha.slice(0, 2)}/${sha.slice(2, 4)}/${sha}`;
 }
 
+/** Месяц папок стенда: один на все три, спеки печатают его в `IDS.period`. */
+const PERIOD = '2026-01-01';
+
 /**
  * SQL фикстуры.
  *
- * `pdfSha` приходит извне: байты фикстуры кладутся в хранилище тем же кодом,
+ * `sha`/`size` приходят извне: байты фикстуры кладутся в хранилище тем же кодом,
  * который считает их хэш, — иначе `GET /files/{id}/content` отдал бы 409 или
  * ушёл в хранилище за объектом, которого там нет, и экран разметки не показал бы
  * страницу. Такой промах выглядел бы как «pdf.js не работает».
+ *
+ * `aggregateHash` — каноническая форма хэша состава файлов, тоже снаружи: её
+ * считает портал (`computeAggregateManifestHash`), и вторая реализация здесь
+ * разошлась бы с первой на первой же правке. Передача аргументом вместо импорта
+ * из `apps/api/dist` оставляет посев проверяемым без сборки (`fixture.test.mjs`).
  */
-export function fixtureSql(pdfSha) {
+export function fixtureSql({ sha, size, aggregateHash }) {
   const workingSha = 'b'.repeat(64);
   const reviewSha = 'c'.repeat(64);
   const derivedSha = 'd'.repeat(64);
+
+  /**
+   * Папка заводится общим помощником `@id/db-harness`, а не выписанным здесь
+   * `INSERT`: он же ставит раздел объекта (без `object_sections` падает
+   * `folders_section_fk`) и связь объекта с организацией. Тридцать пять
+   * скопированных вручную фикстур в тестах API однажды разошлись именно так, и
+   * ровно так же на S44 разошёлся этот файл — переименование колонки папки
+   * теперь правится в одном месте на весь монорепозиторий.
+   */
+  const folder = (folderId, title, contractorId, createdBy) =>
+    folderTreeSql({
+      folderId,
+      objectId: IDS.object,
+      contractorId,
+      managedByContractorId: contractorId,
+      userId: createdBy,
+      sectionCode: 'roofing',
+      sectionName: 'Кровля',
+      period: PERIOD,
+      folderTitle: title,
+    });
 
   return [
     `INSERT INTO counterparties (id, name, kind) VALUES ('${IDS.orgCustomer}', 'ООО «Застройщик»', 'customer')`,
@@ -219,13 +225,10 @@ export function fixtureSql(pdfSha) {
     `INSERT INTO construction_objects (id, code, name, full_name, address, general_contractor_id)
        VALUES ('${IDS.object}', 'E2E01', 'Объект сквозного прогона', 'ЖК «Проверка», корпус 1', 'г. Москва',
                '${IDS.orgGeneral}')`,
-    // Раздел `roofing` есть в сиде 0029: здесь он только включается на объекте.
-    `INSERT INTO object_sections (object_id, section_code)
-       VALUES ('${IDS.object}', 'roofing')`,
+    // Связь объекта с генподрядчиком: папки его организации помощник свяжет сам,
+    // но ни одной такой папки в фикстуре нет — заводит их сценарий.
     `INSERT INTO object_contractors (object_id, contractor_id)
-       VALUES ('${IDS.object}', '${IDS.orgContractor}')`,
-    `INSERT INTO object_contractors (object_id, contractor_id)
-       VALUES ('${IDS.object}', '${IDS.orgGeneral}')`,
+       VALUES ('${IDS.object}', '${IDS.orgGeneral}') ON CONFLICT DO NOTHING`,
 
     `INSERT INTO users (id, kc_sub, full_name, contractor_id)
        VALUES ('${IDS.userContractor}', '${KC.contractor}', 'Сотрудник подрядчика', '${IDS.orgContractor}')`,
@@ -242,36 +245,6 @@ export function fixtureSql(pdfSha) {
     `INSERT INTO users (id, kc_sub, full_name, contractor_id)
        VALUES ('${IDS.userGeneral}', '${KC.general}', 'Инженер ПТО генподрядчика', '${IDS.orgGeneral}')`,
     `INSERT INTO user_roles (user_id, role) VALUES ('${IDS.userGeneral}', 'general_contractor')`,
-
-    // Реестр-черновик за январь: сценарий передачи собирает его из комплектов.
-    `INSERT INTO registries (id, object_id, section_code, period, created_by)
-       VALUES ('${IDS.registry}', '${IDS.object}', 'roofing', DATE '2026-01-01', '${IDS.userAdmin}')`,
-    `INSERT INTO registries (id, object_id, section_code, period, number, created_by)
-       VALUES ('${IDS.registryReady}', '${IDS.object}', 'roofing', DATE '2026-01-01', '9',
-               '${IDS.userGeneral}')`,
-    `INSERT INTO works
-       (id, object_id, contractor_id, managed_by_contractor_id, section_code, period,
-        kind, registry_id, title, auto_run_enabled, created_by)
-       VALUES ('${IDS.registryFileWork}', '${IDS.object}', '${IDS.orgGeneral}', '${IDS.orgGeneral}',
-               'roofing', DATE '2026-01-01', 'registry', '${IDS.registryReady}',
-               'Файл реестра №9', true, '${IDS.userGeneral}')`,
-    `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status,
-                                       submitted_at, submitted_by)
-       VALUES ('${IDS.registryFileRevision}', '${IDS.registryFileWork}', '${IDS.object}',
-               '${IDS.orgGeneral}', 1, 'submitted', now(), '${IDS.userGeneral}')`,
-    `UPDATE works SET current_revision_id = '${IDS.registryFileRevision}'
-      WHERE id = '${IDS.registryFileWork}'`,
-    `INSERT INTO works
-       (id, object_id, contractor_id, managed_by_contractor_id, section_code, period,
-        registry_id, ordinal, title, created_by)
-       VALUES ('${IDS.workIssued}', '${IDS.object}', '${IDS.orgContractor}', '${IDS.orgContractor}',
-               'roofing', DATE '2026-01-01', '${IDS.registryReady}', 1,
-               'Комплект в готовой папке', '${IDS.userContractor}')`,
-    `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status,
-                                       submitted_at, submitted_by)
-       VALUES ('${IDS.revisionIssued}', '${IDS.workIssued}', '${IDS.object}', '${IDS.orgContractor}',
-               1, 'submitted', now(), '${IDS.userContractor}')`,
-    `UPDATE works SET current_revision_id = '${IDS.revisionIssued}' WHERE id = '${IDS.workIssued}'`,
     `INSERT INTO users (id, kc_sub, full_name, contractor_id)
        VALUES ('${IDS.userMixed}', '${KC.mixed}', 'Совмещающий роли', '${IDS.orgContractor}')`,
     `INSERT INTO user_roles (user_id, role) VALUES ('${IDS.userMixed}', 'contractor')`,
@@ -279,48 +252,36 @@ export function fixtureSql(pdfSha) {
     `INSERT INTO user_object_scopes (user_id, object_id) VALUES ('${IDS.userMixed}', '${IDS.object}')`,
     `INSERT INTO user_object_scopes (user_id, object_id) VALUES ('${IDS.userEngineer}', '${IDS.object}')`,
 
-    // --- Ревизия под сценарий приёма файла ---
-    `INSERT INTO works
-       (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-       VALUES ('${IDS.workEmpty}', '${IDS.object}', '${IDS.orgContractor}', '${IDS.orgContractor}',
-               'roofing', DATE '2026-01-01', 'Комплект без файлов', '${IDS.userContractor}')`,
-    `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
-       VALUES ('${IDS.revisionEmpty}', '${IDS.workEmpty}', '${IDS.object}', '${IDS.orgContractor}', 1, 'draft')`,
-    `UPDATE works SET current_revision_id = '${IDS.revisionEmpty}' WHERE id = '${IDS.workEmpty}'`,
+    // --- Папка под сценарий приёма файла: ни файлов, ни рабочего документа ---
+    ...folder(IDS.folderEmpty, 'Комплект без файлов', IDS.orgContractor, IDS.userContractor),
 
-    // --- Ревизия под экран разметки ---
-    `INSERT INTO works
-       (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-       VALUES ('${IDS.workMarkup}', '${IDS.object}', '${IDS.orgContractor}', '${IDS.orgContractor}',
-               'roofing', DATE '2026-01-01', 'Комплект с разметкой', '${IDS.userContractor}')`,
-    `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status)
-       VALUES ('${IDS.revisionMarkup}', '${IDS.workMarkup}', '${IDS.object}', '${IDS.orgContractor}', 1, 'draft')`,
-    `UPDATE works SET current_revision_id = '${IDS.revisionMarkup}' WHERE id = '${IDS.workMarkup}'`,
+    // --- Папка под экран разметки ---
+    ...folder(IDS.folderMarkup, 'Комплект с разметкой', IDS.orgContractor, IDS.userContractor),
     `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
-       VALUES ('${pdfSha.sha}', '${blobKey(pdfSha.sha)}', ${pdfSha.size}, 'application/pdf')`,
+       VALUES ('${sha}', '${blobKey(sha)}', ${size}, 'application/pdf')`,
     `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
        VALUES ('${workingSha}', '${blobKey(workingSha)}', 4096, 'application/pdf')`,
-    `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order, verify_state)
-       VALUES ('${IDS.fileMarkup}', '${IDS.revisionMarkup}', '${pdfSha.sha}', 'Повороты.pdf', 0, 'ok')`,
+    `INSERT INTO source_files (id, folder_id, blob_sha256, file_name, sort_order, verify_state)
+       VALUES ('${IDS.fileMarkup}', '${IDS.folderMarkup}', '${sha}', 'Повороты.pdf', 0, 'ok')`,
     ...PAGES.map(
       (page) =>
-        `INSERT INTO source_pages (id, revision_id, source_file_id, file_page_index, revision_ordinal,
+        `INSERT INTO source_pages (id, folder_id, source_file_id, file_page_index, folder_ordinal,
                                    width_px, height_px, rotation, attention_flags)
-           VALUES ('${page.id}', '${IDS.revisionMarkup}', '${IDS.fileMarkup}', ${page.index}, ${page.index},
+           VALUES ('${page.id}', '${IDS.folderMarkup}', '${IDS.fileMarkup}', ${page.index}, ${page.index},
                    ${page.width}, ${page.height}, ${page.rotation},
                    ${page.index === 2 ? `ARRAY['no_blocks','blank_page_candidate']::text[]` : `ARRAY[]::text[]`})`,
     ),
-    `INSERT INTO processing_bundles (id, revision_id, aggregate_manifest_hash, working_pdf_blob_sha256, builder_version)
-       VALUES ('${IDS.bundleMarkup}', '${IDS.revisionMarkup}',
-               '${computeAggregateManifestHash([{ blobSha256: pdfSha.sha, sortOrder: 0 }])}',
+    `INSERT INTO processing_bundles (id, folder_id, aggregate_manifest_hash, working_pdf_blob_sha256, builder_version)
+       VALUES ('${IDS.bundleMarkup}', '${IDS.folderMarkup}',
+               '${aggregateHash([{ blobSha256: sha, sortOrder: 0 }])}',
                '${workingSha}', 'bundle/1+qpdf')`,
     ...PAGES.map(
       (page) =>
-        `INSERT INTO processing_bundle_pages (bundle_id, revision_id, working_page_index, source_page_id)
-           VALUES ('${IDS.bundleMarkup}', '${IDS.revisionMarkup}', ${page.index}, '${page.id}')`,
+        `INSERT INTO processing_bundle_pages (bundle_id, folder_id, working_page_index, source_page_id)
+           VALUES ('${IDS.bundleMarkup}', '${IDS.folderMarkup}', ${page.index}, '${page.id}')`,
     ),
-    `INSERT INTO layout_revisions (id, revision_id, object_id, bundle_id, revision_no, state)
-       VALUES ('${IDS.layoutMarkup}', '${IDS.revisionMarkup}', '${IDS.object}', '${IDS.bundleMarkup}', 1, 'draft')`,
+    `INSERT INTO layout_revisions (id, folder_id, object_id, bundle_id, revision_no, state)
+       VALUES ('${IDS.layoutMarkup}', '${IDS.folderMarkup}', '${IDS.object}', '${IDS.bundleMarkup}', 1, 'draft')`,
     // RD-документ прогона: его создаёт задача 4 цепочки «Разметить файл», а
     // `startRecognitionRun` без него отвечает 409 «цепочка разметки не была
     // выполнена». Стенд поднимает портал без воркера и без RD WEB, поэтому
@@ -330,61 +291,61 @@ export function fixtureSql(pdfSha) {
        VALUES ('${IDS.layoutMarkup}', 'rd-doc-e2e-1', 'rd-project-e2e')`,
     ...BLOCKS.map(
       (block) =>
-        // `revision_id` и `bundle_id` денормализованы в самой таблице и объявлены
-        // NOT NULL: без них блок мог сослаться на страницу чужой ревизии, и
+        // `folder_id` и `bundle_id` денормализованы в самой таблице и объявлены
+        // NOT NULL: без них блок мог сослаться на страницу чужой папки, и
         // составные FK ровно это и запрещают. Фикстура обязана их заполнять.
-        `INSERT INTO layout_blocks (id, layout_revision_id, revision_id, bundle_id, source_page_id,
+        `INSERT INTO layout_blocks (id, layout_revision_id, folder_id, bundle_id, source_page_id,
                                     working_page_index, object_id, block_type, shape_type,
                                     x0, y0, x1, y1, sort_order, source, detector_provenance)
-           VALUES ('${block.id}', '${IDS.layoutMarkup}', '${IDS.revisionMarkup}', '${IDS.bundleMarkup}',
+           VALUES ('${block.id}', '${IDS.layoutMarkup}', '${IDS.folderMarkup}', '${IDS.bundleMarkup}',
                    '${block.page}', ${block.workingPageIndex},
                    '${IDS.object}', '${block.type}', 'rectangle',
                    ${block.coords[0]}, ${block.coords[1]}, ${block.coords[2]}, ${block.coords[3]},
                    ${block.sortOrder}, 'auto', 'rf_detr')`,
     ),
 
-    // --- Ревизия под согласование ---
-    `INSERT INTO works
-       (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
-       VALUES ('${IDS.workReview}', '${IDS.object}', '${IDS.orgContractor}', '${IDS.orgContractor}',
-               'roofing', DATE '2026-01-01', 'Комплект на проверке', '${IDS.userContractor}')`,
-    // Ревизия создаётся ЧЕРНОВИКОМ и проводится по статусам ниже, после набивки
-    // содержимого. Иначе триггер неизменяемости отвергает вставку файлов и
-    // страниц: класс `source` заперт с момента подачи (§3.9, урок S2), и
-    // фикстура, набивающая содержимое сразу в `in_review`, падает с 23001.
-    `INSERT INTO submission_revisions (id, work_id, object_id, contractor_id, revision_no, status,
-                                       aggregate_manifest_hash)
-       VALUES ('${IDS.revisionReview}', '${IDS.workReview}', '${IDS.object}', '${IDS.orgContractor}', 1,
-               'draft', '${'f'.repeat(64)}')`,
-    `UPDATE works SET current_revision_id = '${IDS.revisionReview}' WHERE id = '${IDS.workReview}'`,
+    // --- Папка под экран проверки ---
+    ...folder(IDS.folderReview, 'Комплект на проверке', IDS.orgContractor, IDS.userContractor),
+    // Хэш состава у папки намеренно НЕ совпадает с хэшем её рабочего документа:
+    // экран проверки обязан уметь сказать «комплект изменился после проверки», и
+    // проверять это надо там, где расхождение есть.
+    `UPDATE folders SET aggregate_manifest_hash = '${'f'.repeat(64)}'
+      WHERE id = '${IDS.folderReview}'`,
     `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
        VALUES ('${reviewSha}', '${blobKey(reviewSha)}', 2048, 'application/pdf')`,
     `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
        VALUES ('${derivedSha}', '${blobKey(derivedSha)}', 1024, 'application/pdf')`,
-    `INSERT INTO source_files (id, revision_id, blob_sha256, file_name, sort_order, verify_state)
-       VALUES ('${IDS.fileReview}', '${IDS.revisionReview}', '${reviewSha}', 'АОСР.pdf', 0, 'ok')`,
-    `INSERT INTO source_pages (id, revision_id, source_file_id, file_page_index, revision_ordinal,
+    `INSERT INTO source_files (id, folder_id, blob_sha256, file_name, sort_order, verify_state)
+       VALUES ('${IDS.fileReview}', '${IDS.folderReview}', '${reviewSha}', 'АОСР.pdf', 0, 'ok')`,
+    `INSERT INTO source_pages (id, folder_id, source_file_id, file_page_index, folder_ordinal,
                                width_px, height_px, rotation)
-       VALUES ('${IDS.pageReview}', '${IDS.revisionReview}', '${IDS.fileReview}', 0, 0, 595, 842, 0)`,
-    `INSERT INTO processing_bundles (id, revision_id, aggregate_manifest_hash, working_pdf_blob_sha256, builder_version)
-       VALUES ('${IDS.bundleReview}', '${IDS.revisionReview}',
-               '${computeAggregateManifestHash([{ blobSha256: reviewSha, sortOrder: 0 }])}',
+       VALUES ('${IDS.pageReview}', '${IDS.folderReview}', '${IDS.fileReview}', 0, 0, 595, 842, 0)`,
+    `INSERT INTO processing_bundles (id, folder_id, aggregate_manifest_hash, working_pdf_blob_sha256, builder_version)
+       VALUES ('${IDS.bundleReview}', '${IDS.folderReview}',
+               '${aggregateHash([{ blobSha256: reviewSha, sortOrder: 0 }])}',
                '${reviewSha}', 'bundle/1+qpdf')`,
-    `INSERT INTO processing_bundle_pages (bundle_id, revision_id, working_page_index, source_page_id)
-       VALUES ('${IDS.bundleReview}', '${IDS.revisionReview}', 0, '${IDS.pageReview}')`,
-    // Документ подтверждён И нарезан: оба условия approve (§9.6).
-    // Провенанс нарезки заполняется ЦЕЛИКОМ: `logical_documents_derived_provenance_chk`
-    // требует либо все шесть полей, либо ни одного — «половина значений означала бы
-    // файл, о происхождении которого нечего сказать».
-    `INSERT INTO logical_documents (id, revision_id, object_id, contractor_id, doc_type_code, ordinal, title,
-                                    needs_review, is_confirmed, confirmed_by, confirmed_at,
+    `INSERT INTO processing_bundle_pages (bundle_id, folder_id, working_page_index, source_page_id)
+       VALUES ('${IDS.bundleReview}', '${IDS.folderReview}', 0, '${IDS.pageReview}')`,
+    // Комплект: папка режется конвейером на акты, и отчёт проверки с S44
+    // группируется по ним, а не складывает двенадцать актов в одну таблицу.
+    // Реквизиты акта заполнены — заголовок группы строит `titleOfComplect`, и без
+    // них он назвал бы комплект порядковым номером.
+    `INSERT INTO complects (id, folder_id, object_id, contractor_id, ordinal, act_number, act_date)
+       VALUES ('${IDS.complectReview}', '${IDS.folderReview}', '${IDS.object}', '${IDS.orgContractor}',
+               1, '336', DATE '2026-01-12')`,
+    // Документ подтверждён И нарезан. Провенанс нарезки заполняется ЦЕЛИКОМ:
+    // `logical_documents_derived_provenance_chk` требует либо все шесть полей,
+    // либо ни одного — «половина значений означала бы файл, о происхождении
+    // которого нечего сказать».
+    `INSERT INTO logical_documents (id, folder_id, object_id, contractor_id, doc_type_code, ordinal, title,
+                                    complect_id, needs_review, is_confirmed, confirmed_by, confirmed_at,
                                     derived_pdf_blob_sha256, derived_pdf_page_count, derived_pdf_bytes,
                                     derived_pdf_built_at, derived_pdf_toolkit, derived_note_applied)
-       VALUES ('${IDS.documentReview}', '${IDS.revisionReview}', '${IDS.object}', '${IDS.orgContractor}',
-               'aosr', 1, 'АОСР № 336', false, true, '${IDS.userEngineer}', now(),
+       VALUES ('${IDS.documentReview}', '${IDS.folderReview}', '${IDS.object}', '${IDS.orgContractor}',
+               'aosr', 1, 'АОСР № 336', '${IDS.complectReview}', false, true, '${IDS.userEngineer}', now(),
                '${derivedSha}', 1, 1024, now(), 'qpdf/11', true)`,
-    `INSERT INTO page_assignments (revision_id, source_page_id, document_id, sort_order, needs_review)
-       VALUES ('${IDS.revisionReview}', '${IDS.pageReview}', '${IDS.documentReview}', 0, false)`,
+    `INSERT INTO page_assignments (folder_id, source_page_id, document_id, sort_order, needs_review)
+       VALUES ('${IDS.folderReview}', '${IDS.pageReview}', '${IDS.documentReview}', 0, false)`,
     `INSERT INTO ruleset_versions (id, version, published_at, published_by)
        VALUES ('${IDS.rulesetVersion}', '2026.08.1', now(), '${IDS.userAdmin}')`,
     // Указатель действующей версии — отдельная строка настроек, а не колонка
@@ -439,34 +400,34 @@ export function fixtureSql(pdfSha) {
                'Ты классифицируешь страницу комплекта и не делаешь предположений о разделе работ.',
                'Текст страницы: {{text}}', now(), '${IDS.userAdmin}')`,
 
-    // Замечание с адресом БЛОКА на ревизии с разметкой: §16 называет переход
+    // Замечание с адресом БЛОКА на папке с разметкой: §16 называет переход
     // «finding → evidence» отдельным пунктом приёмки, а проверить его можно
     // только там, где разметка существует.
-    `INSERT INTO validation_runs (id, revision_id, ruleset_version_id, started_at, finished_at, counts)
-       VALUES ('${IDS.validationRunMarkup}', '${IDS.revisionMarkup}', '${IDS.rulesetVersion}',
+    `INSERT INTO validation_runs (id, folder_id, ruleset_version_id, started_at, finished_at, counts)
+       VALUES ('${IDS.validationRunMarkup}', '${IDS.folderMarkup}', '${IDS.rulesetVersion}',
                now(), now(), '{"rulesEvaluated": 4, "findings": 1}'::jsonb)`,
-    `INSERT INTO findings (id, validation_run_id, revision_id, object_id, contractor_id, rule_code,
+    `INSERT INTO findings (id, validation_run_id, folder_id, object_id, contractor_id, rule_code,
                             severity, state, origin, is_blocking, target_type, target_id,
                             source_page_id, block_id, message, hint)
-       VALUES ('${IDS.findingWithBlock}', '${IDS.validationRunMarkup}', '${IDS.revisionMarkup}',
+       VALUES ('${IDS.findingWithBlock}', '${IDS.validationRunMarkup}', '${IDS.folderMarkup}',
                '${IDS.object}', '${IDS.orgContractor}', 'AOSR.HDR.022', 'warning', 'open',
                'deterministic', false, 'source_page', '${IDS.page1}',
                '${IDS.page1}', '${IDS.blockB}',
                'Штамп на странице не читается целиком', 'Проверьте рамку штампа на второй странице')`,
     // У `validation_runs` нет ни object_id, ни contractor_id: область видимости
-    // прогона определяется его ревизией. Списывать состав колонок с §3 плана
+    // прогона определяется его папкой. Списывать состав колонок с §3 плана
     // нельзя — источник правды это миграция.
-    `INSERT INTO validation_runs (id, revision_id, ruleset_version_id, started_at, finished_at, counts)
-       VALUES ('${IDS.validationRun}', '${IDS.revisionReview}', '${IDS.rulesetVersion}',
+    `INSERT INTO validation_runs (id, folder_id, ruleset_version_id, started_at, finished_at, counts)
+       VALUES ('${IDS.validationRun}', '${IDS.folderReview}', '${IDS.rulesetVersion}',
                now(), now(), '{"rulesEvaluated": 12, "findings": 1}'::jsonb)`,
-    // Замечание НЕ блокирующее: approve обязан пройти, а замечание — остаться
-    // видимым. Блокирующее сделало бы сценарий согласования непроходимым, и это
-    // проверяется отдельно — списком препятствий на экране.
-    `INSERT INTO findings (id, validation_run_id, revision_id, object_id, contractor_id, rule_code,
-                            severity, state, origin, is_blocking, target_type, target_id, source_page_id, message, hint)
-       VALUES ('${IDS.findingWarning}', '${IDS.validationRun}', '${IDS.revisionReview}', '${IDS.object}',
+    // Замечание НЕ блокирующее: оно обязано остаться видимым и не закрыть собой
+    // работу с папкой. Блокирующее проверяется отдельно — списком препятствий.
+    `INSERT INTO findings (id, validation_run_id, folder_id, object_id, contractor_id, rule_code,
+                            severity, state, origin, is_blocking, target_type, target_id, source_page_id,
+                            complect_id, message, hint)
+       VALUES ('${IDS.findingWarning}', '${IDS.validationRun}', '${IDS.folderReview}', '${IDS.object}',
                '${IDS.orgContractor}', 'AOSR.HDR.022', 'warning', 'open', 'deterministic', false,
-               'document', '${IDS.documentReview}', '${IDS.pageReview}',
+               'document', '${IDS.documentReview}', '${IDS.pageReview}', '${IDS.complectReview}',
                'ОГРН не проходит проверку контрольной суммы', 'Сверьте значение с выпиской ЕГРЮЛ')`,
 
     // Журнал ошибок. Данные ставятся прямым SQL, потому что вызвать настоящую
@@ -498,12 +459,6 @@ export function fixtureSql(pdfSha) {
                                 release, request_id, route, status_code, error_code)
        VALUES ('${JOURNAL.issueOpen}', 'e2e0000000000001', now() - interval '2 minutes', 'api',
                'http', 'db', 'error', '2026.08.1', 'req-e2e-000000000001',
-               '/api/v1/works', 500, '53300')`,
-
-    // Проведение ревизии по статусам — последним шагом, когда содержимое уже
-    // на месте. Ровно тот порядок, которым чинилась фикстура на S2.
-    `UPDATE submission_revisions
-        SET status = 'in_review', submitted_at = now(), submitted_by = '${IDS.userContractor}'
-      WHERE id = '${IDS.revisionReview}'`,
+               '/api/v1/folders', 500, '53300')`,
   ];
 }
