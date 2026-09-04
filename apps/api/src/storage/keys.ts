@@ -232,35 +232,3 @@ export function detectionManifestKey(version: string): string {
   assertDetectionModelVersion(version);
   return `${DETECTION_MODEL_PREFIX}/${version}/manifest.json`;
 }
-
-/** Кэш превью страниц (§13) — только при `PREVIEW_MODE=cached`. */
-const PREVIEW_PREFIX = 'preview';
-
-export type PreviewTier = 'thumb' | 'view';
-
-/**
- * Ключ превью страницы рабочего документа.
- *
- * Адресуется рабочим документом, а не ревизией поставки: превью — это картинка
- * страницы КОНКРЕТНОЙ склейки, и при пересборке комплекта нумерация страниц
- * меняется. Ключ по ревизии пришлось бы инвалидировать вручную, а по bundle он
- * инвалидируется сам — новый bundle, новый префикс.
- *
- * Расширение `.png`: тиры webp появятся вместе с `sharp` (§7.1, фолбэк
- * `cached`), а до тех пор портал кладёт то, что отдал RD WEB, не выдавая
- * непережатый файл за пережатый.
- */
-export function previewPageKey(
-  bundleId: string,
-  tier: PreviewTier,
-  workingPageIndex: number,
-): string {
-  if (!UUID_PATTERN.test(bundleId)) {
-    throw new InvalidStorageKeyError('Идентификатор рабочего документа обязан быть uuid');
-  }
-  if (!Number.isInteger(workingPageIndex) || workingPageIndex < 0) {
-    throw new InvalidStorageKeyError('Индекс страницы обязан быть неотрицательным целым');
-  }
-  const page = String(workingPageIndex).padStart(4, '0');
-  return `${PREVIEW_PREFIX}/${bundleId}/${tier}/p${page}.png`;
-}

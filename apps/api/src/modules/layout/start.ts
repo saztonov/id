@@ -33,7 +33,6 @@ import {
   readImmutabilityEnforced,
   readOrientationProbeSettings,
 } from '../../config/portal-settings.js';
-import { DETECT_BATCH_LIMIT } from '../../integrations/rdweb/legacy-adapter.js';
 import { dedupeKeyFor } from '../../jobs/types.js';
 import { conflict } from '../../lib/problem.js';
 import { tracePayload } from '../../observability/context.js';
@@ -170,9 +169,6 @@ function plural(count: number, one: string, few: string, many: string): string {
 /**
  * Черновик разметки + постановка детекции.
  *
- * `previewCached` передаётся значением, а не читается из окружения: у воркера
- * оно своё, и предупреждение обязано выписываться в его журнал, а не в журнал
- * процесса API.
  */
 export async function startMarkupOnBundle(
   db: Database,
@@ -180,7 +176,6 @@ export async function startMarkupOnBundle(
   input: {
     readonly folderId: string;
     readonly bundleId: string;
-    readonly previewCached: boolean;
     readonly logger: Logger;
   },
 ): Promise<StartMarkupResult> {
@@ -279,95 +274,75 @@ export async function startMarkupOnBundle(
     );
   }
 
-  if (detection.provider === 'local') {
-    /**
-     * Карта страниц читается ДО гейта модели (S42).
-     *
-     * Гейту нужно знать, есть ли в комплекте крупные листы: при правиле
-     * форматов комплект из одних A4 размечается без модели вовсе, и «детекция
-     * пропущена» было бы там неправдой. Побочное следствие порядка: комплект
-     * без карты страниц теперь отвечает 409 раньше, чем «пропущено», и это
-     * корректнее — без карты разметки не бывает никакой.
-     */
-    const pageMap = await listBundlePages(db, scope, input.bundleId);
-    const pages = pageMap.map((page) => page.workingPageIndex);
-    if (pages.length === 0) throw conflict('У рабочего документа нет карты страниц.');
-    const largeSheetCount = pageMap.filter(
-      (page) => classifySheet(page.widthPx, page.heightPx).sheetClass === 'large',
-    ).length;
+  /*
+   * Провайдер детекции остался один — локальный RF-DETR.
+   *
+   * У контракта document-sync детекции нет вовсе: блоки в снимке НАШИ, и
+   * RD WEB их только распознаёт. Ветка «детекция через RD WEB» ушла вместе с
+   * легаси-маршрутом, а вместе с ней — и развилка: значение снято из
+   * перечисления, сохранённая строка настройки переведена миграцией 0069.
+   */
+  /**
+   * Карта страниц читается ДО гейта модели (S42).
+   *
+   * Гейту нужно знать, есть ли в комплекте крупные листы: при правиле
+   * форматов комплект из одних A4 размечается без модели вовсе, и «детекция
+   * пропущена» было бы там неправдой. Побочное следствие порядка: комплект
+   * без карты страниц теперь отвечает 409 раньше, чем «пропущено», и это
+   * корректнее — без карты разметки не бывает никакой.
+   */
+  const pageMap = await listBundlePages(db, scope, input.bundleId);
+  const pages = pageMap.map((page) => page.workingPageIndex);
+  if (pages.length === 0) throw conflict('У рабочего документа нет карты страниц.');
+  const largeSheetCount = pageMap.filter(
+    (page) => classifySheet(page.widthPx, page.heightPx).sheetClass === 'large',
+  ).length;
 
-    // Постановка пачек без выложенной модели давала бы страницу задач,
-    // падающих гарантированно и одинаково: воркер не нашёл бы ни весов, ни
-    // манифеста. Черновик разметки при этом уже создан выше, поэтому ручная
-    // разметка доступна — а значит, отказывать нечему, и правильный ответ здесь
-    // «сделано, но без детекции», а не 409.
-    const unavailable = detectionUnavailableReason(detection, { largeSheetCount });
-    if (unavailable !== null) {
-      input.logger.warn(
-        { event: 'detection_skipped_no_model', large_sheets: largeSheetCount },
-        'детекция пропущена: версия модели не задана',
-      );
-      return {
-        layoutRevisionId: layout.id,
-        bundleId: input.bundleId,
-        created,
-        version: layout.version,
-        provider: 'local',
-        jobIds: [],
-        jobsCreated: false,
-        detectionSkipReason: unavailable,
-      };
-    }
+  // Постановка пачек без выложенной модели давала бы страницу задач,
+  // падающих гарантированно и одинаково: воркер не нашёл бы ни весов, ни
+  // манифеста. Черновик разметки при этом уже создан выше, поэтому ручная
+  // разметка доступна — а значит, отказывать нечему, и правильный ответ здесь
+  // «сделано, но без детекции», а не 409.
+  const unavailable = detectionUnavailableReason(detection, { largeSheetCount });
+  if (unavailable !== null) {
+    input.logger.warn(
+      { event: 'detection_skipped_no_model', large_sheets: largeSheetCount },
+      'детекция пропущена: версия модели не задана',
+    );
+    return {
+      layoutRevisionId: layout.id,
+      bundleId: input.bundleId,
+      created,
+      version: layout.version,
+      provider: 'local',
+      jobIds: [],
+      jobsCreated: false,
+      detectionSkipReason: unavailable,
+    };
+  }
 
-    if (input.previewCached) {
-      // Кэш превью брал картинки у RD WEB; при локальной детекции его взять
-      // неоткуда — экран работает через pdf.js (ADR-0008).
-      input.logger.warn(
-        { event: 'preview_cached_unavailable_local_detection' },
-        'PREVIEW_MODE=cached недоступен при локальной детекции: превью рендерит браузер',
-      );
-    }
-    /**
-     * Зонд ориентации идёт ПЕРЕД детекцией (ADR-0020).
-     *
-     * RF-DETR обучен на прямых листах: на боковом он даёт скудную разметку, и
-     * табличная зона, оставшаяся без блока, не будет распознана вовсе — её
-     * никто не спросит у модели. Поэтому цепочка «зонд → детекция», а не
-     * «детекция и когда-нибудь зонд».
-     *
-     * Детекцию ставит сам зонд, в любом своём исходе. Ставить её здесь ЗАОДНО
-     * значило бы поставить дважды — и второй раз без разворота, который зонд
-     * ещё не записал.
-     */
-    const orientation = await readOrientationProbeSettings(db);
-    if (orientation.enabled) {
-      const probes = await enqueueOrientationProbes(db, scope, {
-        layoutRevisionId: layout.id,
-        folderId: input.folderId,
-        bundleId: input.bundleId,
-        pages: pageMap.map((page) => ({
-          workingPageIndex: page.workingPageIndex,
-          sourcePageId: page.sourcePageId,
-        })),
-        logger: input.logger,
-      });
-      return {
-        layoutRevisionId: layout.id,
-        bundleId: input.bundleId,
-        created,
-        version: layout.version,
-        provider: 'local',
-        jobIds: probes.jobIds,
-        jobsCreated: probes.created,
-        detectionSkipReason: null,
-      };
-    }
-
-    const enqueued = await enqueueLocalDetectBatches(db, scope, {
+  /**
+   * Зонд ориентации идёт ПЕРЕД детекцией (ADR-0020).
+   *
+   * RF-DETR обучен на прямых листах: на боковом он даёт скудную разметку, и
+   * табличная зона, оставшаяся без блока, не будет распознана вовсе — её
+   * никто не спросит у модели. Поэтому цепочка «зонд → детекция», а не
+   * «детекция и когда-нибудь зонд».
+   *
+   * Детекцию ставит сам зонд, в любом своём исходе. Ставить её здесь ЗАОДНО
+   * значило бы поставить дважды — и второй раз без разворота, который зонд
+   * ещё не записал.
+   */
+  const orientation = await readOrientationProbeSettings(db);
+  if (orientation.enabled) {
+    const probes = await enqueueOrientationProbes(db, scope, {
       layoutRevisionId: layout.id,
       folderId: input.folderId,
-      pages,
-      overwriteExisting: false,
+      bundleId: input.bundleId,
+      pages: pageMap.map((page) => ({
+        workingPageIndex: page.workingPageIndex,
+        sourcePageId: page.sourcePageId,
+      })),
       logger: input.logger,
     });
     return {
@@ -376,95 +351,29 @@ export async function startMarkupOnBundle(
       created,
       version: layout.version,
       provider: 'local',
-      jobIds: enqueued.jobIds,
-      jobsCreated: enqueued.created,
+      jobIds: probes.jobIds,
+      jobsCreated: probes.created,
       detectionSkipReason: null,
     };
   }
 
-  // Постановка первой задачи цепочки §12 (задача 4). Ключ идемпотентности — по
-  // ревизии разметки: повторное нажатие кнопки не должно порождать второй
-  // RD-документ.
-  const { jobId, created: jobCreated } = await enqueueJob(db, scope, {
-    type: 'rd.create_run_document',
-    // Ревизия разметки — в payload, а не «найдётся по bundle»: пока задача ждёт
-    // в очереди, черновик может смениться (вытеснение №1 → создание №2), и
-    // задача отработала бы по чужой цели.
-    payload: tracePayload({
-      folderId: input.folderId,
-      bundleId: input.bundleId,
-      layoutRevisionId: layout.id,
-    }),
-    dedupeKey: dedupeKeyFor('rd.create_run_document', layout.id),
+  const enqueued = await enqueueLocalDetectBatches(db, scope, {
+    layoutRevisionId: layout.id,
+    folderId: input.folderId,
+    pages,
+    overwriteExisting: false,
+    logger: input.logger,
   });
-
-  input.logger.info(
-    {
-      event: 'job_enqueued',
-      job_type: 'rd.create_run_document',
-      job_id: jobId,
-      created: jobCreated,
-    },
-    'цепочка разметки поставлена в очередь',
-  );
-
   return {
     layoutRevisionId: layout.id,
     bundleId: input.bundleId,
     created,
     version: layout.version,
-    provider: 'rdweb',
-    jobIds: [jobId],
-    jobsCreated: jobCreated,
+    provider: 'local',
+    jobIds: enqueued.jobIds,
+    jobsCreated: enqueued.created,
     detectionSkipReason: null,
   };
-}
-
-/**
- * Разбиение комплекта на пачки детекции RD WEB.
- *
- * Одна задача = одна пачка: у их синхронного вызова есть потолок страниц, а
- * задача, обходящая весь комплект в цикле, держала бы аренду минутами и при
- * падении переигрывала бы уже сделанное. Ключ идемпотентности включает границы
- * пачки, поэтому повторное нажатие не удваивает очередь.
- */
-export async function enqueueDetectBatches(
-  db: Database,
-  scope: AuthScope,
-  input: {
-    readonly layoutRevisionId: string;
-    readonly folderId: string;
-    readonly pages: readonly number[];
-    readonly logger: Logger;
-  },
-): Promise<string[]> {
-  const jobIds: string[] = [];
-  for (let offset = 0; offset < input.pages.length; offset += DETECT_BATCH_LIMIT) {
-    const batch = input.pages.slice(offset, offset + DETECT_BATCH_LIMIT);
-    const { jobId } = await enqueueJob(db, scope, {
-      type: 'layout.detect_pages',
-      payload: tracePayload({
-        folderId: input.folderId,
-        layoutRevisionId: input.layoutRevisionId,
-        pageIndices: batch,
-        overwriteExisting: true,
-      }),
-      // Метка `overwrite` входит в ключ: без неё нажатие кнопки склеилось бы с
-      // уже стоящей в очереди пачкой первичной цепочки, и флаг потерялся бы.
-      dedupeKey: dedupeKeyFor(
-        'layout.detect_pages',
-        input.layoutRevisionId,
-        `${String(batch[0])}-${String(batch[batch.length - 1])}`,
-        'overwrite',
-      ),
-    });
-    jobIds.push(jobId);
-  }
-  input.logger.info(
-    { event: 'job_enqueued', job_type: 'layout.detect_pages', batches: jobIds.length },
-    'детекция поставлена пачками',
-  );
-  return jobIds;
 }
 
 /**
@@ -536,8 +445,8 @@ export async function enqueueLocalDetectBatches(
  * листы обоих, а не одного. Общее время не меняется — меняется наблюдаемость.
  *
  * Нижняя граница нужна, чтобы конвейерные задачи не провалились под фоновые
- * (`preview.cache_pages` — 50, уборка — 10): хвост длинного комплекта остаётся
- * работой, которую ждёт человек.
+ * (`storage.gc` — 10): хвост длинного комплекта остаётся работой, которую ждёт
+ * человек.
  */
 function pagePriority(base: number, floor: number, pageIndex: number): number {
   return Math.max(floor, base - Math.floor(pageIndex / 10));

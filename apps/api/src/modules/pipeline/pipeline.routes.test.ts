@@ -146,6 +146,13 @@ beforeAll(async () => {
     await db.exec(migration.sql);
   }
 
+  // Версия модели детекции: без неё локальная ветка честно отвечает «размечено,
+  // детекция пропущена» и не ставит ни одной задачи — а здесь проверяется, что
+  // кнопка стадию ЗАПУСКАЕТ.
+  await db.query(
+    "INSERT INTO app_settings (key, value) VALUES ('detection.model_version', '\"v1\"'::jsonb) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+  );
+
   const fixture: readonly string[] = [
     `INSERT INTO counterparties (id, name, kind) VALUES ('${ORG_CUSTOMER}', 'ООО «Застройщик»', 'customer')`,
     `INSERT INTO counterparties (id, name, kind) VALUES ('${ORG_A}', 'ООО «Подрядчик А»', 'contractor')`,
@@ -461,9 +468,11 @@ describe('POST /folders/{id}/markup', () => {
 
     const jobs = await jobsOf(FOLDER_READY);
     expect(jobs.some((job) => job.type === 'bundle.build')).toBe(false);
-    expect(jobs.some((job) => job.type.startsWith('rd.') || job.type.startsWith('layout.'))).toBe(
-      true,
-    );
+    // Первым стадию разметки открывает зонд разворота (ADR-0020): детекцию
+    // ставит он сам, в любом своём исходе.
+    expect(
+      jobs.some((job) => job.type === 'page.orientation_probe' || job.type.startsWith('layout.')),
+    ).toBe(true);
   });
 
   it('чужая ревизия недостижима', async () => {

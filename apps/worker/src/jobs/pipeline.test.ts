@@ -524,6 +524,28 @@ describe('реестр воркера', () => {
     expect(registry.has('jobs.reaper')).toBe(true);
   });
 
+  it('цепочка rd.sync_* зарегистрирована целиком и берётся очередью io', () => {
+    // Интеграция не настроена (`execSync` не передан) — и это часть проверки:
+    // обработчики обязаны регистрироваться всегда, иначе портал с пустым
+    // RDWEB_EXEC_* не отказывал бы на задаче, а копил её в очереди навсегда.
+    const registry = createWorkerRegistry(options());
+
+    for (const type of [
+      'rd.sync_prepare',
+      'rd.sync_init',
+      'rd.sync_upload',
+      'rd.sync_complete',
+      'rd.sync_poll',
+      'rd.sync_fetch',
+      'rd.sync_finalize',
+      'rd.sync_resync',
+    ] as const) {
+      expect(registry.has(type), `обработчик ${type} не зарегистрирован`).toBe(true);
+      expect(jobTypesOfQueue('io')).toContain(type);
+      expect(registry.typesOfQueue('io')).toContain(type);
+    }
+  });
+
   it('повторная регистрация — отказ сборки, а не «побеждает последний»', () => {
     const registry = createWorkerRegistry(options());
     expect(() => createWorkerRegistry(options())).not.toThrow();

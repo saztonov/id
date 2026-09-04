@@ -538,9 +538,6 @@ beforeAll(async () => {
     toolkit,
     limits: { maxBytes: TEST_ENV.MAX_UPLOAD_BYTES, maxPages: TEST_ENV.MAX_PAGES_PER_FILE },
     workDirBase: STORAGE_DIR,
-    rdweb: null,
-    rdProjectId: null,
-    previewCached: false,
   });
   const bootstrapRunner = new JobRunner({
     db,
@@ -756,19 +753,11 @@ describe('layout.detect_local с моделью', () => {
   });
 
   it('пустая страница 1 действительно получает флаг no_blocks после анализа покрытия', async () => {
-    const { createAnalyzeCoverageHandler } = await import('./markup.js');
+    const { createAnalyzeCoverageHandler } = await import('./layout-coverage.js');
+    // Порт анализа покрытия стал узким вместе со снятием легаси-маршрута: ни
+    // адаптера RD WEB, ни загрузки PDF, ни импорта блоков ему не нужно.
     const analyzeDeps = {
-      rdweb: null,
-      rdProjectId: null,
-      previewCached: false,
       loadTargetByLayout: async () => buildTestMarkupTarget(FOLDER, layoutRevisionId),
-      findRunDocument: async () => null,
-      saveRunDocument: async () => {},
-      replaceRunDocument: async () => {},
-      openWorkingPdf: async () => {
-        throw new Error('не используется');
-      },
-      importBlocks: async () => ({ imported: 0, skippedPages: [] }),
       loadPageBlocks: async () => {
         const [pages, blocks] = await Promise.all([
           listBundlePages(db, ADMIN_SCOPE, bundleId),
@@ -783,6 +772,8 @@ describe('layout.detect_local с моделью', () => {
         return pages.map((page) => ({
           workingPageIndex: page.workingPageIndex,
           sourcePageId: page.sourcePageId,
+          widthPt: page.widthPx,
+          heightPt: page.heightPx,
           blocks: (byPage.get(page.workingPageIndex) ?? []).map((block) => ({
             blockType: block.blockType,
             x0: block.x0,
@@ -805,7 +796,6 @@ describe('layout.detect_local с моделью', () => {
           ? { written: true }
           : { written: false, reason: outcome.reason };
       },
-      storePreview: async () => {},
     };
 
     const registry = createMaintenanceRegistry();

@@ -37,7 +37,24 @@ import { z } from 'zod';
 
 export const RECOGNITION_RESULT_SCHEMA_VERSION = 'recognition.result.v2';
 
-export const recognitionProviderSchema = z.enum(['rdweb_md', 'openrouter_vlm', 'synthetic']);
+/**
+ * Источник канонического результата.
+ *
+ * `rdweb_md` и `rdweb_exec` — оба RD WEB, и это НЕ дубль. Первый означает разбор
+ * markdown-экспорта легаси-job'а: текст приходил одной простынёй, блоки из неё
+ * вычитывались разметкой заголовков, а модель выбирал портал. Второй — снимок
+ * исполнительной документации (`rdweb.executive_document_snapshot.v1`): блоки
+ * приходят поштучно со структурным `ocr_json`, модель выбирает RD WEB и нам не
+ * сообщает. На одних и тех же пикселях эти два пути дают разный артефакт, и
+ * склеив их одним значением, мы лишились бы единственного признака, по которому
+ * прогоны до и после смены контракта различимы.
+ */
+export const recognitionProviderSchema = z.enum([
+  'rdweb_md',
+  'rdweb_exec',
+  'openrouter_vlm',
+  'synthetic',
+]);
 export type RecognitionProvider = z.infer<typeof recognitionProviderSchema>;
 
 const cellRow = z.array(z.string());

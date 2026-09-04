@@ -55,7 +55,7 @@ import {
   findJob,
   reviveFailedJobs,
 } from '../db/repositories/jobs.js';
-import { RdWebError } from '../integrations/rdweb/port.js';
+import { ExecSyncError } from '../integrations/rdweb-exec/port.js';
 import {
   LlmBudgetError,
   LlmProtocolError,
@@ -562,7 +562,7 @@ params: 1,2,3`,
   /**
    * Отказ по существу запроса повторять нечем: пять попыток на 401 — это пять
    * одинаковых входов служебного аккаунта при отозванном доступе. Решение о
-   * повторе теперь принимает `RdWebError.retriable`, а не «повторяем всё».
+   * повторе теперь принимает `ExecSyncError.retriable`, а не «повторяем всё».
    */
   it('4xx от RD WEB уходит в dead с первой попытки, 5xx повторяется', async () => {
     const denied = await enqueueSystemJob(app.db, {
@@ -572,7 +572,7 @@ params: 1,2,3`,
     });
     behaviours.set(denied.jobId, () =>
       Promise.reject(
-        new RdWebError('RD WEB ответил 401', { status: 401, operation: 'document_read' }),
+        new ExecSyncError('RD WEB ответил 401', { status: 401, operation: 'document_read' }),
       ),
     );
 
@@ -584,7 +584,7 @@ params: 1,2,3`,
     // Статус сохранён в КЛАССЕ ошибки: `normalizeErrorMessage()` вычёркивает из
     // текста все числа, и в `error_message` от «401» остаётся «<n>».
     const deniedRuns = await runsOf(denied.jobId);
-    expect(deniedRuns[0]?.['error_class']).toBe('RdWebError:401');
+    expect(deniedRuns[0]?.['error_class']).toBe('ExecSyncError:401');
     expect(String(deniedRuns[0]?.['error_message'])).not.toContain('401');
 
     // Положительный контроль: преходящий отказ по-прежнему повторяется, иначе
@@ -596,7 +596,7 @@ params: 1,2,3`,
     });
     behaviours.set(flaky.jobId, () =>
       Promise.reject(
-        new RdWebError('RD WEB ответил 503', { status: 503, operation: 'document_read' }),
+        new ExecSyncError('RD WEB ответил 503', { status: 503, operation: 'document_read' }),
       ),
     );
 
@@ -604,7 +604,7 @@ params: 1,2,3`,
     const queued = await rawJob(flaky.jobId);
     expect(queued['status']).toBe('queued');
     expect(queued['attempts']).toBe(1);
-    expect((await runsOf(flaky.jobId))[0]?.['error_class']).toBe('RdWebError:503');
+    expect((await runsOf(flaky.jobId))[0]?.['error_class']).toBe('ExecSyncError:503');
 
     behaviours.set(flaky.jobId, () => Promise.resolve());
     await makeRunnable(flaky.jobId);
@@ -618,7 +618,7 @@ params: 1,2,3`,
    * Классификация задаётся САМИМ классом отказа, а не перечислением в движке.
    *
    * Перечисление и есть способ, которым дефект возвращается: первая редакция
-   * знала только `RdWebError`, и появившиеся на S8 `SegmentationStateError`,
+   * знала только `ExecSyncError`, и появившиеся на S8 `SegmentationStateError`,
    * `LlmBudgetError`, `LlmTimeoutError` все оказались повторяемыми. Тест
    * пользуется классами, о которых `runner.ts` не знает НИЧЕГО, — если правило
    * снова станет перечислением, он покраснеет.

@@ -118,6 +118,16 @@ export const DERIVED_DELETES: readonly PurgeStep[] = [
     where: (id: SQL) =>
       sql`recognition_run_id in (select id from recognition_runs where folder_id = ${id})`,
   },
+  /*
+   * Журнал отправок в RD WEB — ДО прогонов: он на них ссылается (0069).
+   *
+   * В `PIPELINE_RESET_KEEPS` его нет намеренно. Отправка принадлежит прогону, и
+   * пережить его удаление она не может ни физически (внешний ключ), ни по
+   * смыслу. Счётчик генераций при этом живёт не здесь, а в `rd_exec_documents`,
+   * который сброс переживает, — поэтому следующая отправка получит следующую
+   * генерацию, а не начнёт нумерацию заново.
+   */
+  { table: 'rd_exec_syncs', where: (id: SQL) => sql`folder_id = ${id}` },
   { table: 'recognition_runs', where: (id: SQL) => sql`folder_id = ${id}` },
   {
     table: 'rd_run_documents',
@@ -139,6 +149,19 @@ export const DERIVED_DELETES: readonly PurgeStep[] = [
   { table: 'materials', where: (id: SQL) => sql`folder_id = ${id}` },
   { table: 'processing_bundle_pages', where: (id: SQL) => sql`folder_id = ${id}` },
   { table: 'processing_bundles', where: (id: SQL) => sql`folder_id = ${id}` },
+  /*
+   * Реестр внешних идентификаторов RD WEB (0069) — при ПОЛНОМ удалении папки.
+   *
+   * Обе таблицы стоят в `PIPELINE_RESET_KEEPS`: сброс конвейера обязан их
+   * пережить. Иначе повторное распознавание объявляло бы каждый блок новым, и
+   * комплект перераспознавался бы целиком за наш счёт — то есть ровно то, ради
+   * чего реестр и заведён, переставало бы работать при первом же повторе.
+   *
+   * Порядок: блоки раньше документа (ссылаются на него), сам документ — раньше
+   * `layout_blocks` не обязан: связь с разметкой объявлена `ON DELETE SET NULL`.
+   */
+  { table: 'rd_exec_blocks', where: (id: SQL) => sql`folder_id = ${id}` },
+  { table: 'rd_exec_documents', where: (id: SQL) => sql`folder_id = ${id}` },
   { table: 'validation_runs', where: (id: SQL) => sql`folder_id = ${id}` },
 ];
 
@@ -165,6 +188,12 @@ const PIPELINE_RESET_KEEPS: readonly string[] = [
   'page_orientations',
   'processing_bundle_pages',
   'processing_bundles',
+  // Реестр внешних идентификаторов RD WEB (0069): именно он делает повторный
+  // прогон дешёвым — неизменившийся блок остаётся тем же блоком, и модель по
+  // нему не вызывается. Снеся реестр вместе с результатами, сброс превращал бы
+  // каждое повторное распознавание в полное и платное.
+  'rd_exec_blocks',
+  'rd_exec_documents',
 ];
 
 /**

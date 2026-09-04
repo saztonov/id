@@ -1,27 +1,24 @@
 /**
  * Задача `layout.detect_local`: растеризация страницы + RF-DETR ONNX на CPU
- * (ADR-0008) — локальный аналог задачи 7 (`layout.detect_pages` в `markup.ts`),
- * без похода в RD WEB.
+ * (ADR-0008) — единственный способ разметки портала: удалённой детекции больше
+ * нет, блоки в снимок RD WEB уезжают наши (ADR-0027).
  *
- * ## Чем отличается от `layout.detect_pages`
+ * ## Почему пропуск размеченной страницы решается ЗДЕСЬ
  *
- * У легаси-детекции решение «пропустить уже размеченную страницу без
- * `overwriteExisting`» принимает УДАЛЁННАЯ сторона (RD WEB возвращает такие
- * страницы в `skipped_pages`). У локальной детекции удалённой стороны нет —
- * это решение обязан принять сам обработчик ДО рендера и инференса, иначе
- * повторный прогон без флага перезаписи тратил бы CPU на страницы, которые
- * всё равно не изменятся. Правило «страница с РУЧНЫМ блоком не трогается
- * никогда» при этом остаётся за репозиторием (`importDetectedBlocks` →
- * `pagesWithManualBlocks`) — та же защита, что и у легаси-пути, а не вторая
- * реализация того же правила.
+ * Удалённой стороны, которая вернула бы «эта страница пропущена», у локальной
+ * детекции нет — решение обязан принять сам обработчик ДО рендера и инференса,
+ * иначе повторный прогон без флага перезаписи тратил бы CPU на страницы,
+ * которые всё равно не изменятся. Правило «страница с РУЧНЫМ блоком не
+ * трогается никогда» при этом остаётся за репозиторием (`importDetectedBlocks`
+ * → `pagesWithManualBlocks`), а не дублируется здесь второй реализацией.
  *
  * ## Терминальность пустой страницы
  *
  * Страница, на которой детектор не нашёл ни одного блока, — это не отказ:
  * `deps.importBlocks` вызывается и для неё (с пустым списком блоков), задача
  * завершается успехом, а `layout.analyze_coverage` пометит страницу флагом
- * `no_blocks` тем же механизмом, что и у легаси-пути (страница без единого
- * блока в карте). Ничего специально «замораживать» от повторной детекции не
+ * `no_blocks` общим механизмом (страница без единого блока в карте). Ничего
+ * специально «замораживать» от повторной детекции не
  * нужно: следующий явный запуск локальной детекции по этой же странице
  * задействует тот же движок и с высокой вероятностью повторит тот же
  * результат — а бесконечного цикла нет, потому что ничто, кроме явного
@@ -62,6 +59,7 @@ import {
   type DetectedBlockInput,
   type JobContext,
   type JobHandler,
+  type LayoutThresholds,
   type PageRasterizer,
   type ProcessingFeedbackSink,
 } from '@id/api';
@@ -83,7 +81,45 @@ import { detectPage } from '../detection/detector.js';
 import { rotatePagePng } from '../detection/preprocess.js';
 import { DetectionConfigurationError } from '../detection/errors.js';
 import type { ModelStore } from '../detection/model-store.js';
-import { MarkupStateError, type MarkupTarget } from './markup.js';
+
+/**
+ * Цель задачи детекции: ревизия разметки вместе с её рабочим документом.
+ *
+ * Тип переехал сюда из общего модуля стадии разметки, снятого вместе с
+ * легаси-маршрутом RD WEB. Смысл при переезде не изменился: это по-прежнему
+ * «над чем работает задача», и единственный её потребитель теперь — локальная
+ * детекция.
+ */
+export interface MarkupTarget {
+  readonly layoutRevisionId: string;
+  readonly folderId: string;
+  readonly bundleId: string;
+  readonly objectId: string;
+  readonly state: string;
+  readonly detectorProfile: string;
+  readonly workingPdfSha256: string;
+  readonly workingPdfKey: string;
+  readonly workingPdfSizeBytes: number;
+  readonly pageIndices: readonly number[];
+  readonly thresholds: LayoutThresholds;
+  readonly layoutProfileVersion: number | null;
+  /**
+   * Правило разметки, ЗАПИНЕННОЕ на ревизии (S42): что портал ищет на странице.
+   *
+   * Приходит из ревизии, а не из настроек: постраничные задачи исполняются
+   * минутами и вразнобой, и настройка, сменившаяся между ними, разъехалась бы
+   * по одной ревизии двумя правилами.
+   */
+  readonly markupPolicy: MarkupPolicy;
+}
+
+/** Состояние, при котором работать не над чем: дефект постановщика, не сбой. */
+export class MarkupStateError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'MarkupStateError';
+  }
+}
 
 export interface LocalDetectionDeps {
   /** `null` — на воркере нет `pdftoppm`: задача отказывает честно (§ выше). */
@@ -98,9 +134,9 @@ export interface LocalDetectionDeps {
   readonly feedback?: ProcessingFeedbackSink | undefined;
 
   /**
-   * Цель задачи по ЯВНОМУ `layoutRevisionId` — как у `layout.detect_pages`
-   * (`layoutPayload` не несёт `bundleId`, сверять не с чем; `bundleId`
-   * приходит УЖЕ ВНУТРИ `MarkupTarget`).
+   * Цель задачи ищется по ЯВНОМУ `layoutRevisionId`: `layoutPayload` не несёт
+   * `bundleId`, сверять не с чем — `bundleId` приходит УЖЕ ВНУТРИ
+   * `MarkupTarget`.
    */
   loadTargetByLayout(input: {
     readonly folderId: string;

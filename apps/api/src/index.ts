@@ -130,6 +130,7 @@ export type {
 export {
   applyFullPageTextProfile,
   BLOCKS_HASH_VERSION,
+  blockGeometryKey,
   computeBlocksHash,
   createLayoutBlock,
   createRunDocument,
@@ -172,56 +173,78 @@ export type {
  * Наружу выведен ради задачи `layout.start` (S21): звено «сборка → разметка»
  * обязано делать ровно то же, что маршрут, и делать это ТЕМ ЖЕ кодом.
  */
-export {
-  enqueueDetectBatches,
-  enqueueLocalDetectBatches,
-  startMarkupOnBundle,
-} from './modules/layout/start.js';
+export { enqueueLocalDetectBatches, startMarkupOnBundle } from './modules/layout/start.js';
 export type { StartMarkupResult } from './modules/layout/start.js';
 
 export { analyzePages, unionArea } from './layout/attention.js';
 export type { AnalyzedBlock, AnalyzedPage, PageAnalysis } from './layout/attention.js';
 
+/**
+ * Контур снимка исполнительной документации (контракт document-sync v1).
+ *
+ * Экспортируется целиком, потому что цепочка задач живёт в воркере: там и порт,
+ * и сборка тела, и классификация отказов §10. Второй реализации любой из трёх
+ * быть не должно — расхождение здесь означает либо отправленное тело, не
+ * описываемое своим манифестом, либо повтор запроса, который контракт повторять
+ * запрещает.
+ */
 export {
-  createRdWeb,
-  DETECT_BATCH_LIMIT,
-  firstAllowedProject,
-  LegacyRdWebAdapter,
-  RdWebClient,
-  RdWebError,
-  RDWEB_SERVICE,
-  recognitionSelections,
-  SUCCESSFUL_RECOGNITION_STATUSES,
-  TERMINAL_RECOGNITION_STATUSES,
-} from './integrations/rdweb/index.js';
+  buildSnapshotBody,
+  createExecSync,
+  ExecSyncAdapter,
+  ExecSyncClient,
+  ExecSyncError,
+  execSyncMissingVars,
+  EXEC_API_PREFIX,
+  RDWEB_EXEC_SERVICE,
+  SnapshotBuildError,
+  SUCCESSFUL_BLOCK_STATUSES,
+  SUCCESSFUL_SYNC_STATES,
+  TERMINAL_SYNC_STATES,
+} from './integrations/rdweb-exec/index.js';
 export type {
-  CreateRunDocumentInput,
-  CreateRunDocumentResult,
-  DesiredBlock,
-  DetectPagesInput,
-  DetectPagesResult,
-  ExportPayload,
-  RdWebPort,
-  RecognitionSelection,
-  RecognitionStatus,
-  ReconcileLayoutResult,
-  RemoteBlock,
-  RemoteBlockResult,
-  RemoteDocument,
-  RemotePage,
-} from './integrations/rdweb/index.js';
+  BuildSnapshotInput,
+  BuildSnapshotResult,
+  ExecBlockResultRow,
+  ExecBlockResultsPage,
+  ExecConflictKind,
+  ExecSyncPort,
+  ExecSyncState,
+  ExecSyncStatus,
+  InitSyncResult,
+  SnapshotBlockInput,
+  SnapshotDocumentInput,
+  UploadDocumentInput,
+} from './integrations/rdweb-exec/index.js';
 
-/** Разбор экспорта и сопоставление блоков (§5.2, шаги 7–8). */
+/** Репозиторий реестра внешних идентификаторов и журнала отправок (0069). */
 export {
-  EXPORT_ENTRY_HTML,
-  EXPORT_ENTRY_MARKDOWN,
-  EXPORT_ENTRY_QA,
-  ExportFormatError,
-  parseExportMarkdown,
-  requireEntry,
-} from './recognition/export.js';
-export type { ExportBlockText, ExportPageText, ParsedExport } from './recognition/export.js';
-export { geometryKey, matchBlocks } from './recognition/match.js';
+  acceptGeneration,
+  countUploadAttempt,
+  externalDocumentIdOf,
+  externalSyncIdOf,
+  findExecSync,
+  findExecSyncForRun,
+  liftBlockRevisions,
+  liftGeneration,
+  listDeclaredBlocks,
+  loadDocumentNaming,
+  markResyncRequired,
+  openExecSync,
+  recordSyncInitialized,
+  recordSyncState,
+  reconcileExecSnapshot,
+} from './db/repositories/rdweb-exec.js';
+export type {
+  BlockDeclaration,
+  DeclaredBlockView,
+  ExecSnapshotPlan,
+  ExecSyncRowState,
+  ExecSyncView,
+  ExecDocumentNaming,
+  ReconcileBlockInput,
+} from './db/repositories/rdweb-exec.js';
+
 export {
   isRedactableArtifactKind,
   redactAbsoluteUrls,
@@ -233,7 +256,6 @@ export {
   REDACTED_URL,
 } from './recognition/redaction.js';
 export type { Redacted, RedactableArtifactKind } from './recognition/redaction.js';
-export type { MatchableBlock, MatchResult } from './recognition/match.js';
 export { crc32, readZipEntries, writeZipStream, ZipError } from './lib/zip.js';
 export type { ZipEntry, ZipSourceEntry } from './lib/zip.js';
 export { buildXlsx } from './lib/xlsx.js';
@@ -282,7 +304,7 @@ export {
   listRunPages,
   markRunPage,
   mergeRunSettingsSnapshot,
-  publishVlmRunResults,
+  publishRunResults,
   recordArtifact,
   saveRdJobId,
   saveRecognitionResults,
@@ -359,13 +381,24 @@ export type {
   VlmBlockOutcome,
 } from './recognition/vlm/recognize-block.js';
 export { assembleRecognitionResult, RecognitionAssembleError } from './recognition/assemble.js';
+/**
+ * Версии адаптеров обоих маршрутов распознавания.
+ *
+ * Экспортируются потому, что источник артефакта называет ФИНАЛИЗАЦИЯ, а она
+ * живёт в воркере. Зашить строку там значило бы завести второе место, где
+ * версия адаптера может разойтись с самим адаптером, — а расходиться ей нельзя:
+ * по ней прогоны на одних и тех же пикселях отличаются друг от друга.
+ */
+export { ADAPTER_VERSION_OPENROUTER_VLM } from './recognition/vlm/map.js';
+export { ADAPTER_VERSION_RDWEB_EXEC, mapExecBlockResult } from './recognition/rdweb-exec/map.js';
+export type { ExecMapContext, ExecMapOutcome } from './recognition/rdweb-exec/map.js';
 export type {
   AssembleFrozenBlock,
   AssemblePageInput,
   AssembleRecognitionInput,
 } from './recognition/assemble.js';
 
-export { archiveKey, artifactKey, documentPdfKey, previewPageKey } from './storage/keys.js';
+export { archiveKey, artifactKey, documentPdfKey } from './storage/keys.js';
 export type { ArtifactKind } from './storage/keys.js';
 
 /**

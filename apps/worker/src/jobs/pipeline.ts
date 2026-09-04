@@ -41,7 +41,7 @@ import {
   listRunPages,
   markRunPage,
   mergeRunSettingsSnapshot,
-  publishVlmRunResults,
+  publishRunResults,
   readImmutabilityEnforced,
   RECOGNITION_PROMPT_DEFAULTS,
   recognitionPromptDefaultByCode,
@@ -56,25 +56,35 @@ import {
 
 import {
   artifactKey,
+  acceptGeneration,
   blobKey,
-  closeRunDocument,
+  countUploadAttempt,
   documentPdfKey,
   loadMaterializationPlan,
   requireVisibleFolderOfDocument,
   saveDerivedPdf,
   createBundle,
   createMaintenanceRegistry,
-  createRunDocument,
   evaluatePdfFile,
   FALLBACK_LAYOUT_THRESHOLDS,
   findArtifact,
   findBundle,
+  findExecSyncForRun,
+  liftBlockRevisions,
+  liftGeneration,
+  listDeclaredBlocks,
+  listPageOrientations,
+  loadDocumentNaming,
+  markResyncRequired,
+  openExecSync,
+  reconcileExecSnapshot,
+  recordSyncInitialized,
+  recordSyncState,
   findBundleByManifest,
   findFileContent,
   findLayoutRevision,
   findRecognitionRun,
   findFolderForFiles,
-  findRunDocument,
   finishRecognitionRun,
   importDetectedBlocks,
   listBundlePages,
@@ -84,18 +94,14 @@ import {
   loadBundlePlan,
   loadProfileForLayout,
   startMarkupOnBundle,
-  previewPageKey,
   probePdf,
   readDetectionSettings,
   recordArtifact,
-  replaceRunDocument,
   saveFileVerdict,
   savePageAttentionFlags,
-  saveRdJobId,
-  saveRecognitionResults,
-  saveRemoteHashBefore,
   saveSignatureProbe,
   sha256Hex,
+  type ExecSyncPort,
   storableVerdict,
   applySegmentation,
   createAiSpendReader,
@@ -130,8 +136,6 @@ import {
   type LayoutRevisionView,
   type PageRasterizer,
   type PdfToolkit,
-  type RdWebPort,
-  type RecognitionSelection,
   type ReviewDocument,
   type StorageProvider,
   finishValidationRun,
@@ -183,15 +187,6 @@ import { createMaterializePdfHandler, type MaterializeDeps } from './delivery.js
 import { createInternalRegistryProviders } from '@id/rules';
 import { createChecksRunHandler, createChecksSummarizeHandler, type ChecksDeps } from './checks.js';
 import {
-  createFetchExportHandler,
-  createPollRecognitionHandler,
-  createReconcileHandler,
-  createStartRecognitionHandler,
-  type LocalBlock,
-  type PollRecognitionOptions,
-  type RecognitionDeps,
-} from './recognition.js';
-import {
   createClassifyPagesHandler,
   createExtractDocumentHandler,
   createExtractFieldsHandler,
@@ -205,18 +200,10 @@ import {
   type SegmentationDeps,
 } from './segmentation.js';
 import {
-  createAnalyzeCoverageHandler,
-  createDetectPagesHandler,
-  createPreviewCacheHandler,
-  createRunDocumentHandler,
-  createUploadWorkingPdfHandler,
-  createWaitPagesHandler,
-  type MarkupDeps,
+  createLocalDetectionHandler,
+  type LocalDetectionDeps,
   type MarkupTarget,
-  type PageBlocksSnapshot,
-  type WaitPagesOptions,
-} from './markup.js';
-import { createLocalDetectionHandler, type LocalDetectionDeps } from './local-detection.js';
+} from './local-detection.js';
 import {
   createOrientationProbeHandler,
   ORIENTATION_PROBE_MAX_LONG_EDGE_PX,
@@ -237,6 +224,24 @@ import {
   createVlmStartHandler,
   type VlmRecognitionDeps,
 } from './vlm-recognition.js';
+import {
+  createAnalyzeCoverageHandler,
+  type CoverageDeps,
+  type PageBlocksSnapshot,
+} from './layout-coverage.js';
+import {
+  createSyncCompleteHandler,
+  createSyncFetchHandler,
+  createSyncFinalizeHandler,
+  createSyncInitHandler,
+  createSyncPollHandler,
+  createSyncPrepareHandler,
+  createSyncResyncHandler,
+  createSyncUploadHandler,
+  type ExecPollOptions,
+  type ExecSyncDeps,
+} from './exec-sync.js';
+import { PAGE_TEXT_RENDER_VERSION, renderPageText } from '@id/recognition';
 import { cropBlockPng, downscalePng } from '../vlm/crop.js';
 
 /**
@@ -297,15 +302,6 @@ export interface PipelineJobsOptions {
    */
   readonly pdfCacheBytes?: number | undefined;
   /**
-   * Адаптер RD WEB (§5.1). `null` — интеграция не настроена: задачи 4–9 при
-   * этом честно падают с внятной причиной, а стадии приёма продолжают работать.
-   */
-  readonly rdweb?: RdWebPort | null | undefined;
-  /** Проект RD WEB, которым владеет портал (первый из `RDWEB_PROJECT_ALLOWLIST`). */
-  readonly rdProjectId?: string | null | undefined;
-  /** `PREVIEW_MODE=cached` (§7.1): только тогда ставится задача 9. */
-  readonly previewCached?: boolean | undefined;
-  /**
    * Растеризатор PDF→PNG для локальной детекции (ADR-0008), выбранный
    * startup-проверкой `selectRasterizer()` в `main.ts` — тем же паттерном,
    * что и `toolkit` (ADR-0003). `null` — на машине нет `pdftoppm`:
@@ -320,14 +316,17 @@ export interface PipelineJobsOptions {
    * следующем старте `model-store.ts` перекачает и заново сверит sha256.
    */
   readonly detectionCacheDir?: string | undefined;
-  /** Настройки поллинга рендера; в тестах ускоряются. */
-  readonly waitPages?: WaitPagesOptions | undefined;
-  /** Настройки поллинга распознавания; в тестах ускоряются. */
-  readonly pollRecognition?: PollRecognitionOptions | undefined;
-  /** Выбор провайдера/модели/профиля OCR на тип блока (§10). */
-  readonly recognitionSelections?: readonly RecognitionSelection[] | undefined;
-  /** Режим документа RD WEB; по умолчанию выключен (см. `RecognitionDeps`). */
-  readonly recognitionDocumentMode?: boolean | undefined;
+  /**
+   * Адаптер контура снимка исполнительной документации (контракт document-sync v1).
+   *
+   * `null` — интеграция не настроена: цепочка `rd.sync_*` честно отказывает с
+   * внятной причиной, а приём файлов и локальная разметка продолжают работать.
+   */
+  readonly execSync?: ExecSyncPort | null | undefined;
+  /** Проект RD WEB, в который уезжают снимки (`RDWEB_EXEC_PROJECT_ID`). */
+  readonly execProjectId?: string | null | undefined;
+  /** Настройки поллинга снимка RD WEB; в тестах ускоряются. */
+  readonly pollExecSync?: ExecPollOptions | undefined;
   /**
    * Провайдер модели для фазы 2 сегментации (§8.2, §10).
    *
@@ -585,14 +584,22 @@ function bundleBuildDeps(options: PipelineJobsOptions): BundleBuildDeps {
 }
 
 // =====================================================================
-// Порты задач 4–9 (разметка)
+// Порт анализа покрытия
 // =====================================================================
 
 /**
- * Сборка цели задачи разметки из репозиториев.
+ * Связывание анализа покрытия: ревизия разметки, её блоки и флаги внимания.
+ *
+ * Порт узкий намеренно. Прежде эта задача жила в общем порте стадии разметки
+ * вместе с загрузкой PDF, рендером и детекцией через RD WEB — и половина его
+ * методов ей была не нужна. Со снятием легаси-маршрута лишнее ушло, и осталось
+ * ровно то, что задача действительно делает.
+ */
+/**
+ * Цель задачи детекции из репозиториев.
  *
  * Всё читается закреплённой областью (`pinScope`), включая карту страниц и
- * рабочий документ: задача, назвавшая в payload чужую ревизию, не находит
+ * рабочий документ: задача, назвавшая в payload чужую папку, не находит
  * ничего, а не работает с чужими данными от имени системы.
  */
 async function buildMarkupTarget(
@@ -628,83 +635,32 @@ async function buildMarkupTarget(
     markupPolicy: layout.markupPolicy,
   };
 }
-
-function markupDeps(options: PipelineJobsOptions): MarkupDeps {
-  const { db, storage } = options;
+function coverageDeps(options: PipelineJobsOptions): CoverageDeps {
+  const { db } = options;
 
   return {
-    rdweb: options.rdweb ?? null,
-    rdProjectId: options.rdProjectId ?? null,
-    previewCached: options.previewCached ?? false,
-
     loadTargetByLayout: async ({ folderId, layoutRevisionId }) => {
       const scope = await pinScope(db, folderId);
       if (scope === null) return null;
       const layout = await findLayoutRevision(db, scope, layoutRevisionId);
       if (layout === null || layout.folderId !== folderId) return null;
-      return buildMarkupTarget(options, scope, layout);
+      const profile = await loadProfileForLayout(db, layout.layoutProfileId);
+      return {
+        layoutRevisionId: layout.id,
+        folderId: layout.folderId,
+        bundleId: layout.bundleId,
+        // Фолбэк берётся из репозитория, а не объявляется здесь второй раз:
+        // разошедшиеся значения дали бы флаги, не совпадающие с экраном.
+        thresholds: profile?.thresholds ?? FALLBACK_LAYOUT_THRESHOLDS,
+        layoutProfileVersion: profile?.version ?? null,
+        markupPolicy: layout.markupPolicy,
+      };
     },
 
-    findRunDocument: async (layoutRevisionId) => {
-      // Область берётся от ревизии разметки: у `rd_run_documents` собственных
-      // денормализованных колонок области нет.
-      const layout = await findLayoutRevisionSystemwide(db, layoutRevisionId);
-      if (layout === null) return null;
-      const scope = await pinScope(db, layout.folderId);
-      if (scope === null) return null;
-      const found = await findRunDocument(db, scope, layoutRevisionId);
-      return found === null
-        ? null
-        : {
-            rdDocumentId: found.rdDocumentId,
-            rdProjectId: found.rdProjectId,
-            closed: found.closedAt !== null,
-          };
-    },
-
-    saveRunDocument: async (input) => {
-      const scope = await pinScope(db, input.folderId);
-      if (scope === null) throw new PipelineScopeError('Ревизия исчезла до записи RD-документа.');
-      await createRunDocument(db, scope, {
-        layoutRevisionId: input.layoutRevisionId,
-        rdDocumentId: input.rdDocumentId,
-        rdProjectId: input.rdProjectId,
-      });
-    },
-
-    replaceRunDocument: async (input) => {
-      const scope = await pinScope(db, input.folderId);
-      if (scope === null) throw new PipelineScopeError('Ревизия исчезла до замены RD-документа.');
-      await replaceRunDocument(db, scope, {
-        layoutRevisionId: input.layoutRevisionId,
-        rdDocumentId: input.rdDocumentId,
-        rdProjectId: input.rdProjectId,
-      });
-    },
-
-    openWorkingPdf: async (key) => {
-      const object = await storage.getObjectStream(key);
-      return { stream: () => object.stream, sizeBytes: object.sizeBytes };
-    },
-
-    importBlocks: async (input) => {
-      const scope = await pinScope(db, input.folderId);
-      if (scope === null) throw new PipelineScopeError('Ревизия исчезла до импорта разметки.');
-      const result = await importDetectedBlocks(db, scope, {
-        layoutRevisionId: input.layoutRevisionId,
-        workingPageIndices: input.workingPageIndices,
-        blocks: input.blocks,
-        // Провенанс — факт происхождения, а не выдуманная уверенность: ни
-        // `confidence`, ни `model_id` в `BlockOut` нет (§0.1).
-        provenance: 'rf_detr',
-      });
-      return { imported: result.imported, skippedPages: result.skippedPages };
-    },
-
-    loadPageBlocks: async (input) => {
-      const scope = await pinScope(db, input.folderId);
+    loadPageBlocks: async ({ folderId, layoutRevisionId }) => {
+      const scope = await pinScope(db, folderId);
       if (scope === null) return [];
-      const layout = await findLayoutRevision(db, scope, input.layoutRevisionId);
+      const layout = await findLayoutRevision(db, scope, layoutRevisionId);
       if (layout === null) return [];
 
       const [pages, blocks] = await Promise.all([
@@ -714,7 +670,6 @@ function markupDeps(options: PipelineJobsOptions): MarkupDeps {
 
       const byPage = new Map<number, PageBlocksSnapshot['blocks'][number][]>();
       for (const block of blocks) {
-        const list = byPage.get(block.workingPageIndex);
         const entry = {
           blockType: block.blockType,
           x0: block.x0,
@@ -722,6 +677,7 @@ function markupDeps(options: PipelineJobsOptions): MarkupDeps {
           x1: block.x1,
           y1: block.y1,
         };
+        const list = byPage.get(block.workingPageIndex);
         if (list === undefined) byPage.set(block.workingPageIndex, [entry]);
         else list.push(entry);
       }
@@ -738,26 +694,13 @@ function markupDeps(options: PipelineJobsOptions): MarkupDeps {
       }));
     },
 
-    saveFlags: async (input) => {
-      const scope = await pinScope(db, input.folderId);
-      if (scope === null) return { written: false, reason: 'ревизия исчезла' };
-      const outcome = await savePageAttentionFlags(db, scope, {
-        folderId: input.folderId,
-        flags: input.flags,
-      });
+    saveFlags: async ({ folderId, flags }) => {
+      const scope = await pinScope(db, folderId);
+      if (scope === null) return { written: false, reason: 'папка исчезла' };
+      const outcome = await savePageAttentionFlags(db, scope, { folderId, flags });
       return outcome.kind === 'written'
         ? { written: true }
         : { written: false, reason: outcome.reason };
-    },
-
-    storePreview: async (input) => {
-      const key = previewPageKey(input.bundleId, 'view', input.workingPageIndex);
-      await storage.putObject({
-        key,
-        body: Buffer.from(input.bytes),
-        contentType: 'image/png',
-        contentLength: input.bytes.byteLength,
-      });
     },
   };
 }
@@ -806,7 +749,6 @@ function layoutStartDeps(options: PipelineJobsOptions): LayoutStartDeps {
       const started = await startMarkupOnBundle(db, scope, {
         folderId,
         bundleId: bundle.id,
-        previewCached: options.previewCached ?? false,
         logger,
       });
       return {
@@ -971,179 +913,6 @@ function localDetectionDeps(options: PipelineJobsOptions): LocalDetectionDeps {
         provenance: input.provenance,
       });
       return { imported: result.imported, skippedPages: result.skippedPages };
-    },
-  };
-}
-
-// =====================================================================
-// Порты задач 10–13 (распознавание)
-// =====================================================================
-
-/**
- * Область прогона распознавания.
- *
- * Та же дисциплина, что у задач разметки: `folderId` из payload разрешается
- * системным чтением ровно ради подрядчика, а сам прогон, его блоки, артефакты и
- * результаты читаются и пишутся уже закреплённой областью. Payload, назвавший
- * чужой прогон, не находит его вовсе — `findRecognitionRun` фильтрует областью.
- */
-function recognitionDeps(options: PipelineJobsOptions): RecognitionDeps {
-  const { db, storage } = options;
-
-  /** Область прогона: одна функция на все методы, чтобы её нельзя было забыть. */
-  const scopeOf = async (folderId: string): Promise<AuthScope> => {
-    const scope = await pinScope(db, folderId);
-    if (scope === null) {
-      throw new PipelineScopeError(`Ревизия ${folderId} не найдена: прогон адресован в никуда.`);
-    }
-    return scope;
-  };
-
-  /**
-   * Область по идентификатору прогона.
-   *
-   * Прогон адресуется своим uuid, а ревизия у него денормализована, поэтому
-   * одного системного чтения не избежать — оно ровно одно и здесь.
-   */
-  const scopeOfRun = async (runId: string): Promise<{ scope: AuthScope; folderId: string }> => {
-    const run = await findRecognitionRun(db, SYSTEM_SCOPE, runId);
-    if (run === null) throw new PipelineScopeError(`Прогон ${runId} не найден.`);
-    return { scope: await scopeOf(run.folderId), folderId: run.folderId };
-  };
-
-  return {
-    rdweb: options.rdweb ?? null,
-    selections: options.recognitionSelections ?? [],
-    documentMode: options.recognitionDocumentMode ?? false,
-    sha256: (bytes) => sha256Hex(bytes),
-
-    loadRun: async ({ folderId, recognitionRunId }) => {
-      const scope = await pinScope(db, folderId);
-      if (scope === null) return null;
-      const run = await findRecognitionRun(db, scope, recognitionRunId);
-      // Сверка ревизии в payload с ревизией прогона: задача, поставленная с
-      // чужим прогоном, не находит его через область, а задача с прогоном
-      // соседней ревизии того же подрядчика отсекается здесь.
-      if (run === null || run.folderId !== folderId) return null;
-      // Легаси-задачи rd.* без RD-документа не работают по построению; прогон
-      // ветки VLM (rd_run_document_id NULL, ADR-0007) сюда попасть не должен —
-      // его ставит vlm.start_recognition, а не layout.reconcile. Если попал,
-      // честный null: задача откажет «прогон не найден», а не полезет в RD WEB
-      // с пустым идентификатором.
-      if (run.rdDocumentId === null) return null;
-      return {
-        runId: run.id,
-        folderId: run.folderId,
-        layoutRevisionId: run.layoutRevisionId,
-        status: run.status,
-        rdDocumentId: run.rdDocumentId,
-        rdJobId: run.rdJobId,
-        localLayoutHash: run.localLayoutHash,
-        remoteLayoutHashBefore: run.remoteLayoutHashBefore,
-        runDocumentClosed: run.runDocumentClosedAt !== null,
-      };
-    },
-
-    loadFrozenBlocks: async (runId): Promise<readonly LocalBlock[]> => {
-      const { scope } = await scopeOfRun(runId);
-      const run = await findRecognitionRun(db, scope, runId);
-      if (run === null) return [];
-      const blocks = await listLayoutBlocks(db, scope, run.layoutRevisionId);
-      return blocks.map((block) => ({
-        id: block.id,
-        workingPageIndex: block.workingPageIndex,
-        blockType: block.blockType,
-        shapeType: block.shapeType,
-        x0: block.x0,
-        y0: block.y0,
-        x1: block.x1,
-        y1: block.y1,
-        sortOrder: block.sortOrder,
-        points: block.points.map((point) => ({ x: point.x, y: point.y })),
-      }));
-    },
-
-    saveRemoteHashBefore: async (runId, remoteHash) => {
-      const { scope } = await scopeOfRun(runId);
-      await saveRemoteHashBefore(db, scope, runId, remoteHash);
-    },
-
-    saveRdJobId: async (runId, rdJobId) => {
-      const { scope } = await scopeOfRun(runId);
-      await saveRdJobId(db, scope, runId, rdJobId);
-    },
-
-    finishRun: async (input) => {
-      const { scope } = await scopeOfRun(input.runId);
-      return finishRecognitionRun(db, scope, input);
-    },
-
-    findArtifact: async (runId, kind) => {
-      const { scope } = await scopeOfRun(runId);
-      const artifact = await findArtifact(db, scope, runId, kind);
-      return artifact === null
-        ? null
-        : {
-            kind: artifact.kind,
-            artifactSha256: artifact.artifactSha256,
-            byteSize: artifact.byteSize,
-          };
-    },
-
-    recordArtifact: async (input) => {
-      const { scope } = await scopeOfRun(input.runId);
-      const outcome = await recordArtifact(db, scope, {
-        recognitionRunId: input.runId,
-        kind: input.kind,
-        artifactSha256: input.artifactSha256,
-        byteSize: input.byteSize,
-      });
-      return { kind: outcome.kind, artifactSha256: outcome.artifact.artifactSha256 };
-    },
-
-    artifactId: async (runId, kind) => {
-      const { scope } = await scopeOfRun(runId);
-      const artifact = await findArtifact(db, scope, runId, kind);
-      if (artifact === null) {
-        throw new PipelineScopeError(`Артефакт ${kind} прогона ${runId} не записан.`);
-      }
-      return artifact.id;
-    },
-
-    readArtifactBytes: async (runId, kind) => {
-      const key = artifactKey(runId, kind);
-      const head = await storage.headObject(key);
-      if (head === null) return null;
-      return readStorageObject(storage, key, MAX_ARTIFACT_BYTES);
-    },
-
-    writeArtifactBytes: async ({ runId, kind, bytes, contentType }) => {
-      await storage.putObject({
-        key: artifactKey(runId, kind),
-        body: Buffer.from(bytes),
-        contentType,
-        contentLength: bytes.byteLength,
-      });
-    },
-
-    saveResults: async (input) => {
-      const { scope } = await scopeOfRun(input.runId);
-      return saveRecognitionResults(db, scope, {
-        recognitionRunId: input.runId,
-        artifactVersionId: input.artifactVersionId,
-        pages: input.pages,
-        blocks: input.blocks,
-      });
-    },
-
-    closeRunDocument: async (layoutRevisionId) => {
-      const layout = await findLayoutRevisionSystemwide(db, layoutRevisionId);
-      if (layout === null) {
-        throw new PipelineScopeError(`Ревизия разметки ${layoutRevisionId} не найдена.`);
-      }
-      const scope = await scopeOf(layout.folderId);
-      const result = await closeRunDocument(db, scope, layoutRevisionId);
-      return { changed: result.changed };
     },
   };
 }
@@ -1493,7 +1262,7 @@ function vlmRecognitionDeps(options: PipelineJobsOptions): VlmRecognitionDeps {
 
     publishResults: async (input) => {
       const { scope } = await scopeOfRun(input.recognitionRunId);
-      return publishVlmRunResults(db, scope, input);
+      return publishRunResults(db, scope, input);
     },
 
     mergeSnapshot: async (runId, patch) => {
@@ -1650,6 +1419,265 @@ function vlmRecognitionDeps(options: PipelineJobsOptions): VlmRecognitionDeps {
     // Свежий заказ сквозного прогона: снимок payload, взятый при захвате, у
     // поллера финализации отстаёт на минуты и до 240 попыток.
     readAutoContinue: async (jobId) => readJobAutoContinue(db, jobId),
+  };
+}
+
+/**
+ * Связывание цепочки снимка RD WEB с базой, хранилищем и адаптером контракта.
+ *
+ * Та же дисциплина, что у остальных стадий: одно системное чтение ради
+ * определения подрядчика прогона (`pinScope`), после чего всё идёт закреплённой
+ * областью. Вторая реализация любой из этих функций разошлась бы с первой молча.
+ */
+function execSyncDeps(options: PipelineJobsOptions): ExecSyncDeps {
+  const { db, storage } = options;
+
+  const scopeOf = async (folderId: string): Promise<AuthScope> => {
+    const scope = await pinScope(db, folderId);
+    if (scope === null) {
+      throw new PipelineScopeError(`Папка ${folderId} не найдена: прогон адресован в никуда.`);
+    }
+    return scope;
+  };
+
+  const scopeOfRun = async (runId: string): Promise<{ scope: AuthScope; folderId: string }> => {
+    const run = await findRecognitionRun(db, SYSTEM_SCOPE, runId);
+    if (run === null) throw new PipelineScopeError(`Прогон ${runId} не найден.`);
+    return { scope: await scopeOf(run.folderId), folderId: run.folderId };
+  };
+
+  return {
+    port: options.execSync ?? null,
+    projectId: options.execProjectId ?? null,
+    feedback: options.feedback ?? new NoopProcessingFeedbackSink(),
+
+    loadRun: async (runId) => {
+      const run = await findRecognitionRun(db, SYSTEM_SCOPE, runId);
+      if (run === null) return null;
+      const layout = await findLayoutRevisionSystemwide(db, run.layoutRevisionId);
+      if (layout === null) return null;
+      return {
+        runId: run.id,
+        folderId: run.folderId,
+        layoutRevisionId: run.layoutRevisionId,
+        bundleId: layout.bundleId,
+        status: run.status,
+        localLayoutHash: run.localLayoutHash,
+        workingPdfSha256: run.workingPdfSha256,
+        settingsSnapshot: (run.settingsSnapshot ?? {}) as Record<string, unknown>,
+        recoveryRound: run.recoveryRound,
+      };
+    },
+
+    /**
+     * Блоки разметки вместе с разворотом их страницы.
+     *
+     * Разворот приклеивается здесь, а не читается задачей отдельно: он свойство
+     * СКАНА, ключ у него `source_page_id`, и связать его с блоком можно только
+     * через карту страниц рабочего документа. Задача, делающая это сама, завела
+     * бы второе место, где карта читается, — и разошлась бы с первым при
+     * пересборке комплекта.
+     */
+    loadLayoutBlocks: async (target) => {
+      const scope = await scopeOf(target.folderId);
+      const blocks = await listLayoutBlocks(db, scope, target.layoutRevisionId);
+      const orientations = await listPageOrientations(db, target.folderId);
+      const rotationByPage = new Map(
+        orientations.map((row) => [row.sourcePageId, row.contentRotation]),
+      );
+      const pages = await listBundlePages(db, scope, target.bundleId);
+      const sourceByIndex = new Map(
+        pages.map((page) => [page.workingPageIndex, page.sourcePageId]),
+      );
+
+      return blocks.map((block) => {
+        const sourcePageId = sourceByIndex.get(block.workingPageIndex);
+        return {
+          id: block.id,
+          workingPageIndex: block.workingPageIndex,
+          blockType: block.blockType,
+          shapeType: block.shapeType,
+          x0: block.x0,
+          y0: block.y0,
+          x1: block.x1,
+          y1: block.y1,
+          sortOrder: block.sortOrder,
+          points: block.points.map((point) => ({ x: point.x, y: point.y })),
+          displayName: null,
+          contentRotation: sourcePageId === undefined ? 0 : (rotationByPage.get(sourcePageId) ?? 0),
+        };
+      });
+    },
+
+    loadDocumentFacts: async (target) => {
+      const scope = await scopeOf(target.folderId);
+      const bundle = await findBundle(db, scope, target.bundleId);
+      if (bundle === null) {
+        throw new PipelineScopeError(`Рабочий документ ${target.bundleId} не найден.`);
+      }
+      const naming = await loadDocumentNaming(db, target.folderId);
+      const head = await storage.headObject(blobKey(bundle.workingPdfBlobSha256));
+      return {
+        sha256: bundle.workingPdfBlobSha256,
+        sizeBytes: head?.sizeBytes ?? 0,
+        pageCount: bundle.pageCount,
+        projectName: naming.projectName,
+        documentName: naming.documentName,
+      };
+    },
+
+    loadPageGeometry: async (target) => {
+      const scope = await scopeOf(target.folderId);
+      return listBundlePages(db, scope, target.bundleId);
+    },
+
+    openWorkingPdf: async (sha256) => {
+      const key = blobKey(sha256);
+      const head = await storage.headObject(key);
+      if (head === null) {
+        throw new PipelineScopeError(`Рабочий PDF ${sha256} отсутствует в хранилище.`);
+      }
+      const openedStream = await storage.getObjectStream(key);
+      return {
+        sizeBytes: head.sizeBytes,
+        body: () => openedStream.stream,
+      };
+    },
+
+    reconcileSnapshot: async (input) => {
+      const scope = await scopeOf(input.folderId);
+      return reconcileExecSnapshot(db, scope, input);
+    },
+
+    openSync: async (input) => openExecSync(db, input),
+    findSyncForRun: async (runId) => findExecSyncForRun(db, runId),
+    recordSyncInitialized: async (syncId, input) => recordSyncInitialized(db, syncId, input),
+    recordSyncState: async (syncId, state, patch) => recordSyncState(db, syncId, state, patch),
+    countUploadAttempt: async (syncId) => countUploadAttempt(db, syncId),
+    acceptGeneration: async (folderId, generation) => acceptGeneration(db, folderId, generation),
+    markResyncRequired: async (folderId) => markResyncRequired(db, folderId),
+    liftGeneration: async (folderId, atLeast) => liftGeneration(db, folderId, atLeast),
+    liftBlockRevisions: async (folderId, remote) => liftBlockRevisions(db, folderId, remote),
+    listDeclaredBlocks: async (folderId) => listDeclaredBlocks(db, folderId),
+
+    seedRunPages: async (runId, pages) => {
+      const { scope } = await scopeOfRun(runId);
+      await seedRunPages(db, scope, runId, pages);
+    },
+
+    markRunPage: async (input) => {
+      const { scope } = await scopeOfRun(input.runId);
+      await markRunPage(db, scope, input);
+    },
+
+    saveBlockResult: async (input) => {
+      const { scope } = await scopeOfRun(input.runId);
+      await insertBlockResultIdempotent(db, scope, {
+        recognitionRunId: input.runId,
+        layoutRevisionId: input.layoutRevisionId,
+        block: {
+          layoutBlockId: input.layoutBlockId,
+          resultType: input.resultType,
+          contentHtml: null,
+          contentMd: input.contentMd,
+          contentJson: input.contentJson,
+          modelId: null,
+          confidence: null,
+        },
+      });
+    },
+
+    listSavedBlockIds: async (runId) => {
+      const { scope } = await scopeOfRun(runId);
+      return listRunBlockIds(db, scope, runId);
+    },
+
+    listBlockEnvelopes: async (runId) => {
+      const { scope } = await scopeOfRun(runId);
+      const rows = await listRunBlockEnvelopes(db, scope, runId);
+      return rows.map((row) => ({
+        layoutBlockId: row.layoutBlockId,
+        contentJson: row.contentJson,
+      }));
+    },
+
+    mergeSnapshot: async (runId, patch) => {
+      const { scope } = await scopeOfRun(runId);
+      await mergeRunSettingsSnapshot(db, scope, runId, patch);
+    },
+
+    finishRun: async (input) => {
+      const { scope } = await scopeOfRun(input.runId);
+      await finishRecognitionRun(db, scope, input);
+    },
+
+    assemble: (input) => assembleRecognitionResult(input),
+
+    /**
+     * Канонический артефакт: запись идемпотентна и сверяется по хэшу.
+     *
+     * Повторная финализация обязана попасть в тот же артефакт, а не записать
+     * второй: `artifact_versions` держит UNIQUE по (прогон, вид), и расхождение
+     * байтов при том же прогоне означает недетерминированную сборку — это
+     * отказ, а не новая версия.
+     */
+    storeCanonicalArtifact: async (runId, bytes) => {
+      const { scope } = await scopeOfRun(runId);
+      const sha256 = sha256Hex(bytes);
+      const existing = await findArtifact(db, scope, runId, 'canonical');
+      if (existing !== null) {
+        if (existing.artifactSha256 !== sha256) {
+          throw new PipelineScopeError(
+            'Артефакт canonical этого прогона записан с другим хэшем: сборка недетерминирована.',
+          );
+        }
+        return existing.id;
+      }
+      await storage.putObject({
+        key: artifactKey(runId, 'canonical'),
+        body: Buffer.from(bytes),
+        contentType: 'application/json',
+        contentLength: bytes.byteLength,
+      });
+      await recordArtifact(db, scope, {
+        recognitionRunId: runId,
+        kind: 'canonical',
+        artifactSha256: sha256,
+        byteSize: bytes.byteLength,
+      });
+      const recorded = await findArtifact(db, scope, runId, 'canonical');
+      if (recorded === null) {
+        throw new PipelineScopeError('Артефакт canonical не читается сразу после записи.');
+      }
+      return recorded.id;
+    },
+
+    publishResults: async (input) => {
+      const { scope } = await scopeOfRun(input.recognitionRunId);
+      return publishRunResults(db, scope, input);
+    },
+
+    renderPageText: (page) => renderPageText(page as Parameters<typeof renderPageText>[0]),
+    pageTextRenderVersion: PAGE_TEXT_RENDER_VERSION,
+
+    /**
+     * Переход «распознавание → анализ» при сквозном прогоне (S21).
+     *
+     * Заказ перечитывается из строки задачи, а не берётся из payload: между
+     * захватом попытки и решением проходят минуты, и человек мог нажать
+     * «Проверить» уже после захвата. Тот же довод и тот же приём, что у
+     * финализации VLM.
+     */
+    continueWithAnalysis: async (ctx, target) => {
+      const wanted =
+        (await readJobAutoContinue(db, ctx.jobId)) || ctx.payload.autoContinue === true;
+      if (!wanted) return;
+      await ctx.enqueue({
+        type: 'doc.classify_pages',
+        payload: { folderId: target.folderId, autoContinue: true },
+        dedupeKey: `doc.classify_pages:${target.folderId}:${target.runId}`,
+      });
+    },
   };
 }
 
@@ -2157,13 +2185,7 @@ export function registerPipelineJobs(
   // загруженных файлов до размеченных страниц одним нажатием.
   registry.register('layout.start', createLayoutStartHandler(layoutStartDeps(options)));
 
-  const markup = markupDeps(options);
-  registry.register('rd.create_run_document', createRunDocumentHandler(markup));
-  registry.register('rd.upload_working_pdf', createUploadWorkingPdfHandler(markup));
-  registry.register('rd.wait_pages', createWaitPagesHandler(markup, options.waitPages ?? {}));
-  registry.register('layout.detect_pages', createDetectPagesHandler(markup));
-  registry.register('layout.analyze_coverage', createAnalyzeCoverageHandler(markup));
-  registry.register('preview.cache_pages', createPreviewCacheHandler(markup));
+  registry.register('layout.analyze_coverage', createAnalyzeCoverageHandler(coverageDeps(options)));
 
   // Локальная детекция RF-DETR (ADR-0008): альтернатива задаче 7 при
   // `detection.provider='local'` — растеризация PDF на воркере и ONNX-инференс
@@ -2181,14 +2203,6 @@ export function registerPipelineJobs(
   // Задачи 10–13 (§12): цикл сверки, запуск OCR, поллинг и однократный забор
   // экспорта. Регистрируются здесь и безусловно — по той же причине, что и
   // задачи разметки: обработчик без регистрации выглядит зависшим конвейером.
-  const recognition = recognitionDeps(options);
-  registry.register('layout.reconcile', createReconcileHandler(recognition));
-  registry.register('rd.start_recognition', createStartRecognitionHandler(recognition));
-  registry.register(
-    'rd.poll_recognition',
-    createPollRecognitionHandler(recognition, options.pollRecognition ?? {}),
-  );
-  registry.register('rd.fetch_export_once', createFetchExportHandler(recognition));
 
   // Задачи `vlm.*` (ADR-0007): распознавание через OpenRouter VLM по кропам
   // блоков — альтернатива задачам 10–13 при `recognition.provider=openrouter_vlm`.
@@ -2199,6 +2213,22 @@ export function registerPipelineJobs(
   registry.register('vlm.start_recognition', createVlmStartHandler(vlmRecognition));
   registry.register('vlm.recognize_page', createVlmRecognizePageHandler(vlmRecognition));
   registry.register('vlm.finalize_run', createVlmFinalizeHandler(vlmRecognition));
+
+  // Задачи `rd.sync_*`: снимок исполнительной документации в RD WEB (контракт
+  // document-sync v1) — вторая ветка распознавания, ставится при
+  // `recognition.provider=rdweb`. Регистрируются безусловно, тем же принципом,
+  // что и остальные: ненастроенная интеграция — это честный отказ КОНКРЕТНОГО
+  // прогона, а не отсутствующий обработчик, который выглядит зависшим
+  // конвейером.
+  const execSync = execSyncDeps(options);
+  registry.register('rd.sync_prepare', createSyncPrepareHandler(execSync));
+  registry.register('rd.sync_init', createSyncInitHandler(execSync));
+  registry.register('rd.sync_upload', createSyncUploadHandler(execSync));
+  registry.register('rd.sync_complete', createSyncCompleteHandler(execSync));
+  registry.register('rd.sync_poll', createSyncPollHandler(execSync, options.pollExecSync ?? {}));
+  registry.register('rd.sync_fetch', createSyncFetchHandler(execSync));
+  registry.register('rd.sync_finalize', createSyncFinalizeHandler(execSync));
+  registry.register('rd.sync_resync', createSyncResyncHandler(execSync));
 
   // Задачи 14–19 (§12): классификация страниц, сборка документов, реквизиты,
   // реестр приложений, сверка и граф. Регистрируются здесь и безусловно — по

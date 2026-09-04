@@ -270,11 +270,9 @@ const TEST_ENV = loadEnv({
   LOCAL_STORAGE_DIR: STORAGE_DIR,
   AUDIT_HMAC_KEY: 'audit-hmac-key-of-recognition-tests',
   RATE_LIMIT_MAX: '100000',
-  RDWEB_BASE_URL: 'http://127.0.0.1:1/',
-  RDWEB_USER: 'portal@example.test',
-  RDWEB_PASSWORD: 'portal-secret-of-tests',
-  RDWEB_PROJECT_ALLOWLIST: 'prj-portal',
-  RDWEB_OCR_MODEL: 'qwen2.5-vl-7b',
+  RDWEB_EXEC_BASE_URL: 'http://127.0.0.1:1/',
+  RDWEB_EXEC_TOKEN: 'portal-secret-of-tests',
+  RDWEB_EXEC_PROJECT_ID: 'idp-object-1',
 });
 
 let db: TestDatabase;
@@ -391,12 +389,12 @@ async function runRows(): Promise<readonly { id: string; status: string }[]> {
 
 describe('POST /folders/{id}/recognize', () => {
   it('без Idempotency-Key отвечает 400 и НИЧЕГО не ставит в очередь', async () => {
-    const before = await jobRows('layout.reconcile');
+    const before = await jobRows('rd.sync_prepare');
     const response = await as(KC.a, 'POST', `/api/v1/folders/${FOLDER_A}/recognize`, {
       body: { layoutId: LAYOUT_WITH_BLOCKS },
     });
     expect(response.statusCode).toBe(400);
-    expect(await jobRows('layout.reconcile')).toHaveLength(before.length);
+    expect(await jobRows('rd.sync_prepare')).toHaveLength(before.length);
     expect(await runRows()).toHaveLength(0);
   });
 
@@ -440,7 +438,7 @@ describe('POST /folders/{id}/recognize', () => {
     expect(runs).toHaveLength(1);
     expect(runs[0]?.status).toBe('running');
 
-    const jobs = await jobRows('layout.reconcile');
+    const jobs = await jobRows('rd.sync_prepare');
     expect(jobs).toHaveLength(1);
     const payload = JSON.parse(jobs[0]?.payload ?? '{}') as Record<string, unknown>;
     expect(payload.recognitionRunId).toBe(body.recognitionRunId);
@@ -456,15 +454,19 @@ describe('POST /folders/{id}/recognize', () => {
     expect(response.json<{ created: boolean }>().created).toBe(false);
 
     expect(await runRows()).toHaveLength(1);
-    expect(await jobRows('layout.reconcile')).toHaveLength(1);
+    expect(await jobRows('rd.sync_prepare')).toHaveLength(1);
   });
 
-  it('снимок настроек прогона не содержит ни пароля, ни адреса RD WEB', async () => {
+  it('снимок настроек прогона не содержит ни токена, ни адреса RD WEB', async () => {
     const rows = await db.query<{ snapshot: string }>(
       `SELECT settings_snapshot::text AS snapshot FROM recognition_runs WHERE folder_id = '${FOLDER_A}'`,
     );
     const snapshot = rows[0]?.snapshot ?? '';
-    expect(snapshot).toContain('qwen2.5-vl-7b');
+    // Контракт и проект — да, модель — нет: её выбирает RD WEB (§1) и в ответе
+    // не называет, а выдуманный слаг был бы ложью о том, чем распознано.
+    expect(snapshot).toContain('rdweb.executive_document_snapshot.v1');
+    expect(snapshot).toContain('idp-object-1');
+    expect(snapshot).toContain('"model": null');
     expect(snapshot).not.toContain('portal-secret-of-tests');
     expect(snapshot).not.toContain('127.0.0.1');
     expect(snapshot.toLowerCase()).not.toContain('password');

@@ -53,8 +53,8 @@ import {
 } from '../../db/repositories/page-orientation.js';
 import { auditEmailHmac } from '../../db/repositories/admin.js';
 import type { AuditActor } from '../../db/repositories/audit.js';
-import { readDetectionSettings, readImmutabilityEnforced } from '../../config/portal-settings.js';
-import { enqueueDetectBatches, enqueueLocalDetectBatches, startMarkupOnBundle } from './start.js';
+import { readImmutabilityEnforced } from '../../config/portal-settings.js';
+import { enqueueLocalDetectBatches, startMarkupOnBundle } from './start.js';
 import {
   blockCreateSchema,
   blockMutationResponseSchema,
@@ -164,7 +164,6 @@ function registerStartRoute(app: AppInstance): void {
       const started = await startMarkupOnBundle(app.db, scope, {
         folderId,
         bundleId: bundle.id,
-        previewCached: app.env.PREVIEW_MODE === 'cached',
         logger: request.log as unknown as Logger,
       });
 
@@ -174,9 +173,17 @@ function registerStartRoute(app: AppInstance): void {
           layoutRevisionId: started.layoutRevisionId,
           bundleId: started.bundleId,
           created: started.created,
-          // Схема ответа отдаёт одну задачу; у локальной ветки их страница к
-          // странице — наружу уходит первая, остальные видны в консоли задач.
-          jobId: started.jobIds[0] ?? '',
+          /*
+           * Схема ответа отдаёт одну задачу; у локальной ветки их страница к
+           * странице — наружу уходит первая, остальные видны в консоли задач.
+           *
+           * `null`, а не пустая строка: задач может НЕ БЫТЬ вовсе — модель
+           * детекции не выложена, и разметка создана для ручной работы.
+           * Пустая строка не проходит `z.uuid().nullable()`, и ответ 202
+           * превращался в 500 на сериализации. Прежде это не всплывало только
+           * потому, что снятая ветка RD WEB всегда ставила ровно одну задачу.
+           */
+          jobId: started.jobIds[0] ?? null,
           jobCreated: started.jobsCreated,
         });
     },
@@ -465,7 +472,6 @@ function registerPageRoutes(app: AppInstance): void {
         const restarted = await startMarkupOnBundle(app.db, scope, {
           folderId: layout.folderId,
           bundleId: layout.bundleId,
-          previewCached: app.env.PREVIEW_MODE === 'cached',
           logger: request.log as unknown as Logger,
         });
         return reply.code(202).send({
@@ -484,18 +490,18 @@ function registerPageRoutes(app: AppInstance): void {
             );
       if (pages.length === 0) throw conflict('У рабочего документа нет карты страниц.');
 
-      const detection = await readDetectionSettings(app.db);
       const batch = {
         layoutRevisionId: layout.id,
         folderId: layout.folderId,
         pages,
         logger: request.log as unknown as Logger,
       };
-      const jobIds =
-        detection.provider === 'local'
-          ? (await enqueueLocalDetectBatches(app.db, scope, { ...batch, overwriteExisting: true }))
-              .jobIds
-          : await enqueueDetectBatches(app.db, scope, batch);
+      // Провайдер детекции один — локальный: у контракта document-sync детекции
+      // нет вовсе, блоки в снимке наши.
+      const { jobIds } = await enqueueLocalDetectBatches(app.db, scope, {
+        ...batch,
+        overwriteExisting: true,
+      });
       return reply.code(202).send({
         layoutRevisionId: layout.id,
         batches: jobIds.length,

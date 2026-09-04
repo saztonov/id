@@ -207,11 +207,6 @@ const TEST_ENV = loadEnv({
   LOCAL_STORAGE_DIR: STORAGE_DIR,
   AUDIT_HMAC_KEY: 'audit-hmac-key-of-documents-tests',
   RATE_LIMIT_MAX: '100000',
-  RDWEB_BASE_URL: 'http://127.0.0.1:1/',
-  RDWEB_USER: 'portal@example.test',
-  RDWEB_PASSWORD: 'portal-secret-of-tests',
-  RDWEB_PROJECT_ALLOWLIST: 'prj-portal',
-  RDWEB_OCR_MODEL: 'qwen2.5-vl-7b',
 });
 
 let db: TestDatabase;

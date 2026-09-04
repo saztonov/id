@@ -1862,22 +1862,22 @@ export async function computeProcessingStatus(
   };
 }
 
-/** Типы задач детекции: обе ветки провайдера сразу (ADR-0008 и легаси RD WEB). */
-const DETECTION_JOB_TYPES = ['layout.detect_local', 'layout.detect_pages'] as const;
+/** Типы задач детекции. Ветка осталась одна — локальный RF-DETR (ADR-0008). */
+const DETECTION_JOB_TYPES = ['layout.detect_local'] as const;
 
 /**
  * Задачи-РАЗДАТЧИКИ стадии разметки: пока такая ждёт, страницы ещё не розданы.
  *
- * `layout.analyze_coverage` и `preview.cache_pages` сюда не входят намеренно,
- * хотя стадия у них та же: они идут ПОСЛЕ страниц, и обнулять счёт при них
- * значило бы сбрасывать полосу в ноль на финише прогона.
+ * `layout.analyze_coverage` сюда не входит намеренно, хотя стадия у него та
+ * же: он идёт ПОСЛЕ страниц, и обнулять счёт при нём значило бы сбрасывать
+ * полосу в ноль на финише прогона.
+ *
+ * Со снятием легаси-маршрута раздатчик остался один — звено «сборка →
+ * разметка». Зонд разворота сюда НЕ входит, хотя и предшествует детекции: он
+ * работает ПОСТРАНИЧНО, то есть страницы уже розданы, и считать его раздатчиком
+ * значило бы обнулять счёт ровно тогда, когда работа по страницам идёт.
  */
-const LAYOUT_HANDOUT_JOB_TYPES = [
-  'layout.start',
-  'rd.create_run_document',
-  'rd.upload_working_pdf',
-  'rd.wait_pages',
-] as const;
+const LAYOUT_HANDOUT_JOB_TYPES = ['layout.start'] as const;
 
 /**
  * Постраничный ход выделения блоков — см. докстринг `LayoutProgress`.

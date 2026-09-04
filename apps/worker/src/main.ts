@@ -40,15 +40,13 @@ import {
   createPdfLibToolkit,
   createPool,
   createQpdfToolkit,
-  createRdWeb,
+  createExecSync,
   createStorage,
   createLlmPolicy,
   createLlmProvider,
   createVlmProvider,
   detectQpdf,
   EnvError,
-  firstAllowedProject,
-  recognitionSelections,
   enqueueSystemJob,
   errorDigest,
   installProcessErrorHandlers,
@@ -245,11 +243,12 @@ async function main(): Promise<void> {
   // Остальные стадии (`rd.*`, `doc.*`, `checks.*`) добавляются сюда же по мере
   // появления; типы без обработчика воркер не захватывает — их задачи ждут в
   // очереди воркера, который их умеет, и видны в консоли как `queued`.
-  // Адаптер RD WEB собирается фабрикой, а не на месте вызова: только так он
-  // получает метрики, порог `SLOW_EXTERNAL_MS` и сквозной `request_id` (§11).
-  // `null` при ненастроенной интеграции — портал обязан подниматься и принимать
-  // файлы даже без доступа к RD WEB.
-  const rdweb = createRdWeb(env, { metrics, logger });
+  // Адаптер контура снимка исполнительной документации собирается фабрикой, а
+  // не на месте вызова: только так он получает метрики, порог
+  // `SLOW_EXTERNAL_MS` и сквозной `request_id` (§11). `null` при
+  // ненастроенной интеграции — портал обязан подниматься и принимать файлы
+  // даже без доступа к RD WEB.
+  const execSync = createExecSync(env, { metrics, logger });
 
   // VLM-порт распознавания (ADR-0007). Собирается всегда, тем же принципом,
   // что и `rdweb`: `LLM_PROVIDER=none` (дефолт) не даёт пустого объекта, а
@@ -314,13 +313,8 @@ async function main(): Promise<void> {
     feedback,
     toolkit,
     limits: { maxBytes: env.MAX_UPLOAD_BYTES, maxPages: env.MAX_PAGES_PER_FILE },
-    rdweb,
-    rdProjectId: firstAllowedProject(env) ?? null,
-    previewCached: env.PREVIEW_MODE === 'cached',
-    // Выбор провайдера и модели OCR (§10). Пустой список означает «не
-    // настроено», и задача 11 честно отказывает — она не имеет права
-    // подставить чужой `model_id` за администратора.
-    recognitionSelections: recognitionSelections(env),
+    execSync,
+    execProjectId: env.RDWEB_EXEC_PROJECT_ID ?? null,
     rasterizer,
     env,
     /**
@@ -486,7 +480,7 @@ async function main(): Promise<void> {
       pdf_toolkit: toolkit.kind,
       storage_driver: storage.driver,
       // Факт настроенности, а не адрес и тем более не учётные данные (§11).
-      rdweb_configured: rdweb !== null,
+      rdweb_exec_configured: execSync !== null,
       llm_provider: env.LLM_PROVIDER,
       rasterizer: rasterizer?.kind ?? null,
       preview_mode: env.PREVIEW_MODE,

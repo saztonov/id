@@ -70,6 +70,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
+  ADAPTER_VERSION_OPENROUTER_VLM,
   classifyFailure,
   computeBlocksHash,
   RETRYABLE_TABLE_EMPTY_ROWS,
@@ -99,6 +100,7 @@ import {
   renderPageText,
   textBlockSchema,
   type RecognitionBlock,
+  type RecognitionProvider,
   type RecognitionResult,
 } from '@id/recognition';
 
@@ -398,6 +400,8 @@ export interface VlmAssemblePageInput {
 }
 
 export interface VlmAssembleInput {
+  /** Чем распознано. Сборка провайдер-нейтральна и требует источник явно. */
+  readonly source: { readonly provider: RecognitionProvider; readonly adapterVersion: string };
   readonly modelId: string | null;
   readonly pages: readonly VlmAssemblePageInput[];
   readonly frozenBlocks: readonly VlmAssembleFrozenBlock[];
@@ -562,7 +566,7 @@ export interface VlmRecognitionDeps {
     }[]
   >;
 
-  /** Как wired: `publishVlmRunResults(db, scope, input)` — 1:1 (одна транзакция, инвариант 1). */
+  /** Как wired: `publishRunResults(db, scope, input)` — 1:1 (одна транзакция, инвариант 1). */
   publishResults(input: {
     readonly recognitionRunId: string;
     readonly artifactVersionId: string;
@@ -2533,6 +2537,10 @@ export function createVlmFinalizeHandler(deps: VlmRecognitionDeps): JobHandler<'
     let assembled: RecognitionResult;
     try {
       assembled = deps.assemble({
+        source: {
+          provider: 'openrouter_vlm',
+          adapterVersion: ADAPTER_VERSION_OPENROUTER_VLM,
+        },
         modelId: (() => {
           const model = snapshotOf(run)['model'];
           return typeof model === 'string' ? model : null;

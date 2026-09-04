@@ -11,8 +11,15 @@ import {
   type AssembleFrozenBlock,
   type AssemblePageInput,
 } from './assemble.js';
+import { ADAPTER_VERSION_OPENROUTER_VLM } from './vlm/map.js';
 
 const COORDS: readonly [number, number, number, number] = [0.1, 0.1, 0.9, 0.9];
+
+/** Источник прогона: сборка провайдер-нейтральна и требует его явно. */
+const ASSEMBLE_SOURCE = {
+  provider: 'openrouter_vlm',
+  adapterVersion: ADAPTER_VERSION_OPENROUTER_VLM,
+} as const;
 
 function frozen(patch: Partial<AssembleFrozenBlock>): AssembleFrozenBlock {
   return {
@@ -86,6 +93,7 @@ describe('assembleRecognitionResult: успех', () => {
       frozen({ layoutBlockId: 'blk-c', workingPageIndex: 0, blockType: 'stamp', sortOrder: 1 }),
     ];
     const result = assembleRecognitionResult({
+      source: ASSEMBLE_SOURCE,
       modelId: 'actual/model',
       // Страницы нарочно перепутаны: сборка обязана отсортировать сама.
       pages: [page(1), page(0)],
@@ -114,6 +122,7 @@ describe('assembleRecognitionResult: успех', () => {
 
   it('страница без блоков законна (пустой лист скана)', () => {
     const result = assembleRecognitionResult({
+      source: ASSEMBLE_SOURCE,
       modelId: null,
       pages: [page(0), page(1)],
       frozenBlocks: [frozen({ workingPageIndex: 1 })],
@@ -126,6 +135,7 @@ describe('assembleRecognitionResult: успех', () => {
 
   it('равные sortOrder упорядочиваются по layoutBlockId — детерминизм сохранён', () => {
     const result = assembleRecognitionResult({
+      source: ASSEMBLE_SOURCE,
       modelId: 'm',
       pages: [page(0)],
       frozenBlocks: [
@@ -144,6 +154,7 @@ describe('assembleRecognitionResult: успех', () => {
 
 describe('assembleRecognitionResult: двусторонняя сверка', () => {
   const base = {
+    source: ASSEMBLE_SOURCE,
     modelId: 'm',
     pages: [page(0)],
     frozenBlocks: [frozen({})],
@@ -214,7 +225,10 @@ describe('assembleRecognitionResult: двусторонняя сверка', () 
   it('тип результата не совпадает с замороженным', () => {
     expectAssembleError(
       () =>
-        assembleRecognitionResult({ ...base, results: new Map([['blk-a', stampResult('blk-a', 1)]]) }),
+        assembleRecognitionResult({
+          ...base,
+          results: new Map([['blk-a', stampResult('blk-a', 1)]]),
+        }),
       'тип результата',
     );
   });
@@ -222,7 +236,10 @@ describe('assembleRecognitionResult: двусторонняя сверка', () 
   it('ordinal результата не совпадает с sortOrder замороженного', () => {
     expectAssembleError(
       () =>
-        assembleRecognitionResult({ ...base, results: new Map([['blk-a', textResult('blk-a', 7)]]) }),
+        assembleRecognitionResult({
+          ...base,
+          results: new Map([['blk-a', textResult('blk-a', 7)]]),
+        }),
       'ordinal результата',
     );
   });
@@ -241,6 +258,7 @@ describe('assembleRecognitionResult: двусторонняя сверка', () 
   it('перечень расхождений полный, а не первый попавшийся', () => {
     try {
       assembleRecognitionResult({
+        source: ASSEMBLE_SOURCE,
         modelId: 'm',
         pages: [page(0)],
         frozenBlocks: [
@@ -262,6 +280,7 @@ describe('assembleRecognitionResult: финальная валидация ка�
   it('подписанная ссылка на кроп в результате — отказ схемы (§11)', () => {
     expect(() =>
       assembleRecognitionResult({
+        source: ASSEMBLE_SOURCE,
         modelId: 'm',
         pages: [page(0)],
         frozenBlocks: [frozen({})],

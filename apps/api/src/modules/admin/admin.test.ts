@@ -243,7 +243,7 @@ function instrument(db: TestDatabase): TestDatabase {
 
 /** Настоящие значения секретов: тело ответов обязано их не содержать. */
 const PROXY_LLM_TOKEN_VALUE = 'llm-token-must-never-appear-in-any-response';
-const RDWEB_PASSWORD_VALUE = 'rdweb-password-must-never-appear-in-any-response';
+const RDWEB_EXEC_TOKEN_VALUE = 'rdweb-token-must-never-appear-in-any-response';
 
 const TEST_ENV = loadEnv({
   NODE_ENV: 'test',
@@ -257,13 +257,11 @@ const TEST_ENV = loadEnv({
   LLM_PROVIDER: 'proxy_llm',
   PROXY_LLM_BASE_URL: 'https://llm.invalid',
   PROXY_LLM_TOKEN: PROXY_LLM_TOKEN_VALUE,
-  RDWEB_BASE_URL: 'https://rdweb.invalid',
-  RDWEB_USER: 'rdweb-service',
-  RDWEB_PASSWORD: RDWEB_PASSWORD_VALUE,
-  // Allowlist обязателен вместе с адресом (§5.1): служебный аккаунт RD WEB
-  // ограничен portal-owned проектами, и половина конфигурации хуже её
-  // отсутствия — портал поднялся бы, а каждая задача разметки падала бы.
-  RDWEB_PROJECT_ALLOWLIST: 'prj-portal',
+  RDWEB_EXEC_BASE_URL: 'https://rdweb.invalid',
+  RDWEB_EXEC_TOKEN: RDWEB_EXEC_TOKEN_VALUE,
+  // Проект обязателен вместе с адресом и токеном: половина конфигурации хуже её
+  // отсутствия — портал поднялся бы, а каждый прогон распознавания падал бы.
+  RDWEB_EXEC_PROJECT_ID: 'idp-object-1',
   RATE_LIMIT_MAX: '100000',
 });
 
@@ -879,7 +877,7 @@ describe('настройки: секреты не хранятся и не от�
     expect(response.statusCode).toBe(200);
 
     expect(response.body).not.toContain(PROXY_LLM_TOKEN_VALUE);
-    expect(response.body).not.toContain(RDWEB_PASSWORD_VALUE);
+    expect(response.body).not.toContain(RDWEB_EXEC_TOKEN_VALUE);
 
     const body = response.json<{
       settings: { key: string; isDefault: boolean }[];
@@ -899,6 +897,13 @@ describe('настройки: секреты не хранятся и не от�
     const oidc = body.secrets.find((entry) => entry.key === 'auth.oidc_client_secret');
     expect(oidc).toMatchObject({ configured: false, masked: null });
 
+    // Токен RD WEB виден администратору ровно как «задано» и ссылкой на
+    // переменную: другого способа узнать, почему «Распознать» отвечает 409, у
+    // него нет, а само значение живёт только в окружении (§10).
+    const execToken = body.secrets.find((entry) => entry.key === 'rdweb.exec_token');
+    expect(execToken).toMatchObject({ reference: 'env:RDWEB_EXEC_TOKEN', configured: true });
+    expect(execToken?.masked).not.toContain('rdweb-token');
+
     // Статус подключения есть, но «проверено» не заявляется никогда.
     expect(body.integrations.every((entry) => entry.verified === false)).toBe(true);
     expect(body.integrations.find((entry) => entry.name === 'proxy_llm')?.status).toBe(
@@ -906,6 +911,9 @@ describe('настройки: секреты не хранятся и не от�
     );
     expect(body.integrations.find((entry) => entry.name === 'oidc')?.status).toBe('disabled');
     expect(body.integrations.find((entry) => entry.name === 'storage')?.status).toBe('disabled');
+    expect(body.integrations.find((entry) => entry.name === 'rdweb_exec')?.status).toBe(
+      'configured',
+    );
   });
 
   it('запись объявленного секретного ключа отклоняется с указанием переменной', async () => {

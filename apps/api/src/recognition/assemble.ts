@@ -1,6 +1,11 @@
 /**
- * Сборка `RecognitionResult v2` из результатов VLM-прогона со СТРОГОЙ
- * двусторонней сверкой (инвариант 5 плана, ADR-0007).
+ * Сборка `RecognitionResult v2` из результатов прогона со СТРОГОЙ двусторонней
+ * сверкой (инвариант 5 плана, ADR-0007).
+ *
+ * Сборка провайдер-нейтральна: маршрутов распознавания два (VLM через
+ * OpenRouter и снимок в RD WEB), а сверка с разметкой, порядок блоков и форма
+ * канона у них общие. Чем распознано, говорит вызывающий полем `source` — и
+ * говорит обязательно, без умолчания.
  *
  * ## Почему сверка двусторонняя и почему она здесь
  *
@@ -30,20 +35,21 @@
  * Страницы — строго по возрастанию `workingPageIndex` (это же требует и
  * superRefine схемы).
  *
- * `pages[].text = null` — принципиально: текст страницы VLM-пути СОБИРАЕТСЯ
- * рендерером (`renderPageText` поверх блоков), а не хранится дословно; дословный
- * текст — привилегия legacy-адаптера, где он уже был каноном.
+ * `pages[].text = null` — принципиально и одинаково для обоих маршрутов: текст
+ * страницы СОБИРАЕТСЯ рендерером (`renderPageText` поверх блоков), а не хранится
+ * дословно. Так `PAGE_TEXT_RENDER_VERSION` означает одно и то же на обеих
+ * ветках, и офсеты цитат downstream сопоставимы между провайдерами; дословный
+ * текст был привилегией legacy-адаптера, где он уже был каноном.
  */
 import {
   RECOGNITION_RESULT_SCHEMA_VERSION,
   recognitionResultSchema,
   type RecognitionBlock,
   type RecognitionPage,
+  type RecognitionProvider,
   type RecognitionResult,
 } from '@id/recognition';
 import type { BlockType } from '@id/contracts';
-
-import { ADAPTER_VERSION_OPENROUTER_VLM } from './vlm/map.js';
 
 export interface AssemblePageInput {
   readonly workingPageIndex: number;
@@ -61,7 +67,21 @@ export interface AssembleFrozenBlock {
 }
 
 export interface AssembleRecognitionInput {
-  /** Модель прогона (снимок настроек); `null` — законен для recorded-двойника. */
+  /**
+   * Чем распознано. Без значения по умолчанию намеренно.
+   *
+   * До появления второго маршрута провайдер был зашит константой, и это было
+   * честно ровно до тех пор, пока маршрут оставался один. Умолчание сегодня
+   * означало бы, что вызывающий, забывший поле, молча подписывает свой артефакт
+   * чужим именем — а `source.provider` это единственное, по чему прогоны двух
+   * веток различимы на одних и тех же пикселях.
+   */
+  readonly source: {
+    readonly provider: RecognitionProvider;
+    /** Версия адаптера, а не модели: `openrouter-vlm.v3`, `rdweb-exec.v1`. */
+    readonly adapterVersion: string;
+  };
+  /** Модель прогона (снимок настроек); `null` — законен для RD WEB и recorded-двойника. */
   readonly modelId: string | null;
   readonly pages: readonly AssemblePageInput[];
   readonly frozenBlocks: readonly AssembleFrozenBlock[];
@@ -189,8 +209,8 @@ export function assembleRecognitionResult(input: AssembleRecognitionInput): Reco
   const result = {
     schemaVersion: RECOGNITION_RESULT_SCHEMA_VERSION,
     source: {
-      provider: 'openrouter_vlm',
-      adapterVersion: ADAPTER_VERSION_OPENROUTER_VLM,
+      provider: input.source.provider,
+      adapterVersion: input.source.adapterVersion,
       modelId: input.modelId,
       /** Момент генерации проставляет финализация при записи артефакта. */
       generatedAt: null,

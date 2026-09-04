@@ -550,7 +550,6 @@ function secretView(env: Env, key: string) {
 const INTEGRATION_REQUIREMENTS: Readonly<Record<IntegrationName, readonly string[]>> = {
   oidc: ['OIDC_ISSUER', 'OIDC_CLIENT_ID', 'OIDC_CLIENT_SECRET'],
   storage: ['S3_ENDPOINT', 'S3_BUCKET', 'S3_ACCESS_KEY', 'S3_SECRET_KEY'],
-  rdweb: ['RDWEB_BASE_URL', 'RDWEB_USER', 'RDWEB_PASSWORD'],
   rdweb_exec: ['RDWEB_EXEC_BASE_URL', 'RDWEB_EXEC_TOKEN', 'RDWEB_EXEC_PROJECT_ID'],
   proxy_llm: ['PROXY_LLM_BASE_URL', 'PROXY_LLM_TOKEN'],
   sentry: ['SENTRY_DSN'],
@@ -589,8 +588,6 @@ function integrationDisabled(env: Env, name: IntegrationName): boolean {
       return env.LLM_PROVIDER !== 'proxy_llm';
     case 'sentry':
       return env.ERROR_REPORTER !== 'sentry';
-    case 'rdweb':
-      return false;
     case 'rdweb_exec':
       // Не «disabled при другом провайдере распознавания»: администратор,
       // переключающий ветку, обязан ВИДЕТЬ, настроена ли вторая, — иначе

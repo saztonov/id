@@ -287,7 +287,6 @@ function registerMarkupRoute(app: AppInstance): void {
         const started = await startMarkupOnBundle(app.db, scope, {
           folderId,
           bundleId: bundle.id,
-          previewCached: app.env.PREVIEW_MODE === 'cached',
           logger: request.log as unknown as Logger,
         });
         return reply.code(202).send({

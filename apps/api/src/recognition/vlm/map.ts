@@ -69,27 +69,43 @@ export type CanonicalTextBlock = z.infer<typeof textBlockSchema>;
 export type CanonicalImageBlock = z.infer<typeof imageBlockSchema>;
 export type CanonicalStampBlock = z.infer<typeof stampBlockSchema>;
 
-/** Контекст замороженного блока — идентичность результата в каноне. */
+/**
+ * Контекст замороженного блока — идентичность результата в каноне.
+ *
+ * Два поля объявлены допускающими `null`, и оба — ради второго вызывающего,
+ * маршрута RD WEB (`recognition/rdweb-exec/map.ts`), который переиспользует эти
+ * же функции сборки штампа и картинки. Один и тот же штамп обязан давать один и
+ * тот же канонический штамп на обоих путях: вторая реализация правил `buildSheet`
+ * / `buildRevisions` / `buildExtra` разошлась бы с первой при первой же правке, и
+ * сравнение провайдеров, ради которого существует shadow-режим, потеряло бы
+ * смысл.
+ *
+ * - `modelId: null` — RD WEB выбирает модель сам и в ручке блоков её не называет.
+ *   Подставить туда заказанный слаг было бы ложью: заказа модели там нет вовсе.
+ * - `blockId` — идентификатор блока у провайдера. У VLM-пути его нет (блок
+ *   определяет `layoutBlockId`), у RD WEB это `external_block_id`.
+ */
 export interface VlmBlockContext {
   readonly layoutBlockId: string;
   /** `ordinal` канона = `sortOrder` замороженного блока (детерминированный порядок). */
   readonly sortOrder: number;
   readonly coordsNorm: readonly [number, number, number, number];
   /** ФАКТИЧЕСКИ отработавшая модель (`VlmResponse.model`), не заказанная. */
-  readonly modelId: string;
+  readonly modelId: string | null;
+  /** Идентификатор блока у провайдера; `undefined` — как `null`, его нет. */
+  readonly blockId?: string | null | undefined;
 }
 
 function blockBase(context: VlmBlockContext): {
-  blockId: null;
+  blockId: string | null;
   layoutBlockId: string;
   ordinal: number;
   coordsNorm: [number, number, number, number];
   confidence: null;
-  modelId: string;
+  modelId: string | null;
 } {
   return {
-    /** Идентификатора провайдера у VLM-пути нет — блок определяет layoutBlockId. */
-    blockId: null,
+    blockId: context.blockId ?? null,
     layoutBlockId: context.layoutBlockId,
     ordinal: context.sortOrder,
     coordsNorm: [...context.coordsNorm],

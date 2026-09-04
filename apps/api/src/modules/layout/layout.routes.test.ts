@@ -297,6 +297,7 @@ async function layoutDetail(layoutId: string): Promise<LayoutDetail> {
   return response.json<LayoutDetail>();
 }
 
+const PAGE_COUNT = 3;
 const RECT = { x0: 0.1, y0: 0.1, x1: 0.9, y1: 0.4 };
 
 let layoutId = '';
@@ -306,8 +307,17 @@ let layoutId = '';
 // =====================================================================
 
 describe('приём ставит задачи конвейера', () => {
+  beforeAll(async () => {
+    // Версия модели детекции: без неё локальная ветка законно не ставит ни
+    // одной задачи и честно отвечает «размечено, детекция пропущена». Предмет
+    // этих тестов — постановка, поэтому модель объявлена выложенной.
+    await db.query(
+      "INSERT INTO app_settings (key, value) VALUES ('detection.model_version', '\"v1\"'::jsonb) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+    );
+  });
+
   it('до нажатия кнопки задач разметки в очереди нет', async () => {
-    expect(await queuedTypes(FOLDER)).not.toContain('rd.create_run_document');
+    expect(await queuedTypes(FOLDER)).not.toContain('page.orientation_probe');
   });
 
   it('«Разметить файл» создаёт черновик разметки И кладёт строку в jobs', async () => {
@@ -322,16 +332,18 @@ describe('приём ставит задачи конвейера', () => {
 
     // Проверяется ТАБЛИЦА, а не код ответа: на S5 маршрут отвечал успехом,
     // а очередь оставалась пустой.
-    expect(await queuedTypes(FOLDER)).toContain('rd.create_run_document');
+    // Зонд разворота идёт ПЕРЕД детекцией и ставит её сам (ADR-0020).
+    expect(await queuedTypes(FOLDER)).toContain('page.orientation_probe');
 
     const payloads = await db.query<{
-      payload: { folderId: string; bundleId: string; layoutRevisionId: string };
+      payload: { folderId: string; layoutRevisionId: string };
     }>(
-      `SELECT payload FROM jobs WHERE type = 'rd.create_run_document'
-        AND payload->>'folderId' = '${FOLDER}'`,
+      `SELECT payload FROM jobs WHERE type = 'page.orientation_probe'
+        AND payload->>'folderId' = '${FOLDER}'
+        ORDER BY payload->>'workingPageIndex'`,
     );
-    expect(payloads).toHaveLength(1);
-    expect(payloads[0]?.payload.bundleId).toBe(BUNDLE);
+    // Одна задача на страницу: зонд смотрит лист, а не комплект.
+    expect(payloads.length).toBeGreaterThan(0);
     // Цель задачи адресована явно: «текущий черновик этого bundle» за время
     // ожидания в очереди может смениться на следующую ревизию разметки.
     expect(payloads[0]?.payload.layoutRevisionId).toBe(layoutId);
@@ -346,10 +358,12 @@ describe('приём ставит задачи конвейера', () => {
     expect(body.jobCreated).toBe(false);
 
     const rows = await db.query<{ count: string | number }>(
-      `SELECT count(*) AS count FROM jobs WHERE type = 'rd.create_run_document'
+      `SELECT count(*) AS count FROM jobs WHERE type = 'page.orientation_probe'
         AND payload->>'folderId' = '${FOLDER}'`,
     );
-    expect(Number(rows[0]?.count ?? 0)).toBe(1);
+    // Одна задача на страницу комплекта — и ни одной сверх того: повторное
+    // нажатие склеилось с уже стоящими по ключу дедупликации.
+    expect(Number(rows[0]?.count ?? 0)).toBe(PAGE_COUNT);
 
     const layouts = await db.query<{ count: string | number }>(
       `SELECT count(*) AS count FROM layout_revisions WHERE folder_id = '${FOLDER}'`,
@@ -360,7 +374,7 @@ describe('приём ставит задачи конвейера', () => {
   it('без собранного рабочего документа разметка не начинается', async () => {
     const response = await as(KC.contractor, 'POST', `/api/v1/folders/${FOLDER_BARE}/layout`);
     expect(response.statusCode).toBe(409);
-    expect(await queuedTypes(FOLDER_BARE)).not.toContain('rd.create_run_document');
+    expect(await queuedTypes(FOLDER_BARE)).not.toContain('page.orientation_probe');
   });
 
   it('повторная детекция раскладывается на задачи по пачкам', async () => {
@@ -369,17 +383,21 @@ describe('приём ставит задачи конвейера', () => {
     });
     expect(response.statusCode).toBe(202);
     const body = response.json<{ batches: number; jobIds: string[] }>();
-    expect(body.batches).toBe(1);
+    // Локальная детекция полистна: задача на страницу, а не пачка на комплект.
+    // Так падение одного листа не уносит с собой остальные, а приоритет убывает
+    // с номером страницы.
+    expect(body.batches).toBe(PAGE_COUNT);
 
     const rows = await db.query<{
       payload: { pageIndices: number[]; overwriteExisting?: boolean };
       dedupe_key: string;
     }>(
-      `SELECT payload, dedupe_key FROM jobs WHERE type = 'layout.detect_pages'
-        AND payload->>'layoutRevisionId' = '${layoutId}'`,
+      `SELECT payload, dedupe_key FROM jobs WHERE type = 'layout.detect_local'
+        AND payload->>'layoutRevisionId' = '${layoutId}'
+        ORDER BY payload->'pageIndices'->>0`,
     );
-    expect(rows).toHaveLength(1);
-    expect(rows[0]?.payload.pageIndices).toEqual([0, 1, 2]);
+    expect(rows).toHaveLength(PAGE_COUNT);
+    expect(rows.map((row) => row.payload.pageIndices)).toEqual([[0], [1], [2]]);
     // §5.3: «повторить детекцию» — явное действие пользователя, и оно обязано
     // действительно переразмечать. Без флага удалённая сторона вернула бы уже
     // размеченные страницы в skipped_pages, и нажатие кнопки ничего бы не дало.

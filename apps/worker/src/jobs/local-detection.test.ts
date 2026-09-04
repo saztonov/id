@@ -20,7 +20,7 @@ import {
   type LocalDetectionDeps,
 } from './local-detection.js';
 import { DetectionConfigurationError } from '../detection/errors.js';
-import type { MarkupTarget } from './markup.js';
+import type { MarkupTarget } from './local-detection.js';
 
 const FOLDER = '00000000-0000-4000-8000-000000000001';
 const LAYOUT = '00000000-0000-4000-8000-000000000002';

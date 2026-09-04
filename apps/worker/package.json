@@ -22,6 +22,7 @@
     "@id/contracts": "workspace:*",
     "@id/detection": "workspace:*",
     "@id/doc-types": "workspace:*",
+    "@id/execsync": "workspace:*",
     "@id/recognition": "workspace:*",
     "@id/rules": "workspace:*",
     "drizzle-orm": "0.45.2",
@@ -35,7 +36,7 @@
   "devDependencies": {
     "@electric-sql/pglite": "0.5.5",
     "@id/db-harness": "workspace:*",
-    "@id/fake-rdweb": "workspace:*",
+    "@id/fake-rdweb-exec": "workspace:*",
     "@id/migrator": "workspace:*",
     "@types/node": "26.2.0",
     "@types/pg": "8.21.0",

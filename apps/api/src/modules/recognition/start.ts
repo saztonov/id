@@ -19,7 +19,8 @@ import type { Database } from '../../db/repositories/users.js';
 import { readPublishedPromptCodes } from '../../db/repositories/admin.js';
 import { enqueueJob, reviveFailedJobs } from '../../db/repositories/jobs.js';
 import { startRecognitionRun } from '../../db/repositories/recognition.js';
-import { recognitionSelections } from '../../integrations/rdweb/index.js';
+import { execSyncMissingVars } from '../../integrations/rdweb-exec/index.js';
+import { EXEC_SYNC_SCHEMA_VERSION } from '@id/execsync';
 import { RECOGNITION_PROMPT_CODES } from '../../recognition/vlm/prompts.js';
 import { dedupeKeyFor } from '../../jobs/types.js';
 import { conflict, notFound } from '../../lib/problem.js';
@@ -42,9 +43,11 @@ import { tracePayload } from '../../observability/context.js';
  * маршрут ручного пути ничего подобного не обещает — он и есть инструмент
  * shadow-сравнения, и запрещать ему dry-run значило бы запретить сам режим.
  *
- * Ветка RD WEB проверок конфигурации не имеет: ни модели, ни промптов стадии
- * recognize у неё нет. Dry-run её тоже не касается — публикацию пропускает
- * финализация VLM-прогона, у RD WEB такой развилки нет вовсе.
+ * Проверка конфигурации у веток разная — модель против удостоверения, — а гейт
+ * dry-run общий, и это существенно. Прежде он касался только VLM, потому что у
+ * маршрута RD WEB не было развилки публикации вовсе; теперь она есть, и режим
+ * сравнения провайдеров обязан вести себя одинаково с обеими ветками — иначе
+ * сравнивать нечего.
  */
 export async function assertRecognitionStageReady(
   db: Database,
@@ -52,8 +55,12 @@ export async function assertRecognitionStageReady(
   options: { readonly requirePublication: boolean },
 ): Promise<void> {
   const recognition = await readRecognitionSettings(db);
-  if (recognition.provider !== 'openrouter_vlm') return;
-  assertVlmStageReady(env, recognition);
+  if (recognition.provider === 'openrouter_vlm') {
+    assertVlmStageReady(env, recognition);
+  } else {
+    assertExecStageReady(env);
+  }
+
   if (options.requirePublication && (await readAiDryRunOnly(db))) {
     throw conflict(
       'Портал в режиме dry-run: распознавание выполнится, но результат никуда не ' +
@@ -96,6 +103,30 @@ function assertVlmStageReady(env: Env, recognition: { readonly vlmModel: string 
 }
 
 /**
+ * Готовность ветки RD WEB — проверка КОНФИГУРАЦИИ до создания прогона.
+ *
+ * Прежде такой проверки не было вовсе, и это было не упущением, а следствием
+ * прежнего контракта: там отказ приходил позже, из `startRecognitionRun`,
+ * фразой «RD-документ прогона не создан». Теперь у ветки есть собственные
+ * предусловия — адрес контура, удостоверение и проект, — и ненастроенная
+ * интеграция даёт гарантированный отказ на первом же сетевом вызове. Прогон
+ * родился бы затем, чтобы умереть; отказать надо раньше и по существу.
+ *
+ * Текст называет переменные окружения поимённо: администратор, увидевший это
+ * сообщение, должен знать, что именно дозаполнить, а не идти читать код.
+ */
+function assertExecStageReady(env: Env): void {
+  const missing = execSyncMissingVars(env);
+  if (missing.length > 0) {
+    throw conflict(
+      `Интеграция RD WEB не настроена: не заданы ${missing.join(', ')}. ` +
+        'Задайте их в окружении развёртывания либо переключите распознавание на ' +
+        'VLM в настройках портала.',
+    );
+  }
+}
+
+/**
  * Коды стадии recognize, у которых нет опубликованной версии, — предупреждение, а
  * не отказ.
  *
@@ -119,7 +150,8 @@ export interface StartRecognitionResult {
    * Возвращается, потому что ручной путь обязан сказать, чем кончится: у
    * гранулярного маршрута гейта на dry-run нет намеренно, и без этого признака
    * «распознавание запущено» означало бы разное в двух режимах, не отличаясь ни
-   * одним словом. У ветки RD WEB развилки публикации нет — всегда `false`.
+   * одним словом. Признак общий для обеих веток: с переходом на контракт
+   * document-sync shadow-режим появился и у маршрута RD WEB.
    */
   readonly dryRun: boolean;
   /**
@@ -179,8 +211,8 @@ export async function startRecognition(
    */
   const recognition = await readRecognitionSettings(db);
   let settingsSnapshot: Record<string, unknown>;
-  let firstJobType: 'layout.reconcile' | 'vlm.start_recognition';
-  let dryRun = false;
+  let firstJobType: 'rd.sync_prepare' | 'vlm.start_recognition';
+  let dryRun: boolean;
 
   if (recognition.provider === 'openrouter_vlm') {
     assertVlmStageReady(env, recognition);
@@ -197,28 +229,49 @@ export async function startRecognition(
     };
     firstJobType = 'vlm.start_recognition';
   } else {
-    const selections = recognitionSelections(env);
+    assertExecStageReady(env);
+
+    /*
+     * Снимок v3: контракт document-sync.
+     *
+     * `model: null` — не упущение. Модель выбирает RD WEB (§1: выбор выреза,
+     * модели и промта принадлежит им целиком), и в ручке результатов её не
+     * называет. Записать сюда что-нибудь значило бы соврать о том, чем
+     * распознано, — а снимок существует ровно затем, чтобы прогон это доказывал.
+     *
+     * `dryRun` у этой ветки появляется впервые. Прежний маршрут развилки
+     * публикации не имел, и это обесценивало сам режим: `ai.dry_run_only`
+     * заводился ради СРАВНЕНИЯ провайдеров, а сравнивать было не с чем, пока
+     * одна из двух веток его игнорировала. Денег он здесь не экономит — модель
+     * отработает и будет оплачена, — но смысл сохраняет полностью: canonical
+     * пишется, публикация пропускается, downstream прогона не видит.
+     */
+    dryRun = await readAiDryRunOnly(db);
     settingsSnapshot = {
-      version: 1,
-      documentMode: false,
-      blockTypes: selections.map((selection) => selection.blockType),
-      provider: selections[0]?.providerType ?? null,
-      model: selections[0]?.modelId ?? null,
-      promptProfiles: Object.fromEntries(
-        selections
-          .filter((selection) => selection.promptProfileId !== undefined)
-          .map((selection) => [selection.blockType, selection.promptProfileId]),
-      ),
+      version: 3,
+      provider: 'rdweb',
+      contract: EXEC_SYNC_SCHEMA_VERSION,
+      externalProjectId: env.RDWEB_EXEC_PROJECT_ID ?? null,
+      model: null,
+      dryRun,
+      ...(input.retryPages === undefined ? {} : { recheck: { pages: [...input.retryPages] } }),
     };
-    firstJobType = 'layout.reconcile';
+    firstJobType = 'rd.sync_prepare';
   }
 
   const { run, created } = await startRecognitionRun(db, scope, {
     layoutRevisionId: input.layoutId,
     settingsSnapshot,
-    // Ветке RD WEB без RD-документа OCR запускать негде; у VLM-прогона его нет
-    // по построению (ADR-0007).
-    requireRdDocument: recognition.provider !== 'openrouter_vlm',
+    /*
+     * RD-документа не требует НИ ОДНА ветка.
+     *
+     * У прежнего маршрута RD WEB он был условием запуска OCR, и именно поэтому
+     * комбинация «детекция local + распознавание rdweb» была тупиком: локальная
+     * разметка RD-документа не создаёт, и прогон отвечал 409. У контракта
+     * document-sync документ заводится самой отправкой, а блоки в снимке наши —
+     * то есть эта комбинация стала единственным и штатным маршрутом.
+     */
+    requireRdDocument: false,
     // Восстановление возможно только у ветки VLM: перенос результатов
     // выполняет `vlm.start_recognition`, у ветки RD WEB такого шага нет.
     repairOfRunId: recognition.provider === 'openrouter_vlm' ? (input.repairOfRunId ?? null) : null,

@@ -29,6 +29,7 @@
     "@id/db": "workspace:*",
     "@id/detection": "workspace:*",
     "@id/doc-types": "workspace:*",
+    "@id/execsync": "workspace:*",
     "@id/recognition": "workspace:*",
     "@id/rules": "workspace:*",
     "drizzle-orm": "0.45.2",

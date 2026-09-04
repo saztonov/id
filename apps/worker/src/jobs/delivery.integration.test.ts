@@ -324,7 +324,6 @@ beforeAll(async () => {
       toolkit,
       limits: { maxBytes: env.MAX_UPLOAD_BYTES, maxPages: env.MAX_PAGES_PER_FILE },
       workDirBase: STORAGE_DIR,
-      rdweb: null,
       llm: null,
     }),
     logger: createLogger({ service: 'worker', level: 'silent', env: 'test' }),

@@ -42,11 +42,13 @@ const packageRoots: Readonly<Record<string, string>> = {
   '@id/db': 'packages/db',
   '@id/detection': 'packages/detection',
   '@id/doc-types': 'packages/doc-types',
+  '@id/execsync': 'packages/execsync',
   '@id/recognition': 'packages/recognition',
   '@id/rules': 'packages/rules',
   '@id/check-harness': 'tools/check-harness',
   '@id/db-harness': 'tools/db-harness',
   '@id/fake-rdweb': 'tools/fake-rdweb',
+  '@id/fake-rdweb-exec': 'tools/fake-rdweb-exec',
   '@id/fixtures': 'tools/fixtures',
   '@id/migrator': 'tools/migrator',
 };

@@ -184,6 +184,11 @@ test('переключение провайдера распознавания �
     isDefault: true,
   });
 
+  // Стенд поднят без RDWEB_EXEC_* — а провайдер по умолчанию именно RD WEB:
+  // администратор обязан видеть, чего окружению не хватает, ДО того как нажмёт
+  // «Распознать» и получит 409.
+  await expect(page.getByTestId('rdweb-exec-warning')).toBeVisible();
+
   await page.getByTestId('recognition-provider-select').click();
   await page.locator('.ant-select-dropdown:visible').getByTitle('VLM через OpenRouter').click();
 

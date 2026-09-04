@@ -1608,7 +1608,7 @@ export const processingFeedback = pgTable("processing_feedback", {
 	check("processing_feedback_score_chk", sql`(score IS NULL) OR ((score >= (0)::double precision) AND (score <= (1)::double precision))`),
 	check("processing_feedback_page_chk", sql`(working_page_index IS NULL) OR (working_page_index >= 0)`),
 	check("processing_feedback_prompt_version_chk", sql`(prompt_version IS NULL) OR (prompt_version > 0)`),
-	check("processing_feedback_reason_chk", sql`reason_code = ANY (ARRAY['vlm.invalid_json'::text, 'vlm.schema_mismatch'::text, 'vlm.refusal'::text, 'vlm.empty_result'::text, 'extract.field_missing'::text, 'extract.value_mismatch'::text, 'classify.low_confidence'::text, 'detect.no_blocks'::text, 'detect.low_score'::text, 'detect.no_stamp'::text, 'match.ambiguous'::text, 'doc_split.unassigned_pages'::text, 'manual.field_corrected'::text, 'manual.block_redrawn'::text, 'manual.type_changed'::text, 'orientation.probe_failed'::text, 'orientation.low_confidence'::text])`),
+	check("processing_feedback_reason_chk", sql`reason_code = ANY (ARRAY['vlm.invalid_json'::text, 'vlm.schema_mismatch'::text, 'vlm.refusal'::text, 'vlm.empty_result'::text, 'extract.field_missing'::text, 'extract.value_mismatch'::text, 'classify.low_confidence'::text, 'detect.no_blocks'::text, 'detect.low_score'::text, 'detect.no_stamp'::text, 'match.ambiguous'::text, 'doc_split.unassigned_pages'::text, 'manual.field_corrected'::text, 'manual.block_redrawn'::text, 'manual.type_changed'::text, 'orientation.probe_failed'::text, 'orientation.low_confidence'::text, 'rdweb.suspicious'::text, 'rdweb.block_error'::text, 'rdweb.block_non_retriable'::text, 'rdweb.block_unmappable'::text])`),
 ]);
 
 export const counterpartyKinds = pgTable("counterparty_kinds", {
@@ -1761,6 +1761,86 @@ export const complects = pgTable("complects", {
 	unique("complects_scope_uq").on(table.contractorId, table.id, table.objectId),
 	unique("complects_folder_uq").on(table.folderId, table.id),
 	check("complects_ordinal_chk", sql`ordinal > 0`),
+]);
+
+export const rdExecDocuments = pgTable("rd_exec_documents", {
+	folderId: uuid("folder_id").primaryKey().notNull(),
+	objectId: uuid("object_id").notNull(),
+	externalProjectId: text("external_project_id").notNull(),
+	externalDocumentId: text("external_document_id").notNull(),
+	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
+	syncGeneration: bigint("sync_generation", { mode: "number" }).default(0).notNull(),
+	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
+	baseGeneration: bigint("base_generation", { mode: "number" }).default(0).notNull(),
+	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
+	nextBlockSeq: bigint("next_block_seq", { mode: "number" }).default(1).notNull(),
+	pdfRevisionNo: integer("pdf_revision_no").default(0).notNull(),
+	lastPdfSha256: text("last_pdf_sha256"),
+	resyncRequired: boolean("resync_required").default(false).notNull(),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	updatedAt: timestamp("updated_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+}, (table) => [
+	index("ix_rd_exec_documents_object").using("btree", table.objectId.asc().nullsLast().op("uuid_ops")),
+	foreignKey({
+			columns: [table.folderId, table.objectId],
+			foreignColumns: [folders.id, folders.objectId],
+			name: "rd_exec_documents_scope_fk"
+		}),
+	unique("rd_exec_documents_external_uq").on(table.externalDocumentId),
+	check("rd_exec_documents_project_chk", sql`(length(external_project_id) >= 1) AND (length(external_project_id) <= 128)`),
+	check("rd_exec_documents_document_chk", sql`(length(external_document_id) >= 1) AND (length(external_document_id) <= 128)`),
+	check("rd_exec_documents_generation_chk", sql`(sync_generation >= base_generation) AND (base_generation >= 0)`),
+	check("rd_exec_documents_seq_chk", sql`next_block_seq > 0`),
+	check("rd_exec_documents_pdf_sha_chk", sql`(last_pdf_sha256 IS NULL) OR (last_pdf_sha256 ~ '^[0-9a-f]{64}$'::text)`),
+	check("rd_exec_documents_pdf_rev_chk", sql`(pdf_revision_no = 0) = (last_pdf_sha256 IS NULL)`),
+]);
+
+export const rdExecSyncs = pgTable("rd_exec_syncs", {
+	id: uuid().defaultRandom().primaryKey().notNull(),
+	folderId: uuid("folder_id").notNull(),
+	recognitionRunId: uuid("recognition_run_id"),
+	externalSyncId: text("external_sync_id").notNull(),
+	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
+	syncGeneration: bigint("sync_generation", { mode: "number" }).notNull(),
+	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
+	baseGeneration: bigint("base_generation", { mode: "number" }).notNull(),
+	manifestSha256: text("manifest_sha256").notNull(),
+	documentSha256: text("document_sha256").notNull(),
+	documentRevision: text("document_revision").notNull(),
+	blocksCount: integer("blocks_count").notNull(),
+	remoteSyncId: text("remote_sync_id"),
+	duplicate: boolean(),
+	uploadRequired: boolean("upload_required"),
+	uploadAttempts: integer("upload_attempts").default(0).notNull(),
+	state: text().default('preparing').notNull(),
+	remoteState: text("remote_state"),
+	allTerminal: boolean("all_terminal"),
+	allSuccessful: boolean("all_successful"),
+	counters: jsonb().default({}).notNull(),
+	errorCode: text("error_code"),
+	errorMessage: text("error_message"),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	updatedAt: timestamp("updated_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+}, (table) => [
+	index("ix_rd_exec_syncs_run").using("btree", table.recognitionRunId.asc().nullsLast().op("uuid_ops")).where(sql`(recognition_run_id IS NOT NULL)`),
+	foreignKey({
+			columns: [table.folderId],
+			foreignColumns: [rdExecDocuments.folderId],
+			name: "rd_exec_syncs_folder_id_fkey"
+		}).onDelete("cascade"),
+	foreignKey({
+			columns: [table.folderId, table.recognitionRunId],
+			foreignColumns: [recognitionRuns.folderId, recognitionRuns.id],
+			name: "rd_exec_syncs_run_fk"
+		}),
+	unique("rd_exec_syncs_external_uq").on(table.externalSyncId, table.folderId),
+	unique("rd_exec_syncs_generation_uq").on(table.folderId, table.syncGeneration),
+	check("rd_exec_syncs_counts_chk", sql`(blocks_count >= 0) AND (upload_attempts >= 0)`),
+	check("rd_exec_syncs_state_chk", sql`state = ANY (ARRAY['preparing'::text, 'initialized'::text, 'uploaded'::text, 'completed'::text, 'terminal'::text, 'conflict'::text])`),
+	check("rd_exec_syncs_manifest_chk", sql`manifest_sha256 ~ '^[0-9a-f]{64}$'::text`),
+	check("rd_exec_syncs_document_chk", sql`document_sha256 ~ '^[0-9a-f]{64}$'::text`),
+	check("rd_exec_syncs_generation_chk", sql`(sync_generation > 0) AND (base_generation >= 0) AND (sync_generation > base_generation)`),
+	check("rd_exec_syncs_terminal_chk", sql`(state <> 'terminal'::text) OR (remote_state IS NOT NULL)`),
 ]);
 
 export const userObjectScopes = pgTable("user_object_scopes", {
@@ -2146,6 +2226,45 @@ export const pageOrientations = pgTable("page_orientations", {
 	check("page_orientations_source_chk", sql`source = ANY (ARRAY['probe'::text, 'user'::text])`),
 	check("page_orientations_confidence_chk", sql`(probe_confidence IS NULL) OR ((probe_confidence >= (0)::double precision) AND (probe_confidence <= (1)::double precision))`),
 	check("page_orientations_probe_evidence_chk", sql`(source <> 'probe'::text) OR (probe_rotation IS NOT NULL) OR (probe_error IS NOT NULL)`),
+]);
+
+export const rdExecBlocks = pgTable("rd_exec_blocks", {
+	folderId: uuid("folder_id").notNull(),
+	externalBlockId: text("external_block_id").notNull(),
+	geometryKey: text("geometry_key").notNull(),
+	declaredSha256: text("declared_sha256").notNull(),
+	revision: integer().default(1).notNull(),
+	layoutBlockId: uuid("layout_block_id"),
+	workingPageIndex: integer("working_page_index").notNull(),
+	blockType: text("block_type").notNull(),
+	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
+	firstAnnouncedGeneration: bigint("first_announced_generation", { mode: "number" }).notNull(),
+	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
+	lastAnnouncedGeneration: bigint("last_announced_generation", { mode: "number" }).notNull(),
+	deletedAt: timestamp("deleted_at", { withTimezone: true, mode: 'string' }),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	updatedAt: timestamp("updated_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+}, (table) => [
+	index("ix_rd_exec_blocks_geometry").using("btree", table.folderId.asc().nullsLast().op("uuid_ops"), table.geometryKey.asc().nullsLast().op("uuid_ops")).where(sql`(deleted_at IS NULL)`),
+	uniqueIndex("ux_rd_exec_blocks_layout").using("btree", table.folderId.asc().nullsLast().op("uuid_ops"), table.layoutBlockId.asc().nullsLast().op("uuid_ops")).where(sql`(layout_block_id IS NOT NULL)`),
+	foreignKey({
+			columns: [table.folderId],
+			foreignColumns: [rdExecDocuments.folderId],
+			name: "rd_exec_blocks_folder_id_fkey"
+		}).onDelete("cascade"),
+	foreignKey({
+			columns: [table.folderId, table.layoutBlockId],
+			foreignColumns: [layoutBlocks.folderId, layoutBlocks.id],
+			name: "rd_exec_blocks_layout_fk"
+		}).onDelete("set null"),
+	primaryKey({ columns: [table.externalBlockId, table.folderId], name: "rd_exec_blocks_pkey"}),
+	check("rd_exec_blocks_revision_chk", sql`revision > 0`),
+	check("rd_exec_blocks_page_chk", sql`working_page_index >= 0`),
+	check("rd_exec_blocks_type_chk", sql`block_type = ANY (ARRAY['text'::text, 'image'::text, 'stamp'::text])`),
+	check("rd_exec_blocks_geometry_chk", sql`geometry_key ~ '^[0-9a-f]{64}$'::text`),
+	check("rd_exec_blocks_declared_chk", sql`declared_sha256 ~ '^[0-9a-f]{64}$'::text`),
+	check("rd_exec_blocks_id_len_chk", sql`(length(external_block_id) >= 1) AND (length(external_block_id) <= 128)`),
+	check("rd_exec_blocks_generation_chk", sql`(last_announced_generation >= first_announced_generation) AND (first_announced_generation > 0)`),
 ]);
 
 export const pageClassifications = pgTable("page_classifications", {

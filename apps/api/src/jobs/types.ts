@@ -131,21 +131,6 @@ const analysisPayload = folderPayload.extend({ autoContinue });
 const filePayload = folderPayload.extend({ sourceFileId: uuid });
 
 /**
- * Задачи разметки 4–6 и 9: рабочий документ И ревизия разметки.
- *
- * `layoutRevisionId` обязателен, хотя «текущий черновик этого bundle» найти
- * можно и без него. Нельзя: черновик у поставки один, но за время жизни
- * поставки их сменяется несколько (вытеснение №1 → создание №2), и задача,
- * поставленная для первой ревизии, отработала бы по второй, выдав диагностику,
- * противоположную факту. Цель обязана адресоваться явно — так же, как её уже
- * адресуют задачи 7 и 8.
- */
-const markupPayload = folderPayload.extend({
-  bundleId: uuid,
-  layoutRevisionId: uuid,
-});
-
-/**
  * Вход зонда ориентации: ОДНА страница.
  *
  * `layoutRevisionId` нужен, чтобы по завершении поставить детекцию именно этой
@@ -264,30 +249,6 @@ export const JOB_DEFINITIONS = {
   },
 
   // 4–9. Разметка (§6.1).
-  'rd.create_run_document': {
-    queue: 'io',
-    payload: markupPayload,
-    stage: 'layout',
-    maxAttempts: DEFAULT_MAX_ATTEMPTS,
-    leaseMs: EXTERNAL_LEASE_MS,
-    priority: DEFAULT_PRIORITY,
-  },
-  'rd.upload_working_pdf': {
-    queue: 'io',
-    payload: markupPayload,
-    stage: 'layout',
-    maxAttempts: DEFAULT_MAX_ATTEMPTS,
-    leaseMs: 900_000,
-    priority: DEFAULT_PRIORITY,
-  },
-  'rd.wait_pages': {
-    queue: 'io',
-    payload: markupPayload,
-    stage: 'layout',
-    maxAttempts: 30,
-    leaseMs: EXTERNAL_LEASE_MS,
-    priority: DEFAULT_PRIORITY,
-  },
   /**
    * Звено «сборка → разметка» кнопки S21 «Разметить».
    *
@@ -308,14 +269,6 @@ export const JOB_DEFINITIONS = {
     stage: 'layout',
     maxAttempts: 3,
     leaseMs: DEFAULT_LEASE_MS,
-    priority: DEFAULT_PRIORITY,
-  },
-  'layout.detect_pages': {
-    queue: 'io',
-    payload: layoutPayload,
-    stage: 'layout',
-    maxAttempts: DEFAULT_MAX_ATTEMPTS,
-    leaseMs: EXTERNAL_LEASE_MS,
     priority: DEFAULT_PRIORITY,
   },
   /**
@@ -379,15 +332,6 @@ export const JOB_DEFINITIONS = {
     leaseMs: DEFAULT_LEASE_MS,
     priority: DEFAULT_PRIORITY,
   },
-  'preview.cache_pages': {
-    queue: 'cpu',
-    payload: markupPayload,
-    stage: 'layout',
-    maxAttempts: 3,
-    leaseMs: 600_000,
-    // Ниже остальных: превью — ускорение экрана, а не условие продолжения.
-    priority: 50,
-  },
 
   // 10–13. Распознавание (§5.2, §6.2).
   //
@@ -396,40 +340,6 @@ export const JOB_DEFINITIONS = {
   // всё, что задача обязана считать заказанным. Payload, называющий только
   // разметку, позволил бы задаче цикла сверки отработать по одному прогону, а
   // старту OCR — по другому, и хэши сравнивались бы не с тем, что заказано.
-  'layout.reconcile': {
-    queue: 'io',
-    payload: recognitionPayload,
-    stage: 'recognition',
-    maxAttempts: DEFAULT_MAX_ATTEMPTS,
-    leaseMs: 600_000,
-    priority: DEFAULT_PRIORITY,
-  },
-  'rd.start_recognition': {
-    queue: 'io',
-    payload: recognitionPayload,
-    stage: 'recognition',
-    // Повтор старта OCR — это второй прогон на GPU. Единственная попытка:
-    // неуспех обязан разбираться человеком, а не переигрываться автоматом.
-    maxAttempts: 1,
-    leaseMs: EXTERNAL_LEASE_MS,
-    priority: DEFAULT_PRIORITY,
-  },
-  'rd.poll_recognition': {
-    queue: 'io',
-    payload: recognitionPayload,
-    stage: 'recognition',
-    maxAttempts: 60,
-    leaseMs: EXTERNAL_LEASE_MS,
-    priority: DEFAULT_PRIORITY,
-  },
-  'rd.fetch_export_once': {
-    queue: 'io',
-    payload: recognitionPayload,
-    stage: 'recognition',
-    maxAttempts: 3,
-    leaseMs: 900_000,
-    priority: DEFAULT_PRIORITY,
-  },
 
   // Распознавание через OpenRouter VLM (ADR-0007). Ставится вместо цепочки
   // rd.start/poll/fetch при settings_snapshot.provider='openrouter_vlm'.
@@ -469,7 +379,7 @@ export const JOB_DEFINITIONS = {
   },
   /**
    * Идемпотентный сборщик: ждёт терминальности всех строк
-   * recognition_run_pages (паттерн poll, как rd.poll_recognition), затем
+   * recognition_run_pages (паттерн poll, как rd.sync_poll), затем
    * собирает RecognitionResult, валидирует и публикует одной транзакцией.
    *
    * `maxAttempts` — 240, и это не «на всякий случай». Ожидание страниц теперь
@@ -486,6 +396,109 @@ export const JOB_DEFINITIONS = {
     stage: 'recognition',
     maxAttempts: 240,
     leaseMs: EXTERNAL_LEASE_MS,
+    priority: DEFAULT_PRIORITY,
+  },
+
+  /*
+   * Снимок исполнительной документации в RD WEB (контракт document-sync v1).
+   *
+   * Ставится вместо цепочки `vlm.*` при `recognition.provider='rdweb'`. Все
+   * восемь задач в очереди `io` и адресуют ПРОГОН, а не разметку, — по тому же
+   * доводу, что и задачи 10–13: прогон уже пиннит и ревизию разметки, и её
+   * `blocks_hash`, и рабочий PDF, то есть всё, что задача обязана считать
+   * заказанным.
+   *
+   * Восемь, а не пять, потому что шагов у контракта пять, и к ним добавляются
+   * три собственных: подготовка снимка (реестр идентичности и генерация),
+   * финализация (общая с VLM публикация) и разбор конфликтов. Слепив их с
+   * сетевыми шагами, мы получили бы задачу, у которой сеть и транзакция БД
+   * повторяются вместе, — а повторять их надо по-разному.
+   */
+  'rd.sync_prepare': {
+    queue: 'io',
+    payload: recognitionPayload,
+    stage: 'recognition',
+    maxAttempts: 3,
+    leaseMs: DEFAULT_LEASE_MS,
+    priority: DEFAULT_PRIORITY,
+  },
+  'rd.sync_init': {
+    queue: 'io',
+    payload: recognitionPayload,
+    stage: 'recognition',
+    maxAttempts: DEFAULT_MAX_ATTEMPTS,
+    leaseMs: EXTERNAL_LEASE_MS,
+    priority: DEFAULT_PRIORITY,
+  },
+  /** Загрузка рабочего PDF потоком: 86 МБ по сети — это минуты, не секунды. */
+  'rd.sync_upload': {
+    queue: 'io',
+    payload: recognitionPayload,
+    stage: 'recognition',
+    maxAttempts: DEFAULT_MAX_ATTEMPTS,
+    leaseMs: 900_000,
+    priority: DEFAULT_PRIORITY,
+  },
+  'rd.sync_complete': {
+    queue: 'io',
+    payload: recognitionPayload,
+    stage: 'recognition',
+    maxAttempts: DEFAULT_MAX_ATTEMPTS,
+    leaseMs: EXTERNAL_LEASE_MS,
+    priority: DEFAULT_PRIORITY,
+  },
+  /**
+   * Опрос до терминального состояния (§15: вебхуков в v1 нет).
+   *
+   * 240 попыток по тем же основаниям, что у `vlm.finalize_run`: ожидание
+   * записывается исходом `deferred`, а не отказом, и при потолке
+   * `DEFERRAL_BACKOFF` в минуту это около четырёх часов терпения. Распознавание
+   * комплекта на их стороне столько и идёт.
+   */
+  'rd.sync_poll': {
+    queue: 'io',
+    payload: recognitionPayload,
+    stage: 'recognition',
+    maxAttempts: 240,
+    leaseMs: EXTERNAL_LEASE_MS,
+    priority: DEFAULT_PRIORITY,
+  },
+  /**
+   * Забор результатов. Отдельно от финализации намеренно: сеть со своими
+   * повторами отделена от барьера публикации, а чекпоинт лежит в
+   * `block_results` (ON CONFLICT DO NOTHING), поэтому повтор не платит дважды.
+   * То же разделение, что у `vlm.recognize_page` и `vlm.finalize_run`.
+   */
+  'rd.sync_fetch': {
+    queue: 'io',
+    payload: recognitionPayload,
+    stage: 'recognition',
+    maxAttempts: 3,
+    leaseMs: 900_000,
+    priority: DEFAULT_PRIORITY,
+  },
+  'rd.sync_finalize': {
+    queue: 'io',
+    payload: recognitionPayload,
+    stage: 'recognition',
+    maxAttempts: 60,
+    leaseMs: EXTERNAL_LEASE_MS,
+    priority: DEFAULT_PRIORITY,
+  },
+  /**
+   * Разбор конфликта §9: поднять счётчики и пересобрать снимок.
+   *
+   * Две попытки — это потолок кругов, а не запас на сбои. Ручки, отдающей
+   * действующую серверную генерацию документа, в контракте нет (открытый вопрос
+   * к команде RD WEB), поэтому лечение — шаг вперёд вслепую; без потолка портал
+   * крутил бы 409 бесконечно, и выглядело бы это как работающий конвейер.
+   */
+  'rd.sync_resync': {
+    queue: 'io',
+    payload: recognitionPayload,
+    stage: 'recognition',
+    maxAttempts: 2,
+    leaseMs: DEFAULT_LEASE_MS,
     priority: DEFAULT_PRIORITY,
   },
 

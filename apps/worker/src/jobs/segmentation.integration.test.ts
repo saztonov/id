@@ -46,7 +46,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { createPgliteDatabase, createTestPool, type TestDatabase } from '@id/db-harness';
 import { loadMigrations } from '@id/migrator';
-import { startFakeRdWeb, type FakeRdWeb } from '@id/fake-rdweb';
+import { startFakeExecSync, type FakeExecSync } from '@id/fake-rdweb-exec';
 import {
   createDatabase,
   createLogger,
@@ -59,7 +59,7 @@ import {
   ensureDraftLayout,
   findSectionMarkers,
   JobRunner,
-  LegacyRdWebAdapter,
+  createExecSync,
   listFieldValues,
   listLogicalDocuments,
   listPageAssignments,
@@ -84,8 +84,8 @@ import { createWorkerRegistry } from './pipeline.js';
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
 const MIGRATIONS_DIR = join(ROOT, 'migrations');
 
-const RD_PASSWORD = 'portal-secret-never-in-logs';
-const OCR_MODEL = 'qwen2.5-vl-7b-instruct';
+const RD_TOKEN = 'rdext_segmentation_secret';
+const EXEC_PROJECT = 'idp-object-1';
 const LLM_MODEL = 'recorded-classifier';
 
 function id(n: number): string {
@@ -279,7 +279,7 @@ let db: Database;
 let storage: StorageProvider;
 let toolkit: PdfToolkit;
 let runner: JobRunner;
-let fake: FakeRdWeb;
+let fake: FakeExecSync;
 let bundleId = '';
 const logSink: string[] = [];
 
@@ -346,15 +346,21 @@ function fixtureStatements(
 }
 
 beforeAll(async () => {
-  fake = await startFakeRdWeb({
-    users: [{ email: 'portal@example.test', password: RD_PASSWORD }],
-    renderDelayPolls: 1,
-    maxPagesPerDetectCall: 12,
-    // Один полностраничный TEXT-блок на страницу: текст страницы обязан
-    // совпасть с заданным дословно, иначе заголовок документа перестал бы быть
-    // первой строкой, а `char_span` реквизитов измерялся бы в склейке секций.
-    fullPageBlocks: true,
-    pageTexts: PAGE_TEXTS,
+  /*
+   * Один полностраничный TEXT-блок на страницу, и его текст — заданный дословно.
+   *
+   * Иначе заголовок документа перестал бы быть первой строкой страницы, а
+   * `char_span` реквизитов измерялся бы в склейке секций. Блоки заводятся ниже
+   * вручную: детекции у контракта document-sync нет вовсе — блоки в снимке наши.
+   */
+  fake = await startFakeExecSync({
+    token: RD_TOKEN,
+    projects: [EXEC_PROJECT],
+    pollsBeforeTerminal: 1,
+    resultFactory: (block) => ({
+      ocrMarkdown: PAGE_TEXTS[block.page_index] ?? '',
+      ocrJson: null,
+    }),
   });
 
   const TEST_ENV = loadEnv({
@@ -366,11 +372,9 @@ beforeAll(async () => {
     STORAGE_DRIVER: 'local',
     LOCAL_STORAGE_DIR: STORAGE_DIR,
     AUDIT_HMAC_KEY: 'audit-hmac-key-of-segmentation-e2e',
-    RDWEB_BASE_URL: fake.url,
-    RDWEB_USER: 'portal@example.test',
-    RDWEB_PASSWORD: RD_PASSWORD,
-    RDWEB_PROJECT_ALLOWLIST: 'prj-portal',
-    RDWEB_OCR_MODEL: OCR_MODEL,
+    RDWEB_EXEC_BASE_URL: fake.url,
+    RDWEB_EXEC_TOKEN: RD_TOKEN,
+    RDWEB_EXEC_PROJECT_ID: EXEC_PROJECT,
   });
 
   testDb = await createPgliteDatabase();
@@ -415,15 +419,7 @@ beforeAll(async () => {
 
   toolkit = createPdfLibToolkit(await loadPdfLibModule((specifier) => import(specifier)));
 
-  const rdweb = new LegacyRdWebAdapter({
-    baseUrl: fake.url,
-    user: 'portal@example.test',
-    password: RD_PASSWORD,
-    projectId: 'prj-portal',
-    metrics,
-    logger,
-    slowExternalMs: TEST_ENV.SLOW_EXTERNAL_MS,
-  });
+  const execSync = createExecSync(TEST_ENV, { metrics, logger });
 
   const llm = new RecordedLlmProvider({
     responses: recordedByHash,
@@ -452,16 +448,9 @@ beforeAll(async () => {
       toolkit,
       limits: { maxBytes: TEST_ENV.MAX_UPLOAD_BYTES, maxPages: TEST_ENV.MAX_PAGES_PER_FILE },
       workDirBase: STORAGE_DIR,
-      rdweb,
-      rdProjectId: 'prj-portal',
-      previewCached: false,
-      waitPages: { pollsPerAttempt: 6, pollIntervalMs: 10 },
-      pollRecognition: { pollsPerAttempt: 6, pollIntervalMs: 10 },
-      recognitionSelections: [
-        { blockType: 'text', providerType: 'lmstudio', modelId: OCR_MODEL },
-        { blockType: 'image', providerType: 'lmstudio', modelId: OCR_MODEL },
-        { blockType: 'stamp', providerType: 'lmstudio', modelId: OCR_MODEL },
-      ],
+      execSync,
+      execProjectId: EXEC_PROJECT,
+      pollExecSync: { pollsPerAttempt: 6, pollIntervalMs: 10 },
       llm,
     }),
     logger,
@@ -493,24 +482,43 @@ beforeAll(async () => {
   bundleId = bundles[0]?.id ?? '';
   expect(bundleId).not.toBe('');
 
-  // Стадии 4–13: разметка и распознавание — полностью, как в бою.
+  // Разметка и распознавание — полностью, как в бою.
   const { layout } = await ensureDraftLayout(db, SCOPE, { folderId: FOLDER, bundleId });
-  await enqueueSystemJob(db, {
-    type: 'rd.create_run_document',
-    payload: { folderId: FOLDER, bundleId, layoutRevisionId: layout.id },
-    dedupeKey: dedupeKeyFor('rd.create_run_document', layout.id),
-  });
-  await drainQueue();
+
+  // Полностраничный текстовый блок на каждый лист: разметка НАША, и на маршруте
+  // document-sync её никто, кроме портала, не строит.
+  const mapped = await testDb.query<{ working_page_index: number; source_page_id: string }>(
+    `SELECT working_page_index, source_page_id FROM processing_bundle_pages
+       WHERE bundle_id = '${bundleId}' ORDER BY working_page_index`,
+  );
+  for (const page of mapped) {
+    await testDb.query(
+      `INSERT INTO layout_blocks
+         (layout_revision_id, folder_id, bundle_id, source_page_id, working_page_index,
+          object_id, block_type, shape_type, x0, y0, x1, y1, sort_order, source,
+          detector_provenance)
+       VALUES ('${layout.id}', '${FOLDER}', '${bundleId}', '${page.source_page_id}',
+               ${page.working_page_index}, '${OBJECT}', 'text', 'rectangle',
+               0, 0, 1, 1, 0, 'auto', 'full_page')`,
+    );
+  }
 
   const { run } = await startRecognitionRun(db, SCOPE, {
     layoutRevisionId: layout.id,
-    requireRdDocument: true,
-    settingsSnapshot: { version: 1, provider: 'lmstudio', model: OCR_MODEL, documentMode: false },
+    requireRdDocument: false,
+    settingsSnapshot: {
+      version: 3,
+      provider: 'rdweb',
+      contract: 'rdweb.executive_document_snapshot.v1',
+      externalProjectId: EXEC_PROJECT,
+      model: null,
+      dryRun: false,
+    },
   });
   await enqueueSystemJob(db, {
-    type: 'layout.reconcile',
+    type: 'rd.sync_prepare',
     payload: { folderId: FOLDER, recognitionRunId: run.id },
-    dedupeKey: dedupeKeyFor('layout.reconcile', run.id),
+    dedupeKey: dedupeKeyFor('rd.sync_prepare', run.id),
   });
   await drainQueue();
 
@@ -963,7 +971,7 @@ describe('провайдер модели', () => {
   it('в журнале уровня trace нет ни одного секрета', () => {
     const log = logSink.join('\n');
     expect(log.length).toBeGreaterThan(0);
-    expect(log).not.toContain(RD_PASSWORD);
+    expect(log).not.toContain(RD_TOKEN);
   });
 });
 

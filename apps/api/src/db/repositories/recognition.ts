@@ -1275,7 +1275,7 @@ export async function listRunBlockEnvelopes(
     .orderBy(asc(blockResults.layoutBlockId));
 }
 
-export interface PublishVlmResultsInput {
+export interface PublishRunResultsInput {
   readonly recognitionRunId: string;
   readonly artifactVersionId: string;
   readonly pages: readonly {
@@ -1295,10 +1295,10 @@ export interface PublishVlmResultsInput {
  * отсекаются по уже записанному множеству, указатели переводятся upsert'ом —
  * второй раз в то же самое место.
  */
-export async function publishVlmRunResults(
+export async function publishRunResults(
   db: Database,
   scope: AuthScope,
-  input: PublishVlmResultsInput,
+  input: PublishRunResultsInput,
 ): Promise<{
   readonly pagesWritten: number;
   readonly pagesAlreadyPresent: number;

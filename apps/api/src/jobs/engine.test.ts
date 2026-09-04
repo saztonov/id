@@ -484,9 +484,10 @@ describe('очередь задач', () => {
     expect(priorityOf(0)).toBe(priorityOf(9));
     expect(priorityOf(10)).toBe(priorityOf(0) - 1);
 
-    // Ниже фоновых задач (кэш превью — 50, уборка — 10) хвост не падает: это
-    // по-прежнему работа, которую ждёт человек.
-    expect(priorityOf(100_000)).toBeGreaterThan(jobDefinition('preview.cache_pages').priority);
+    // Ниже фоновых задач хвост не падает: это по-прежнему работа, которую ждёт
+    // человек. Эталоном служит уборка хранилища (10) — самая низкоприоритетная
+    // задача каталога после снятия кэша превью.
+    expect(priorityOf(100_000)).toBeGreaterThan(jobDefinition('storage.gc').priority);
   });
 
   it('глубина очереди считается по типам и статусам', async () => {

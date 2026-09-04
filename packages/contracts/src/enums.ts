@@ -203,7 +203,7 @@ export const recognitionProviderSettingSchema = z.enum(['rdweb', 'openrouter_vlm
 export type RecognitionProviderSetting = z.infer<typeof recognitionProviderSettingSchema>;
 
 /** Провайдер ДЕТЕКЦИИ блоков (`detection.provider`): RD WEB или локальный RF-DETR. */
-export const detectionProviderSettingSchema = z.enum(['rdweb', 'local']);
+export const detectionProviderSettingSchema = z.enum(['local']);
 export type DetectionProviderSetting = z.infer<typeof detectionProviderSettingSchema>;
 
 /**
@@ -370,8 +370,8 @@ export type AutonomyLevel = z.infer<typeof autonomyLevelSchema>;
  * `deferred` и `failed` — РАЗНЫЕ факты, и различие не косметическое.
  * `failed` означает «работа не получилась»; `deferred` — «работы ещё нет,
  * условие не наступило»: так ждут поллеры (`vlm.finalize_run` — терминальности
- * страниц прогона, `rd.poll_recognition` — окончания OCR, `rd.wait_pages` —
- * рендера). Пока значение было одно, минута нормального ожидания давала
+ * страниц прогона, `rd.sync_poll` — окончания распознавания на стороне RD WEB).
+ * Пока значение было одно, минута нормального ожидания давала
  * двенадцать строк `failed`, текст «Распознавание ещё идёт» в `jobs.last_error`
  * и плашку «Обработка остановилась: отказов 12» на живом конвейере — причём
  * заслоняя собой задачу, которая действительно умерла.
@@ -501,5 +501,27 @@ export const processingFeedbackReasonSchema = z.enum([
   'orientation.probe_failed',
   /** Зонд предложил разворот, но не уверен: мнение записано, лист не повёрнут. */
   'orientation.low_confidence',
+  /**
+   * RD WEB вернул результат блока со статусом `suspicious` (контракт §11).
+   *
+   * «Результат получен, но не подтверждён» — и успехом это по контракту не
+   * считается. Текст портал всё равно публикует: потерять распознанное хуже,
+   * чем показать сомнительное с пометкой. Но след обязан остаться, иначе
+   * «распознано» и «распознано неуверенно» на экране неразличимы, а годового
+   * ряда «как часто их модель не уверена» не построить вовсе.
+   */
+  'rdweb.suspicious',
+  /** Блок отказал у них с возможностью повтора. */
+  'rdweb.block_error',
+  /**
+   * Блок отказал НЕПОВТОРЯЕМО.
+   *
+   * Отдельный код, а не оттенок предыдущего: первый чинится повтором отправки,
+   * второй — только правкой самого блока. Склеив их, портал потерял бы
+   * единственный срез, по которому они различаются.
+   */
+  'rdweb.block_non_retriable',
+  /** Результат пришёл, но не разобрался в канонический блок: `ocr_json` не той формы. */
+  'rdweb.block_unmappable',
 ]);
 export type ProcessingFeedbackReason = z.infer<typeof processingFeedbackReasonSchema>;

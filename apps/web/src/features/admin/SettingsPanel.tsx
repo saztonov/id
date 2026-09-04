@@ -198,11 +198,10 @@ const DETECTION_VERSION_MESSAGE =
 
 /** Подписи провайдеров; значения — из enum'ов `@id/contracts`, не литералами. */
 const RECOGNITION_PROVIDER_OPTION_LABELS: Record<RecognitionProviderSetting, string> = {
-  rdweb: 'RD WEB (legacy)',
+  rdweb: 'RD WEB (снимок исполнительной документации)',
   openrouter_vlm: 'VLM через OpenRouter',
 };
 const DETECTION_PROVIDER_OPTION_LABELS: Record<DetectionProviderSetting, string> = {
-  rdweb: 'RD WEB',
   local: 'Локально (RF-DETR, CPU)',
 };
 
@@ -237,7 +236,7 @@ function RecognitionSettingsCard({ view }: { view: SettingsView }): ReactNode {
   const detection = detectionProviderSettingSchema.safeParse(
     settingString(view, 'detection.provider'),
   );
-  const detectionProvider: DetectionProviderSetting = detection.success ? detection.data : 'rdweb';
+  const detectionProvider: DetectionProviderSetting = detection.success ? detection.data : 'local';
 
   const strategy = detectionSheetStrategySchema.safeParse(
     settingString(view, 'detection.sheet_strategy'),
@@ -291,6 +290,7 @@ function RecognitionSettingsCard({ view }: { view: SettingsView }): ReactNode {
   };
 
   const proxyLlm = view.integrations.find((item) => item.name === 'proxy_llm');
+  const rdwebExec = view.integrations.find((item) => item.name === 'rdweb_exec');
   const savedModel = settingString(view, 'recognition.vlm_model');
   const savedVersion = settingString(view, 'detection.model_version');
 
@@ -388,6 +388,23 @@ function RecognitionSettingsCard({ view }: { view: SettingsView }): ReactNode {
                     : `Распознавание через OpenRouter ходит через шлюз proxy_llm, а окружению не хватает переменных${
                         proxyLlm.missing.length > 0 ? `: ${proxyLlm.missing.join(', ')}` : ''
                       }. Прогоны VLM будут отказывать до настройки окружения.`
+              }
+            />
+          )}
+
+        {recognitionProvider === 'rdweb' &&
+          (rdwebExec === undefined || rdwebExec.status !== 'configured') && (
+            <Alert
+              type="warning"
+              showIcon
+              data-testid="rdweb-exec-warning"
+              message="Контур RD WEB не сконфигурирован"
+              description={
+                rdwebExec === undefined
+                  ? 'Сервер не объявил интеграцию rdweb_exec — распознавать снимком исполнительной документации не через что.'
+                  : `Распознавание снимком ходит в RD WEB, а окружению не хватает переменных${
+                      rdwebExec.missing.length > 0 ? `: ${rdwebExec.missing.join(', ')}` : ''
+                    }. «Распознать» будет отвечать 409 до настройки окружения.`
               }
             />
           )}
@@ -577,7 +594,7 @@ function DetectionTuningCard({ view }: { view: SettingsView }): ReactNode {
   const detection = detectionProviderSettingSchema.safeParse(
     settingString(view, 'detection.provider'),
   );
-  const provider: DetectionProviderSetting = detection.success ? detection.data : 'rdweb';
+  const provider: DetectionProviderSetting = detection.success ? detection.data : 'local';
 
   const mode = detectionInferenceModeSettingSchema.safeParse(
     settingString(view, 'detection.inference_mode'),

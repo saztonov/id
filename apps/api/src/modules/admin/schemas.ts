@@ -81,8 +81,6 @@ export const SECRET_SETTINGS = {
   'database.url': 'DATABASE_URL',
   'storage.s3_access_key': 'S3_ACCESS_KEY',
   'storage.s3_secret_key': 'S3_SECRET_KEY',
-  'rdweb.user': 'RDWEB_USER',
-  'rdweb.password': 'RDWEB_PASSWORD',
   'rdweb.exec_token': 'RDWEB_EXEC_TOKEN',
   'ai.proxy_llm_token': 'PROXY_LLM_TOKEN',
   'observability.sentry_dsn': 'SENTRY_DSN',
@@ -297,11 +295,18 @@ export const SETTINGS_REGISTRY = {
       }),
     defaultValue: '',
   },
-  /** Ветка детекции блоков (ADR-0008): RD WEB или локальный RF-DETR на CPU. */
+  /**
+   * Провайдер детекции блоков (ADR-0008).
+   *
+   * Значение осталось одно — локальный RF-DETR на CPU. Детекция через RD WEB
+   * ушла вместе с легаси-маршрутом: у контракта document-sync её нет вовсе,
+   * блоки в снимке наши. Настройка сохранена как точка расширения и как место,
+   * где видно, чем портал размечает.
+   */
   'detection.provider': {
     title: 'Провайдер детекции блоков',
     schema: detectionProviderSettingSchema,
-    defaultValue: 'rdweb',
+    defaultValue: 'local',
     control: { kind: 'enum', options: detectionProviderSettingSchema.options },
   },
   /**
@@ -449,16 +454,15 @@ export function settingDefinition(key: string): SettingDefinition | null {
   return key in SETTINGS_REGISTRY ? SETTINGS_REGISTRY[key as SettingKey] : null;
 }
 
-/** Интеграции, состояние подключения которых отдаётся вместо секретов (§10). */
-export const INTEGRATION_NAMES = [
-  'oidc',
-  'storage',
-  'rdweb',
-  /** Контур снимка исполнительной документации: другой адрес, другое удостоверение. */
-  'rdweb_exec',
-  'proxy_llm',
-  'sentry',
-] as const;
+/**
+ * Интеграции, состояние подключения которых отдаётся вместо секретов (§10).
+ *
+ * `rdweb_exec` — контур снимка исполнительной документации. Прежнее имя
+ * `rdweb` ушло вместе с легаси-маршрутом: у нового контура другой адрес,
+ * другое удостоверение и другой набор переменных, и показывать их под старым
+ * именем значило бы утверждать, что настроено то, чего нет.
+ */
+export const INTEGRATION_NAMES = ['oidc', 'storage', 'rdweb_exec', 'proxy_llm', 'sentry'] as const;
 export type IntegrationName = (typeof INTEGRATION_NAMES)[number];
 
 // =====================================================================
