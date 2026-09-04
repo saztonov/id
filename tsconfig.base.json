@@ -65,7 +65,6 @@
       "@id/rules": ["./packages/rules/src/index.ts"],
       "@id/check-harness": ["./tools/check-harness/src/index.ts"],
       "@id/db-harness": ["./tools/db-harness/src/index.ts"],
-      "@id/fake-rdweb": ["./tools/fake-rdweb/src/index.ts"],
       "@id/fake-rdweb-exec": ["./tools/fake-rdweb-exec/src/index.ts"],
       "@id/fixtures": ["./tools/fixtures/src/index.ts"],
       "@id/migrator": ["./tools/migrator/src/index.ts"]

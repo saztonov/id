@@ -47,7 +47,6 @@ const packageRoots: Readonly<Record<string, string>> = {
   '@id/rules': 'packages/rules',
   '@id/check-harness': 'tools/check-harness',
   '@id/db-harness': 'tools/db-harness',
-  '@id/fake-rdweb': 'tools/fake-rdweb',
   '@id/fake-rdweb-exec': 'tools/fake-rdweb-exec',
   '@id/fixtures': 'tools/fixtures',
   '@id/migrator': 'tools/migrator',
