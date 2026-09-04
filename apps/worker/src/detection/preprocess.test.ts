@@ -20,7 +20,9 @@ async function solidPng(
   height: number,
   color: { r: number; g: number; b: number },
 ): Promise<Buffer> {
-  return sharp({ create: { width, height, channels: 3, background: color } }).png().toBuffer();
+  return sharp({ create: { width, height, channels: 3, background: color } })
+    .png()
+    .toBuffer();
 }
 
 describe('readTileRgb', () => {
@@ -68,7 +70,9 @@ describe('декод страницы целиком', () => {
         raw[at + 2] = (x + y) % 256;
       }
     }
-    return sharp(raw, { raw: { width, height, channels: 3 } }).png().toBuffer();
+    return sharp(raw, { raw: { width, height, channels: 3 } })
+      .png()
+      .toBuffer();
   }
 
   it('вырезка из развёрнутого кадра совпадает с вырезкой из файла до байта', async () => {
@@ -116,7 +120,9 @@ describe('tileLumaStats', () => {
   it('плитка из двух контрастных половин — std>0, не blank', async () => {
     // Половина чёрная, половина белая: sharp `composite` кладёт вторую
     // половину поверх однотонного фона.
-    const black = await sharp({ create: { width: 4, height: 8, channels: 3, background: { r: 0, g: 0, b: 0 } } })
+    const black = await sharp({
+      create: { width: 4, height: 8, channels: 3, background: { r: 0, g: 0, b: 0 } },
+    })
       .png()
       .toBuffer();
     const page = await sharp({
@@ -153,7 +159,9 @@ describe('preprocessTile', () => {
     expect(input.data.length).toBe(3 * resolution * resolution);
 
     const plane = resolution * resolution;
-    const expectedPerChannel = [128, 64, 32].map((v, c) => (v / 255 - mean[c as 0 | 1 | 2]) / std[c as 0 | 1 | 2]);
+    const expectedPerChannel = [128, 64, 32].map(
+      (v, c) => (v / 255 - mean[c as 0 | 1 | 2]) / std[c as 0 | 1 | 2],
+    );
 
     for (let c = 0; c < 3; c += 1) {
       for (let i = 0; i < plane; i += 1) {

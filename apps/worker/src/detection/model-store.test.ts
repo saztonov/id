@@ -31,14 +31,24 @@ class FakeStorage implements StorageProvider {
     readonly contentType: string;
   }) {
     this.objects.set(input.key, input.body);
-    return { key: input.key, sizeBytes: input.body.byteLength, contentType: input.contentType, etag: null };
+    return {
+      key: input.key,
+      sizeBytes: input.body.byteLength,
+      contentType: input.contentType,
+      etag: null,
+    };
   }
 
   async getObjectStream(key: string) {
     this.getObjectStreamCalls += 1;
     const body = this.objects.get(key);
     if (body === undefined) throw new Error(`fake storage: объект ${key} не найден`);
-    return { stream: Readable.from(body), sizeBytes: body.byteLength, contentLength: body.byteLength, range: null };
+    return {
+      stream: Readable.from(body),
+      sizeBytes: body.byteLength,
+      contentLength: body.byteLength,
+      range: null,
+    };
   }
 
   async headObject(key: string) {

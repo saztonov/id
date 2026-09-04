@@ -119,7 +119,16 @@ describe('renderPageText v2', () => {
       ...base,
       ordinal: 1,
       blockType: 'stamp',
-      stamp: { code: 'ИД-01', stage: null, sheet: null, object: null, name: null, organization: null, revisions: null, extra: {} },
+      stamp: {
+        code: 'ИД-01',
+        stage: null,
+        sheet: null,
+        object: null,
+        name: null,
+        organization: null,
+        revisions: null,
+        extra: {},
+      },
     } as unknown as RecognitionBlock;
 
     expect(renderPageText(page({ blocks: [legacyStamp] }))).toBe('**[STAMP]** | Code: ИД-01');

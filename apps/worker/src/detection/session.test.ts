@@ -11,7 +11,12 @@ import { resolveOutputNames } from './session.js';
 function tensorMeta(
   name: string,
   shape: readonly (number | string)[],
-): { readonly name: string; readonly isTensor: true; readonly type: 'float32'; readonly shape: readonly (number | string)[] } {
+): {
+  readonly name: string;
+  readonly isTensor: true;
+  readonly type: 'float32';
+  readonly shape: readonly (number | string)[];
+} {
   return { name, isTensor: true, type: 'float32', shape };
 }
 

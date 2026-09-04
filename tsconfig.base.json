@@ -22,6 +22,52 @@
     "declarationMap": true,
     "sourceMap": true,
     "skipLibCheck": true,
-    "forceConsistentCasingInFileNames": true
+    "forceConsistentCasingInFileNames": true,
+
+    /*
+     * Внутренние пакеты разрешаются в `src`, а НЕ в `dist`.
+     *
+     * Это тот же класс отказа, что уже закрыт для тестов в `vitest.shared.ts`, и
+     * тот же довод. У каждого пакета воркспейса `types` указывает на
+     * `dist/index.d.ts` — так и надо в бою, — но `dist` лежит в `.gitignore`.
+     * Значит `pnpm -r typecheck` проверяет типы против ПРОШЛОЙ сборки: на машине,
+     * где `dist` есть, но устарел, он молча зелёный; на чистом дереве типы чужих
+     * пакетов схлопываются в `any`, и `noImplicitAny` краснеет там, где код
+     * исправен.
+     *
+     * Проверено: ровно по этой причине CI падал на первом шаге сорок прогонов
+     * подряд («Parameter 'row' implicitly has an 'any' type»), и ни один тест в
+     * нём не исполнился ни разу. Долг записан в `docs/EXECUTION_LOG.md` при S8.
+     *
+     * Порядок команд (`build` перед `typecheck`) это ПРЯЧЕТ, а не решает: он
+     * делает ответ верным сегодня и ничего не обещает завтра. Алиас убирает сам
+     * класс отказа — под `--noEmit` импорт `@id/*` всегда ведёт в текущий
+     * исходник, и порядок команд перестаёт что-либо значить.
+     *
+     * В `tsconfig.build.json` каждого пакета отображение ГАСИТСЯ (`"paths": {}`):
+     * при `noEmit: false` файл чужого пакета оказался бы вне `rootDir`, и сборка
+     * упала бы. На эмиссию это не влияет и без того — `tsc` не переписывает
+     * спецификаторы в `.d.ts`, там по-прежнему стоит `@id/db`.
+     *
+     * Список задан поимённо, а не выведен из `pnpm-workspace.yaml`: пакет без
+     * `src/index.ts` (например, `@id/web`) отображать нельзя, а вычисленный
+     * список молча включил бы его и сломал бы разрешение.
+     */
+    "paths": {
+      "@id/api": ["./apps/api/src/index.ts"],
+      "@id/worker": ["./apps/worker/src/index.ts"],
+      "@id/contracts": ["./packages/contracts/src/index.ts"],
+      "@id/db": ["./packages/db/src/index.ts"],
+      "@id/detection": ["./packages/detection/src/index.ts"],
+      "@id/doc-types": ["./packages/doc-types/src/index.ts"],
+      "@id/execsync": ["./packages/execsync/src/index.ts"],
+      "@id/recognition": ["./packages/recognition/src/index.ts"],
+      "@id/rules": ["./packages/rules/src/index.ts"],
+      "@id/check-harness": ["./tools/check-harness/src/index.ts"],
+      "@id/db-harness": ["./tools/db-harness/src/index.ts"],
+      "@id/fake-rdweb": ["./tools/fake-rdweb/src/index.ts"],
+      "@id/fixtures": ["./tools/fixtures/src/index.ts"],
+      "@id/migrator": ["./tools/migrator/src/index.ts"]
+    }
   }
 }

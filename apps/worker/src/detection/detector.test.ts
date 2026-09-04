@@ -34,7 +34,10 @@ async function solidPagePath(
 }
 
 /** Один запрос (Q=1): один known-текстовый бокс с высоким score. */
-function oneTextDetectionTensors(): { readonly dets: OnnxTensorLike; readonly labels: OnnxTensorLike } {
+function oneTextDetectionTensors(): {
+  readonly dets: OnnxTensorLike;
+  readonly labels: OnnxTensorLike;
+} {
   return {
     // cxcywh normalized: cx=0.5 cy=0.5 w=0.4 h=0.2 -> xyxy [0.3,0.4,0.7,0.6]
     dets: { data: Float32Array.from([0.5, 0.5, 0.4, 0.2]), dims: [1, 1, 4] },
@@ -44,7 +47,10 @@ function oneTextDetectionTensors(): { readonly dets: OnnxTensorLike; readonly la
 }
 
 /** Пустые запросы: все логиты глубоко отрицательные — ничего не проходит порог. */
-function emptyDetectionTensors(): { readonly dets: OnnxTensorLike; readonly labels: OnnxTensorLike } {
+function emptyDetectionTensors(): {
+  readonly dets: OnnxTensorLike;
+  readonly labels: OnnxTensorLike;
+} {
   return {
     dets: { data: Float32Array.from([0.5, 0.5, 0.1, 0.1]), dims: [1, 1, 4] },
     labels: { data: Float32Array.from([-10, -10, -10, -10]), dims: [1, 1, 4] },
@@ -148,7 +154,12 @@ describe('detectPage', () => {
   it('тайловый режим: полностью однотонные плитки пропускаются (blank-skip), ONNX не вызывается', async () => {
     // tileSize=16 без overlap, страница 48×16 -> три плитки по ширине (>1
     // плитки => настоящий тайловый режим, blank-skip активен).
-    const params: InferenceParams = { ...BASE_PARAMS, tileSize: 16, overlap: 0, trainingMode: 'tiles' };
+    const params: InferenceParams = {
+      ...BASE_PARAMS,
+      tileSize: 16,
+      overlap: 0,
+      trainingMode: 'tiles',
+    };
     const width = 48;
     const height = 16;
     const png = await solidPagePath(dir, 'blank.png', width, height, { r: 250, g: 250, b: 250 });
@@ -170,7 +181,12 @@ describe('detectPage', () => {
   });
 
   it('тайловый режим: неоднородная плитка не пропускается', async () => {
-    const params: InferenceParams = { ...BASE_PARAMS, tileSize: 16, overlap: 0, trainingMode: 'tiles' };
+    const params: InferenceParams = {
+      ...BASE_PARAMS,
+      tileSize: 16,
+      overlap: 0,
+      trainingMode: 'tiles',
+    };
     const width = 48;
     const height = 16;
 

@@ -823,7 +823,8 @@ describe('отмена идущей задачи', () => {
     // очередь и не имеет права объявить упавшей.
     const raw = await rawJob(job.jobId);
     expect(raw.status).toBe('cancelled');
-  }, 40_000);
+    // 60 с: два ожидания по 20 с подряд плюс запас на подъём воркера.
+  }, 60_000);
 });
 
 describe('остановка воркера', () => {
@@ -917,7 +918,19 @@ function pause(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function waitUntil(predicate: () => boolean, timeoutMs = 10_000): Promise<void> {
+/**
+ * Дедлайн — 20 секунд, а не 10.
+ *
+ * Проверяемое утверждение звучит «условие НАСТУПАЕТ», а не «наступает за десять
+ * секунд»: воркер опрашивает очередь, и время до первого захода в обработчик
+ * зависит от загрузки машины, а не от кода. При десяти секундах тест краснел в
+ * полном прогоне (`pnpm gate`, четыре воркера vitest, у каждого свой pglite) и
+ * проходил в одиночку — то есть мерил нагрузку, а не движок задач.
+ *
+ * Для обязательного гейта это не мелочь: случайно краснеющая проверка
+ * обесценивает весь гейт, потому что её начинают обходить.
+ */
+async function waitUntil(predicate: () => boolean, timeoutMs = 20_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!predicate()) {
     if (Date.now() > deadline) throw new Error('условие не наступило за отведённое время');

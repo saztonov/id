@@ -18,7 +18,9 @@ export interface OnnxTensorLike {
 
 /** Порт инференса: один вход (препроцессенная плитка), два выхода (боксы+классы). */
 export interface OnnxSessionPort {
-  run(input: OnnxTensorLike): Promise<{ readonly dets: OnnxTensorLike; readonly labels: OnnxTensorLike }>;
+  run(
+    input: OnnxTensorLike,
+  ): Promise<{ readonly dets: OnnxTensorLike; readonly labels: OnnxTensorLike }>;
 }
 
 export interface OnnxSessionOptions {
@@ -107,7 +109,10 @@ export function resolveOutputNames(
   );
 }
 
-function asFloat32Tensor(value: { readonly type: string; readonly data: unknown }, what: string): Float32Array {
+function asFloat32Tensor(
+  value: { readonly type: string; readonly data: unknown },
+  what: string,
+): Float32Array {
   if (value.type !== 'float32') {
     throw new DetectionModelMismatchError(
       `Выход ${what} ONNX-графа имеет тип ${value.type}, ожидался float32`,

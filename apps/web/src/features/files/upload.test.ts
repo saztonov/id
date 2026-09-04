@@ -103,7 +103,9 @@ describe('uploadToTicket', () => {
   it('окончательный отказ называет код и уходит в журнал со статусом', async () => {
     // Ответ строится на каждый вызов: тело `Response` читается один раз, и один
     // объект на три попытки лгал бы — вторая и третья получили бы пустое тело.
-    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(response(500, INTERNAL_ERROR)));
+    const fetchMock = vi
+      .fn()
+      .mockImplementation(() => Promise.resolve(response(500, INTERNAL_ERROR)));
     vi.stubGlobal('fetch', fetchMock);
 
     const outcome = await settle(uploadToTicket(TICKET, FILE));

@@ -196,12 +196,7 @@ class ClientError extends Error {
    */
   readonly code: string | undefined;
 
-  constructor(
-    name: string,
-    message: string,
-    frames: readonly string[],
-    code: string | undefined,
-  ) {
+  constructor(name: string, message: string, frames: readonly string[], code: string | undefined) {
     super(message);
     this.name = name;
     this.code = code;

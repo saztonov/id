@@ -60,9 +60,10 @@ function assertAgreement(wire: Wire, zodNode: z.ZodType, path: string): void {
   }
   if (zodNode instanceof z.ZodNullable) {
     const type = wire['type'];
-    expect(Array.isArray(type) && type.includes('null'), `${path}: nullable через type-массив`).toBe(
-      true,
-    );
+    expect(
+      Array.isArray(type) && type.includes('null'),
+      `${path}: nullable через type-массив`,
+    ).toBe(true);
     const rest = (type as string[]).filter((item) => item !== 'null');
     expect(rest.length, `${path}: nullable-юнион ровно из одного типа и null`).toBe(1);
     assertAgreement({ ...wire, type: rest[0] }, zodNode.unwrap() as z.ZodType, path);

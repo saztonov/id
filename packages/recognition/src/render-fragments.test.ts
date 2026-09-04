@@ -88,9 +88,7 @@ describe('renderFragmentsToMarkdown v1', () => {
   });
 
   it('рваные строки дополняются пустыми ячейками до максимальной ширины', () => {
-    const result = renderFragmentsToMarkdown([
-      table(['А', 'Б'], [['1'], ['2', '3', '4']]),
-    ]);
+    const result = renderFragmentsToMarkdown([table(['А', 'Б'], [['1'], ['2', '3', '4']])]);
 
     // Ширина = max(2, 1, 3) = 3: ни одна ячейка не теряется.
     expect(result).toBe(

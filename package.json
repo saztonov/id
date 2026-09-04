@@ -10,6 +10,9 @@
   "type": "module",
   "scripts": {
     "typecheck": "pnpm -r typecheck",
+    "gate": "node tools/scripts/gate.mjs",
+    "gate:clean": "node tools/scripts/gate-clean.mjs",
+    "hooks:install": "git config core.hooksPath tools/githooks",
     "lint": "pnpm -r lint",
     "test": "pnpm -r test",
     "build": "pnpm -r build",

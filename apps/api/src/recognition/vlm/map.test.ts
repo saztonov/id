@@ -74,9 +74,7 @@ describe('map: text', () => {
       { kind: 'paragraph', text: '1. Пункт', emphasis: 'none' },
       { kind: 'table', table: { header: ['А', 'Б'], rows: [['1', '2']], title: null } },
     ]);
-    expect(block.text).toBe(
-      '## Ведомость\n\n1. Пункт\n\n| А | Б |\n| --- | --- |\n| 1 | 2 |',
-    );
+    expect(block.text).toBe('## Ведомость\n\n1. Пункт\n\n| А | Б |\n| --- | --- |\n| 1 | 2 |');
     expect(block.features).toBeNull();
   });
 
