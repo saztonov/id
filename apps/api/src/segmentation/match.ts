@@ -287,6 +287,45 @@ function rowDocType(row: ParsedRegistryRow): string | null {
   return resolveDocType(matchDocTypes(name, DOC_TYPES, { headingLines: 1 }), DOC_TYPES).code;
 }
 
+/**
+ * Единственная пара видов, которую номер различить НЕ МОЖЕТ.
+ *
+ * §8.3 запрещает решать по виду, и запрет остаётся в силе: реестр обобщает
+ * наименования, и «Паспорт качества Арматура №16005» законно описывает лист
+ * «СЕРТИФИКАТ КАЧЕСТВА № 16005». Здесь исключается не расхождение вида, а
+ * структурная неразличимость: акт и его исполнительная схема носят в описи
+ * ОДИН номер. В папке «ИД Мастер апрель 2026» позиция 1.1 («АОСР …») и
+ * позиция 1.16 («Исполнительная схема …») обе стоят с номером «№ 48-ОТ/-1
+ * этаж», и номер сам по себе не отвечает, какую из двух бумаг искать.
+ *
+ * Что было без этого: строка схемы дотягивалась до АКТА частичным совпадением
+ * (0.60) и объявлялась сопоставленной, а все двенадцать исполнительных схем
+ * папки оставались «не названными описью передачи» — двенадцать ложных
+ * предупреждений REG.111 при правильно заполненной описи.
+ */
+const ACT_CLASS = /^aosr/u;
+const SCHEME_CLASS = /^exec_/u;
+
+function numberSharingClass(code: string | null): 'act' | 'scheme' | null {
+  if (code === null) return null;
+  if (ACT_CLASS.test(code)) return 'act';
+  if (SCHEME_CLASS.test(code)) return 'scheme';
+  return null;
+}
+
+/**
+ * Строка и документ принадлежат разным половинам этой пары.
+ *
+ * Обе стороны обязаны быть УВЕРЕННО опознаны: наименование материала вида не
+ * даёт вовсе (`rowDocType` вернёт `null`), и такая строка ограничения не
+ * получает — иначе запрет расползся бы на весь реестр.
+ */
+function contradictsSharedNumber(rowType: string | null, docType: string | null): boolean {
+  const row = numberSharingClass(rowType);
+  const document = numberSharingClass(docType);
+  return row !== null && document !== null && row !== document;
+}
+
 /** Как основание кандидата читается человеком в объяснении решения. */
 function basisLabel(basis: CandidateBasis): string {
   switch (basis) {
@@ -637,6 +676,7 @@ export function matchRegistryRows(
 ): MatchRegistryResult {
   const byNormalized = indexBy(documents, (value) => normalizeDocNo(value).normalized);
   const byFolded = indexBy(documents, (value) => normalizeDocNo(value).folded);
+  const typeOf = new Map(documents.map((d) => [d.documentId, d.docTypeCode]));
 
   const named = new Set<string>();
   const matches: RegistryMatch[] = [];
@@ -657,8 +697,20 @@ export function matchRegistryRows(
       continue;
     }
 
+    /**
+     * Отсев акта из-под строки схемы и наоборот — ДО лестницы, а не внутри неё.
+     *
+     * Ступеней пять, и отсев на каждой пришлось бы повторить пять раз: одна
+     * забытая ступень вернула бы ровно то поведение, ради которого правило
+     * написано. Здесь же он действует и на `named` — документ, до которого
+     * строке дотягиваться нельзя, не должен считаться ею названным.
+     */
+    const rowType = rowDocType(row);
+    const fits = (ids: readonly string[]): string[] =>
+      ids.filter((id) => !contradictsSharedNumber(rowType, typeOf.get(id) ?? null));
+
     const keys = rowKeys(row);
-    const exact = lookup(byNormalized, keys.normalized);
+    const exact = fits(lookup(byNormalized, keys.normalized));
     for (const id of exact) named.add(id);
 
     if (exact.length === 1) {
@@ -692,7 +744,7 @@ export function matchRegistryRows(
       continue;
     }
 
-    const folded = lookup(byFolded, keys.folded);
+    const folded = fits(lookup(byFolded, keys.folded));
     for (const id of folded) named.add(id);
 
     if (folded.length === 1) {
@@ -728,7 +780,7 @@ export function matchRegistryRows(
     // вхождения куска (то не требует от совпавшей части никакой роли).
     const core = numericCoreOf(row.docNoFolded);
     if (core !== null) {
-      const byCore = numericCoreCandidates(core, documents);
+      const byCore = fits(numericCoreCandidates(core, documents));
       for (const id of byCore) named.add(id);
 
       if (byCore.length === 1) {
@@ -763,7 +815,7 @@ export function matchRegistryRows(
     // Последняя ступень: номер совпал КУСКОМ. Идёт после точной и фолдинга,
     // поэтому обесценить их не может — сюда доходят только строки, которым
     // целиком не соответствует ни один документ комплекта.
-    const partial = partialCandidates(row.docNoFolded, documents);
+    const partial = fits(partialCandidates(row.docNoFolded, documents));
     for (const id of partial) named.add(id);
 
     if (partial.length === 1) {
@@ -794,7 +846,7 @@ export function matchRegistryRows(
       continue;
     }
 
-    const nearby = oneCharCandidates(row.docNoFolded, documents);
+    const nearby = fits(oneCharCandidates(row.docNoFolded, documents));
     for (const id of nearby) named.add(id);
 
     if (nearby.length === 1) {
