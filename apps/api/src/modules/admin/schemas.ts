@@ -83,6 +83,7 @@ export const SECRET_SETTINGS = {
   'storage.s3_secret_key': 'S3_SECRET_KEY',
   'rdweb.user': 'RDWEB_USER',
   'rdweb.password': 'RDWEB_PASSWORD',
+  'rdweb.exec_token': 'RDWEB_EXEC_TOKEN',
   'ai.proxy_llm_token': 'PROXY_LLM_TOKEN',
   'observability.sentry_dsn': 'SENTRY_DSN',
 } as const satisfies Record<string, string>;
@@ -107,12 +108,42 @@ export function secretEnvVarFor(key: string): string | null {
   return key in SECRET_SETTINGS ? SECRET_SETTINGS[key as SecretSettingKey] : null;
 }
 
+/**
+ * Чем значение правится на экране «Администрирование».
+ *
+ * Дескриптор объявляется РЯДОМ со схемой, а не выводится из неё. Схема знает,
+ * какое значение допустимо, но не знает, что показать человеку: у булева ключа
+ * это переключатель, у перечисления — список, у числа с `null` — поле, пустота
+ * которого означает «взять из манифеста модели». Вывод контрола из zod завязал
+ * бы экран на внутренности библиотеки и молча ломался бы при её обновлении.
+ *
+ * Судьёй значения дескриптор при этом не становится: запись проверяет `schema`,
+ * и 422 приходит от неё. Согласие двух объявлений держит тест «дескриптор
+ * согласован со схемой»: он гоняет через схему все варианты перечисления и
+ * границы числа.
+ */
+export type SettingControl =
+  | { readonly kind: 'boolean'; readonly nullable?: boolean }
+  | { readonly kind: 'enum'; readonly options: readonly string[] }
+  | {
+      readonly kind: 'number';
+      readonly min?: number;
+      readonly max?: number;
+      readonly step?: number;
+      readonly integer?: boolean;
+      readonly nullable?: boolean;
+    }
+  | { readonly kind: 'string'; readonly placeholder?: string; readonly multiline?: boolean }
+  | { readonly kind: 'object' };
+
 export interface SettingDefinition {
   readonly title: string;
   /** Схема значения. Значение хранится в `app_settings.value` как jsonb. */
   readonly schema: z.ZodType;
   /** Значение по умолчанию: строки в `app_settings` может не быть вовсе. */
   readonly defaultValue: JsonValue;
+  /** Чем значение правится на экране. Ключ с `managedBy` показывается текстом. */
+  readonly control: SettingControl;
   /**
    * Эндпоинт, которому принадлежит ключ.
    *
@@ -151,11 +182,7 @@ export const SETTINGS_REGISTRY = {
       'Неизменяемость поданных данных действует (§3.9); выключать только на время тестирования',
     schema: z.boolean(),
     defaultValue: true,
-  },
-  'ai.enabled': {
-    title: 'Стадии AI включены',
-    schema: z.boolean(),
-    defaultValue: false,
+    control: { kind: 'boolean' },
   },
   /*
    * Shadow-режим стадий AI (ADR-0007).
@@ -182,16 +209,7 @@ export const SETTINGS_REGISTRY = {
     title: 'Промты выполняются только в режиме dry-run, без записи результатов',
     schema: z.boolean(),
     defaultValue: false,
-  },
-  'ai.monthly_budget_rub': {
-    title: 'Месячный бюджет обращений к LLM, рубли',
-    schema: z.number().nonnegative().max(10_000_000),
-    defaultValue: 0,
-  },
-  'rdweb.enabled': {
-    title: 'Интеграция с RD WEB включена',
-    schema: z.boolean(),
-    defaultValue: true,
+    control: { kind: 'boolean' },
   },
   /**
    * Ветка распознавания (ADR-0007). Действует только на НОВЫЕ прогоны:
@@ -201,6 +219,7 @@ export const SETTINGS_REGISTRY = {
     title: 'Провайдер распознавания',
     schema: recognitionProviderSettingSchema,
     defaultValue: 'rdweb',
+    control: { kind: 'enum', options: recognitionProviderSettingSchema.options },
   },
   /**
    * Слаг модели OpenRouter для VLM-распознавания. Пусто — модель не выбрана,
@@ -209,6 +228,7 @@ export const SETTINGS_REGISTRY = {
    */
   'recognition.vlm_model': {
     title: 'Модель OpenRouter для распознавания (слаг)',
+    control: { kind: 'string', placeholder: 'vendor/model' },
     schema: z
       .string()
       .max(200)
@@ -229,6 +249,7 @@ export const SETTINGS_REGISTRY = {
     title: 'Определять разворот скана автоматически (зонд перед детекцией)',
     schema: z.boolean(),
     defaultValue: true,
+    control: { kind: 'boolean' },
   },
   /**
    * Модель зонда. Пусто — берётся `recognition.vlm_model`.
@@ -240,6 +261,7 @@ export const SETTINGS_REGISTRY = {
    */
   'orientation.probe_model': {
     title: 'Модель зонда ориентации (пусто — модель распознавания)',
+    control: { kind: 'string', placeholder: 'модель распознавания' },
     schema: z
       .string()
       .max(200)
@@ -266,6 +288,7 @@ export const SETTINGS_REGISTRY = {
    */
   'analysis.model': {
     title: 'Модель стадий анализа (пусто — модель распознавания)',
+    control: { kind: 'string', placeholder: 'модель распознавания' },
     schema: z
       .string()
       .max(200)
@@ -279,6 +302,7 @@ export const SETTINGS_REGISTRY = {
     title: 'Провайдер детекции блоков',
     schema: detectionProviderSettingSchema,
     defaultValue: 'rdweb',
+    control: { kind: 'enum', options: detectionProviderSettingSchema.options },
   },
   /**
    * Версия локальной модели детекции — префикс ключа в хранилище
@@ -287,6 +311,7 @@ export const SETTINGS_REGISTRY = {
    */
   'detection.model_version': {
     title: 'Версия локальной модели детекции (RF-DETR)',
+    control: { kind: 'string', placeholder: 'слаг версии в хранилище' },
     schema: z
       .string()
       .max(64)
@@ -316,6 +341,7 @@ export const SETTINGS_REGISTRY = {
     title: 'Правило разметки по формату листа',
     schema: detectionSheetStrategySchema,
     defaultValue: 'detect_all',
+    control: { kind: 'enum', options: detectionSheetStrategySchema.options },
   },
   /**
    * Как искать собственный номер листа на крупном формате (S42, правило S46).
@@ -333,6 +359,7 @@ export const SETTINGS_REGISTRY = {
     title: 'Искать номер листа в верхней надписи (крупные форматы)',
     schema: largeSheetNumberZoneSchema,
     defaultValue: 'near_stamp',
+    control: { kind: 'enum', options: largeSheetNumberZoneSchema.options },
   },
 
   /*
@@ -358,11 +385,13 @@ export const SETTINGS_REGISTRY = {
     title: 'Режим инференса детектора: auto — по манифесту модели',
     schema: detectionInferenceModeSettingSchema,
     defaultValue: 'auto',
+    control: { kind: 'enum', options: detectionInferenceModeSettingSchema.options },
   },
   'detection.score_threshold': {
     title: 'Порог принятия детекции (пусто — из манифеста модели)',
     schema: z.number().min(0).max(1).nullable(),
     defaultValue: null,
+    control: { kind: 'number', min: 0, max: 1, step: 0.05, nullable: true },
   },
   /**
    * Пороги по классам. Заданный класс перекрывает манифест, незаданный его
@@ -377,16 +406,19 @@ export const SETTINGS_REGISTRY = {
       stamp: z.number().min(0).max(1).optional(),
     }),
     defaultValue: {},
+    control: { kind: 'object' },
   },
   'detection.nms_iou': {
     title: 'Порог IoU при подавлении пересечений (пусто — из манифеста модели)',
     schema: z.number().min(0).max(1).nullable(),
     defaultValue: null,
+    control: { kind: 'number', min: 0, max: 1, step: 0.05, nullable: true },
   },
   'detection.merge_split_text': {
     title: 'Склеивать разорванные текстовые блоки (пусто — из манифеста модели)',
     schema: z.boolean().nullable(),
     defaultValue: null,
+    control: { kind: 'boolean', nullable: true },
   },
   /**
    * Потолок детекций на страницу. `null` занят под наследование, поэтому снять
@@ -398,27 +430,14 @@ export const SETTINGS_REGISTRY = {
     title: 'Потолок числа детекций на страницу (пусто — из манифеста модели)',
     schema: z.int().min(1).max(10_000).nullable(),
     defaultValue: null,
-  },
-  'checks.autorun_after_documents': {
-    title: 'Запускать проверки сразу после подтверждения документов',
-    schema: z.boolean(),
-    defaultValue: false,
-  },
-  'doc_type_candidates.min_occurrences': {
-    title: 'Сколько раз должен встретиться заголовок, чтобы попасть в кандидаты видов ИД',
-    schema: z.int().min(1).max(1000),
-    defaultValue: 3,
+    control: { kind: 'number', min: 1, max: 10_000, step: 1, integer: true, nullable: true },
   },
   [RULESET_ACTIVE_VERSION_KEY]: {
     title: 'Действующая версия набора правил',
     schema: uuidSchema.nullable(),
     defaultValue: null,
+    control: { kind: 'string' },
     managedBy: 'POST /api/v1/admin/rulesets/{id}/activate',
-  },
-  'portal.maintenance_notice': {
-    title: 'Объявление в интерфейсе портала',
-    schema: z.string().max(1000),
-    defaultValue: '',
   },
 } as const satisfies Record<string, SettingDefinition>;
 
@@ -431,7 +450,15 @@ export function settingDefinition(key: string): SettingDefinition | null {
 }
 
 /** Интеграции, состояние подключения которых отдаётся вместо секретов (§10). */
-export const INTEGRATION_NAMES = ['oidc', 'storage', 'rdweb', 'proxy_llm', 'sentry'] as const;
+export const INTEGRATION_NAMES = [
+  'oidc',
+  'storage',
+  'rdweb',
+  /** Контур снимка исполнительной документации: другой адрес, другое удостоверение. */
+  'rdweb_exec',
+  'proxy_llm',
+  'sentry',
+] as const;
 export type IntegrationName = (typeof INTEGRATION_NAMES)[number];
 
 // =====================================================================
@@ -513,6 +540,26 @@ export const userCardResponseSchema = z.object({
 
 export const settingKeyParamsSchema = z.object({ key: settingKeySchema });
 
+/** Дескриптор контрола наружу: зеркало `SettingControl` в терминах zod. */
+export const settingControlSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('boolean'), nullable: z.boolean().optional() }),
+  z.object({ kind: z.literal('enum'), options: z.array(z.string()).readonly() }),
+  z.object({
+    kind: z.literal('number'),
+    min: z.number().optional(),
+    max: z.number().optional(),
+    step: z.number().optional(),
+    integer: z.boolean().optional(),
+    nullable: z.boolean().optional(),
+  }),
+  z.object({
+    kind: z.literal('string'),
+    placeholder: z.string().optional(),
+    multiline: z.boolean().optional(),
+  }),
+  z.object({ kind: z.literal('object') }),
+]);
+
 export const settingWriteBodySchema = z.object({ value: jsonValueSchema });
 
 export const settingResponseSchema = z.object({
@@ -521,6 +568,7 @@ export const settingResponseSchema = z.object({
   value: jsonValueSchema,
   /** Значение отдано из реестра, потому что строки в `app_settings` нет. */
   isDefault: z.boolean(),
+  control: settingControlSchema,
   managedBy: z.string().nullable(),
   updatedAt: isoDateTimeSchema.nullable(),
   updatedBy: uuidSchema.nullable(),

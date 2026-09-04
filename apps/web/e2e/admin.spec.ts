@@ -227,6 +227,50 @@ test('невалидный слаг модели ловится у поля и �
   await expect(page.getByTestId('setting-error-recognition.vlm_model')).toHaveCount(0);
 });
 
+test('ключ без карточки правится прямо в таблице и сбрасывается к умолчанию', async ({ page }) => {
+  await signIn(page, KC.admin, '/admin?tab=settings');
+
+  // Зонд ориентации редактора в карточках не имеет: до появления таблицы
+  // выключить его можно было только запросом к API мимо интерфейса.
+  expect(await settingOf(page, 'orientation.probe_enabled')).toEqual({
+    value: true,
+    isDefault: true,
+  });
+
+  await page.getByTestId('setting-value-orientation.probe_enabled').click();
+
+  await expect
+    .poll(async () => {
+      const setting = await settingOf(page, 'orientation.probe_enabled');
+      return setting === null ? 'нет' : `${String(setting.value)}:${String(setting.isDefault)}`;
+    })
+    .toBe('false:false');
+
+  // Сброс возвращает ключ во власть кода: строки в app_settings больше нет,
+  // и значение снова приходит из реестра.
+  await page.getByTestId('setting-reset-orientation.probe_enabled').click();
+  await page.getByRole('button', { name: 'Сбросить' }).last().click();
+
+  await expect
+    .poll(async () => {
+      const setting = await settingOf(page, 'orientation.probe_enabled');
+      return setting === null ? 'нет' : `${String(setting.value)}:${String(setting.isDefault)}`;
+    })
+    .toBe('true:true');
+});
+
+test('ключ, который правится карточкой, в таблице не редактируется дважды', async ({ page }) => {
+  await signIn(page, KC.admin, '/admin?tab=settings');
+
+  // У ключа с редактором в карточке строка таблицы только читается и
+  // называет место правки: два контрола на одно значение расходятся на
+  // глазах при первой же неудачной записи.
+  await expect(page.getByTestId('setting-value-recognition.provider')).toHaveCount(0);
+  await expect(
+    page.getByText('Правится в карточке «Распознавание и детекция» выше').first(),
+  ).toBeVisible();
+});
+
 // =====================================================================
 // Журнал ошибок (§11)
 // =====================================================================

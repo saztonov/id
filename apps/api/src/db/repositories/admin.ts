@@ -501,6 +501,39 @@ export async function writeSetting(
   });
 }
 
+/**
+ * Сброс настройки к умолчанию: строка удаляется, значение снова из реестра.
+ *
+ * Записать умолчание вместо удаления нельзя: копия перестала бы следовать за
+ * реестром, и выкатка, меняющая умолчание, обошла бы стороной ровно те среды,
+ * где кто-то однажды нажал «сбросить».
+ *
+ * Отсутствие строки — не ошибка: сброшенный ключ уже в требуемом состоянии, а
+ * запись в журнал всё равно делается. Она отвечает на вопрос «кто и когда
+ * снял отклонение», и молчать о нажатии из-за того, что оно ничего не
+ * изменило, значило бы терять след действия человека.
+ */
+export async function deleteSetting(
+  db: Database,
+  scope: AuthScope,
+  input: {
+    readonly key: string;
+    readonly audit: AuditEntry;
+  },
+): Promise<{ readonly deleted: boolean }> {
+  requireGlobalScope(scope, 'настроек портала');
+
+  return db.transaction(async (tx) => {
+    const rows = await tx
+      .delete(appSettings)
+      .where(eq(appSettings.key, input.key))
+      .returning({ key: appSettings.key });
+
+    await appendAuditLog(tx, scope, input.audit);
+    return { deleted: rows.length > 0 };
+  });
+}
+
 // =====================================================================
 // Промты
 // =====================================================================

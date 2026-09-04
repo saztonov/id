@@ -42,6 +42,7 @@ import {
   pgErrorCode,
   publishRulesetVersion,
   readSetting,
+  deleteSetting,
   readSettings,
   replaceUserRoles,
   setUserContractor,
@@ -448,6 +449,76 @@ function registerSettingsRoutes(app: AppInstance): void {
       return settingView(key, row);
     },
   );
+
+  /**
+   * Сброс к умолчанию: строка из `app_settings` удаляется.
+   *
+   * Это не «записать значение по умолчанию», а вернуть ключ во власть кода:
+   * умолчание живёт в реестре, и записанная копия перестала бы следовать за
+   * ним при следующей выкатке. Разница видна на экране — источник значения
+   * снова становится «значение по умолчанию».
+   *
+   * Сброс ключа, которого в `app_settings` нет, — успех, а не 404: повторное
+   * нажатие обязано быть безопасным (§12), а состояние после него ровно то,
+   * которого просили.
+   */
+  app.delete(
+    `${PREFIX}/settings/:key`,
+    {
+      schema: {
+        params: settingKeyParamsSchema,
+        response: { 200: settingResponseSchema },
+      },
+      preHandler: manage,
+    },
+    async (request) => {
+      const { scope } = currentAuth(request);
+      const key = request.params.key;
+
+      const envVar = secretEnvVarFor(key);
+      if (envVar !== null || looksSecret(key)) {
+        throw unprocessable(
+          [
+            {
+              pointer: '/key',
+              code: 'secret-setting',
+              message:
+                envVar !== null
+                  ? `Значение задаётся переменной окружения ${envVar}`
+                  : 'Имя ключа указывает на секрет',
+            },
+          ],
+          'Секреты в настройках портала не хранятся (§10): сбрасывать в `app_settings` нечего.',
+        );
+      }
+
+      const definition = settingDefinition(key);
+      if (definition === null) {
+        throw notFound(
+          'Такой настройки нет. Список настраиваемых ключей отдаёт GET /api/v1/admin/settings.',
+        );
+      }
+
+      if (definition.managedBy !== undefined) {
+        throw conflict(
+          `Ключ «${key}» меняется только через ${definition.managedBy}: сброс произвольной ` +
+            'записью оставил бы проверки без действующего набора правил.',
+        );
+      }
+
+      await deleteSetting(app.db, scope, {
+        key,
+        audit: auditEntry(app, request, {
+          action: 'setting.reset',
+          entityType: 'app_setting',
+          entityId: key,
+          payload: { key },
+        }),
+      });
+
+      return settingView(key, null);
+    },
+  );
 }
 
 function settingView(key: string, row: SettingRow | null) {
@@ -457,6 +528,7 @@ function settingView(key: string, row: SettingRow | null) {
     title: definition?.title ?? key,
     value: row === null ? (definition?.defaultValue ?? null) : row.value,
     isDefault: row === null,
+    control: definition?.control ?? { kind: 'string' as const },
     managedBy: definition?.managedBy ?? null,
     updatedAt: row?.updatedAt ?? null,
     updatedBy: row?.updatedBy ?? null,
@@ -479,6 +551,7 @@ const INTEGRATION_REQUIREMENTS: Readonly<Record<IntegrationName, readonly string
   oidc: ['OIDC_ISSUER', 'OIDC_CLIENT_ID', 'OIDC_CLIENT_SECRET'],
   storage: ['S3_ENDPOINT', 'S3_BUCKET', 'S3_ACCESS_KEY', 'S3_SECRET_KEY'],
   rdweb: ['RDWEB_BASE_URL', 'RDWEB_USER', 'RDWEB_PASSWORD'],
+  rdweb_exec: ['RDWEB_EXEC_BASE_URL', 'RDWEB_EXEC_TOKEN', 'RDWEB_EXEC_PROJECT_ID'],
   proxy_llm: ['PROXY_LLM_BASE_URL', 'PROXY_LLM_TOKEN'],
   sentry: ['SENTRY_DSN'],
 };
@@ -517,6 +590,11 @@ function integrationDisabled(env: Env, name: IntegrationName): boolean {
     case 'sentry':
       return env.ERROR_REPORTER !== 'sentry';
     case 'rdweb':
+      return false;
+    case 'rdweb_exec':
+      // Не «disabled при другом провайдере распознавания»: администратор,
+      // переключающий ветку, обязан ВИДЕТЬ, настроена ли вторая, — иначе
+      // переключение оказывается прыжком в темноту.
       return false;
   }
 }

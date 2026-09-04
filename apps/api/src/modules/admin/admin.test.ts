@@ -349,7 +349,7 @@ function admin(): Promise<SignedIn> {
 }
 
 async function call(
-  method: 'GET' | 'POST' | 'PUT' | 'PATCH',
+  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE',
   url: string,
   session: SignedIn | null,
   body?: unknown,
@@ -365,7 +365,7 @@ async function call(
 }
 
 async function asAdmin(
-  method: 'GET' | 'POST' | 'PUT' | 'PATCH',
+  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE',
   url: string,
   body?: unknown,
 ): Promise<LightMyRequestResponse> {
@@ -389,7 +389,7 @@ const P = '/api/v1/admin';
  * он не будет ни проверен на регистрацию, ни проверен на доступность чужим ролям.
  */
 interface AdminProbe {
-  readonly method: 'GET' | 'POST' | 'PUT' | 'PATCH';
+  readonly method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
   /** Шаблон маршрута для `hasRoute`. */
   readonly route: string;
   /** Конкретный адрес запроса. */
@@ -428,8 +428,13 @@ const ADMIN_PROBES: readonly AdminProbe[] = [
   {
     method: 'PUT',
     route: `${P}/settings/:key`,
-    url: `${P}/settings/ai.enabled`,
+    url: `${P}/settings/orientation.probe_enabled`,
     body: { value: true },
+  },
+  {
+    method: 'DELETE',
+    route: `${P}/settings/:key`,
+    url: `${P}/settings/orientation.probe_enabled`,
   },
   { method: 'GET', route: `${P}/prompts`, url: `${P}/prompts?limit=5` },
   {
@@ -610,10 +615,10 @@ describe('ни один эндпоинт администрирования не
     ).toMatchObject({ user: { roles: [], contractorId: null, isActive: true } });
 
     const settings = await asAdmin('GET', `${P}/settings`);
-    const aiEnabled = settings
+    const probeEnabled = settings
       .json<{ settings: { key: string; isDefault: boolean }[] }>()
-      .settings.find((entry) => entry.key === 'ai.enabled');
-    expect(aiEnabled?.isDefault).toBe(true);
+      .settings.find((entry) => entry.key === 'orientation.probe_enabled');
+    expect(probeEnabled?.isDefault).toBe(true);
 
     const prompts = await db.query<{ total: string }>(
       `SELECT count(*)::text AS total FROM prompt_templates WHERE code = '${SWEEP_PROMPT_CODE}'`,
@@ -939,10 +944,14 @@ describe('настройки: секреты не хранятся и не от�
   });
 
   it('значение проверяется схемой ключа и сохраняется', async () => {
-    const wrong = await asAdmin('PUT', `${P}/settings/ai.enabled`, { value: 'да' });
+    const wrong = await asAdmin('PUT', `${P}/settings/orientation.probe_enabled`, {
+      value: 'да',
+    });
     expect(wrong.statusCode).toBe(422);
 
-    const written = await asAdmin('PUT', `${P}/settings/ai.enabled`, { value: true });
+    const written = await asAdmin('PUT', `${P}/settings/orientation.probe_enabled`, {
+      value: true,
+    });
     expect(written.statusCode).toBe(200);
     expect(written.json<{ value: boolean; isDefault: boolean }>()).toMatchObject({
       value: true,
@@ -952,8 +961,51 @@ describe('настройки: секреты не хранятся и не от�
     const listed = await asAdmin('GET', `${P}/settings`);
     const entry = listed
       .json<{ settings: { key: string; value: unknown; updatedBy: string | null }[] }>()
-      .settings.find((item) => item.key === 'ai.enabled');
+      .settings.find((item) => item.key === 'orientation.probe_enabled');
     expect(entry).toMatchObject({ value: true, updatedBy: USER_ADMIN });
+  });
+
+  /**
+   * Сброс возвращает ключ во власть кода.
+   *
+   * Проверяется не «значение стало прежним», а ИСТОЧНИК: запись умолчания тем
+   * же значением дала бы тот же `value` и осталась бы отклонением, которое
+   * перестало следовать за реестром.
+   */
+  it('сброс удаляет отклонение и возвращает значение по умолчанию', async () => {
+    const written = await asAdmin('PUT', `${P}/settings/analysis.model`, {
+      value: 'qwen/qwen3-vl-235b',
+    });
+    expect(written.statusCode).toBe(200);
+    expect(written.json<{ isDefault: boolean }>().isDefault).toBe(false);
+
+    const reset = await asAdmin('DELETE', `${P}/settings/analysis.model`);
+    expect(reset.statusCode).toBe(200);
+    expect(reset.json<{ value: unknown; isDefault: boolean }>()).toMatchObject({
+      value: '',
+      isDefault: true,
+    });
+
+    const rows = await db.query<{ total: string }>(
+      `SELECT count(*)::text AS total FROM app_settings WHERE key = 'analysis.model'`,
+    );
+    expect(rows[0]?.total).toBe('0');
+
+    // Повторное нажатие безопасно: состояние уже то, которого просили.
+    const again = await asAdmin('DELETE', `${P}/settings/analysis.model`);
+    expect(again.statusCode).toBe(200);
+  });
+
+  it('сброс отвергается там же, где и запись: секрет, незнакомый ключ, чужой маршрут', async () => {
+    const secret = await asAdmin('DELETE', `${P}/settings/ai.proxy_llm_token`);
+    expect(secret.statusCode).toBe(422);
+    expect(secret.json<{ detail: string }>().detail).toContain('Секреты');
+
+    const unknown = await asAdmin('DELETE', `${P}/settings/nope.nope`);
+    expect(unknown.statusCode).toBe(404);
+
+    const managed = await asAdmin('DELETE', `${P}/settings/ruleset.active_version_id`);
+    expect(managed.statusCode).toBe(409);
   });
 });
 
@@ -1581,6 +1633,7 @@ describe('журнал аудита', () => {
       'user.activated',
       'user.deactivated',
       'setting.updated',
+      'setting.reset',
       'prompt.created',
       'prompt.updated',
       'prompt.state_changed',

@@ -30,8 +30,10 @@ import {
   Card,
   Input,
   InputNumber,
+  Popconfirm,
   Select,
   Space,
+  Switch,
   Table,
   Tag,
   Typography,
@@ -56,6 +58,7 @@ import type {
   AppSetting,
   IntegrationStatus,
   SecretReference,
+  SettingControl,
   SettingsView,
 } from '../../api/types.js';
 import { useSession } from '../../app/session.js';
@@ -80,40 +83,7 @@ export function SettingsPanel(): ReactNode {
       <RecognitionSettingsCard view={settings.data} />
       <DetectionTuningCard view={settings.data} />
 
-      <Card size="small" title="Настройки портала">
-        <Table<AppSetting>
-          rowKey="key"
-          size="small"
-          pagination={false}
-          dataSource={settings.data.settings}
-          locale={{ emptyText: 'Настроек нет' }}
-          columns={[
-            { title: 'Ключ', dataIndex: 'key', key: 'key' },
-            { title: 'Назначение', dataIndex: 'title', key: 'title' },
-            {
-              title: 'Значение',
-              dataIndex: 'value',
-              key: 'value',
-              render: (value: unknown) => (
-                <Typography.Text code>{JSON.stringify(value)}</Typography.Text>
-              ),
-            },
-            {
-              title: 'Источник',
-              dataIndex: 'isDefault',
-              key: 'isDefault',
-              render: (isDefault: boolean) =>
-                isDefault ? <Tag>значение по умолчанию</Tag> : <Tag color="blue">задано</Tag>,
-            },
-            {
-              title: 'Изменено',
-              dataIndex: 'updatedAt',
-              key: 'updatedAt',
-              render: (value: string | null) => value ?? '—',
-            },
-          ]}
-        />
-      </Card>
+      <SettingsTables view={settings.data} />
 
       <Card size="small" title="Секреты">
         <Typography.Paragraph type="secondary" style={{ marginTop: 0 }}>
@@ -852,5 +822,499 @@ function DetectionTuningCard({ view }: { view: SettingsView }): ReactNode {
         </div>
       </Space>
     </Card>
+  );
+}
+
+// =====================================================================
+// Таблицы настроек: правка по дескриптору контрола
+// =====================================================================
+
+/**
+ * Группы ключей.
+ *
+ * Список ключей не полон намеренно: ключ, не попавший ни в одну группу,
+ * показывается в «Прочих», а не исчезает с экрана. Реестр живёт на сервере, и
+ * экран, который печатает только известные ему ключи, скрыл бы новую настройку
+ * ровно в тот день, когда её завели.
+ */
+const OPERATIONAL_KEYS: readonly string[] = [
+  'recognition.provider',
+  'recognition.vlm_model',
+  'analysis.model',
+  'orientation.probe_enabled',
+  'orientation.probe_model',
+  'detection.provider',
+  'detection.model_version',
+];
+
+const EXPERT_KEYS: readonly string[] = [
+  'detection.sheet_strategy',
+  'detection.large_sheet_number_zone',
+  'detection.inference_mode',
+  'detection.score_threshold',
+  'detection.per_class_thresholds',
+  'detection.nms_iou',
+  'detection.merge_split_text',
+  'detection.max_detections',
+];
+
+const MODE_KEYS: readonly string[] = ['core.enforce_immutability', 'ai.dry_run_only'];
+
+/**
+ * Ключи, редактор которых живёт в карточке выше, и название этой карточки.
+ *
+ * Второй редактор того же ключа в таблице сделал бы экран двусмысленным: два
+ * контрола, показывающих одно значение, расходятся на глазах у человека при
+ * первой же неудачной записи. Поэтому в таблице такие ключи только читаются, а
+ * строка называет место, где их правят, — иначе поиск по таблице приводит в
+ * тупик, что и произошло с правилом разметки по формату листа.
+ */
+const CARD_MANAGED_KEYS: Readonly<Record<string, string>> = {
+  'recognition.provider': 'Распознавание и детекция',
+  'recognition.vlm_model': 'Распознавание и детекция',
+  'detection.provider': 'Распознавание и детекция',
+  'detection.model_version': 'Распознавание и детекция',
+  'detection.sheet_strategy': 'Распознавание и детекция',
+  'detection.large_sheet_number_zone': 'Распознавание и детекция',
+  'detection.inference_mode': 'Качество детекции блоков',
+  'detection.score_threshold': 'Качество детекции блоков',
+  'detection.per_class_thresholds': 'Качество детекции блоков',
+  'detection.nms_iou': 'Качество детекции блоков',
+  'detection.merge_split_text': 'Качество детекции блоков',
+  'detection.max_detections': 'Качество детекции блоков',
+};
+
+/**
+ * Подписи значений перечислений — по ключу настройки, а не общей картой.
+ *
+ * У провайдера распознавания и провайдера детекции одно и то же значение
+ * `rdweb`, а названия разные: слитая карта показала бы одному из них чужое.
+ * Ключ без подписей печатает значения как есть — это честнее выдуманного
+ * названия и не мешает новой настройке появиться на экране.
+ */
+const ENUM_LABELS_BY_KEY: Readonly<Record<string, Readonly<Record<string, string>>>> = {
+  'recognition.provider': RECOGNITION_PROVIDER_OPTION_LABELS,
+  'detection.provider': DETECTION_PROVIDER_OPTION_LABELS,
+  'detection.sheet_strategy': DETECTION_SHEET_STRATEGY_LABELS,
+  'detection.large_sheet_number_zone': LARGE_SHEET_NUMBER_ZONE_LABELS,
+  'detection.inference_mode': INFERENCE_MODE_LABELS,
+};
+
+function SettingsTables({ view }: { view: SettingsView }): ReactNode {
+  const { can } = useSession();
+  const { message } = AntApp.useApp();
+  const queryClient = useQueryClient();
+  const canManage = can('settings.manage');
+
+  /** Ошибка записи по ключу: 422 сервера ложится к своей строке. */
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  /** Ключ, по которому сейчас идёт запись: остальные строки не блокируются. */
+  const [pendingKey, setPendingKey] = useState<string | null>(null);
+
+  const invalidate = async (): Promise<void> => {
+    await queryClient.invalidateQueries({ queryKey: adminKeys.settings() });
+  };
+
+  const save = useMutation({
+    mutationFn: (input: { key: string; value: unknown }) =>
+      admin.setSetting(input.key, input.value),
+    onMutate: (input) => {
+      setPendingKey(input.key);
+    },
+    onSuccess: async (saved) => {
+      setFieldErrors((prev) => ({ ...prev, [saved.key]: '' }));
+      message.success(`Настройка «${saved.title}» сохранена`);
+      await invalidate();
+    },
+    onError: (error, input) => {
+      // 422 несёт pointer `/value`, полю формы он не соответствует: сообщения
+      // приходят как unmatched и встают к строке, которая сохранялась.
+      const mapped = mapFieldErrors(error, []);
+      if (isApiError(error) && error.status === 422 && mapped.unmatched.length > 0) {
+        setFieldErrors((prev) => ({ ...prev, [input.key]: mapped.unmatched.join('; ') }));
+        return;
+      }
+      message.error(describeError(error));
+    },
+    onSettled: () => {
+      setPendingKey(null);
+    },
+  });
+
+  const reset = useMutation({
+    mutationFn: (key: string) => admin.resetSetting(key),
+    onMutate: (key) => {
+      setPendingKey(key);
+    },
+    onSuccess: async (restored) => {
+      setFieldErrors((prev) => ({ ...prev, [restored.key]: '' }));
+      message.success(`Настройка «${restored.title}» вернулась к значению по умолчанию`);
+      await invalidate();
+    },
+    onError: (error) => {
+      message.error(describeError(error));
+    },
+    onSettled: () => {
+      setPendingKey(null);
+    },
+  });
+
+  const columns = [
+    { title: 'Ключ', dataIndex: 'key', key: 'key', width: 260 },
+    { title: 'Назначение', dataIndex: 'title', key: 'title' },
+    {
+      title: 'Значение',
+      key: 'value',
+      width: 320,
+      render: (_: unknown, setting: AppSetting) => (
+        <Space direction="vertical" size={2} style={{ width: '100%' }}>
+          <SettingValue
+            // Черновик строки живёт в её собственном состоянии, и после записи
+            // строка обязана перечитать значение с сервера: ключ включает
+            // значение, поэтому редактор пересоздаётся вместе с ним.
+            key={`${setting.key}:${JSON.stringify(setting.value)}`}
+            setting={setting}
+            disabled={!canManage || pendingKey === setting.key}
+            onSave={(value) => {
+              save.mutate({ key: setting.key, value });
+            }}
+          />
+          {(fieldErrors[setting.key] ?? '') === '' ? null : (
+            <Typography.Text type="danger" data-testid={`setting-error-${setting.key}`}>
+              {fieldErrors[setting.key]}
+            </Typography.Text>
+          )}
+        </Space>
+      ),
+    },
+    {
+      title: 'Источник',
+      dataIndex: 'isDefault',
+      key: 'isDefault',
+      width: 190,
+      render: (isDefault: boolean) =>
+        isDefault ? <Tag>значение по умолчанию</Tag> : <Tag color="blue">задано</Tag>,
+    },
+    {
+      title: 'Изменено',
+      dataIndex: 'updatedAt',
+      key: 'updatedAt',
+      width: 200,
+      render: (value: string | null) => value ?? '—',
+    },
+    {
+      title: '',
+      key: 'actions',
+      width: 120,
+      render: (_: unknown, setting: AppSetting) =>
+        setting.isDefault || setting.managedBy !== null ? null : (
+          <Popconfirm
+            title="Вернуть значение по умолчанию?"
+            description="Строка настройки удалится, и значение снова будет браться из кода портала."
+            okText="Сбросить"
+            cancelText="Отмена"
+            onConfirm={() => {
+              reset.mutate(setting.key);
+            }}
+          >
+            <Button
+              size="small"
+              disabled={!canManage || pendingKey === setting.key}
+              data-testid={`setting-reset-${setting.key}`}
+            >
+              Сбросить
+            </Button>
+          </Popconfirm>
+        ),
+    },
+  ];
+
+  const known = new Set([...OPERATIONAL_KEYS, ...EXPERT_KEYS, ...MODE_KEYS]);
+  const groups: { title: string; caption: string; rows: AppSetting[] }[] = [
+    {
+      title: 'Рабочие настройки',
+      caption:
+        'Провайдеры, модели и версия весов. Действуют на новые прогоны: выполняющийся прогон читает собственный снимок настроек.',
+      rows: view.settings.filter((setting) => OPERATIONAL_KEYS.includes(setting.key)),
+    },
+    {
+      title: 'Экспертные настройки (подбираются замером)',
+      caption:
+        'Пороги и режимы детекции. Значения выводятся замером на стенде, а не подбираются наугад: пустое поле означает «взять из манифеста модели».',
+      rows: view.settings.filter((setting) => EXPERT_KEYS.includes(setting.key)),
+    },
+    {
+      title: 'Режимы тестирования',
+      caption:
+        'Снимают инварианты портала ради прогона сценария целиком. В рабочем режиме неизменяемость включена, а dry-run выключен; любое переключение попадает в журнал аудита.',
+      rows: view.settings.filter((setting) => MODE_KEYS.includes(setting.key)),
+    },
+    {
+      title: 'Прочие настройки',
+      caption:
+        'Ключи, у которых есть собственный маршрут управления либо которые ещё не отнесены ни к одной группе.',
+      rows: view.settings.filter((setting) => !known.has(setting.key)),
+    },
+  ];
+
+  return (
+    <>
+      {groups
+        .filter((group) => group.rows.length > 0)
+        .map((group) => (
+          <Card key={group.title} size="small" title={group.title}>
+            <Typography.Paragraph type="secondary" style={{ marginTop: 0 }}>
+              {group.caption}
+            </Typography.Paragraph>
+            <Table<AppSetting>
+              rowKey="key"
+              size="small"
+              pagination={false}
+              dataSource={group.rows}
+              locale={{ emptyText: 'Настроек нет' }}
+              columns={columns}
+            />
+          </Card>
+        ))}
+    </>
+  );
+}
+
+/**
+ * Контрол одной строки — по дескриптору, пришедшему с сервера.
+ *
+ * Перечисления и переключатели сохраняются сразу выбором: промежуточного
+ * состояния у них нет. Строки и числа набираются по частям, поэтому у них
+ * кнопка — запись каждого нажатия клавиши сыпала бы 422 на полуслове.
+ */
+function SettingValue({
+  setting,
+  disabled,
+  onSave,
+}: {
+  setting: AppSetting;
+  disabled: boolean;
+  onSave: (value: unknown) => void;
+}): ReactNode {
+  const cardTitle = CARD_MANAGED_KEYS[setting.key];
+
+  if (setting.managedBy !== null) {
+    return (
+      <Space direction="vertical" size={2}>
+        <Typography.Text code>{JSON.stringify(setting.value)}</Typography.Text>
+        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+          Меняется маршрутом {setting.managedBy}
+        </Typography.Text>
+      </Space>
+    );
+  }
+
+  if (cardTitle !== undefined) {
+    return (
+      <Space direction="vertical" size={2}>
+        <Typography.Text code>{JSON.stringify(setting.value)}</Typography.Text>
+        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+          Правится в карточке «{cardTitle}» выше
+        </Typography.Text>
+      </Space>
+    );
+  }
+
+  return <SettingControlEditor setting={setting} disabled={disabled} onSave={onSave} />;
+}
+
+function SettingControlEditor({
+  setting,
+  disabled,
+  onSave,
+}: {
+  setting: AppSetting;
+  disabled: boolean;
+  onSave: (value: unknown) => void;
+}): ReactNode {
+  const control: SettingControl = setting.control;
+  const testId = `setting-value-${setting.key}`;
+
+  if (control.kind === 'boolean' && control.nullable !== true) {
+    return (
+      <Switch
+        checked={setting.value === true}
+        disabled={disabled}
+        onChange={onSave}
+        aria-label={setting.title}
+        data-testid={testId}
+      />
+    );
+  }
+
+  if (control.kind === 'boolean') {
+    // Третье состояние — «значение берётся из манифеста модели», и оно не то же
+    // самое, что «не склеивать»: выключить и не трогать — разные решения.
+    const value = setting.value === null ? 'manifest' : setting.value === true ? 'on' : 'off';
+    return (
+      <Select<'manifest' | 'on' | 'off'>
+        style={{ width: 200 }}
+        value={value}
+        options={[
+          { value: 'manifest', label: 'Из манифеста' },
+          { value: 'on', label: 'Да' },
+          { value: 'off', label: 'Нет' },
+        ]}
+        disabled={disabled}
+        onChange={(next) => {
+          onSave(next === 'manifest' ? null : next === 'on');
+        }}
+        aria-label={setting.title}
+        data-testid={testId}
+      />
+    );
+  }
+
+  if (control.kind === 'enum') {
+    return (
+      <Select<string>
+        style={{ width: 280 }}
+        value={typeof setting.value === 'string' ? setting.value : null}
+        options={control.options.map((option) => ({
+          value: option,
+          label: (ENUM_LABELS_BY_KEY[setting.key] ?? {})[option] ?? option,
+        }))}
+        disabled={disabled}
+        onChange={onSave}
+        aria-label={setting.title}
+        data-testid={testId}
+      />
+    );
+  }
+
+  if (control.kind === 'number') {
+    return (
+      <NumberSetting
+        setting={setting}
+        control={control}
+        disabled={disabled}
+        onSave={onSave}
+        testId={testId}
+      />
+    );
+  }
+
+  if (control.kind === 'string') {
+    return (
+      <StringSetting
+        setting={setting}
+        control={control}
+        disabled={disabled}
+        onSave={onSave}
+        testId={testId}
+      />
+    );
+  }
+
+  // Составное значение правится там, где у него есть смысл по частям: общий
+  // редактор показал бы JSON, в котором опечатка стоит дороже удобства.
+  return <Typography.Text code>{JSON.stringify(setting.value)}</Typography.Text>;
+}
+
+function NumberSetting({
+  setting,
+  control,
+  disabled,
+  onSave,
+  testId,
+}: {
+  setting: AppSetting;
+  control: Extract<SettingControl, { kind: 'number' }>;
+  disabled: boolean;
+  onSave: (value: unknown) => void;
+  testId: string;
+}): ReactNode {
+  const [draft, setDraft] = useState<number | null>(() =>
+    typeof setting.value === 'number' ? setting.value : null,
+  );
+
+  return (
+    <Space.Compact>
+      <InputNumber
+        style={{ width: 160 }}
+        {...(control.min === undefined ? {} : { min: control.min })}
+        {...(control.max === undefined ? {} : { max: control.max })}
+        {...(control.step === undefined ? {} : { step: control.step })}
+        {...(control.integer === true ? { precision: 0 } : {})}
+        value={draft}
+        onChange={(value) => {
+          setDraft(typeof value === 'number' ? value : null);
+        }}
+        {...(control.nullable === true ? { placeholder: 'из манифеста' } : {})}
+        disabled={disabled}
+        aria-label={setting.title}
+        data-testid={testId}
+      />
+      <Button
+        disabled={disabled}
+        onClick={() => {
+          onSave(draft);
+        }}
+        data-testid={`${testId}-save`}
+      >
+        Сохранить
+      </Button>
+    </Space.Compact>
+  );
+}
+
+function StringSetting({
+  setting,
+  control,
+  disabled,
+  onSave,
+  testId,
+}: {
+  setting: AppSetting;
+  control: Extract<SettingControl, { kind: 'string' }>;
+  disabled: boolean;
+  onSave: (value: unknown) => void;
+  testId: string;
+}): ReactNode {
+  const [draft, setDraft] = useState<string>(() =>
+    typeof setting.value === 'string' ? setting.value : '',
+  );
+
+  return (
+    <Space.Compact style={{ width: '100%' }}>
+      {control.multiline === true ? (
+        <Input.TextArea
+          value={draft}
+          onChange={(event) => {
+            setDraft(event.target.value);
+          }}
+          {...(control.placeholder === undefined ? {} : { placeholder: control.placeholder })}
+          disabled={disabled}
+          aria-label={setting.title}
+          data-testid={testId}
+          autoSize={{ minRows: 1, maxRows: 4 }}
+        />
+      ) : (
+        <Input
+          value={draft}
+          onChange={(event) => {
+            setDraft(event.target.value);
+          }}
+          {...(control.placeholder === undefined ? {} : { placeholder: control.placeholder })}
+          disabled={disabled}
+          aria-label={setting.title}
+          data-testid={testId}
+        />
+      )}
+      <Button
+        disabled={disabled}
+        onClick={() => {
+          onSave(draft.trim());
+        }}
+        data-testid={`${testId}-save`}
+      >
+        Сохранить
+      </Button>
+    </Space.Compact>
   );
 }

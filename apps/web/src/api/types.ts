@@ -892,11 +892,34 @@ export interface UserCard {
   user: PortalUser;
 }
 
+/**
+ * Чем правится значение настройки: зеркало `SettingControl` сервера.
+ *
+ * Дескриптор приходит с сервера, а не выводится экраном по имени ключа:
+ * реестр настроек живёт на сервере, и список ключей меняется без ведома
+ * клиента. Экран, который угадывает контрол сам, при следующем ключе покажет
+ * поле ввода там, где нужен переключатель, и никто этого не заметит.
+ */
+export type SettingControl =
+  | { kind: 'boolean'; nullable?: boolean }
+  | { kind: 'enum'; options: string[] }
+  | {
+      kind: 'number';
+      min?: number;
+      max?: number;
+      step?: number;
+      integer?: boolean;
+      nullable?: boolean;
+    }
+  | { kind: 'string'; placeholder?: string; multiline?: boolean }
+  | { kind: 'object' };
+
 export interface AppSetting {
   key: string;
   title: string;
   value: unknown;
   isDefault: boolean;
+  control: SettingControl;
   managedBy: string | null;
   updatedAt: string | null;
   updatedBy: string | null;

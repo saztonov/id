@@ -961,6 +961,16 @@ export const admin = {
       (r) => r.data,
     ),
 
+  /**
+   * Сброс ключа к умолчанию: строка в `app_settings` удаляется.
+   *
+   * Отдельное действие, а не запись умолчания тем же `setSetting`: записанная
+   * копия умолчания перестала бы следовать за реестром сервера, и разница
+   * видна на экране — источник значения снова становится «по умолчанию».
+   */
+  resetSetting: (key: string) =>
+    request<AppSetting>('DELETE', `${V1}/admin/settings/${key}`).then((r) => r.data),
+
   rules: () => get<{ items: RuleDefinition[] }>(`${V1}/admin/rules`).then((r) => r.items),
 
   rulesets: () => get<Page<RulesetVersion>>(`${V1}/admin/rulesets`, { query: { limit: 100 } }),
