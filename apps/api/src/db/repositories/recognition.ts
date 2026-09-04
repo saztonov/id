@@ -506,11 +506,92 @@ export interface FinishRunInput {
 }
 
 /**
+ * Ключ предупреждения для сравнения «уже есть или нет».
+ *
+ * Тройка `code` + `message` + `workingPageIndex`, а не `JSON.stringify` целиком:
+ * порядок полей у объекта зависит от того, кто его построил, и два одинаковых по
+ * смыслу предупреждения из разных мест разошлись бы ключами.
+ */
+function warningKey(warning: unknown): string {
+  if (typeof warning === 'object' && warning !== null && 'code' in warning) {
+    const item = warning as { code?: unknown; message?: unknown; workingPageIndex?: unknown };
+    return [item.code, item.message, item.workingPageIndex].map((v) => String(v)).join(' ');
+  }
+  return JSON.stringify(warning);
+}
+
+/** Слияние без повторов, порядок первого появления сохраняется. */
+function mergeWarnings(
+  existing: readonly unknown[],
+  added: readonly unknown[],
+): readonly unknown[] {
+  const seen = new Set(existing.map(warningKey));
+  const result = [...existing];
+  for (const warning of added) {
+    const key = warningKey(warning);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(warning);
+  }
+  return result;
+}
+
+/**
+ * Предупреждения, родившиеся ДО финала прогона.
+ *
+ * Заведено потому, что канала для них не было вовсе: `buildSnapshotBody`
+ * возвращает предупреждения о выброшенных блоках, а `rd.sync_prepare` мог только
+ * записать их в журнал воркера. На вкладке «История» их не было, хотя шапка
+ * `snapshot.ts` требует обратного — «блок пропал» и «блок не распознался» на
+ * экране обязаны различаться. Молчащее предупреждение не отличается от
+ * отсутствующего.
+ *
+ * Дописывание идёт под `for update` и без повторов: `rd.sync_prepare`
+ * повторяется до трёх раз, и без дедупликации второй заход утроил бы список.
+ * Прогон не в `running` не трогается — исход уже вынесен, дополнять его нечем.
+ */
+export async function appendRunWarnings(
+  db: Database,
+  scope: AuthScope,
+  runId: string,
+  warnings: readonly unknown[],
+): Promise<void> {
+  if (warnings.length === 0) return;
+  await requireRunningRun(db, scope, runId);
+
+  await db.transaction(async (tx) => {
+    const current = await tx.execute<{ warnings: unknown }>(sql`
+      select warnings from ${recognitionRuns}
+       where ${recognitionRuns.id} = ${runId}::uuid
+         and ${recognitionRuns.status} = 'running'
+         for update
+    `);
+    const row = current.rows[0];
+    if (row === undefined) return;
+
+    const existing = Array.isArray(row.warnings) ? (row.warnings as readonly unknown[]) : [];
+    const merged = mergeWarnings(existing, warnings);
+    if (merged.length === existing.length) return;
+
+    await tx.execute(sql`
+      update ${recognitionRuns}
+         set warnings = ${JSON.stringify(merged)}::jsonb
+       where ${recognitionRuns.id} = ${runId}::uuid
+         and ${recognitionRuns.status} = 'running'
+    `);
+  });
+}
+
+/**
  * Завершение прогона — единственный путь из `running`.
  *
  * Идемпотентно по построению: `where status = 'running'` не даст переписать уже
  * вынесенный исход. Повтор задачи, дошедшей до конца, обязан увидеть тот же
  * результат, а не переоформить `integrity_error` в `done`.
+ *
+ * Предупреждения ДОПИСЫВАЮТСЯ, а не заменяются: до финала их успевает накопить
+ * `appendRunWarnings`, и замена стёрла бы их ровно в тот момент, когда человек
+ * впервые открывает прогон.
  */
 export async function finishRecognitionRun(
   db: Database,
@@ -522,12 +603,24 @@ export async function finishRecognitionRun(
   if (run.status !== 'running') return { changed: false, status: run.status };
 
   return db.transaction(async (tx) => {
+    const before = await tx.execute<{ warnings: unknown }>(sql`
+      select warnings from ${recognitionRuns}
+       where ${recognitionRuns.id} = ${input.runId}::uuid
+         and ${recognitionRuns.status} = 'running'
+         for update
+    `);
+    const accumulated = before.rows[0];
+    const existing = Array.isArray(accumulated?.warnings)
+      ? (accumulated.warnings as readonly unknown[])
+      : [];
+    const warnings = mergeWarnings(existing, input.warnings ?? []);
+
     const updated = await tx.execute<{ status: string }>(sql`
       update ${recognitionRuns}
          set status = ${input.status},
              finished_at = now(),
              counts = ${JSON.stringify(input.counts ?? {})}::jsonb,
-             warnings = ${JSON.stringify(input.warnings ?? [])}::jsonb,
+             warnings = ${JSON.stringify(warnings)}::jsonb,
              remote_layout_hash_after = coalesce(
                ${input.remoteLayoutHashAfter ?? null}, ${recognitionRuns.remoteLayoutHashAfter})
        where ${recognitionRuns.id} = ${input.runId}::uuid

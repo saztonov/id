@@ -26,6 +26,7 @@ import type { Pool } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { createPgliteDatabase, createTestPool, type TestDatabase } from '@id/db-harness';
+import { LEGACY_MARKUP_POLICY } from '@id/contracts';
 import { loadMigrations } from '@id/migrator';
 import { startFakeExecSync, type FakeExecSync } from '@id/fake-rdweb-exec';
 import {
@@ -40,6 +41,7 @@ import {
   listLayoutBlocks,
   loadEnv,
   NoopErrorReporter,
+  pinMarkupPolicy,
   startRecognitionRun,
   type AuthScope,
   type Database,
@@ -447,5 +449,77 @@ describe('вытеснение не публикуется (§16 п. 10)', () =>
       `SELECT warnings FROM recognition_runs WHERE id = '${runId}'`,
     );
     expect(warnings[0]?.warnings.map((warning) => warning.code)).toContain('superseded');
+  }, 180_000);
+});
+
+/**
+ * Комбинация, в которой номер листа не возьмётся ниоткуда.
+ *
+ * Листы фикстуры — 1654×2339 пунктов, то есть крупнее A4. При `sheet_aware` они
+ * размечаются одним штампом, а собственного номера листа в штампе нет; на этом
+ * маршруте второго источника не существует — `sheet_code` в `StampBlockResult`
+ * у RD WEB не предусмотрен. Без предупреждения сверка с реестром приложений
+ * объявила бы «нет в комплекте» каждую исполнительную схему, и человек искал бы
+ * дефект в распознавании, а не в настройке.
+ *
+ * Здесь же проверяется САМ КАНАЛ: предупреждение рождается в `rd.sync_prepare`, а
+ * `recognition_runs.warnings` пишется на финале. Пока финал заменял список, а не
+ * дописывал к нему, всё, рождённое раньше, стиралось ровно в тот момент, когда
+ * человек впервые открывает прогон.
+ */
+describe('выключенная зона номера на крупных листах', () => {
+  async function pin(numberZone: 'off' | 'near_stamp'): Promise<void> {
+    await pinMarkupPolicy(db, SCOPE, {
+      layoutRevisionId: LAYOUT,
+      policy: {
+        version: 1,
+        sheetStrategy: 'sheet_aware',
+        numberZone,
+        numberZonePad: { x: 0.1, y: 0.25 },
+      },
+    });
+  }
+
+  async function warningCodes(runId: string): Promise<readonly string[]> {
+    const rows = await testDb.query<{ warnings: { code: string }[] }>(
+      `SELECT warnings FROM recognition_runs WHERE id = '${runId}'`,
+    );
+    return (rows[0]?.warnings ?? []).map((warning) => warning.code);
+  }
+
+  afterAll(async () => {
+    await pinMarkupPolicy(db, SCOPE, { layoutRevisionId: LAYOUT, policy: LEGACY_MARKUP_POLICY });
+  });
+
+  it('прогон предупреждает и называет листы — и предупреждение переживает финал', async () => {
+    await pin('off');
+    const runId = await startRun();
+    await drainQueue();
+
+    expect(await runOutcome(runId).then((outcome) => outcome.status)).toBe('done');
+    expect(await warningCodes(runId)).toContain('large_sheet_number_zone_off');
+
+    const rows = await testDb.query<{ warnings: { code: string; message: string }[] }>(
+      `SELECT warnings FROM recognition_runs WHERE id = '${runId}'`,
+    );
+    const warning = rows[0]?.warnings.find((item) => item.code === 'large_sheet_number_zone_off');
+    // Номера листов человекочитаемые, с единицы: «лист 0» в разговоре с
+    // инженером не значит ничего.
+    expect(warning?.message).toContain('Листов крупнее A4: 2 (1, 2)');
+    expect(warning?.message).toContain('верхней надписи');
+
+    await resetRun(runId);
+  }, 180_000);
+
+  it('при включённой зоне номера предупреждения нет', async () => {
+    // Негативный контроль: те же самые крупные листы, тот же комплект. Без него
+    // тест доказывал бы лишь то, что мы умеем печатать строку.
+    await pin('near_stamp');
+    const runId = await startRun();
+    await drainQueue();
+
+    expect(await warningCodes(runId)).not.toContain('large_sheet_number_zone_off');
+
+    await resetRun(runId);
   }, 180_000);
 });

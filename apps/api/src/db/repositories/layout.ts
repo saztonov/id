@@ -45,10 +45,13 @@ import {
   attentionFlagSchema,
   classifySheet,
   LEGACY_MARKUP_POLICY,
+  pageMarkupMode,
   parseMarkupPolicy,
   type AttentionFlag,
   type BlockType,
+  type DetectionSheetStrategy,
   type DetectorProvenance,
+  type LargeSheetNumberZone,
   type MarkupPolicy,
   type ShapeType,
 } from '@id/contracts';
@@ -1204,6 +1207,59 @@ async function loadPageSizes(
   return new Map(
     rows.map((row) => [row.workingPageIndex, { widthPt: row.widthPt, heightPt: row.heightPt }]),
   );
+}
+
+/** Правило разметки ревизии и листы, размечаемые одним штампом. */
+export interface MarkupContext {
+  readonly numberZone: LargeSheetNumberZone;
+  readonly sheetStrategy: DetectionSheetStrategy;
+  /** Рабочие индексы листов, у которых режим разметки — `stamp_only`. */
+  readonly largeSheetPages: readonly number[];
+}
+
+/**
+ * Контекст разметки прогона: правило и перечень крупных листов.
+ *
+ * Заведено под одно предупреждение, и оно того стоит. При `sheet_aware` лист
+ * крупнее A4 размечается одним штампом, а собственного номера листа в штампе
+ * нет — там «Обозначение» проекта, общее у всех листов раздела. Второй источник
+ * номера — верхняя надпись отдельным блоком — включается `numberZone`, и при
+ * `off` его нет. На маршруте RD WEB третьего источника не существует:
+ * `sheet_code` в их `StampBlockResult` не предусмотрен.
+ *
+ * Комбинация не гипотетическая и не безобидная: замер на двенадцати крупных
+ * листах эталонного комплекта (шапка `selectLargeSheetBlocks`) дал в ней ноль
+ * верных номеров и двенадцать ложных — в текст страницы побеждает кадастровый
+ * номер участка из поля «Объект» штампа. Сверка с реестром приложений объявит
+ * «нет в комплекте» каждую исполнительную схему, и без предупреждения это
+ * выглядело бы дефектом распознавания.
+ *
+ * Правило берётся из ЗАПИНЕННОГО `markupPolicy` ревизии, а не из настройки:
+ * настройка могла смениться после разметки, и тогда предупреждение описывало бы
+ * не тот комплект, который отправляется.
+ */
+export async function loadMarkupContext(
+  db: Database,
+  scope: AuthScope,
+  layoutRevisionId: string,
+): Promise<MarkupContext | null> {
+  const layout = await findLayoutRevision(db, scope, layoutRevisionId);
+  if (layout === null) return null;
+
+  const sizes = await loadPageSizes(db, scope, layout.bundleId);
+  const largeSheetPages: number[] = [];
+  for (const [workingPageIndex, size] of sizes) {
+    if (pageMarkupMode(size.widthPt, size.heightPt, layout.markupPolicy) === 'stamp_only') {
+      largeSheetPages.push(workingPageIndex);
+    }
+  }
+  largeSheetPages.sort((a, b) => a - b);
+
+  return {
+    numberZone: layout.markupPolicy.numberZone,
+    sheetStrategy: layout.markupPolicy.sheetStrategy,
+    largeSheetPages,
+  };
 }
 
 async function loadPageMap(

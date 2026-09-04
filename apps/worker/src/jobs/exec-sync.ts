@@ -45,6 +45,7 @@ import {
   type HashableBlock,
   type JobContext,
   type JobHandler,
+  type MarkupContext,
   type ProcessingFeedbackSink,
   type SnapshotBlockInput,
 } from '@id/api';
@@ -155,6 +156,7 @@ export interface ExecSyncDeps {
   loadLayoutBlocks(target: ExecRunTarget): Promise<readonly ExecLayoutBlock[]>;
   loadDocumentFacts(target: ExecRunTarget): Promise<ExecDocumentFacts>;
   loadPageGeometry(target: ExecRunTarget): Promise<readonly ExecPageGeometry[]>;
+  loadMarkupContext(target: ExecRunTarget): Promise<MarkupContext | null>;
   openWorkingPdf(sha256: string): Promise<{ body: () => Readable; sizeBytes: number }>;
 
   reconcileSnapshot(input: {
@@ -236,6 +238,8 @@ export interface ExecSyncDeps {
   listSavedBlockIds(runId: string): Promise<ReadonlySet<string>>;
 
   mergeSnapshot(runId: string, patch: Record<string, unknown>): Promise<void>;
+  /** Предупреждения, родившиеся до финала: иначе им некуда доехать. */
+  appendWarnings(runId: string, warnings: readonly RecognitionWarning[]): Promise<void>;
   finishRun(input: {
     readonly runId: string;
     readonly status: 'done' | 'failed' | 'integrity_error';
@@ -477,6 +481,56 @@ function declaredHashInput(block: ExecLayoutBlock, geometryKey: string): string 
   ].join('|');
 }
 
+/** Сколько номеров листов перечисляется в тексте, прежде чем начнётся «и ещё». */
+const LISTED_PAGES_LIMIT = 5;
+
+/**
+ * Предупреждение о комбинации, в которой номер листа не возьмётся ниоткуда.
+ *
+ * Крупный лист при `sheet_aware` размечается одним штампом, а собственного
+ * номера листа в штампе нет — там «Обозначение» проекта, общее у всех листов
+ * раздела. Верхнюю надпись отдельным блоком добавляет `numberZone`, и при `off`
+ * её нет. На этом маршруте третьего источника не существует: поля `sheet_code` в
+ * `StampBlockResult` у RD WEB не предусмотрено, `stamp.sheetCode` всегда `null`.
+ *
+ * Замер на двенадцати крупных листах эталонного комплекта: в этой комбинации
+ * верных номеров ноль, ложных двенадцать — в текст страницы побеждает
+ * кадастровый номер участка из поля «Объект» штампа. Сверка с реестром
+ * приложений объявит «нет в комплекте» каждую исполнительную схему, и без этой
+ * строки человек искал бы дефект в распознавании, а не в настройке.
+ *
+ * Почему только здесь, а не на общей стадии разметки: на ветке VLM номер
+ * добирается дозапросом кропа штампа, и там комбинация безобидна.
+ * Предупреждение, выданное обеим веткам одинаково, было бы ложной тревогой в
+ * половине случаев.
+ */
+async function sheetNumberWarnings(
+  deps: ExecSyncDeps,
+  target: ExecRunTarget,
+): Promise<readonly RecognitionWarning[]> {
+  const markup = await deps.loadMarkupContext(target);
+  if (markup === null) return [];
+  if (markup.numberZone !== 'off' || markup.largeSheetPages.length === 0) return [];
+
+  const pages = markup.largeSheetPages.map((index) => String(index + 1));
+  const listed = pages.slice(0, LISTED_PAGES_LIMIT).join(', ');
+  const tail =
+    pages.length > LISTED_PAGES_LIMIT ? ` и ещё ${String(pages.length - LISTED_PAGES_LIMIT)}` : '';
+
+  return [
+    {
+      code: 'large_sheet_number_zone_off',
+      message:
+        `Листов крупнее A4: ${String(pages.length)} (${listed}${tail}). ` +
+        'На них размечен только штамп, а собственного номера листа в штампе нет — ' +
+        'RD WEB его не отдаёт. Сверка с реестром приложений объявит такие схемы ' +
+        'отсутствующими. Включите «Номер листа на крупном формате» → «искать номер ' +
+        'листа в верхней надписи» и повторите детекцию, либо обведите номер вручную.',
+      workingPageIndex: null,
+    },
+  ];
+}
+
 export function createSyncPrepareHandler(deps: ExecSyncDeps): JobHandler<'rd.sync_prepare'> {
   return async (ctx: JobContext<'rd.sync_prepare'>) => {
     const target = await requireRun(deps, ctx.payload.recognitionRunId);
@@ -599,17 +653,24 @@ export function createSyncPrepareHandler(deps: ExecSyncDeps): JobHandler<'rd.syn
         adapterVersion: ADAPTER_VERSION_RDWEB_EXEC,
       });
 
-      if (built.warnings.length > 0 || built.skipped.length > 0) {
+      const warnings = [...built.warnings, ...(await sheetNumberWarnings(deps, target))];
+
+      if (warnings.length > 0 || built.skipped.length > 0) {
         ctx.logger.warn(
           {
             event: 'exec_snapshot_warnings',
             recognition_run_id: target.runId,
             skipped: built.skipped.length,
-            codes: built.warnings.map((warning) => warning.code),
+            codes: warnings.map((warning) => warning.code),
           },
           'снимок собран с оговорками',
         );
       }
+
+      // Журнал воркера читает инженер, а прогон открывает человек, нажавший
+      // «Распознать». Пока предупреждения жили только в журнале, выброшенный
+      // блок был для него неотличим от нераспознанного.
+      await deps.appendWarnings(target.runId, warnings);
 
       await ctx.emit('recognition.sync_prepared', {
         recognitionRunId: target.runId,

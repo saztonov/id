@@ -148,8 +148,10 @@ export {
   listLayoutRevisions,
   listPageAttentionFlags,
   listPagesWithBlocks,
+  loadMarkupContext,
   loadProfileForLayout,
   parseThresholds,
+  pinMarkupPolicy,
   replacePageWithFullPageBlock,
   replaceRunDocument,
   savePageAttentionFlags,
@@ -163,6 +165,7 @@ export type {
   LayoutProfileView,
   LayoutRevisionView,
   LayoutThresholds,
+  MarkupContext,
   RunDocumentView,
   SaveFlagsOutcome,
 } from './db/repositories/layout.js';
@@ -289,6 +292,7 @@ export type {
 } from './catalog-import/parse.js';
 
 export {
+  appendRunWarnings,
   closeRunDocument,
   findArtifact,
   findRecognitionRun,

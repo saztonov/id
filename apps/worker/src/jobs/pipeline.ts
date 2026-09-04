@@ -57,6 +57,7 @@ import {
 import {
   artifactKey,
   acceptGeneration,
+  appendRunWarnings,
   blobKey,
   countUploadAttempt,
   documentPdfKey,
@@ -92,6 +93,7 @@ import {
   listLayoutBlocks,
   listPagesWithBlocks,
   loadBundlePlan,
+  loadMarkupContext,
   loadProfileForLayout,
   startMarkupOnBundle,
   probePdf,
@@ -1531,6 +1533,11 @@ function execSyncDeps(options: PipelineJobsOptions): ExecSyncDeps {
       return listBundlePages(db, scope, target.bundleId);
     },
 
+    loadMarkupContext: async (target) => {
+      const scope = await scopeOf(target.folderId);
+      return loadMarkupContext(db, scope, target.layoutRevisionId);
+    },
+
     openWorkingPdf: async (sha256) => {
       const key = blobKey(sha256);
       const head = await storage.headObject(key);
@@ -1604,6 +1611,11 @@ function execSyncDeps(options: PipelineJobsOptions): ExecSyncDeps {
     mergeSnapshot: async (runId, patch) => {
       const { scope } = await scopeOfRun(runId);
       await mergeRunSettingsSnapshot(db, scope, runId, patch);
+    },
+
+    appendWarnings: async (runId, warnings) => {
+      const { scope } = await scopeOfRun(runId);
+      await appendRunWarnings(db, scope, runId, warnings);
     },
 
     finishRun: async (input) => {

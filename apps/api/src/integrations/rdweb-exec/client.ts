@@ -103,7 +103,7 @@ export class ExecSyncClient {
             signal: controller.signal,
           });
 
-          if (!response.ok) throw await failureOf(response, options.operation);
+          if (!response.ok) throw await failureOf(response, options.operation, this.#options.token);
           if (response.status === 204) return undefined as T;
           return (await response.json()) as T;
         } catch (error) {
@@ -147,7 +147,10 @@ export class ExecSyncClient {
             duplex: 'half',
           } as RequestInit & { duplex: 'half' });
 
-          if (!response.ok) throw await failureOf(response, 'upload_put');
+          // Bearer к подписанной ссылке не прикладывается, но вычёркивание всё
+          // равно передаётся: правило «секрет не печатается» не должно зависеть
+          // от того, помнит ли следующий читатель про это отличие.
+          if (!response.ok) throw await failureOf(response, 'upload_put', this.#options.token);
           await response.arrayBuffer();
         } catch (error) {
           if (error instanceof ExecSyncError) throw error;
@@ -159,6 +162,27 @@ export class ExecSyncClient {
   }
 }
 
+/** Сколько символов чужого текста доезжает до диагностики. */
+const BODY_SNIPPET_LIMIT = 200;
+
+/**
+ * Короткий снимок тела, не подошедшего под форму контракта.
+ *
+ * Переводы строк схлопываются: HTML-страница ошибки иначе разорвала бы одну
+ * запись журнала на полсотни строк, а прочитать её всё равно нельзя.
+ *
+ * Удостоверение вычёркивается ДО обрезки. Это не паранойя, а прямое следствие
+ * решения печатать чужой текст: ответ мы не сочиняем, а текст ошибки доезжает
+ * до `job_runs.error_message` и до консоли задач. Шлюз, вернувший присланный
+ * заголовок эхом, превратил бы диагностику в способ раздать токен — ровно этот
+ * дефект уже случался на S3 (`Authorization` в объекте ошибки LLM-провайдера).
+ */
+function snippetOf(text: string, secret: string): string {
+  const collapsed = text.replace(/\s+/gu, ' ').trim();
+  const safe = secret === '' ? collapsed : collapsed.split(secret).join('***');
+  return safe.length > BODY_SNIPPET_LIMIT ? `${safe.slice(0, BODY_SNIPPET_LIMIT)}…` : safe;
+}
+
 /**
  * Отказ из тела ответа: `{"detail": {"code": "…", "message": "…"}}` (§10).
  *
@@ -166,32 +190,53 @@ export class ExecSyncClient {
  * или пересобирать снимок, и решение это обязано опираться на код контракта, а
  * не на угадывание по тексту. Сообщение обрезается: у него нет обещания не
  * содержать эха присланных данных, а данные здесь — исполнительная документация.
+ *
+ * ## Почему тело не в форме контракта всё равно попадает в текст
+ *
+ * Потому что молчание здесь стоило полдня. На приёмке `rd.sync_init` пять раз
+ * получил `500`, а в консоли задач стояло «RD WEB ответил» без продолжения:
+ * их `500` отдавал `Internal Server Error` простым текстом, `JSON.parse` бросал,
+ * и оба поля оставались пустыми. Отличить «сломан их обработчик» от «сломано
+ * наше тело» удалось только серией ручных проб через `docker exec` — при том,
+ * что сам ответ был у нас в руках и мы его выбрасывали.
+ *
+ * Обрезка та же, что у `message`, и по той же причине: чужой текст может
+ * оказаться эхом присланного, а страница ошибки — километровой.
  */
-async function failureOf(response: Response, operation: string): Promise<ExecSyncError> {
+async function failureOf(
+  response: Response,
+  operation: string,
+  secret: string,
+): Promise<ExecSyncError> {
   let code: string | null = null;
   let message = '';
+  let raw = '';
   try {
-    const text = await response.text();
-    const parsed: unknown = text.length > 0 ? JSON.parse(text) : null;
+    raw = await response.text();
+    const parsed: unknown = raw.length > 0 ? JSON.parse(raw) : null;
     const detail = (parsed as { detail?: unknown } | null)?.detail;
     if (typeof detail === 'object' && detail !== null) {
       const rawCode = (detail as { code?: unknown }).code;
       const rawMessage = (detail as { message?: unknown }).message;
       if (typeof rawCode === 'string') code = rawCode;
-      if (typeof rawMessage === 'string') message = rawMessage.slice(0, 200);
+      if (typeof rawMessage === 'string') message = rawMessage.slice(0, BODY_SNIPPET_LIMIT);
     } else if (typeof detail === 'string') {
       // Прежний контур отвечал строкой в `detail`; форма могла остаться на
       // общих обработчиках, и терять текст из-за этого незачем.
-      message = detail.slice(0, 200);
+      message = detail.slice(0, BODY_SNIPPET_LIMIT);
     }
   } catch {
     code = null;
   }
 
+  const status = String(response.status);
+  const snippet = snippetOf(raw, secret);
   const described =
     code === null && message === ''
-      ? `RD WEB ответил ${String(response.status)}`
-      : `RD WEB ответил ${String(response.status)}: ${[code, message].filter(Boolean).join(' — ')}`;
+      ? snippet === ''
+        ? `RD WEB ответил ${status} с пустым телом`
+        : `RD WEB ответил ${status}, тело не в форме контракта: ${snippet}`
+      : `RD WEB ответил ${status}: ${[code, message].filter(Boolean).join(' — ')}`;
 
   return new ExecSyncError(described, {
     status: response.status,
