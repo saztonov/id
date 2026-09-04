@@ -74,6 +74,7 @@ import { Link } from '../../app/router.js';
 import { usePollingInterval } from './stream.js';
 import { isDryRun, newestRecognitionRun, runningRecognitionRun } from './runs.js';
 import { activeStageOf, isBusy } from './busy.js';
+import { describeState, deferredStageOf, plural } from './state.js';
 import { startedLabel } from './started.js';
 
 /** Опрос постраничного прогресса, пока прогон идёт. */
@@ -212,10 +213,10 @@ export function PipelineBar({ folderId, editable }: PipelineBarProps): ReactNode
   const queued = data?.queued ?? 0;
   const running = data?.running ?? 0;
   const dead = data?.dead ?? 0;
-  // Отсрочки суммируются по типам: сводного счётчика у ревизии нет, и заводить
-  // его незачем — «кто-то ждёт» отвечается сложением тех же строк, по которым
-  // считается и виновник остановки.
-  const deferred = (data?.jobTypes ?? []).reduce((total, row) => total + row.deferred, 0);
+  // Ожидание берётся ТЕКУЩЕЕ и вместе со стадией: пожизненный счётчик отсрочек
+  // (`deferred`) остаётся ненулевым до конца обработки и потому называл
+  // страницы ещё долго после того, как их дописали (см. шапку `state.ts`).
+  const deferredStage = deferredStageOf(data);
   const busy = isBusy(stage, queued, running);
   const activeStage = activeStageOf(data);
   // Постраничный счётчик разметки приезжает в той же сводке: своего запроса и
@@ -338,7 +339,7 @@ export function PipelineBar({ folderId, editable }: PipelineBarProps): ReactNode
               activeStage,
               queued,
               running,
-              deferred,
+              deferredStage,
               dead,
               busy,
               dryRun,
@@ -456,56 +457,6 @@ export function PipelineBar({ folderId, editable }: PipelineBarProps): ReactNode
   );
 }
 
-interface StateInput {
-  readonly stage: string | null;
-  /** Стадия с задачами в очереди; `null` — конвейер не занят. */
-  readonly activeStage: string | null;
-  readonly queued: number;
-  readonly running: number;
-  readonly deferred: number;
-  readonly dead: number;
-  readonly busy: boolean;
-  readonly dryRun: boolean;
-  readonly progress: { readonly pagesTotal: number } | null;
-}
-
-/** Одна фраза о том, что происходит прямо сейчас. */
-function describeState(input: StateInput): string {
-  const { stage, activeStage, queued, running, deferred, dead, busy, dryRun, progress } = input;
-
-  if (stage === null) return 'конвейер не запускался';
-  if (!busy) {
-    // «Готово» о прогоне, который ничего не опубликовал, — это неправда:
-    // распознавание состоялось, а комплект после него ровно там же, где был.
-    if (dryRun && (stage === 'ready' || stage === 'recognition')) {
-      return 'распознано, но не опубликовано';
-    }
-    if (stage === 'ready') return 'готово';
-    if (stage === 'failed') return 'обработка остановлена отказом';
-    return `последняя стадия: ${stageLabel(stage)}`;
-  }
-
-  // Сборщик ждёт, пока допишутся страницы: это работа, а не затор. Пока
-  // ожидание записывалось отказом, эта же секунда показывалась как «Обработка
-  // остановилась» — и человек шёл разбираться с исправным конвейером.
-  if (deferred > 0 && dead === 0) return 'идёт: ждём, пока допишутся страницы';
-
-  // Занятый конвейер называет ТЕКУЩУЮ стадию, а не самую дальнюю: иначе во
-  // время пересборки рабочего документа экран обещает выделение блоков, которое
-  // ещё даже не поставлено в очередь.
-  const now = activeStage ?? stage;
-
-  // Прогон создан, но страниц ещё нет: между постановкой в очередь и первой
-  // страницей проходят десятки секунд, и молчание здесь читается как зависание.
-  if (now === 'recognition' && running > 0 && (progress === null || progress.pagesTotal === 0)) {
-    return 'идёт: готовим страницы к распознаванию';
-  }
-  if (running === 0) {
-    return `в очереди: ${String(queued)} ${plural(queued, 'задача', 'задачи', 'задач')}, ждём исполнителя`;
-  }
-  return `идёт: ${stageLabel(now)}`;
-}
-
 /**
  * Причина остановки: КТО умер и что при этом сказал сервер.
  *
@@ -604,40 +555,4 @@ function Elapsed({ sinceMs }: { sinceMs: number | null }): ReactNode {
         : `${String(minutes)} мин ${String(seconds).padStart(2, '0')} с`}
     </Typography.Text>
   );
-}
-
-/** Склонение по русскому правилу: 1 задача, 2 задачи, 5 задач. */
-function plural(count: number, one: string, few: string, many: string): string {
-  const mod100 = count % 100;
-  if (mod100 >= 11 && mod100 <= 14) return many;
-  const mod10 = count % 10;
-  if (mod10 === 1) return one;
-  if (mod10 >= 2 && mod10 <= 4) return few;
-  return many;
-}
-
-/**
- * Подписи стадий.
- *
- * Отдельная таблица, а не `PROCESSING_STAGE_LABELS` из `shared/labels`: там
- * стадии названы для журнала («распознавание»), а здесь фраза встраивается в
- * «идёт: …» и читается вместе с ней.
- */
-function stageLabel(stage: string | null): string {
-  switch (stage) {
-    case 'uploaded':
-      return 'приём файлов и сборка рабочего документа';
-    case 'layout':
-      return 'выделение блоков на страницах';
-    case 'recognition':
-      return 'распознавание';
-    case 'analysis':
-      return 'разбор документов и реквизитов';
-    case 'checks':
-      return 'проверка правилами';
-    case 'ready':
-      return 'нарезка и выдача';
-    default:
-      return stage ?? 'неизвестно';
-  }
 }

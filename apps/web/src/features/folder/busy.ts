@@ -15,8 +15,19 @@
  */
 import type { ProcessingStatus } from '../../api/types.js';
 
-/** Стадии, на которых конвейер что-то делает прямо сейчас. */
-const BUSY_STAGES: readonly string[] = ['uploaded', 'layout', 'recognition', 'analysis', 'checks'];
+/**
+ * Стадии, на которых конвейер что-то делает прямо сейчас, — В ПОРЯДКЕ конвейера.
+ *
+ * Порядок значим для второго читателя (`state.ts`): из нескольких ждущих стадий
+ * называется самая ранняя, потому что она и держит остальные.
+ */
+export const PIPELINE_STAGES: readonly string[] = [
+  'uploaded',
+  'layout',
+  'recognition',
+  'analysis',
+  'checks',
+];
 
 /**
  * Занят ли конвейер.
@@ -28,7 +39,7 @@ const BUSY_STAGES: readonly string[] = ['uploaded', 'layout', 'recognition', 'an
  */
 export function isBusy(stage: string | null, queued: number, running: number): boolean {
   if (stage === null) return false;
-  if (!BUSY_STAGES.includes(stage)) return false;
+  if (!PIPELINE_STAGES.includes(stage)) return false;
   return queued > 0 || running > 0;
 }
 

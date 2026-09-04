@@ -92,6 +92,8 @@ const jobTypeSummarySchema = z.object({
   failed: z.int(),
   /** Попытки, окончившиеся ожиданием: условие ещё не наступило. */
   deferred: z.int(),
+  /** Задачи этого типа, отсроченные прямо сейчас, — в отличие от `deferred`. */
+  deferredNow: z.int(),
   leaseExpired: z.int(),
   inFlight: z.int(),
   /** Задачи этого типа, исчерпавшие попытки. Не попытки, а задачи. */
@@ -112,6 +114,7 @@ const processingStatusSchema = z.object({
   dead: z.int(),
   attempts: z.int(),
   totalDurationMs: z.int(),
+  /** Текущий непрерывный отрезок работы; простои между запусками не входят. */
   elapsedMs: z.int().nullable(),
   startedAt: z.string().nullable(),
   finishedAt: z.string().nullable(),

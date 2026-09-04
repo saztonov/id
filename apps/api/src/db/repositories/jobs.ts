@@ -1461,6 +1461,17 @@ export async function queueSnapshot(db: JobExecutor): Promise<QueueSnapshotRows>
 // Вычисляемый processing_status (§3.8)
 // =====================================================================
 
+/**
+ * Пауза, после которой работа считается ПРЕРВАННОЙ, а не идущей.
+ *
+ * Пятнадцать минут — с запасом над самой длинной штатной паузой внутри работы:
+ * потолок повтора после отказа — десять минут (`DEFAULT_BACKOFF`, `jobs/types`),
+ * отсрочки поллеров ждут не дольше минуты. То есть работающий конвейер этот
+ * порог не рвёт никогда, а человеческую паузу — «разметил вечером, распознаю
+ * утром» — рвёт всегда.
+ */
+const IDLE_GAP = `interval '15 minutes'`;
+
 /** Порядок стадий конвейера: по нему выбирается сводная стадия ревизии. */
 const STAGE_ORDER: readonly ProcessingStage[] = [
   'uploaded',
@@ -1485,6 +1496,22 @@ export interface JobTypeSummary {
    * конвейера объявляла остановку на работающем конвейере.
    */
   readonly deferred: number;
+  /**
+   * Задачи этого типа, отсроченные ПРЯМО СЕЙЧАС.
+   *
+   * `deferred` считает попытки за всю жизнь ревизии и потому отвечает на другой
+   * вопрос: «ждали ли здесь когда-нибудь». Экран спрашивает «ждут ли сейчас», и
+   * пожизненного счётчика ему мало — после первой же отсрочки он остаётся
+   * ненулевым до конца обработки. На боевом комплекте это выглядело так: страницы
+   * дописались, двадцать минут шло извлечение реквизитов, а полоса конвейера всё
+   * ещё уверяла, что ждёт страницы.
+   *
+   * Признак берётся из `jobs`, а не из журнала попыток, и однозначен: `deferJob`
+   * — единственное место, оставляющее задачу в `queued` без `last_error` при
+   * непустом `attempts`. `failJob` и `reapExpiredLeases` всегда пишут причину, а
+   * у задачи, поставленной с отложенным стартом, нет попыток.
+   */
+  readonly deferredNow: number;
   readonly leaseExpired: number;
   readonly inFlight: number;
   /**
@@ -1590,7 +1617,16 @@ export interface ProcessingStatus {
   readonly attempts: number;
   /** Сумма длительностей завершённых попыток — ответ на вопрос «сколько идёт». */
   readonly totalDurationMs: number;
-  /** Календарное время от первой попытки до последней завершённой. */
+  /**
+   * Календарное время ТЕКУЩЕГО непрерывного отрезка работы; простои между
+   * запусками в него не входят.
+   *
+   * Считалось от самой первой попытки ревизии за всю её жизнь, и это давало
+   * ответ на вопрос, которого никто не задавал. На боевом комплекте экран
+   * показал «966 мин»: между разметкой вечером и распознаванием утром конвейер
+   * девять с половиной часов не делал ничего, и эта ночь целиком лежала в
+   * «сколько идёт обработка».
+   */
   readonly elapsedMs: number | null;
   readonly startedAt: string | null;
   readonly finishedAt: string | null;
@@ -1667,17 +1703,56 @@ export async function computeProcessingStatus(
      group by job_type
   `);
 
-  const pendingRows = await db.execute<{ type: string; status: string; count: number }>(sql`
-    select ${jobs.type} as type, ${jobs.status} as status, count(*)::int as count
+  const pendingRows = await db.execute<{
+    type: string;
+    status: string;
+    count: number;
+    deferred_now: number;
+  }>(sql`
+    select ${jobs.type} as type, ${jobs.status} as status, count(*)::int as count,
+           count(*) filter (
+             where ${jobs.status} = 'queued'
+               and ${jobs.attempts} > 0
+               and ${jobs.lastError} is null
+               and ${jobs.nextRunAt} > now()
+           )::int as deferred_now
       from ${jobs}
      where ${jobs.payload} ->> 'folderId' = ${folderId}
        and ${jobs.status} in ('queued', 'running', 'failed')
      group by 1, 2
   `);
 
+  /**
+   * Начало ТЕКУЩЕГО отрезка работы: первая попытка после последнего простоя.
+   *
+   * Разрывы ищутся по бегущему максимуму окончаний, а не по предыдущей строке:
+   * попытки идут внахлёст (десятки страниц распознаются разом), и соседняя по
+   * времени старта попытка вполне может завершиться раньше начала своей
+   * предшественницы. Незавершённая попытка держит отрезок открытым — её конец
+   * берётся равным началу.
+   */
+  const sessionRows = await db.execute<{ session_started_at: string | null }>(sql`
+    with attempts as (
+      select ${jobRuns.startedAt} as started_at,
+             max(coalesce(${jobRuns.finishedAt}, ${jobRuns.startedAt})) over (
+               order by ${jobRuns.startedAt}
+               rows between unbounded preceding and 1 preceding
+             ) as prev_end
+        from ${jobRuns}
+       where ${jobRuns.folderId} = ${folderId}
+    )
+    select ${sql.raw(
+      ISO(`max(started_at) filter (
+             where prev_end is null or started_at - prev_end > ${IDLE_GAP}
+           )`),
+    )} as session_started_at
+      from attempts
+  `);
+
   let queued = 0;
   let running = 0;
   let dead = 0;
+  const deferredNowByType = new Map<string, number>();
   const deadByType = new Map<string, number>();
   const pendingByStage = new Map<ProcessingStage, number>();
   for (const row of pendingRows.rows) {
@@ -1686,6 +1761,9 @@ export async function computeProcessingStatus(
     if (row.status === 'failed') {
       dead += row.count;
       deadByType.set(row.type, (deadByType.get(row.type) ?? 0) + row.count);
+    }
+    if (row.deferred_now > 0) {
+      deferredNowByType.set(row.type, (deferredNowByType.get(row.type) ?? 0) + row.deferred_now);
     }
     const stage = isJobType(row.type) ? stageOf(row.type) : null;
     if (stage !== null && row.status !== 'failed') {
@@ -1709,7 +1787,11 @@ export async function computeProcessingStatus(
    * «Обработка остановилась» и не могла сказать, на чём.
    */
   const jobTypes: JobTypeSummary[] = [
-    ...new Set([...runRows.rows.map((row) => row.job_type), ...deadByType.keys()]),
+    ...new Set([
+      ...runRows.rows.map((row) => row.job_type),
+      ...deadByType.keys(),
+      ...deferredNowByType.keys(),
+    ]),
   ].map((jobType) => {
     const row = runRows.rows.find((candidate) => candidate.job_type === jobType);
     return {
@@ -1719,6 +1801,7 @@ export async function computeProcessingStatus(
       succeeded: row?.succeeded ?? 0,
       failed: row?.failed ?? 0,
       deferred: row?.deferred ?? 0,
+      deferredNow: deferredNowByType.get(jobType) ?? 0,
       leaseExpired: row?.lease_expired ?? 0,
       inFlight: row?.in_flight ?? 0,
       dead: deadByType.get(jobType) ?? 0,
@@ -1750,6 +1833,7 @@ export async function computeProcessingStatus(
 
   const startedAt = minIso(jobTypes.map((s) => s.firstStartedAt));
   const finishedAt = maxIso(jobTypes.map((s) => s.lastFinishedAt));
+  const sessionStartedAt = sessionRows.rows[0]?.session_started_at ?? null;
 
   return {
     folderId,
@@ -1763,10 +1847,13 @@ export async function computeProcessingStatus(
     dead,
     attempts: sum(jobTypes.map((s) => s.attempts)),
     totalDurationMs: sum(jobTypes.map((s) => s.totalDurationMs)),
+    // Ноль — законный ответ: в начатом отрезке ещё ни одна попытка не
+    // завершилась, и последний известный финиш остался в прошлом отрезке.
+    // Дальше время дотикивает экран, а следующий опрос вернёт настоящее.
     elapsedMs:
-      startedAt === null || finishedAt === null
+      sessionStartedAt === null || finishedAt === null
         ? null
-        : Math.max(0, Date.parse(finishedAt) - Date.parse(startedAt)),
+        : Math.max(0, Date.parse(finishedAt) - Date.parse(sessionStartedAt)),
     startedAt,
     finishedAt,
     stages,

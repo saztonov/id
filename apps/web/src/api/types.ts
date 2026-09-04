@@ -713,6 +713,7 @@ export interface ProcessingStatus {
   dead: number;
   attempts: number;
   totalDurationMs: number;
+  /** Текущий непрерывный отрезок работы; простои между запусками не входят. */
   elapsedMs: number | null;
   startedAt: string | null;
   finishedAt: string | null;
@@ -726,6 +727,13 @@ export interface ProcessingStatus {
     succeeded: number;
     /** Попытки, окончившиеся ожиданием: «условие ещё не наступило». */
     deferred: number;
+    /**
+     * Задачи этого типа, отсроченные ПРЯМО СЕЙЧАС.
+     *
+     * `deferred` копится за всю жизнь ревизии и потому отвечает «ждали ли
+     * здесь когда-нибудь»; полосе конвейера нужно «ждут ли сейчас».
+     */
+    deferredNow: number;
     leaseExpired: number;
     inFlight: number;
     /**

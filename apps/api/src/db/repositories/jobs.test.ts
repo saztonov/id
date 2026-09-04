@@ -796,3 +796,130 @@ describe('computeProcessingStatus: разметка постранично', () 
     expect(await layoutOf()).toBeNull();
   });
 });
+
+// =====================================================================
+// Честные показания полосы конвейера (S51)
+// =====================================================================
+
+/**
+ * Два показания, которые ввели инженера в заблуждение на боевом комплекте.
+ *
+ * Экран сказал «идёт: ждём, пока допишутся страницы 966 мин 04 с» — и человек
+ * пошёл искать зависание в базе. Конвейер был исправен: страницы дописались
+ * двадцатью минутами раньше, шло извлечение реквизитов, а шестнадцать часов
+ * набежали из ночного простоя между разметкой вечером и распознаванием утром.
+ * Врали оба числа, и оба — по одной причине: они считались за всю жизнь
+ * ревизии там, где спрашивают про «сейчас».
+ */
+describe('computeProcessingStatus: время работы и текущее ожидание', () => {
+  const SCOPE: AuthScope = { kind: 'manager', userId: USER };
+  const FOLDER_2 = id(300);
+
+  /** Своя ревизия: соседние наборы тестов уже наполнили очередь общей. */
+  beforeAll(async () => {
+    for (const statement of folderTreeSql({
+      contractorId: ORG,
+      objectId: OBJECT,
+      userId: USER,
+      folderId: FOLDER_2,
+    })) {
+      await testDb.query(statement);
+    }
+  });
+
+  /** Попытка задачи в журнале: минуты от условного «сейчас» назад. */
+  async function attempt(
+    jobType: string,
+    startedMinutesAgo: number,
+    finishedMinutesAgo: number,
+  ): Promise<void> {
+    await testDb.query(
+      `INSERT INTO job_runs (job_type, folder_id, attempt, started_at, finished_at, outcome, duration_ms)
+         VALUES ('${jobType}', '${FOLDER_2}', 1,
+                 now() - interval '${String(startedMinutesAgo)} minutes',
+                 now() - interval '${String(finishedMinutesAgo)} minutes',
+                 'succeeded', 1000)`,
+    );
+  }
+
+  const statusOf = async () => {
+    const status = await computeProcessingStatus(db, SCOPE, FOLDER_2);
+    if (status === null) throw new Error('ревизия не видна области');
+    return status;
+  };
+
+  it('простой между запусками не входит во время работы', async () => {
+    // Вечерняя разметка и утреннее распознавание — две РАЗНЫЕ работы, между
+    // ними человек спал. Прежняя формула складывала их вместе с ночью.
+    await attempt('layout.detect_local', 16 * 60 + 6, 16 * 60);
+    await attempt('vlm.recognize_page', 30, 20);
+    await attempt('vlm.finalize_run', 21, 10);
+
+    const status = await statusOf();
+
+    expect(status.elapsedMs).toBeGreaterThanOrEqual(19 * 60_000);
+    expect(status.elapsedMs).toBeLessThan(22 * 60_000);
+    // Историческая рамка ревизии не сдвинулась: её читает вкладка «История».
+    expect(Date.now() - Date.parse(status.startedAt ?? '')).toBeGreaterThan(16 * 60 * 60_000);
+  });
+
+  it('пауза внутри работы отрезок не рвёт', async () => {
+    // Повтор после отказа ждёт до десяти минут штатно, и такая пауза — часть
+    // той же работы, а не новый её заход. Порог отрезка выбран заведомо выше:
+    // здесь между финишем прошлой попытки и стартом новой прошло восемь минут.
+    await attempt('doc.extract_document', 2, 1);
+
+    const status = await statusOf();
+
+    // Отрезок по-прежнему начинается с распознавания, то есть 30 минут назад.
+    expect(status.elapsedMs).toBeGreaterThanOrEqual(28 * 60_000);
+    expect(status.elapsedMs).toBeLessThan(31 * 60_000);
+  });
+
+  it('отсрочка называется, только пока она идёт', async () => {
+    // Признак берётся из `jobs`: отсроченная задача ждёт в очереди без причины
+    // отказа. Пожизненный счётчик `deferred` остаётся ненулевым навсегда.
+    const { jobId } = await enqueueSystemJob(db, {
+      type: 'doc.extract_finalize',
+      payload: { folderId: FOLDER_2, generation: id(301) },
+      dedupeKey: 'doc.extract_finalize:s51',
+    });
+    await testDb.query(
+      `UPDATE jobs SET attempts = 27, last_error = NULL, next_run_at = now() + interval '30 seconds'
+        WHERE id = '${jobId}'`,
+    );
+
+    const waiting = await statusOf();
+    expect(
+      waiting.jobTypes.find((row) => row.jobType === 'doc.extract_finalize')?.deferredNow,
+    ).toBe(1);
+
+    // Та же задача, ждущая ПОВТОРА после отказа, ожиданием не считается: за ней
+    // стоит ошибка, и говорить о ней надо словами про отказ.
+    await testDb.query(
+      `UPDATE jobs SET last_error = 'попытка не уложилась в 180000 мс' WHERE id = '${jobId}'`,
+    );
+
+    // Тип уходит из сводки целиком: попыток он не записал, мёртвых задач не
+    // оставил — сводка собирается по фактам, а не по всем мыслимым типам.
+    const retrying = await statusOf();
+    expect(
+      retrying.jobTypes.find((row) => row.jobType === 'doc.extract_finalize')?.deferredNow ?? 0,
+    ).toBe(0);
+  });
+
+  it('свежепоставленная задача с отложенным стартом — не отсрочка', async () => {
+    // У неё нет ни одной попытки: ждут не её результата, а её очереди.
+    const { jobId } = await enqueueSystemJob(db, {
+      type: 'checks.run',
+      payload: { folderId: FOLDER_2 },
+      dedupeKey: 'checks.run:s51',
+    });
+    await testDb.query(
+      `UPDATE jobs SET next_run_at = now() + interval '5 minutes' WHERE id = '${jobId}'`,
+    );
+
+    const status = await statusOf();
+    expect(status.jobTypes.find((row) => row.jobType === 'checks.run')?.deferredNow ?? 0).toBe(0);
+  });
+});
