@@ -96,6 +96,8 @@ const RECOGNITION_A = id(67);
 const ARTIFACT_A = id(68);
 const TEXT_A0 = id(69);
 const DOCUMENT_A = id(70);
+/** Версия текста НУЛЕВОЙ длины: распознавание, записанное как успех. */
+const TEXT_A1_EMPTY = id(71);
 
 /** Ревизия с двумя прогонами: авторитетный тот, что новее. */
 const FOLDER_C = id(81);
@@ -234,6 +236,14 @@ const FIXTURE: readonly string[] = [
                                    artifact_version_id, text_md, text_sha256)
      VALUES ('${TEXT_A0}', '${FOLDER_A}', '${PAGE_A0}', '${RECOGNITION_A}', '${ARTIFACT_A}',
              'СЕРТИФИКАТ СООТВЕТСТВИЯ действителен до 12.03.2024', '${SHA('6')}')`,
+  // Вторая страница «распознана» пустой: блок принят, версия текста записана,
+  // а содержимого в ней нет. Так выглядит исход `table_empty_rows` — модель
+  // объявила таблицу и не выписала из неё ни строки. Для счётчика покрытия это
+  // НЕ распознанная страница, иначе шапка проверки скроет потерю.
+  `INSERT INTO page_text_versions (id, folder_id, source_page_id, recognition_run_id,
+                                   artifact_version_id, text_md, text_sha256)
+     VALUES ('${TEXT_A1_EMPTY}', '${FOLDER_A}', '${PAGE_A1}', '${RECOGNITION_A}', '${ARTIFACT_A}',
+             '', '${SHA('c')}')`,
   `INSERT INTO logical_documents (id, folder_id, object_id, contractor_id, doc_type_code, ordinal, title)
      VALUES ('${DOCUMENT_A}', '${FOLDER_A}', '${OBJECT}', '${ORG_A}', 'cert_conformity', 0, 'Сертификат № 42')`,
   `INSERT INTO page_assignments (folder_id, source_page_id, document_id, sort_order)
@@ -709,6 +719,10 @@ describe('обогащение замечаний', () => {
     const { coverage, counts } = summaryOf(response);
 
     expect(coverage.pagesTotal).toBe(3);
+    // Версий текста у папки две, но одна пустая, и распознанной страницей она
+    // не считается: пустая версия — это провал распознавания, записанный как
+    // успех. На боевой папке так исчезла страница описи передачи вместе с
+    // девяноста шестью позициями, а шапка продолжала считать её распознанной.
     expect(coverage.pagesRecognized).toBe(1);
     expect(coverage.pagesAssigned).toBe(2);
     // Непривязанная страница — это `page_assignments` с пустым документом, а

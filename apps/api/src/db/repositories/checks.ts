@@ -1350,7 +1350,21 @@ export async function loadChecksCoverage(
   const rows = await db
     .select({
       pagesTotal: sql<number>`(select count(*)::int from ${sourcePages} p where p.folder_id = folders.id)`,
-      pagesRecognized: sql<number>`(select count(distinct t.source_page_id)::int from ${pageTextVersions} t where t.folder_id = folders.id)`,
+      /**
+       * Распознанной считается страница с НЕПУСТЫМ текстом.
+       *
+       * Версия текста нулевой длины — не признак распознавания, а его провал,
+       * записанный как успех: модель объявляет таблицу и не выписывает из неё
+       * ни строки (`table_empty_rows`), блок принимается, страница помечается
+       * `done`. На боевой папке «ИД Мастер апрель 2026» так пропала третья
+       * страница описи передачи — вместе с девяноста шестью её позициями, — а
+       * шапка проверки продолжала утверждать «распознано 219 страниц из 220»,
+       * потому что пустая версия текста считалась наравне с полной. Счётчик
+       * покрытия существует ровно затем, чтобы такое не пряталось.
+       */
+      pagesRecognized: sql<number>`(
+        select count(distinct t.source_page_id)::int from ${pageTextVersions} t
+         where t.folder_id = folders.id and length(btrim(t.text_md)) > 0)`,
       pagesAssigned: sql<number>`(select count(*)::int from ${pageAssignments} a where a.folder_id = folders.id and a.document_id is not null)`,
       pagesUnassigned: sql<number>`(select count(*)::int from ${pageAssignments} a where a.folder_id = folders.id and a.document_id is null)`,
       unassignedPageNumbers: sql<number[]>`(
