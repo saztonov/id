@@ -32,6 +32,7 @@ export const PERMISSIONS = {
   'submission.read': ['contractor', 'general_contractor', 'engineer', 'manager', 'admin'],
   'submission.upload': ['contractor', 'general_contractor', 'engineer', 'manager', 'admin'],
   'submission.submit': ['contractor', 'general_contractor', 'engineer', 'manager', 'admin'],
+  'submission.delete': ['contractor', 'general_contractor', 'engineer', 'manager', 'admin'],
   'markup.read': ['contractor', 'general_contractor', 'engineer', 'manager', 'admin'],
   'markup.edit': ['contractor', 'general_contractor', 'engineer', 'admin'],
   'recognition.start': ['contractor', 'general_contractor', 'engineer', 'admin'],
