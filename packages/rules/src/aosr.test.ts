@@ -899,7 +899,10 @@ describe('REG.100 / REG.101 / REG.102 — сверка с реестром пр�
     expect(verdictOf('REG.100', registryGraph('matched'))).toBe('pass');
     const missing = registryGraph('missing');
     expect(verdictOf('REG.100', missing)).toBe('fail');
-    expect(messagesOf('REG.100', missing)[0]).toContain('строка 3 реестра');
+    // Предложный падеж, а не именительный: замечание читает подрядчик, и
+    // «названный в строка 3 реестра» обесценивает самое тяжёлое из того, что
+    // портал говорит о комплекте.
+    expect(messagesOf('REG.100', missing)[0]).toContain('названный в строке 3 реестра');
   });
 
   it('REG.100: строка «б/н» отсутствия документа не доказывает', () => {
@@ -946,6 +949,23 @@ describe('REG.100 / REG.101 / REG.102 — сверка с реестром пр�
     expect(verdictOf('REG.101', makeGraph({ documents: [quality] }))).toBe('n_a');
   });
 
+  it('REG.101: схема и журнал авторского надзора строки в реестре приложений не требуют', () => {
+    // Реестр приложений — перечень МАТЕРИАЛЬНЫЙ: его графы «наименование
+    // материала» и «организация (производитель)» заводятся на документ о
+    // качестве. У исполнительной схемы и учётного листа авторского надзора
+    // материала нет, и в реестре приложений их не бывает — они названы п. 4
+    // акта и описью передачи. На боевой папке «ИД Мастер апрель 2026» правило
+    // выдавало пятнадцать предупреждений из пятнадцати ровно на них, при
+    // двенадцати правильно заполненных реестрах.
+    const scheme = makeDocument({ docTypeCode: 'exec_scheme', title: 'Исполнительная схема' });
+    const log = makeDocument({
+      docTypeCode: 'author_supervision_log',
+      title: 'УЧЕТНЫЙ ЛИСТ № 118',
+    });
+
+    expect(verdictOf('REG.101', registryGraph('matched', [scheme, log]))).toBe('pass');
+  });
+
   it('REG.102: однозначное сопоставление даёт pass, неоднозначное — fail', () => {
     expect(verdictOf('REG.102', registryGraph('matched'))).toBe('pass');
     expect(verdictOf('REG.102', registryGraph('ambiguous'))).toBe('fail');
@@ -981,18 +1001,21 @@ describe('REG.100 / REG.101 / REG.102 — сверка с реестром пр�
   it('REG.101: документ-кандидат строки лишним не объявляется', () => {
     // Двойное обвинение: строка реестра не нашла документ по номеру, а сам
     // документ объявлялся не названным реестром — за один и тот же факт.
-    const scheme = makeDocument({ docTypeCode: 'exec_scheme', title: null });
+    // Вид документа здесь намеренно материальный: исполнительная схема с S51
+    // исключена из ожидаемых в реестре приложений безусловно, и на ней это
+    // утверждение проходило бы, даже если бы ветка кандидатов сломалась.
+    const certificate = makeDocument({ docTypeCode: 'cert_conformity', title: null });
     const graph = makeGraph({
-      documents: [registry, scheme],
+      documents: [registry, certificate],
       registryRows: [
         makeRegistryRow({
           registryDocumentId: registry.id,
           rowNo: 9,
-          docNameRaw: 'Исполнительная схема обратной засыпки',
-          docNoRaw: 'ИС №002',
+          docNameRaw: 'Сертификат соответствия',
+          docNoRaw: 'СС №002',
           matchState: 'candidate',
           matchedDocumentId: null,
-          candidateDocumentIds: [scheme.id],
+          candidateDocumentIds: [certificate.id],
         }),
       ],
     });

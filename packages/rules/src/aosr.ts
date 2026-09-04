@@ -160,6 +160,9 @@ const PASSPORT_TYPES: readonly string[] = [
 /** Исполнительные схемы. */
 const SCHEME_TYPE = /^exec_/u;
 
+/** Журнал (учётный лист) авторского надзора: приложение к акту, но не к материалу. */
+const SUPERVISION_LOG_TYPE = 'author_supervision_log';
+
 const NO_ACTS = 'в комплекте нет акта освидетельствования с уверенно определённым типом';
 
 // ---------------------------------------------------------------------------
@@ -1416,8 +1419,26 @@ function evaluateNextWorks(graph: CheckGraph): RuleResult {
 
 const NO_REGISTRY = 'в комплекте нет реестра приложений — сверять нечего';
 
+function rowTail(docNoRaw: string | null, docNameRaw: string): string {
+  return `реестра («${docNameRaw}»${docNoRaw === null ? '' : `, № ${docNoRaw}`})`;
+}
+
+/** Именительный: «строка 3 реестра (…) сопоставлена неоднозначно». */
 function rowLabel(rowNo: number, docNoRaw: string | null, docNameRaw: string): string {
-  return `строка ${String(rowNo)} реестра («${docNameRaw}»${docNoRaw === null ? '' : `, № ${docNoRaw}`})`;
+  return `строка ${String(rowNo)} ${rowTail(docNoRaw, docNameRaw)}`;
+}
+
+/**
+ * Предложный: «названный в строкЕ 3 реестра (…)».
+ *
+ * Отдельная форма, а не склейка на месте: подстановка именительного падежа в
+ * предлог давала «названный в строка 3 реестра» — фразу, которую подрядчик
+ * читает в отчёте как признак того, что текст собран машиной и доверять ему
+ * не обязательно. Замечание об отсутствующем документе — самое тяжёлое из
+ * того, что портал говорит, и оно обязано быть написано по-русски.
+ */
+function rowLabelIn(rowNo: number, docNoRaw: string | null, docNameRaw: string): string {
+  return `строке ${String(rowNo)} ${rowTail(docNoRaw, docNameRaw)}`;
 }
 
 /**
@@ -1448,7 +1469,7 @@ function evaluateRegistryMissing(graph: CheckGraph): RuleResult {
   const findings = graph.registryRows
     .filter((row) => row.matchState === 'missing')
     .map((row) => {
-      const label = rowLabel(row.rowNo, row.docNoRaw, row.docNameRaw);
+      const label = rowLabelIn(row.rowNo, row.docNoRaw, row.docNameRaw);
 
       /**
        * Строка без сравнимого номера («б/н») отсутствия документа не доказывает.
@@ -1526,6 +1547,22 @@ function evaluateRegistryExtra(graph: CheckGraph): RuleResult {
     const code = document.docTypeCode;
     // Сам акт и реестр в реестре не перечисляются.
     if (code !== null && (ACT_TYPES.test(code) || code === REGISTRY_TYPE)) continue;
+    /**
+     * Реестр приложений — перечень МАТЕРИАЛЬНЫЙ, и вид документа решает, вправе
+     * ли правило требовать там строку.
+     *
+     * Его графы — «наименование материала», «организация (производитель)»,
+     * «наименование документа», «номер», «дата»: строка заводится на документ
+     * о качестве, подтверждающий материал. У исполнительной схемы и журнала
+     * авторского надзора материала нет, и в реестре приложений их не бывает —
+     * они названы п. 4 акта и описью передачи. Требовать от них строки значит
+     * требовать заполнить графу «наименование материала» у чертежа.
+     *
+     * На боевой папке «ИД Мастер апрель 2026» это давало пятнадцать
+     * предупреждений из пятнадцати: одиннадцать схем и четыре учётных листа во
+     * всех двенадцати комплектах, где реестры приложений заполнены правильно.
+     */
+    if (code !== null && (SCHEME_TYPE.test(code) || code === SUPERVISION_LOG_TYPE)) continue;
 
     findings.push(
       defect({
