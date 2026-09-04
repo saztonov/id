@@ -171,15 +171,76 @@ export function hasPermission(roles: readonly PortalRole[], permission: Permissi
   return roles.some((role) => allowed.includes(role));
 }
 
+/**
+ * Отметка права на замыкании-стороже.
+ *
+ * Читает её гейт «матрица роль × ручка»: он получает `preHandler` из хука
+ * `onRoute` и обязан ответить, каким правом закрыт маршрут, не разбирая
+ * исходники. Поведенческой пробой этот вопрос не решается: `document.edit`,
+ * `checks.run`, `registry.accept`, `folder.approve` и `folder.return` выданы
+ * ОДНОМУ набору ролей, поэтому маршрут, закрытый по ошибке не тем правом, ведёт
+ * себя неотличимо от исправного.
+ *
+ * `Symbol.for`, чтобы отметка пережила два экземпляра модуля. На поведение не
+ * влияет: свойство функции не попадает ни в ответ, ни в журнал, ни в
+ * `printRoutes` (тот печатает только имя функции).
+ */
+export const ROUTE_PERMISSIONS: unique symbol = Symbol.for('id-portal.route-permissions');
+
+/** Сторож с отметкой права. */
+type MarkedHandler = preHandlerAsyncHookHandler & {
+  readonly [ROUTE_PERMISSIONS]: readonly Permission[];
+};
+
+function mark(
+  handler: preHandlerAsyncHookHandler,
+  permissions: readonly Permission[],
+): preHandlerAsyncHookHandler {
+  return Object.assign(handler, { [ROUTE_PERMISSIONS]: permissions }) as MarkedHandler;
+}
+
+/**
+ * Права, которыми закрыт маршрут. `null` — сторожа с отметкой на нём нет вовсе
+ * (маршрут публичный либо требует только сессии).
+ *
+ * Читатель живёт здесь, а не в тесте, намеренно: копия, разъехавшаяся с
+ * писателем, вернула бы `null` на КАЖДОМ маршруте и сделала бы гейт зелёным
+ * вхолостую.
+ */
+export function routePermissions(preHandler: unknown): readonly Permission[] | null {
+  const chain = Array.isArray(preHandler)
+    ? (preHandler as readonly unknown[])
+    : preHandler === undefined || preHandler === null
+      ? []
+      : [preHandler];
+
+  const marks = chain.flatMap((hook) =>
+    typeof hook === 'function' && ROUTE_PERMISSIONS in hook
+      ? [(hook as MarkedHandler)[ROUTE_PERMISSIONS]]
+      : [],
+  );
+
+  if (marks.length === 0) return null;
+  // Два сторожа на одном маршруте матрица не выражает, а молча взять первый —
+  // значит проверять не тот гейт, что стоит.
+  if (marks.length > 1) {
+    throw new Error(`на маршруте несколько сторожей прав: ${marks.flat().join(', ')}`);
+  }
+  return marks[0] ?? null;
+}
+
 export function requirePermission(permission: Permission): preHandlerAsyncHookHandler {
-  return async function checkPermission(request: FastifyRequest) {
-    // Аутентификация раньше авторизации: иначе анонимный запрос получил бы 403
-    // вместо 401 и клиент не понял бы, что нужно войти.
-    await requireAuth(request);
-    if (!hasPermission(request.authContext?.roles ?? [], permission)) {
-      throw permissionDenied(permission);
-    }
-  };
+  return mark(
+    async function checkPermission(request: FastifyRequest) {
+      // Аутентификация раньше авторизации: иначе анонимный запрос получил бы 403
+      // вместо 401 и клиент не понял бы, что нужно войти.
+      await requireAuth(request);
+      if (!hasPermission(request.authContext?.roles ?? [], permission)) {
+        throw permissionDenied(permission);
+      }
+    },
+    [permission],
+  );
 }
 
 /**
@@ -195,13 +256,13 @@ export function requirePermission(permission: Permission): preHandlerAsyncHookHa
 export function requireAnyPermission(
   permissions: readonly Permission[],
 ): preHandlerAsyncHookHandler {
-  return async function checkAnyPermission(request: FastifyRequest) {
+  return mark(async function checkAnyPermission(request: FastifyRequest) {
     await requireAuth(request);
     const roles = request.authContext?.roles ?? [];
     if (!permissions.some((permission) => hasPermission(roles, permission))) {
       throw permissionDenied(permissions[0] ?? 'settings.manage');
     }
-  };
+  }, permissions);
 }
 
 function permissionDenied(permission: Permission) {

@@ -183,8 +183,34 @@ declare module 'fastify' {
   }
 }
 
+/**
+ * Маршрут, каким его видит хук `onRoute` при регистрации.
+ *
+ * Тип объявлен структурно, а не взят из `RouteOptions` фастифая: у `AppInstance`
+ * свой type-provider, и внешне объявленная сигнатура упирается в
+ * `strictFunctionTypes`. Заодно он документирует, на что гейту разрешено
+ * опираться, — а опирается он на три вещи: полный путь-шаблон с префиксом
+ * (`/api/v1/folders/:folderId`), метод и цепочку `preHandler` в том виде, в
+ * каком её написал автор (функция, массив или ничего).
+ */
+export interface ObservedRoute {
+  readonly method: string | readonly string[];
+  readonly url: string;
+  readonly preHandler?: unknown;
+  readonly schema?: unknown;
+}
+
 export interface BuildAppOptions {
   readonly env?: Env;
+  /**
+   * Наблюдатель регистрации маршрутов. Нужен гейту «матрица роль × ручка»
+   * (`route-matrix.test.ts`): перечень ручек обязан выводиться из РОУТЕРА, а не
+   * из списка, который ведут руками. Список — это `ADMIN_PROBES`, и его слабое
+   * место в том, что новый эндпоинт не попадает в свип молча.
+   *
+   * Без опции хук не навешивается: на боевую сборку это не влияет ничем.
+   */
+  readonly onRoute?: (route: ObservedRoute) => void;
   /** Готовый пул (тесты, pglite). Переданный извне пул не закрывается при shutdown. */
   readonly pool?: Pool;
   readonly authProvider?: AuthProvider | null;
@@ -308,6 +334,18 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppInstan
         : randomUUID();
     },
   }).withTypeProvider<ZodTypeProvider>();
+
+  // Наблюдатель регистрации маршрутов ставится ЗДЕСЬ, а не ниже, и это не
+  // вкусовщина: дочерние контексты копируют хуки `onRoute` в момент своего
+  // создания (`fastify/lib/hooks.js`, `buildHooks`), поэтому хук, добавленный
+  // после первого `app.register(...)`, не увидел бы маршруты инкапсулированных
+  // плагинов — например приём байтов драйвера `local` (`modules/files/routes.ts`).
+  const observeRoute = options.onRoute;
+  if (observeRoute !== undefined) {
+    app.addHook('onRoute', (route) => {
+      observeRoute(route);
+    });
+  }
 
   app.setValidatorCompiler(validatorCompiler);
   app.setSerializerCompiler(serializerCompiler);
