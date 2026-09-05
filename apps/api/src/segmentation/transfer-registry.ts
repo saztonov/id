@@ -119,6 +119,13 @@ export interface ParsedTransferRow {
   readonly copies: number | null;
   /** «Страница по списку» дословно: бывает диапазоном «46-47». */
   readonly pagesRaw: string | null;
+  /**
+   * Номер позиции строки не продолжает нумерацию своего раздела (S53).
+   *
+   * Строка остаётся там, где напечатана, а расхождение публикуется правилом:
+   * это дефект описи, а не повод перенести строку в чужой комплект.
+   */
+  readonly positionMismatch: boolean;
 }
 
 export interface TransferParseResult {
@@ -453,6 +460,24 @@ function openGroup(
   return true;
 }
 
+/**
+ * Номер раздела продолжает нумерацию описи: следующий за наибольшим виденным.
+ *
+ * Пропуск номера законен (раздел выпал из описи целиком), но прыжок вперёд на
+ * десятки — это потерянная точка распознавания, а не новый раздел.
+ */
+function opensNextSection(state: ParseState, sectionNo: string): boolean {
+  const next = Number(sectionNo);
+  if (!Number.isInteger(next) || next <= 0) return false;
+
+  let maxSeen = 0;
+  for (const group of state.groups) {
+    const seen = group.groupNo === null ? Number.NaN : Number(group.groupNo);
+    if (Number.isInteger(seen) && seen > maxSeen) maxSeen = seen;
+  }
+  return next <= maxSeen + 1;
+}
+
 function buildRow(
   state: ParseState,
   cells: readonly string[],
@@ -460,6 +485,7 @@ function buildRow(
   groupOrdinal: number,
   pageId: string,
   shift = 0,
+  positionMismatch = false,
 ): void {
   if (state.rows.length >= MAX_ROWS) {
     if (!state.truncated) {
@@ -509,6 +535,7 @@ function buildRow(
     sheets: toCount(cellAt(cells, layout.sheets, shift)),
     copies: toCount(cellAt(cells, layout.copies, shift)),
     pagesRaw: pagesRaw === '' ? null : pagesRaw,
+    positionMismatch,
   });
 }
 
@@ -659,17 +686,42 @@ export function parseTransferRegistry(input: {
          */
         const hierarchical = HIERARCHICAL_POSITION.exec(posRaw);
         const sectionNo = hierarchical?.[1] ?? null;
+        let positionMismatch = false;
         if (layout.form === 'b' && sectionNo !== null) {
           const known = state.groups.findIndex((group) => group.groupNo === sectionNo);
           if (known >= 0) {
-            openGroupOrdinal = known;
+            /**
+             * Назад — только к ОТКРЫТОМУ разделу, и никогда к закрытому (S53).
+             *
+             * Раздел закрывается, когда после него открылся следующий: строки
+             * идут подряд, и вернуться в предыдущий раздел строка физически не
+             * может — под его заголовком она не напечатана. В боевой папке
+             * «ИД Мастер апрель 2026» раздел 10 продолжен номерами «8.5»…«8.14»,
+             * и возврат уводил десять его строк в комплект восьмого акта: они
+             * сверялись с чужими документами, а пять документов десятого
+             * получали «не назван описью».
+             *
+             * Положение сильнее нумерации: строка остаётся там, где напечатана,
+             * а расхождение помечается и уходит правилу REG.113.
+             */
+            if (openGroupOrdinal === null || known === openGroupOrdinal) {
+              openGroupOrdinal = known;
+            } else {
+              positionMismatch = true;
+              state.warnings.push(
+                `страница ${page.sourcePageId}: позиция «${posRaw}» продолжает нумерацию ` +
+                  `раздела ${sectionNo}, а строка напечатана в разделе ` +
+                  `${state.groups[openGroupOrdinal]?.groupNo ?? String(openGroupOrdinal + 1)} — ` +
+                  'строка оставлена по месту',
+              );
+            }
           } else {
             const open = openGroupOrdinal === null ? undefined : state.groups[openGroupOrdinal];
             if (open !== undefined && open.groupNo === null) {
               // Раздел открыт заголовком, а номер его строк стал известен
               // только сейчас: заголовок печатается ПЕРЕД таблицей.
               state.groups[openGroupOrdinal as number] = { ...open, groupNo: sectionNo };
-            } else {
+            } else if (opensNextSection(state, sectionNo)) {
               const opened = openGroup(
                 state,
                 {
@@ -688,6 +740,20 @@ export function parseTransferRegistry(input: {
               state.warnings.push(
                 `страница ${page.sourcePageId}: раздел ${sectionNo} начался без заголовка — ` +
                   'название работы у него пустое',
+              );
+            } else {
+              /**
+               * Номер, перепрыгнувший через разделы, раздела не заводит (S53).
+               *
+               * «85.5» вместо «8.5» — одна потерянная точка распознавания, и
+               * фантомный раздел 85 увёл бы строку из своего комплекта в
+               * несуществующий. Продолжением считается только следующий номер
+               * по порядку; всё остальное — расхождение нумерации по месту.
+               */
+              positionMismatch = true;
+              state.warnings.push(
+                `страница ${page.sourcePageId}: позиция «${posRaw}» не продолжает нумерацию ` +
+                  'описи — строка оставлена в текущем разделе',
               );
             }
           }
@@ -726,7 +792,15 @@ export function parseTransferRegistry(input: {
         }
 
         const before = state.rows.length;
-        buildRow(state, cells, layout, openGroupOrdinal, page.sourcePageId, shift);
+        buildRow(
+          state,
+          cells,
+          layout,
+          openGroupOrdinal,
+          page.sourcePageId,
+          shift,
+          positionMismatch,
+        );
         const added = state.rows[before];
         if (added !== undefined && layout.form === 'b') {
           attachActNo(state, openGroupOrdinal, added);
