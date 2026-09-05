@@ -953,7 +953,7 @@ describe('владелец номера и номер под заголовко�
     extractFields({
       docTypeCode,
       typeConfident: true,
-      pages: [{ sourcePageId: 'p1', pageTextVersionId: 'v1', text }],
+      pages: [{ pageTextVersionId: 'v1', text }],
     }).find((field) => field.fieldCode === 'number')?.valueText ?? null;
 
   it('номер сертификата берётся со строки под заголовком, а не с бланка', () => {
