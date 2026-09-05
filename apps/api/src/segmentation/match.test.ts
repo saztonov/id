@@ -386,7 +386,7 @@ describe('documentNumbersOf', () => {
   it('собирает номера в порядке кодов и без повторов', () => {
     const numbers = documentNumbersOf([
       { fieldCode: 'scheme_number', valueText: 'К14/ДК2-СЦ4' },
-      { fieldCode: 'issuer', valueText: 'ООО «СУ-10»' },
+      { fieldCode: 'issuer', valueText: 'ООО «Генподряд-Тест»' },
       { fieldCode: 'number', valueText: '336' },
       { fieldCode: 'blank_number', valueText: '  ' },
       { fieldCode: 'number', valueText: '336' },

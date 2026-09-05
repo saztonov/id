@@ -188,7 +188,7 @@ describe('типо-специфичная схема — только при у�
     const scheme =
       '**[STAMP]** | № К14/ДК2-СЦ4 | Code: СТ26/01-14-ДК2-РД | Stage: ИД | Sheet: 1 из 1\n\n' +
       '**Name:** Исполнительная схема стяжки в/о П.Д-П.Ж\n\n' +
-      '**Organization:** ООО «ЭМДМ-СТРОЙ»';
+      '**Organization:** ООО «Синтетик-Строй»';
     const fields = extractFields(
       input(scheme, { docTypeCode: 'exec_scheme', typeConfident: true }),
     );

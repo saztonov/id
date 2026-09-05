@@ -93,7 +93,7 @@ describe('renderPageText v2', () => {
               sheet: '1 из 1',
               object: 'Корпус 14',
               name: 'Исполнительная схема стяжки в/о П.Д-П.Ж',
-              organization: 'ООО «ЭМДМ-СТРОЙ»',
+              organization: 'ООО «Синтетик-Строй»',
               revisions: null,
               extra: { signature_1: 'Пр. работ — Хусенов М.К.' },
             },
@@ -106,7 +106,7 @@ describe('renderPageText v2', () => {
       '**[STAMP]** | № К14/ДК2-СЦ4 | Code: СТ26/01-14-ДК2-РД | Stage: ИД | Sheet: 1 из 1\n\n' +
         '**Name:** Исполнительная схема стяжки в/о П.Д-П.Ж\n\n' +
         '**Object:** Корпус 14\n\n' +
-        '**Organization:** ООО «ЭМДМ-СТРОЙ»\n\n' +
+        '**Organization:** ООО «Синтетик-Строй»\n\n' +
         '**signature_1:** Пр. работ — Хусенов М.К.',
     );
   });
