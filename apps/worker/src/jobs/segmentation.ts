@@ -70,6 +70,8 @@ import {
   renderExtractUserPrompt,
   renderUserPrompt,
   promptDocTypeCodes,
+  annexCandidates,
+  transferPartitions,
   type DocumentRelationInput,
   type FieldValueView,
   type JobContext,
@@ -78,6 +80,8 @@ import {
   type LlmProviderName,
   type LogicalDocumentView,
   type MatchableDocument,
+  type RegistryPartition,
+  type ScopedDocument,
   type TransferGroupCandidate,
   type PageAssignmentView,
   type PageClassification,
@@ -1636,46 +1640,20 @@ export function createMatchRegistryHandler(
     const registryDocumentIds = new Set(stored.map((row) => row.documentId));
 
     /**
-     * Кандидаты сверки — документы ЭТОГО ЖЕ комплекта, а не всей папки.
+     * Кандидаты сверки берутся из общего модуля (`@id/api`, `candidates.ts`).
      *
-     * Прежде сверка искала по всей ревизии, и на папке из двенадцати актов это
-     * давало 72 строки «сопоставлено неоднозначно» из 138: один и тот же
-     * сертификат лежит в приложениях каждого акта, и по номеру он отвечал
-     * двенадцати строкам сразу. Различить их сверка не могла и честно
-     * отказывалась — правильный ответ на неправильно поставленный вопрос.
-     *
-     * Комплект границу и задаёт: перечень приложений принадлежит одному акту, и
-     * искать его строки за пределами этого акта незачем. Документы вне
-     * комплектов (опись, титулы) в кандидаты не попадают вовсе: перечень
-     * приложений акта их не называет.
+     * Правило «кого показывать строке» читают двое — это задание и офлайн-стенд,
+     * — и, живя в двух копиях, они разошлись: мутация сверки на стенде не
+     * краснела, потому что стенд судил папку не тем правилом (S53).
      */
-    const matchable = (document: LogicalDocumentView): MatchableDocument => ({
+    const scoped: readonly ScopedDocument[] = documents.map((document) => ({
       documentId: document.id,
       docTypeCode: document.docTypeCode,
+      complectId: document.complectId,
       numbers: numbers.get(document.id) ?? [],
       issuedAt: issuedAt.get(document.id) ?? null,
       title: document.title,
-    });
-
-    const candidatesOf = (complectId: string | null): readonly MatchableDocument[] =>
-      documents
-        // Сам реестр в сверку не входит: он перечисляет приложения, а не себя.
-        .filter((document) => !registryDocumentIds.has(document.id))
-        .filter((document) => complectId !== null && document.complectId === complectId)
-        .map(matchable);
-
-    /**
-     * Запасные кандидаты для строки описи, чей раздел не нашёл своего акта.
-     *
-     * Вся папка минус перечни: строка названа, документ у неё где-то есть, и
-     * отказываться искать его только потому, что не опознан раздел, значило бы
-     * объявить документ отсутствующим по своей же причине. Двойники в такой
-     * выборке дадут честное «неоднозначно» — это ответ о том, что портал не
-     * знает, к какому акту относится строка, и он вернее выдуманного.
-     */
-    const folderCandidates: readonly MatchableDocument[] = documents
-      .filter((document) => !registryDocumentIds.has(document.id))
-      .map(matchable);
+    }));
 
     const matches: RegistryMatch[] = [];
     let matched = 0;
@@ -1703,28 +1681,22 @@ export function createMatchRegistryHandler(
     const partitionsOf = (
       registryDocumentId: string,
       rowsOfRegistry: readonly RegistryRowView[],
-    ): readonly (readonly [readonly MatchableDocument[], readonly RegistryRowView[]])[] => {
+    ): readonly RegistryPartition<RegistryRowView>[] => {
       if (isTransfer.get(registryDocumentId) !== true) {
-        const own = candidatesOf(complectOfDocument.get(registryDocumentId) ?? null);
-        return [[own, rowsOfRegistry]];
+        return [
+          {
+            documents: annexCandidates(scoped, complectOfDocument.get(registryDocumentId) ?? null),
+            rows: rowsOfRegistry,
+          },
+        ];
       }
 
-      const byComplect = new Map<string | null, RegistryRowView[]>();
-      for (const row of rowsOfRegistry) {
-        const bucket = byComplect.get(row.complectId);
-        if (bucket === undefined) byComplect.set(row.complectId, [row]);
-        else bucket.push(row);
-      }
-
-      return [...byComplect.entries()].map(([complectId, rowsOfComplect]) => [
-        complectId === null ? folderCandidates : candidatesOf(complectId),
-        rowsOfComplect,
-      ]);
+      return transferPartitions(scoped, rowsOfRegistry);
     };
 
     for (const registryDocumentId of registryDocumentIds) {
       const rowsOfDocument = stored.filter((row) => row.documentId === registryDocumentId);
-      for (const [matchableDocuments, rowsOfRegistry] of partitionsOf(
+      for (const { documents: matchableDocuments, rows: rowsOfRegistry } of partitionsOf(
         registryDocumentId,
         rowsOfDocument,
       )) {

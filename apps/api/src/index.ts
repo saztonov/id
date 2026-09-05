@@ -561,6 +561,12 @@ export type {
 } from './segmentation/match.js';
 
 /**
+ * Выборки кандидатов сверки — одна реализация на воркер и офлайн-стенд (S53).
+ */
+export { annexCandidates, transferPartitions } from './segmentation/candidates.js';
+export type { RegistryPartition, ScopedDocument } from './segmentation/candidates.js';
+
+/**
  * Разбор описи передачи папки и сопоставление её групп с комплектами (S20).
  *
  * Это НЕ реестр приложений внутри АОСР (`parseAnnexRegistry` выше): другой

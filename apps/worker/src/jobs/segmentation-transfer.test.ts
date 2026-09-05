@@ -274,3 +274,94 @@ describe('задание 18: строки описи сверяются со с�
     expect(decisions).toEqual([{ id: 'row-3', state: 'ambiguous' }]);
   });
 });
+
+describe('задание 18: реестр приложений — кандидат описи, а не исключение из неё (S53)', () => {
+  /**
+   * Опись перечисляет реестры приложений так же, как всё остальное.
+   *
+   * В папке «ИД Мастер апрель 2026» строка «Реестр к АОСР № 48-ОТ/-1 этаж»
+   * стоит в каждом из двенадцати разделов, и ни одна из них документа не
+   * нашла: выборка описи исключала ВСЕ разобранные перечни, а не только саму
+   * опись. Портал объявлял двенадцать имеющихся реестров отсутствующими и
+   * добавлял к ним двенадцать «документ папки не назван описью» — двадцать
+   * четыре замечания об одном и том же несуществующем дефекте.
+   */
+  const documents: readonly DocumentSpec[] = [
+    { id: 'transfer', ordinal: 1, docTypeCode: 'transfer_registry' },
+    { id: 'act-1', ordinal: 2, docTypeCode: 'aosr', complectId: 'complect-1', number: '48-ОТ' },
+    {
+      id: 'annex-1',
+      ordinal: 3,
+      docTypeCode: 'annex_registry',
+      complectId: 'complect-1',
+      number: '1.1',
+    },
+    {
+      id: 'passport-1',
+      ordinal: 4,
+      docTypeCode: 'quality_passport',
+      complectId: 'complect-1',
+      number: '357',
+    },
+  ];
+
+  const transferRow: Partial<RegistryRowView> = {
+    id: 'row-annex',
+    documentId: 'transfer',
+    ordinal: 1,
+    rowNo: 1,
+    sectionTitle: 'раздел 1',
+    docNameRaw: 'Реестр к АОСР № 48-ОТ',
+    docNoRaw: '1.1',
+    docNoNorm: '1.1',
+    docNoFolded: '1.1',
+    orgRaw: null,
+    validFrom: null,
+    validTo: null,
+    issuedAt: null,
+    matchedDocumentId: null,
+    matchScore: null,
+    matchState: 'missing',
+    complectId: 'complect-1',
+    candidateDocumentIds: [],
+  };
+
+  /** Строка самого реестра приложений: без неё выборки описи не отличить. */
+  const annexRow: Partial<RegistryRowView> = {
+    id: 'row-material',
+    documentId: 'annex-1',
+    ordinal: 1,
+    rowNo: 1,
+    sectionTitle: null,
+    docNameRaw: 'Паспорт',
+    docNoRaw: '357',
+    docNoNorm: '357',
+    docNoFolded: '357',
+    orgRaw: null,
+    validFrom: null,
+    validTo: null,
+    issuedAt: null,
+    matchedDocumentId: null,
+    matchScore: null,
+    matchState: 'missing',
+    complectId: null,
+    candidateDocumentIds: [],
+  };
+
+  it('строка описи находит реестр приложений своего комплекта', async () => {
+    const decisions = await matchedStatesOf(documents, [transferRow, annexRow]);
+
+    expect(decisions).toContainEqual({ id: 'row-annex', state: 'matched' });
+  });
+
+  it('строка реестра приложений сам перечень кандидатом не считает', async () => {
+    // Обратная сторона того же правила: перечень приложений перечисляет
+    // материалы, а не себя и не соседний перечень.
+    const decisions = await matchedStatesOf(documents, [
+      transferRow,
+      { ...annexRow, docNameRaw: 'Реестр', docNoRaw: '1.1', docNoNorm: '1.1', docNoFolded: '1.1' },
+    ]);
+
+    expect(decisions).toContainEqual({ id: 'row-material', state: 'missing' });
+  });
+});

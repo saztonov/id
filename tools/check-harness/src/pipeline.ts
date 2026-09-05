@@ -16,12 +16,14 @@
 import { basename } from 'node:path';
 
 import {
+  annexCandidates,
   classifyPages,
   decodeSegmentation,
   extractFields,
   KNOWN_TYPE_MIN_CONFIDENCE,
   documentNumbersOf,
   matchRegistryRows,
+  transferPartitions,
   matchTransferGroups,
   pagesNeedingLlm,
   parseAnnexRegistry,
@@ -30,11 +32,11 @@ import {
   toRegistryRows,
   TRANSFER_TYPE,
   type ExtractedField,
-  type MatchableDocument,
   type MatchRegistryResult,
   type PageClassification,
   type PageInput,
   type RegistryParseResult,
+  type ScopedDocument,
   type Segmentation,
   type TransferGroupCandidate,
   type TransferGroupsOutcome,
@@ -268,6 +270,24 @@ export function runPackage(dir: string, options: HarnessOptions): PackageRunResu
     };
   });
 
+  /**
+   * Документы в том виде, в каком о них судит выборка кандидатов.
+   *
+   * Правило выборки берётся из портала (`@id/api`, `candidates.ts`), а не
+   * пишется здесь заново: свои копии стенда и воркера разошлись молча, и
+   * мутация сверки на стенде из-за этого не краснела (S53).
+   */
+  const scoped: readonly ScopedDocument[] = documents.map((document) => ({
+    documentId: document.id,
+    docTypeCode: document.docTypeCode,
+    complectId: document.complectId,
+    // Все формы номера, а не один `number`: у исполнительной схемы он приходит
+    // шифром из штампа, и сверка обязана видеть его тоже.
+    numbers: documentNumbersOf(document.fields),
+    issuedAt: document.fields.find((field) => field.fieldCode === 'issued_at')?.valueDate ?? null,
+    title: document.title,
+  }));
+
   // Задачи 17–18: разбор реестров и сверка по номеру.
   const registries: RegistryRunView[] = [];
   const registryRows: RegistryRowNode[] = [];
@@ -276,19 +296,7 @@ export function runPackage(dir: string, options: HarnessOptions): PackageRunResu
     if (document.docTypeCode !== REGISTRY_TYPE) continue;
     const parsed = parseAnnexRegistry({ pages: extractionPagesOf.get(document.id) ?? [] });
 
-    const matchable: readonly MatchableDocument[] = documents
-      .filter((candidate) => candidate.id !== document.id)
-      .map((candidate) => ({
-        documentId: candidate.id,
-        docTypeCode: candidate.docTypeCode,
-        // Все формы номера, а не один `number`: у исполнительной схемы он
-        // приходит шифром из штампа, и сверка обязана видеть его тоже.
-        numbers: documentNumbersOf(candidate.fields),
-        issuedAt: candidate.fields.find((f) => f.fieldCode === 'issued_at')?.valueDate ?? null,
-        title: candidate.title,
-      }));
-
-    const match = matchRegistryRows(parsed.rows, matchable);
+    const match = matchRegistryRows(parsed.rows, annexCandidates(scoped, document.complectId));
     registries.push({
       documentId: document.id,
       documentOrdinal: document.ordinal,
@@ -399,56 +407,53 @@ export function runPackage(dir: string, options: HarnessOptions): PackageRunResu
   }
 
   /**
-   * Строки описи сверяются ВНУТРИ своего комплекта (S50).
+   * Строки описи сверяются ВНУТРИ своего комплекта (S50), раздел без акта — по
+   * всей папке (S53).
    *
    * Раздел, привязанный к комплекту, ищет свои документы только среди его
    * документов: двенадцать одинаковых паспортов одной папки иначе дают
-   * «неоднозначно» на каждой строке. Строки раздела без комплекта остаются
-   * несопоставленными — искать их по всей папке значило бы гадать.
+   * «неоднозначно» на каждой строке. Разбиение берётся у портала — прежде
+   * стенд строки без комплекта просто пропускал, то есть молча объявлял их
+   * ненайденными, а воркер искал их по всей папке.
    */
-  for (const [index, row] of transferRows.entries()) {
-    if (row.complectId === null) continue;
-    const scoped: readonly MatchableDocument[] = documents
-      .filter((candidate) => candidate.complectId === row.complectId)
-      .map((candidate) => ({
-        documentId: candidate.id,
-        docTypeCode: candidate.docTypeCode,
-        numbers: documentNumbersOf(candidate.fields),
-        issuedAt: candidate.fields.find((f) => f.fieldCode === 'issued_at')?.valueDate ?? null,
-        title: candidate.title,
-      }));
-    const decision = matchRegistryRows(
-      [
-        {
-          rowNo: row.rowNo,
-          sectionTitle: row.sectionTitle,
-          docNameRaw: row.docNameRaw,
-          docNoRaw: row.docNoRaw,
-          docNoNorm: row.docNoNorm,
-          docNoFolded: row.docNoFolded,
-          orgRaw: row.orgRaw,
-          validFrom: row.validFrom,
-          validTo: row.validTo,
-          issuedAt: row.issuedAt,
-        },
-      ],
-      scoped,
-    ).rows[0];
-    if (decision === undefined) continue;
-    transferRows[index] = {
-      ...row,
-      matchedDocumentId: decision.matchedDocumentId,
-      matchScore: decision.matchScore,
-      matchState:
-        decision.matchState === 'matched'
-          ? 'matched'
-          : decision.matchState === 'ambiguous'
-            ? 'ambiguous'
-            : decision.matchState === 'candidate'
-              ? 'candidate'
-              : 'missing',
-      candidateDocumentIds: decision.candidates.map((candidate) => candidate.documentId),
-    };
+  const transferRowIndex = new Map(transferRows.map((row, index) => [row.id, index] as const));
+  for (const partition of transferPartitions(scoped, transferRows)) {
+    const outcome = matchRegistryRows(
+      partition.rows.map((row) => ({
+        rowNo: row.rowNo,
+        sectionTitle: row.sectionTitle,
+        docNameRaw: row.docNameRaw,
+        docNoRaw: row.docNoRaw,
+        docNoNorm: row.docNoNorm,
+        docNoFolded: row.docNoFolded,
+        orgRaw: row.orgRaw,
+        validFrom: row.validFrom,
+        validTo: row.validTo,
+        issuedAt: row.issuedAt,
+      })),
+      partition.documents,
+    );
+
+    for (const [position, decision] of outcome.rows.entries()) {
+      const row = partition.rows[position];
+      if (row === undefined) continue;
+      const index = transferRowIndex.get(row.id);
+      if (index === undefined) continue;
+      transferRows[index] = {
+        ...row,
+        matchedDocumentId: decision.matchedDocumentId,
+        matchScore: decision.matchScore,
+        matchState:
+          decision.matchState === 'matched'
+            ? 'matched'
+            : decision.matchState === 'ambiguous'
+              ? 'ambiguous'
+              : decision.matchState === 'candidate'
+                ? 'candidate'
+                : 'missing',
+        candidateDocumentIds: decision.candidates.map((candidate) => candidate.documentId),
+      };
+    }
   }
   // Задача 19: связи. Затем материалы — как в задаче 20 (checks.ts:507).
   const relations = deriveOfflineRelations(documents, registryRows);
