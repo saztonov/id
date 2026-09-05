@@ -817,3 +817,41 @@ describe('номер из наименования строки (S53)', () => {
     expect(result.rows[0]).toMatchObject({ matchState: 'matched', matchedDocumentId: 'scheme' });
   });
 });
+
+describe('алиас из наименования не берёт номер родителя (S53)', () => {
+  it('строка «Реестр к АОСР № 48-ОТ» ищет себя по своему номеру, а не по номеру акта', () => {
+    const act: MatchableDocument = {
+      documentId: 'act',
+      docTypeCode: 'aosr',
+      numbers: ['48-ОТ'],
+      issuedAt: null,
+      title: null,
+    };
+    const annex: MatchableDocument = {
+      documentId: 'annex',
+      docTypeCode: 'annex_registry',
+      numbers: ['1.1'],
+      issuedAt: null,
+      title: null,
+    };
+    const row: ParsedRegistryRow = {
+      rowNo: 1,
+      sectionTitle: null,
+      docNameRaw: 'Реестр к АОСР № 48-ОТ',
+      docNoRaw: '1.1',
+      docNoNorm: normalizeDocNo('1.1').normalized,
+      docNoFolded: normalizeDocNo('1.1').folded,
+      orgRaw: null,
+      validFrom: null,
+      validTo: null,
+      issuedAt: null,
+    };
+
+    // Предлог «к» отделяет номер родителя: иначе строка нашла бы два документа
+    // и получила «неоднозначно» при единственном верном реестре.
+    expect(matchRegistryRows([row], [act, annex]).rows[0]).toMatchObject({
+      matchState: 'matched',
+      matchedDocumentId: 'annex',
+    });
+  });
+});

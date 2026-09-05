@@ -475,9 +475,20 @@ const INNER_NUMBER_SIGN = /№\s*(.+)$/u;
  */
 const NAME_NUMBER_TAIL = /№\s*([^№]+?)(?:\s+от\s+\d|\s*$)/u;
 
+/**
+ * Ссылка на ЧУЖОЙ документ перед «№»: «Реестр к АОСР № 48-ОТ/-1 этаж».
+ *
+ * Предлог «к» отделяет номер родителя от номера самой строки. Без проверки
+ * строка перечня приложений искала бы себя и по номеру акта — и находила два
+ * документа, то есть честное «неоднозначно» вместо единственного верного.
+ */
+const PARENT_REFERENCE_BEFORE_NUMBER = /(?:^|[^\p{L}])к\s+\p{L}[^№]*$/u;
+
 function nameAlias(name: string): string {
   const match = NAME_NUMBER_TAIL.exec(name);
-  return match?.[1]?.trim() ?? '';
+  if (match?.index === undefined) return '';
+  if (PARENT_REFERENCE_BEFORE_NUMBER.test(name.slice(0, match.index))) return '';
+  return match[1]?.trim() ?? '';
 }
 
 /**
