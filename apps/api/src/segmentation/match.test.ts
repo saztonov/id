@@ -716,3 +716,104 @@ describe('documentsNamedInActItem3', () => {
     expect(named).toEqual([]);
   });
 });
+
+describe('структурные виды строки перечня (S53)', () => {
+  /**
+   * Акт и его исполнительная схема носят в описи ОДИН номер, и различает их
+   * только вид, названный в самом наименовании строки. Каталог видов на такую
+   * строку не рассчитан: он ищет заголовок листа, а «АОСР Устройство…» — не
+   * заголовок бланка РД-11-02.
+   */
+  const act: MatchableDocument = {
+    documentId: 'act',
+    docTypeCode: 'aosr',
+    numbers: ['52-ОТ/1'],
+    issuedAt: null,
+    title: null,
+  };
+  const scheme: MatchableDocument = {
+    documentId: 'scheme',
+    docTypeCode: 'exec_scheme',
+    numbers: ['52.1-ОТ/-1ЭТАЖ'],
+    issuedAt: null,
+    title: null,
+  };
+
+  const named = (name: string, no: string): ParsedRegistryRow => ({
+    rowNo: 1,
+    sectionTitle: null,
+    docNameRaw: name,
+    docNoRaw: no,
+    docNoNorm: normalizeDocNo(no).normalized,
+    docNoFolded: normalizeDocNo(no).folded,
+    orgRaw: null,
+    validFrom: null,
+    validTo: null,
+    issuedAt: null,
+  });
+
+  it('строка акта не дотягивается до исполнительной схемы', () => {
+    const result = matchRegistryRows(
+      [named('АОСР Устройство штукатурки стен в помещении №1.3', '52-ОТ/-1 этаж')],
+      [act, scheme],
+    );
+
+    expect(result.rows[0]?.matchedDocumentId).toBe('act');
+  });
+
+  it('строка схемы не дотягивается до акта', () => {
+    const result = matchRegistryRows(
+      [named('Исполнительная схема устройства стен сплошной штукатурки', '52-ОТ/-1 этаж')],
+      [act],
+    );
+
+    // Акт исключён как структурно неразличимый по номеру, а схемы в выборке
+    // нет: строка честно остаётся ненайденной, а не забирает чужой документ.
+    expect(result.rows[0]?.matchState).toBe('missing');
+  });
+
+  it('строка реестра приложений опознаётся и при чтении «АОСП»', () => {
+    const registry: MatchableDocument = {
+      documentId: 'annex',
+      docTypeCode: 'annex_registry',
+      numbers: ['1.1'],
+      issuedAt: null,
+      title: null,
+    };
+    const result = matchRegistryRows([named('Реестр к АОСП № 48-ОТ/-1 этаж', '1.1')], [registry]);
+
+    expect(result.rows[0]?.matchedDocumentId).toBe('annex');
+  });
+});
+
+describe('номер из наименования строки (S53)', () => {
+  it('исполнительная схема находится по собственному номеру из наименования', () => {
+    // В графе номера у строки схемы стоит номер АКТА; собственный номер схемы
+    // напечатан только в наименовании, после «№» и до даты.
+    const scheme: MatchableDocument = {
+      documentId: 'scheme',
+      docTypeCode: 'exec_scheme',
+      numbers: ['52.1-ОТ/-1ЭТАЖ'],
+      issuedAt: null,
+      title: null,
+    };
+    const row: ParsedRegistryRow = {
+      rowNo: 1,
+      sectionTitle: null,
+      docNameRaw:
+        'Исполнительная схема устройства стен сплошной штукатурки в/о 3-4//А-Б на отм. ' +
+        '-3,850 №52.1-от/-1 этаж от 10.04.2026г.',
+      docNoRaw: '52-ОТ/-1 этаж',
+      docNoNorm: normalizeDocNo('52-ОТ/-1 этаж').normalized,
+      docNoFolded: normalizeDocNo('52-ОТ/-1 этаж').folded,
+      orgRaw: null,
+      validFrom: null,
+      validTo: null,
+      issuedAt: null,
+    };
+
+    const result = matchRegistryRows([row], [scheme]);
+
+    expect(result.rows[0]).toMatchObject({ matchState: 'matched', matchedDocumentId: 'scheme' });
+  });
+});

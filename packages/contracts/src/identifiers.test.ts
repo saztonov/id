@@ -100,7 +100,7 @@ describe('normalizeDocNo', () => {
   });
 
   it('пустая строка не является особым случаем', () => {
-    expect(normalizeDocNo('')).toEqual({ raw: '', normalized: '', folded: '' });
+    expect(normalizeDocNo('')).toEqual({ raw: '', normalized: '', folded: '', compact: '' });
   });
 
   describe('фолдинг гомоглифов', () => {
@@ -159,5 +159,33 @@ describe('normalizeDocNo', () => {
         normalizeDocNo('RU.MCC.240.445.38407').folded,
       );
     });
+  });
+});
+
+describe('компактная форма номера (S53)', () => {
+  it('сводит номер, потерявший разделители при распознавании', () => {
+    // Опись печатает «52-ОТ/-1 этаж», распознавание отдаёт «52-ОТ/1».
+    expect(normalizeDocNo('52-ОТ/1').compact).toBe(normalizeDocNo('52ОТ1').compact);
+    expect(normalizeDocNo('RU.СМИК.001.Н.00270').compact).toBe(
+      normalizeDocNo('RU СМИК 001 Н 00270').compact,
+    );
+  });
+
+  it('соседние цифровые группы не склеиваются', () => {
+    // «1.23-ОТ» и «12.3-ОТ» — законно разные номера двух разных актов, и
+    // компактная форма обязана их различать: иначе сверка утверждала бы
+    // тождество там, где его нет.
+    expect(normalizeDocNo('1.23-ОТ').compact).not.toBe(normalizeDocNo('12.3-ОТ').compact);
+  });
+
+  it('граница между буквой и цифрой не значима', () => {
+    expect(normalizeDocNo('48-ОТ/-1').compact).toBe(normalizeDocNo('48ОТ1').compact);
+  });
+
+  it('считается от свёрнутой формы, а не от точной', () => {
+    // Обе слабые ступени — про одно и то же чтение листа.
+    expect(normalizeDocNo('РОСС RU Д-РУ.РА01.В.29363/25').compact).toBe(
+      normalizeDocNo('РОСС RU Д-RU.PA01.B.29363/25').compact,
+    );
   });
 });

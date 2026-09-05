@@ -179,6 +179,29 @@ const EXACT_SCORE = 1;
 const FOLDED_SCORE = 0.85;
 
 /**
+ * Счёт совпадения по компактной форме номера — с оговоркой (S53).
+ *
+ * Ниже фолдинга и ВЫШЕ числового ядра: ядро сравнивает часть номера, а
+ * компактная форма — весь номер, потерявший только разделители. Замер на папке
+ * «ИД Мастер апрель 2026»: опись печатает «52-ОТ/-1 этаж», распознавание
+ * отдаёт «52-ОТ/1», и девять актов из двенадцати не находили своей строки
+ * описи вместе с двенадцатью реестрами приложений и десятью схемами.
+ *
+ * Счёт ниже фолдинга намеренно: совпал не номер, а номер без разделителей, и
+ * §9.1 обязан видеть по счёту, что решение принято с допуском.
+ */
+const COMPACT_SCORE = 0.7;
+
+/**
+ * Компактная форма короче этого в сравнении не участвует.
+ *
+ * Пять знаков: «001», «1.1», «7» после выброса разделителей входят подстрокой
+ * в половину номеров комплекта, и ступень, и без того нестрогая, начала бы
+ * находить случайные пары.
+ */
+export const MIN_COMPACT_LENGTH = 5;
+
+/**
  * Счёт совпадения по числовому ядру номера.
  *
  * Ниже фолдинга и выше куска: совпал не весь номер и не произвольная его часть,
@@ -280,9 +303,37 @@ const CANDIDATE_BOTH_SCORE = 0.5;
  * Наименование материала («Гвозди», «Блок стеновой 600x250x200») вида не даёт
  * вовсе — и это правильный ответ, а не пропуск.
  */
+/**
+ * Малый лексикон СТРУКТУРНЫХ видов, которые перечень называет своими словами.
+ *
+ * Каталог видов рассчитан на ЗАГОЛОВОК ЛИСТА, а строка перечня — не заголовок:
+ * «АОСР Устройство шпатлевки стен…» ни одному якорю акта не отвечает, потому
+ * что акт узнаётся по фразам бланка РД-11-02, которых в строке нет. Из-за
+ * этого строка акта оставалась без вида, ограничение «акт и схема носят один
+ * номер» не срабатывало, и строка исполнительной схемы дотягивалась до самого
+ * акта.
+ *
+ * Лексикон закрыт тремя видами, у которых опись пишет вид прямо в
+ * наименовании, и открывать его шире нельзя: §8.3 запрещает решать по виду
+ * там, где перечень обобщает («Паспорт качества Арматура» на листе
+ * «СЕРТИФИКАТ КАЧЕСТВА»).
+ */
+const STRUCTURAL_ROW_TYPES: readonly (readonly [RegExp, string])[] = [
+  [/^\s*(?:АОСР|Акт\s+освидетельствован)/iu, 'aosr'],
+  [
+    /^\s*Реестр\s*(?:№\s*[\d.]+\s*)?(?:к\s+(?:АОСР|АОСП|АСР|акту|№)|приложений)/iu,
+    'annex_registry',
+  ],
+  [/^\s*Исполнительн\S*\s+схем/iu, 'exec_scheme'],
+];
+
 function rowDocType(row: ParsedRegistryRow): string | null {
   const name = row.docNameRaw.trim();
   if (name === '') return null;
+
+  for (const [pattern, code] of STRUCTURAL_ROW_TYPES) {
+    if (pattern.test(name)) return code;
+  }
 
   return resolveDocType(matchDocTypes(name, DOC_TYPES, { headingLines: 1 }), DOC_TYPES).code;
 }
@@ -409,6 +460,34 @@ const INNER_NUMBER_SIGN = /№\s*(.+)$/u;
  * нельзя: «001» входит подстрокой в половину номеров комплекта, и ступень,
  * которая и без того нестрогая, начала бы находить случайные пары.
  */
+/**
+ * Хвост наименования после «№» до даты: собственный номер документа (S53).
+ *
+ * Опись описывает исполнительную схему так: «Исполнительная схема устройства
+ * стен сплошной штукатурки в/о 3-4//А-Б на отм. -3,850 №52.1-от/-1 этаж от
+ * 10.04.2026г.», а в графе номера у той же строки стоит номер АКТА — «52-ОТ/-1
+ * этаж». Собственный номер схемы напечатан только в наименовании, и без него
+ * десять схем папки не находили своих строк: графа номера отвечала актом,
+ * который строке схемы запрещён как структурно неразличимый.
+ *
+ * Граница — дата: «… № 52.1-от/-1 этаж ОТ 10.04.2026г.». Всё, что после неё, к
+ * номеру не относится.
+ */
+const NAME_NUMBER_TAIL = /№\s*([^№]+?)(?:\s+от\s+\d|\s*$)/u;
+
+function nameAlias(name: string): string {
+  const match = NAME_NUMBER_TAIL.exec(name);
+  return match?.[1]?.trim() ?? '';
+}
+
+/**
+ * Сравнимые формы строки перечня: сохранённая, алиас графы номера и алиас
+ * наименования.
+ *
+ * Порядок значим для ОБЪЯСНЕНИЯ, а не для решения: все формы ищутся вместе, и
+ * при нескольких найденных документах строка получает `ambiguous`, как и при
+ * коллизии одной формы.
+ */
 function rowKeys(row: ParsedRegistryRow): {
   readonly normalized: readonly string[];
   readonly folded: readonly string[];
@@ -416,15 +495,18 @@ function rowKeys(row: ParsedRegistryRow): {
   const normalized = [row.docNoNorm as string];
   const folded = [row.docNoFolded as string];
 
-  const inner = row.docNoRaw === null ? null : INNER_NUMBER_SIGN.exec(row.docNoRaw);
-  const tail = inner?.[1]?.trim() ?? '';
-  if (tail !== '') {
-    const alias = normalizeDocNo(tail);
+  const push = (value: string): void => {
+    if (value === '') return;
+    const alias = normalizeDocNo(value);
     if (alias.normalized !== '' && !normalized.includes(alias.normalized)) {
       normalized.push(alias.normalized);
       folded.push(alias.folded);
     }
-  }
+  };
+
+  const inner = row.docNoRaw === null ? null : INNER_NUMBER_SIGN.exec(row.docNoRaw);
+  push(inner?.[1]?.trim() ?? '');
+  push(nameAlias(row.docNameRaw));
 
   return { normalized, folded };
 }
@@ -496,23 +578,49 @@ function numericCoreCandidates(
 }
 
 /**
- * Документы, чей номер содержит номер строки (или содержится в нём).
+ * Документы, чья компактная форма номера РАВНА форме строки.
  *
- * Сравнение идёт по фолдингу: ступень и без того нестрогая, а гомоглифы к её
- * вопросу отношения не имеют.
+ * Только равенство: вхождение — это уже частичное совпадение, и оно живёт
+ * ступенью ниже со своим счётом. Здесь номер совпал целиком, разошлись лишь
+ * разделители: «RU.СМИК.001.Н.00270» и «RU СМИК 001 Н 00270».
  */
-function partialCandidates(
-  rowFolded: string,
+function compactCandidates(
+  rowCompact: string,
   documents: readonly MatchableDocument[],
 ): readonly string[] {
-  if (rowFolded.length < MIN_PARTIAL_LENGTH) return [];
+  if (rowCompact.length < MIN_COMPACT_LENGTH) return [];
+
+  const found: string[] = [];
+  for (const document of documents) {
+    const hit = document.numbers.some((number) => normalizeDocNo(number).compact === rowCompact);
+    if (hit && !found.includes(document.documentId)) found.push(document.documentId);
+  }
+  return found;
+}
+
+/**
+ * Документы, чей номер содержит номер строки (или содержится в нём).
+ *
+ * Сравнение идёт по КОМПАКТНОЙ форме (S53). Вхождение спрашивает «одна запись
+ * номера внутри другой», а разделители в этом вопросе не значат ничего: на
+ * боевой папке акт напечатан «48-ОТ/-1 этаж», а распознан «48-ОТ/1», и по
+ * свёрнутой форме вхождения нет из-за одного лишнего дефиса — девять актов
+ * из двенадцати объявлялись отсутствующими. Граница цифровых групп в
+ * компактной форме сохранена, поэтому «1.23-ОТ» и «12.3-ОТ» по-прежнему
+ * различаются.
+ */
+function partialCandidates(
+  rowCompact: string,
+  documents: readonly MatchableDocument[],
+): readonly string[] {
+  if (rowCompact.length < MIN_PARTIAL_LENGTH) return [];
 
   const found: string[] = [];
   for (const document of documents) {
     const hit = document.numbers.some((number) => {
-      const key = normalizeDocNo(number).folded;
+      const key = normalizeDocNo(number).compact;
       if (key.length < MIN_PARTIAL_LENGTH) return false;
-      return key.includes(rowFolded) || rowFolded.includes(key);
+      return key.includes(rowCompact) || rowCompact.includes(key);
     });
     if (hit && !found.includes(document.documentId)) found.push(document.documentId);
   }
@@ -552,22 +660,27 @@ export function differsByOneChar(a: string, b: string): boolean {
 /**
  * Документы, чей номер отличается от номера строки ровно одним знаком.
  *
+ * Сравнение по КОМПАКТНОЙ форме (S53): «один знак» — вопрос о буквах и цифрах,
+ * а не о разделителях. Опись печатает «RU СММК 001 Н 00270», лист —
+ * «RU.СМИК.001.Н.00270»; по свёрнутой форме длины расходятся на четыре точки, и
+ * ступень не срабатывала при единственном различающемся знаке «М»/«И».
+ *
  * Последняя ступень номера: она отвечает там, где не ответили ни точное
  * сравнение, ни фолдинг, ни числовое ядро, ни кусок, — то есть на паре букв,
  * которые распознавание путает по соседству штрихов, а не по сходству
  * начертаний.
  */
 function oneCharCandidates(
-  rowFolded: string,
+  rowCompact: string,
   documents: readonly MatchableDocument[],
 ): readonly string[] {
-  if (rowFolded.length < MIN_ONE_CHAR_LENGTH) return [];
+  if (rowCompact.length < MIN_ONE_CHAR_LENGTH) return [];
 
   const found: string[] = [];
   for (const document of documents) {
     const hit = document.numbers.some((number) => {
-      const key = normalizeDocNo(number).folded;
-      return key.length >= MIN_ONE_CHAR_LENGTH && differsByOneChar(key, rowFolded);
+      const key = normalizeDocNo(number).compact;
+      return key.length >= MIN_ONE_CHAR_LENGTH && differsByOneChar(key, rowCompact);
     });
     if (hit && !found.includes(document.documentId)) found.push(document.documentId);
   }
@@ -775,6 +888,45 @@ export function matchRegistryRows(
       continue;
     }
 
+    /**
+     * Ступень компактной формы: разделители разошлись, номер — нет (S53).
+     *
+     * Идёт сразу после фолдинга, потому что сравнивает номер ЦЕЛИКОМ, и до
+     * числового ядра, которое сравнивает лишь его часть.
+     */
+    const compact = fits(compactCandidates(normalizeDocNo(row.docNoRaw ?? '').compact, documents));
+    for (const id of compact) named.add(id);
+
+    if (compact.length === 1) {
+      matches.push({
+        rowNo: row.rowNo,
+        matchState: 'matched',
+        matchedDocumentId: compact[0] ?? null,
+        matchScore: COMPACT_SCORE,
+        reason:
+          'номер совпал с точностью до разделителей: полного совпадения в комплекте нет, ' +
+          'кандидат единственный',
+        candidates: [],
+      });
+      continue;
+    }
+
+    if (compact.length > 1) {
+      matches.push({
+        rowNo: row.rowNo,
+        matchState: 'ambiguous',
+        matchedDocumentId: null,
+        matchScore: null,
+        reason: `без разделителей номеру соответствуют ${compact.length} документов: различить их сверка не может`,
+        candidates: compact.map((documentId) => ({
+          documentId,
+          basis: 'doc_no' as const,
+          score: COMPACT_SCORE,
+        })),
+      });
+      continue;
+    }
+
     // Ступень числового ядра: буквенная приставка разошлась, цифровая серия —
     // нет. Идёт после фолдинга (тот сравнивает номер целиком и сильнее) и до
     // вхождения куска (то не требует от совпавшей части никакой роли).
@@ -815,7 +967,7 @@ export function matchRegistryRows(
     // Последняя ступень: номер совпал КУСКОМ. Идёт после точной и фолдинга,
     // поэтому обесценить их не может — сюда доходят только строки, которым
     // целиком не соответствует ни один документ комплекта.
-    const partial = fits(partialCandidates(row.docNoFolded, documents));
+    const partial = fits(partialCandidates(normalizeDocNo(row.docNoRaw ?? '').compact, documents));
     for (const id of partial) named.add(id);
 
     if (partial.length === 1) {
@@ -846,7 +998,7 @@ export function matchRegistryRows(
       continue;
     }
 
-    const nearby = fits(oneCharCandidates(row.docNoFolded, documents));
+    const nearby = fits(oneCharCandidates(normalizeDocNo(row.docNoRaw ?? '').compact, documents));
     for (const id of nearby) named.add(id);
 
     if (nearby.length === 1) {
