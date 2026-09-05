@@ -433,7 +433,7 @@ function anyCase(source: string): string {
  * находила.
  */
 const OWN_NUMBER_LABELLED = new RegExp(
-  String.raw`(?:^|[\n«"„“])[^\S\n]*(?:[*_#>]+[^\S\n]*)?(?:${OWN_NUMBER_LABELS.map(anyCase).join('|')})\s*[:;]?\s*(?:№|N)?\s*(${NUMBER_HEAD}${NUMBER_TAIL})`,
+  String.raw`(?:^|[\n«"„“])[^\S\n]*(?:[*_#>]+[^\S\n]*)?(?:${OWN_NUMBER_LABELS.map(anyCase).join('|')})\s*[:;]?\s*(?:№|N)?\s*[*_]*(${NUMBER_HEAD}${NUMBER_TAIL})`,
   'gdu',
 );
 
@@ -638,6 +638,11 @@ const CADASTRAL_NUMBER = /^\d{2}:\d{2}:\d{6,7}:\d+$/u;
 function plausibleNumber(hit: RawHit): boolean {
   const cleaned = cleanNumberValue(hit.value);
   if (cleaned === '') return false;
+  // Значение без единой буквы и цифры номером не бывает. Проверка заведена по
+  // замеру: на исполнительных схемах папки «ИД Мастер апрель 2026» значение
+  // выделено звёздочками разметки («Исполнительная схема № *48.1-ОТ/1-1
+  // ЭТАЖ*»), захват спотыкался о «*», и номером схемы становился знак «№».
+  if (!/[\p{L}\p{N}]/u.test(cleaned)) return false;
   if (CADASTRAL_NUMBER.test(cleaned)) return false;
   const first = (cleaned.split(/\s+/u)[0] ?? '').replace(/[.:]+$/u, '').toLowerCase();
   return !NUMBER_STOP_TOKENS.has(first);
@@ -663,7 +668,7 @@ function plausibleNumber(hit: RawHit): boolean {
  * партию, а `act_number` чужой акт.
  */
 const FOREIGN_NUMBER_OWNER =
-  /(?:аттестат[а-я]*\s+аккредитаци[а-я]*|аккредитаци[а-я]+|кадастров[а-я]+)\s*[:;]?\s*(?:№|N)?\s*$/iu;
+  /(?:аттестат[а-я]*\s+аккредитаци[а-я]*|аккредитаци[а-я]+|кадастров[а-я]+|регистрационн[а-я]*(?:\s+номер)?|свидетельств[а-я]*|протокол[а-я]*(?:\s+испытани[а-я]*)?|заявк[а-я]*|решени[а-я]*)\s*[:;]?\s*(?:№|N)?\s*$/iu;
 
 /** Находка, перед которой на той же строке назван владелец чужого номера. */
 function ownNumber(text: string): (hit: RawHit) => boolean {
@@ -673,7 +678,14 @@ function ownNumber(text: string): (hit: RawHit) => boolean {
     const lineStart = text.lastIndexOf('\n', Math.max(0, hit.start - 1)) + 1;
     // Влево берётся только начало ЭТОЙ строки: «аккредитации» абзацем выше
     // относится к своему предложению и о нашей находке ничего не говорит.
-    return !FOREIGN_NUMBER_OWNER.test(text.slice(lineStart, hit.start));
+    //
+    // Имя документа В НАЧАЛЕ строки исключается тем же приёмом, что у даты
+    // (`withoutLeadingOpener`): там оно называет не чужой документ, а ЭТОТ.
+    // «СВИДЕТЕЛЬСТВО о государственной регистрации № RU.77…» — заголовок листа
+    // со своим номером, а «ОРГАН ПО СЕРТИФИКАЦИИ «СТМ» Свидетельство № RU.СМИК…»
+    // называет орган, выдавший сертификат.
+    const prefix = text.slice(lineStart, hit.start).replace(/^[\s*_#>]+/u, '');
+    return !FOREIGN_NUMBER_OWNER.test(withoutLeadingOpener(prefix));
   };
 }
 
@@ -834,6 +846,68 @@ const ACCREDITATION = /((?:RA|РА)\.(?:RU|РУ)\.?[0-9A-ZА-Я]{2,12})/dgiu;
  * то же место документа — строка с «№», — и вторая реализация того же поиска
  * разошлась бы с первой на первом же уточнении шаблона.
  */
+/**
+ * Номер, напечатанный отдельной строкой под заголовком БЕЗ «№» (S53).
+ *
+ * Бланки сертификатов так и устроены: под титулом «СЕРТИФИКАТ СООТВЕТСТВИЯ»
+ * отдельной строкой стоит `RU.СМИК.001.Н.00270`, а знак «№» на листе есть
+ * только у номера бланка («Б № 000601») и у номеров чужих документов в теле.
+ * Ступени, требующие «№», собственный номер такого листа не видят вовсе, и
+ * двенадцать копий сертификата в папке «ИД Мастер апрель 2026» получали
+ * номером бланк — после чего строка описи «Сертификат соответствия
+ * № RU СММК 001 Н 00270» своего документа не находила.
+ *
+ * Ограничения делают ступень узкой: строка целиком состоит из одного значения,
+ * в нём есть и цифра, и разделитель или буква, длина от шести знаков, и стоит
+ * оно вплотную под заголовком документа. Дата под заголовком номером не
+ * становится — у неё свой шаблон.
+ */
+const HEADING_NUMBER_LINE = /^(?:[*_#>\s]*)([\p{L}\d][\p{L}\d./-]{5,})[*_\s]*$/u;
+
+/** Сколько непустых строк под заголовком просматривается. */
+const HEADING_NUMBER_LOOKAHEAD = 2;
+
+function headingNumberHits(text: string): readonly RawHit[] {
+  const lines = text.split('\n');
+  const hits: RawHit[] = [];
+  let offset = 0;
+
+  for (const [index, raw] of lines.entries()) {
+    const start = offset;
+    offset += raw.length + 1;
+
+    const line = headingLine(raw);
+    if (line === '' || !OPENER_RE.test(line.toUpperCase())) continue;
+
+    let seen = 0;
+    let below = start + raw.length + 1;
+    for (let j = index + 1; j < lines.length && seen < HEADING_NUMBER_LOOKAHEAD; j += 1) {
+      const candidate = lines[j] ?? '';
+      const from = below;
+      below += candidate.length + 1;
+      if (candidate.trim() === '') continue;
+      seen += 1;
+
+      const match = HEADING_NUMBER_LINE.exec(candidate);
+      const value = match?.[1] ?? '';
+      // Дата под заголовком — не номер: у неё свой реквизит и свой шаблон.
+      if (value === '' || !/\d/u.test(value) || !/[\p{L}./-]/u.test(value)) continue;
+      if (new RegExp(`^${ANY_DATE}$`, 'u').test(value)) continue;
+
+      const at = candidate.indexOf(value);
+      hits.push({
+        value,
+        start: from + at,
+        end: from + at + value.length,
+        confidence: CONFIDENCE.labelled,
+      });
+      break;
+    }
+  }
+
+  return hits;
+}
+
 function findDocumentNumber(text: string): readonly RawHit[] {
   // Значение НЕ чистится от кавычек — иначе `evidence` перестал бы совпадать
   // со спаном текста; чистка участвует только в решении «номер ли это».
@@ -847,6 +921,9 @@ function findDocumentNumber(text: string): readonly RawHit[] {
     .filter(own);
   return firstOf(
     sweep(text, OWN_NUMBER_LABELLED, CONFIDENCE.ownLabel).filter(plausibleNumber),
+    // Номер отдельной строкой под заголовком: у бланков сертификатов «№» стоит
+    // только у номера бланка, и ступени, требующие его, свой номер не видят.
+    headingNumberHits(text).filter(plausibleNumber).filter(own),
     strong.filter(atHeading).map((hit) => ({ ...hit, confidence: CONFIDENCE.ownLabel })),
     strong,
     sweep(text, NUMBER_WEAK, CONFIDENCE.weak).filter(plausibleNumber).filter(own),
