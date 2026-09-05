@@ -45,6 +45,9 @@ import {
   DOC_TYPES,
   fieldsForType,
   introducesFollowingLine,
+  isFallbackCode,
+  matchDocTypes,
+  resolveDocType,
 } from '@id/doc-types';
 import { OPENER_RE } from './document-openers.js';
 import type { ExtractedField, TextEvidence } from './types.js';
@@ -110,10 +113,23 @@ interface RawHit {
 /** Как сводятся находки со всех страниц в одно значение реквизита. */
 type Merge = 'text' | 'date' | 'number' | 'list';
 
+/**
+ * Что правило знает о документе, кроме текста страницы (S53).
+ *
+ * Пока правила видели только текст, строка «Сертификат соответствия № RU.CMIK…»
+ * на листе ПАСПОРТА выглядела заголовком документа, и номер чужого сертификата
+ * доставался паспорту с наивысшей уверенностью. Отличить заголовок листа от
+ * упоминания чужой бумаги можно, только зная, чей это лист.
+ */
+export interface RuleContext {
+  /** Вид документа; `null` — не определён, и проверка по виду не делается. */
+  readonly docTypeCode: string | null;
+}
+
 interface RuleSpec {
   readonly fieldCode: string;
   readonly merge: Merge;
-  readonly find: (text: string) => readonly RawHit[];
+  readonly find: (text: string, context: RuleContext) => readonly RawHit[];
 }
 
 /**
@@ -516,7 +532,10 @@ function headingLine(line: string): string {
  * снимает ложный тип у классификатора (`introducesFollowingLine`), и берётся он
  * из одного места на обоих читателей.
  */
-function atDocumentHeading(text: string): (hit: RawHit) => boolean {
+function atDocumentHeading(
+  text: string,
+  docTypeCode: string | null = null,
+): (hit: RawHit) => boolean {
   return (hit) => {
     const lines = text.slice(0, hit.start).split('\n');
     // Строка, на которой стоит сам «№»: у формы «ПРОТОКОЛ АТТЕСТАЦИИ № 60261»
@@ -527,6 +546,28 @@ function atDocumentHeading(text: string): (hit: RawHit) => boolean {
       if (line === '') continue;
       seen.push(line);
       if (!OPENER_RE.test(line.toUpperCase())) continue;
+
+      /**
+       * Заголовок ЧУЖОГО вида — это упоминание, а не титул листа (S53).
+       *
+       * На листе паспорта напечатано «Сертификат соответствия
+       * № RU.CMIK.001.H.00270 от 17.05.2023 г.» — ссылка на документ, которым
+       * подтверждена продукция. Строка начинается открывателем, и номер чужого
+       * сертификата доставался паспорту с наивысшей уверенностью; строка описи
+       * «Паспорт № 357» своего документа после этого не находила.
+       *
+       * Вид строки берётся тем же каталогом, что и у классификатора страниц:
+       * второй реализации «на что похож этот заголовок» в репозитории нет.
+       */
+      if (docTypeCode !== null && line !== '') {
+        const resolved = resolveDocType(
+          matchDocTypes(line, DOC_TYPES, { headingLines: 1 }),
+          DOC_TYPES,
+        ).code;
+        if (resolved !== null && resolved !== docTypeCode && !isFallbackCode(resolved)) {
+          return false;
+        }
+      }
 
       // Заголовок найден. Введён ли он перечнем — решает строка НАД ним.
       for (let j = i - 1; j >= 0; j -= 1) {
@@ -867,6 +908,58 @@ const HEADING_NUMBER_LINE = /^(?:[*_#>\s]*)([\p{L}\d][\p{L}\d./-]{5,})[*_\s]*$/u
 /** Сколько непустых строк под заголовком просматривается. */
 const HEADING_NUMBER_LOOKAHEAD = 2;
 
+/**
+ * Номер после СОБСТВЕННОГО названия документа, в том числе в ячейке таблицы.
+ *
+ * Бланк паспорта печатает свой номер графой таблицы: «| Паспорт № | 357 |».
+ * Знак «№» и значение стоят в РАЗНЫХ ячейках, между ними разделитель графы,
+ * и ни одна ступень номера такую пару не видела: у паспорта оставался номер
+ * сертификата, упомянутого ниже по листу, а строка описи «Паспорт № 357»
+ * своего документа не находила.
+ *
+ * Своим название считается только при совпадении с видом документа: «Сертификат
+ * соответствия № …» на листе паспорта называет чужую бумагу. Вид строки
+ * определяется тем же каталогом, что и у классификатора страниц.
+ */
+function ownTitleNumberHits(text: string, docTypeCode: string | null): readonly RawHit[] {
+  if (docTypeCode === null || isFallbackCode(docTypeCode)) return [];
+
+  const hits: RawHit[] = [];
+  let offset = 0;
+  for (const line of text.split('\n')) {
+    const start = offset;
+    offset += line.length + 1;
+
+    const sign = line.indexOf('№');
+    if (sign < 0) continue;
+
+    // Вид определяется по ВСЕЙ строке: якорь паспорта требует непустого
+    // значения после «№», и обрезанный по знаку заголовок ему не отвечает.
+    const title = line.replace(/[|*_#>]/gu, ' ').trim();
+    if (title === '') continue;
+    const resolved = resolveDocType(
+      matchDocTypes(title, DOC_TYPES, { headingLines: 1 }),
+      DOC_TYPES,
+    ).code;
+    if (resolved !== docTypeCode) continue;
+
+    const rest = line.slice(sign + 1);
+    const value = /^[\s|*_]*([^\s|*]+)/u.exec(rest);
+    const captured = value?.[1] ?? '';
+    if (captured === '') continue;
+
+    const at = rest.indexOf(captured);
+    hits.push({
+      value: captured,
+      start: start + sign + 1 + at,
+      end: start + sign + 1 + at + captured.length,
+      confidence: CONFIDENCE.ownLabel,
+    });
+  }
+
+  return hits;
+}
+
 function headingNumberHits(text: string): readonly RawHit[] {
   const lines = text.split('\n');
   const hits: RawHit[] = [];
@@ -908,19 +1001,21 @@ function headingNumberHits(text: string): readonly RawHit[] {
   return hits;
 }
 
-function findDocumentNumber(text: string): readonly RawHit[] {
+function findDocumentNumber(text: string, context: RuleContext): readonly RawHit[] {
   // Значение НЕ чистится от кавычек — иначе `evidence` перестал бы совпадать
   // со спаном текста; чистка участвует только в решении «номер ли это».
   const own = ownNumber(text);
   // Ступени идут от сильного ярлыка к слабой форме, и порядок здесь — это и
   // есть ранжир. `firstOf` отдаёт первую непустую ступень, поэтому найденный
   // по ярлыку собственный номер не конкурирует с чужим «№» из шапки вовсе.
-  const atHeading = atDocumentHeading(text);
+  const atHeading = atDocumentHeading(text, context.docTypeCode);
   const strong = sweep(text, NUMBER_STRONG, CONFIDENCE.labelled)
     .filter(plausibleNumber)
     .filter(own);
   return firstOf(
     sweep(text, OWN_NUMBER_LABELLED, CONFIDENCE.ownLabel).filter(plausibleNumber),
+    // Собственное название документа как ярлык: «| Паспорт № | 357 |».
+    ownTitleNumberHits(text, context.docTypeCode).filter(plausibleNumber),
     // Номер отдельной строкой под заголовком: у бланков сертификатов «№» стоит
     // только у номера бланка, и ступени, требующие его, свой номер не видят.
     headingNumberHits(text).filter(plausibleNumber).filter(own),
@@ -1371,10 +1466,14 @@ function evidenceOf(hit: PageHit): TextEvidence | null {
   };
 }
 
-function runRule(rule: RuleSpec, pages: readonly ExtractionPage[]): ExtractedField | null {
+function runRule(
+  rule: RuleSpec,
+  pages: readonly ExtractionPage[],
+  context: RuleContext,
+): ExtractedField | null {
   const hits: PageHit[] = [];
   for (const page of pages) {
-    for (const hit of rule.find(page.text)) hits.push({ ...hit, page });
+    for (const hit of rule.find(page.text, context)) hits.push({ ...hit, page });
   }
   if (hits.length === 0) return null;
 
@@ -1514,7 +1613,7 @@ export function extractBaseFields(input: ExtractionInput): readonly ExtractedFie
     const rule = RULES_BY_CODE.get(definition.code);
     if (rule === undefined) continue;
 
-    const field = runRule(rule, input.pages);
+    const field = runRule(rule, input.pages, { docTypeCode: input.docTypeCode });
     if (field !== null) fields.push(field);
   }
 
@@ -1546,7 +1645,7 @@ export function extractTypeFields(input: ExtractionInput): readonly ExtractedFie
     const rule = RULES_BY_CODE.get(field.code);
     if (rule === undefined) continue;
 
-    const extracted = runRule(rule, input.pages);
+    const extracted = runRule(rule, input.pages, { docTypeCode: input.docTypeCode });
     if (extracted !== null) fields.push(extracted);
   }
 
