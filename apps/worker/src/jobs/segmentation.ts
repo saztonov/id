@@ -1653,6 +1653,9 @@ export function createMatchRegistryHandler(
       numbers: numbers.get(document.id) ?? [],
       issuedAt: issuedAt.get(document.id) ?? null,
       title: document.title,
+      // Число листов отвечает одному вопросу: лежит ли при документе
+      // приложение, которое опись перечисляет отдельной строкой.
+      pageCount: document.pageCount,
     }));
 
     const matches: RegistryMatch[] = [];

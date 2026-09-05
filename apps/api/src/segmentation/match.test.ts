@@ -855,3 +855,67 @@ describe('алиас из наименования не берёт номер р
     });
   });
 });
+
+describe('приложение ищется по родителю (S53)', () => {
+  const parent = (id: string, pageCount: number): MatchableDocument => ({
+    documentId: id,
+    docTypeCode: 'sanitary_conclusion',
+    numbers: ['77.01.12.П.003165.10.16'],
+    issuedAt: null,
+    title: null,
+    pageCount,
+  });
+
+  const annexRow = (no: string | null): ParsedRegistryRow => ({
+    rowNo: 1,
+    sectionTitle: null,
+    docNameRaw: 'Приложение к экспертному заключению',
+    docNoRaw: no,
+    docNoNorm: no === null ? null : normalizeDocNo(no).normalized,
+    docNoFolded: no === null ? null : normalizeDocNo(no).folded,
+    orgRaw: null,
+    validFrom: null,
+    validTo: null,
+    issuedAt: null,
+  });
+
+  it('строка «б/н» находит родителя, при котором лежит лист приложения', () => {
+    // Своего номера у приложения нет, и лестница по номеру находила либо
+    // ничего, либо чужое. Родитель на трёх листах — приложение при нём.
+    const result = matchRegistryRows([annexRow(null)], [parent('conclusion', 3)]);
+
+    expect(result.rows[0]).toMatchObject({
+      matchState: 'matched',
+      matchedDocumentId: 'conclusion',
+      matchScore: 0.7,
+    });
+  });
+
+  it('у однолистного родителя приложения нет — совпадением это не считается', () => {
+    const result = matchRegistryRows([annexRow(null)], [parent('conclusion', 1)]);
+
+    expect(result.rows[0]?.matchState).toBe('candidate');
+    expect(result.rows[0]?.reason).toContain('приложения при нём нет');
+  });
+
+  it('два родителя с приложениями дают кандидата, а не выбор наугад', () => {
+    const result = matchRegistryRows([annexRow(null)], [parent('first', 3), parent('second', 2)]);
+
+    expect(result.rows[0]?.matchState).toBe('candidate');
+    expect(result.rows[0]?.candidates.map((c) => c.documentId)).toEqual(['first', 'second']);
+  });
+
+  it('родителя нужного вида нет — строка идёт обычной лестницей номера', () => {
+    const other: MatchableDocument = {
+      documentId: 'passport',
+      docTypeCode: 'quality_passport',
+      numbers: ['000345'],
+      issuedAt: null,
+      title: null,
+      pageCount: 1,
+    };
+    const result = matchRegistryRows([annexRow('000345')], [other]);
+
+    expect(result.rows[0]).toMatchObject({ matchState: 'matched', matchedDocumentId: 'passport' });
+  });
+});

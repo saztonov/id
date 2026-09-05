@@ -77,6 +77,15 @@ export interface MatchableDocument {
    */
   readonly issuedAt: string | null;
   readonly title: string | null;
+  /**
+   * Сколько листов у документа; `undefined` — счёт не передан (S53).
+   *
+   * Нужен ровно одному вопросу: лежит ли при документе приложение. Опись
+   * перечисляет «Приложение к экспертному заключению» отдельной строкой, а в
+   * папке этот лист лежит ВНУТРИ родителя — вторым и третьим листом. Документ
+   * из одного листа приложения при себе не держит.
+   */
+  readonly pageCount?: number;
 }
 
 /**
@@ -121,7 +130,12 @@ export function documentNumbersOf(
  */
 export type CandidateBasis =
   /** Номер совпал, но сразу у нескольких документов: различить их сверка не может. */
-  'doc_no' | 'doc_type' | 'issued_at' | 'doc_type_and_issued_at';
+  | 'doc_no'
+  | 'doc_type'
+  | 'issued_at'
+  | 'doc_type_and_issued_at'
+  /** Строка описывает приложение, а родителей подходящего вида несколько (S53). */
+  | 'annex_pages';
 
 export interface RegistryCandidate {
   readonly documentId: string;
@@ -285,6 +299,16 @@ export const MIN_PARTIAL_LENGTH = 4;
  * нечем». Счёт нужен ради упорядочивания кандидатов между собой, а не ради
  * сравнения с совпадениями.
  */
+/**
+ * Счёт совпадения приложения с его родителем (S53).
+ *
+ * Ниже фолдинга и вровень с числовым ядром: подтверждён не номер, а СТРУКТУРА —
+ * лист приложения лежит внутри родителя, и других родителей этого вида в
+ * комплекте нет. Утверждение проверяемое: у однолистного документа приложения
+ * при себе нет, и такая строка совпадением не становится.
+ */
+const ANNEX_SCORE = 0.7;
+
 const CANDIDATE_TYPE_SCORE = 0.4;
 const CANDIDATE_DATE_SCORE = 0.35;
 const CANDIDATE_BOTH_SCORE = 0.5;
@@ -318,6 +342,29 @@ const CANDIDATE_BOTH_SCORE = 0.5;
  * там, где перечень обобщает («Паспорт качества Арматура» на листе
  * «СЕРТИФИКАТ КАЧЕСТВА»).
  */
+/**
+ * Строка описывает ПРИЛОЖЕНИЕ к документу названного вида (S53).
+ *
+ * Приложение — не самостоятельный документ папки: физически это лист внутри
+ * родителя, и своего номера у него чаще всего нет вовсе («б/н»). Опись при
+ * этом перечисляет его отдельной строкой, и без этой связи двадцать две строки
+ * папки «ИД Мастер апрель 2026» объявлялись ненайденными или несравнимыми.
+ */
+const ANNEX_ROW_PARENTS: readonly (readonly [RegExp, string])[] = [
+  [/^\s*Приложение\s+к\s+(?:экспертному\s+)?заключени/iu, 'sanitary_conclusion'],
+  [/^\s*Приложение\s+к\s+свидетельств/iu, 'state_registration_certificate'],
+  [/^\s*Приложение\s+к\s+сертификат/iu, 'cert_conformity'],
+  [/^\s*Приложение\s+к\s+декларац/iu, 'declaration'],
+];
+
+/** Вид родителя, если строка описывает приложение к нему. */
+function annexParentType(name: string): string | null {
+  for (const [pattern, code] of ANNEX_ROW_PARENTS) {
+    if (pattern.test(name)) return code;
+  }
+  return null;
+}
+
 const STRUCTURAL_ROW_TYPES: readonly (readonly [RegExp, string])[] = [
   [/^\s*(?:АОСР|Акт\s+освидетельствован)/iu, 'aosr'],
   [
@@ -388,6 +435,8 @@ function basisLabel(basis: CandidateBasis): string {
       return 'видом документа';
     case 'issued_at':
       return 'датой выдачи';
+    case 'annex_pages':
+      return 'видом родительского документа';
   }
 }
 
@@ -806,6 +855,60 @@ export function matchRegistryRows(
   const matches: RegistryMatch[] = [];
 
   for (const row of rows) {
+    /**
+     * Приложение ищется по РОДИТЕЛЮ, а не по своему номеру (S53).
+     *
+     * Ступень стоит перед всеми номерными: у приложения своего номера чаще
+     * всего нет вовсе («б/н»), а тот, что напечатан, — это номер бланка, и
+     * лестница по нему находит либо ничего, либо чужое.
+     *
+     * Родителем считается документ названного вида, при котором ЛЕЖИТ лист
+     * приложения: у однолистного документа приложения нет, и строка честно
+     * остаётся ненайденной. Родителей несколько — кандидат: выбрать одного
+     * сверка не вправе.
+     */
+    const parentType = annexParentType(row.docNameRaw);
+    if (parentType !== null) {
+      const parents = documents.filter((document) => document.docTypeCode === parentType);
+      const withAnnex = parents.filter((document) => (document.pageCount ?? 0) >= 2);
+
+      if (withAnnex.length === 1) {
+        const parent = withAnnex[0] as MatchableDocument;
+        named.add(parent.documentId);
+        matches.push({
+          rowNo: row.rowNo,
+          matchState: 'matched',
+          matchedDocumentId: parent.documentId,
+          matchScore: ANNEX_SCORE,
+          reason:
+            'приложение лежит листами родителя: в комплекте один документ вида ' +
+            `«${parentType}» с приложением`,
+          candidates: [],
+        });
+        continue;
+      }
+
+      if (parents.length > 0) {
+        for (const parent of parents) named.add(parent.documentId);
+        matches.push({
+          rowNo: row.rowNo,
+          matchState: 'candidate',
+          matchedDocumentId: null,
+          matchScore: CANDIDATE_TYPE_SCORE,
+          reason:
+            withAnnex.length === 0
+              ? `в комплекте есть документ вида «${parentType}», но приложения при нём нет`
+              : `приложение может лежать при любом из ${withAnnex.length} документов вида «${parentType}»`,
+          candidates: (withAnnex.length === 0 ? parents : withAnnex).map((parent) => ({
+            documentId: parent.documentId,
+            basis: 'annex_pages' as const,
+            score: CANDIDATE_TYPE_SCORE,
+          })),
+        });
+        continue;
+      }
+    }
+
     if (row.docNoNorm === null || row.docNoFolded === null) {
       // Строка без сравнимого номера («б/н», пустая графа). Считать её
       // совпавшей нельзя, а искать по наименованию — нельзя тем более:

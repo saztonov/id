@@ -286,6 +286,7 @@ export function runPackage(dir: string, options: HarnessOptions): PackageRunResu
     numbers: documentNumbersOf(document.fields),
     issuedAt: document.fields.find((field) => field.fieldCode === 'issued_at')?.valueDate ?? null,
     title: document.title,
+    pageCount: document.pages.length,
   }));
 
   // Задачи 17–18: разбор реестров и сверка по номеру.
