@@ -13,7 +13,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { ProcessingStatus, StageSummary } from '../../api/types.js';
 
-import { activeStageOf, checksAhead, isBusy } from './busy.js';
+import { activeStageOf, checksAhead, isBusy, resetControl } from './busy.js';
 
 function stage(name: StageSummary['stage'], pending: number): StageSummary {
   return {
@@ -85,6 +85,30 @@ describe('isBusy', () => {
   it('сводки нет — не занятость', () => {
     expect(isBusy(undefined)).toBe(false);
     expect(isBusy(null)).toBe(false);
+  });
+});
+
+describe('resetControl', () => {
+  it('идущая работа — это «Стоп»', () => {
+    expect(resetControl(status({ stage: 'recognition', queued: 16 }), true)).toBe('stop');
+  });
+
+  it('мёртвая задача без очереди — это «Сбросить»', () => {
+    // Тот самый завал: очередь пуста, задача мертва и держит свой dedupe_key,
+    // то есть молча гасит следующую цепочку. Снять его с карточки папки было
+    // нечем — только консолью задач в администрировании.
+    expect(resetControl(status({ stage: 'failed', dead: 1 }), false)).toBe('reset');
+  });
+
+  it('прогон, который никто не закроет, — тоже «Сбросить»', () => {
+    // Финализатор снят, задач нет, а прогон вечно «идёт»: полоса на экране
+    // показывает работу, которой не существует.
+    expect(resetControl(status({ stage: 'ready' }), true)).toBe('reset');
+  });
+
+  it('чистой папке кнопка не нужна', () => {
+    expect(resetControl(status({ stage: 'ready' }), false)).toBeNull();
+    expect(resetControl(undefined, false)).toBeNull();
   });
 });
 

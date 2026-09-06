@@ -73,7 +73,7 @@ import { useSession } from '../../app/session.js';
 import { Link } from '../../app/router.js';
 import { usePollingInterval } from './stream.js';
 import { isDryRun, newestRecognitionRun, runningRecognitionRun } from './runs.js';
-import { activeStageOf, isBusy } from './busy.js';
+import { activeStageOf, isBusy, resetControl } from './busy.js';
 import { describeState, deferredStageOf, plural } from './state.js';
 import { startedLabel } from './started.js';
 
@@ -198,10 +198,17 @@ export function PipelineBar({ folderId, editable }: PipelineBarProps): ReactNode
   const stop = useMutation({
     mutationFn: () => pipeline.stop(folderId),
     onSuccess: async (result) => {
-      message.success(
+      // Итог называется по СДЕЛАННОМУ, а не по нажатой кнопке: снятие задач и
+      // закрытие незавершённого прогона — разные действия, и «снято 0 задач»
+      // после сброса зависшего прогона выглядело бы как «ничего не вышло».
+      const jobs =
         result.cancelledJobs === 0
-          ? 'Останавливать было нечего: очередь уже пуста'
-          : `Обработка остановлена: снято ${String(result.cancelledJobs)} ${plural(result.cancelledJobs, 'задача', 'задачи', 'задач')}`,
+          ? null
+          : `снято ${String(result.cancelledJobs)} ${plural(result.cancelledJobs, 'задача', 'задачи', 'задач')}`;
+      const run = result.runFinished ? 'прогон распознавания закрыт' : null;
+      const done = [jobs, run].filter((part) => part !== null).join(', ');
+      message.success(
+        done === '' ? 'Снимать было нечего: очередь уже пуста' : `Обработка сброшена: ${done}`,
       );
       await refresh();
     },
@@ -218,6 +225,9 @@ export function PipelineBar({ folderId, editable }: PipelineBarProps): ReactNode
   // страницы ещё долго после того, как их дописали (см. шапку `state.ts`).
   const deferredStage = deferredStageOf(data);
   const busy = isBusy(data);
+  // Что предложить человеку — прекратить идущее или разобрать завал; `null` —
+  // снимать нечего (см. `resetControl`).
+  const control = resetControl(data, runningRun !== null);
   const activeStage = activeStageOf(data);
   // Постраничный счётчик разметки приезжает в той же сводке: своего запроса и
   // своего опроса у него нет намеренно (см. `LayoutProgress` на сервере).
@@ -307,22 +317,32 @@ export function PipelineBar({ folderId, editable }: PipelineBarProps): ReactNode
         )}
 
         {/*
-          «Стоп» показывается только тогда, когда есть что останавливать:
+          Кнопка снятия показывается только тогда, когда есть что снимать:
           кнопка, которая всегда на экране и почти всегда бесполезна, приучает
           её не замечать — а нужна она в тот единственный раз, когда человек
           понял, что запустил не то.
+
+          Слов два, потому что поступка два: «Стоп» прекращает идущее, «Сбросить»
+          разбирает завал из мёртвых задач и незакрытого прогона. Разбирать его
+          прежде можно было только консолью задач в администрировании, и это не
+          инструмент для того, кто ведёт комплект: там чужие задачи всех папок
+          портала, а нужна одна.
         */}
-        {busy && (
+        {control !== null && (
           <Popconfirm
-            title="Остановить обработку?"
-            description="Распознанное сохранится. Продолжить можно кнопкой «2. Распознать»."
-            okText="Остановить"
+            title={control === 'stop' ? 'Остановить обработку?' : 'Сбросить обработку?'}
+            description={
+              control === 'stop'
+                ? 'Распознанное сохранится. Продолжить можно кнопкой «2. Распознать».'
+                : 'Снимутся упавшие и зависшие задачи, незавершённый прогон закроется. Распознанное сохранится — обработку можно запустить заново.'
+            }
+            okText={control === 'stop' ? 'Остановить' : 'Сбросить'}
             okButtonProps={{ danger: true }}
             cancelText="Отмена"
             onConfirm={() => stop.mutate()}
           >
             <Button danger loading={stop.isPending} disabled={!canRun} data-testid="pipeline-stop">
-              Стоп
+              {control === 'stop' ? 'Стоп' : 'Сбросить'}
             </Button>
           </Popconfirm>
         )}
@@ -446,6 +466,18 @@ export function PipelineBar({ folderId, editable }: PipelineBarProps): ReactNode
                 которого спрашивают «а почему», и спросить было не у кого.
               */}
               <Typography.Text>{failure.reason}</Typography.Text>
+              {/*
+                Что делать дальше — рядом с бедой, а не в чужой инструкции.
+                Мёртвая задача держит свой `dedupe_key`, то есть молча гасит
+                следующую цепочку: пока её не снять, «2. Распознать» доводит
+                комплект ровно до этого места и снова останавливается.
+              */}
+              {control === 'reset' && (
+                <Typography.Text type="secondary">
+                  Снимите завал кнопкой «Сбросить» и запустите обработку заново — иначе следующий
+                  запуск остановится здесь же.
+                </Typography.Text>
+              )}
               <Link to={`/ids/folders/${folderId}?tab=history`}>
                 Подробности прогона в «Истории»
               </Link>
