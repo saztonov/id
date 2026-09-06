@@ -23,7 +23,7 @@ import { execSyncProbe, type ExecProbeResult } from './probe.js';
 const TOKEN = 'rdext-chasovoy-0002';
 const PROJECT = 'idp-object-1';
 
-/** Ответ на каждый вызов по порядку: шаг 1, затем шаг 2. */
+/** Ответ на каждый вызов по порядку: объявление, чтение синхронизации, блоки. */
 function runProbe(...responses: (() => Response)[]): Promise<ExecProbeResult> {
   const destination = new Writable({
     write(_chunk: Buffer, _encoding, callback) {
@@ -59,16 +59,18 @@ function detail(status: number, code: string, message: string): () => Response {
 }
 
 describe('проба различает преграды контура', () => {
-  it('422 на объявлении снимка и 404 на чтении — связь есть', async () => {
+  it('422 на объявлении снимка и два 404 на чтении — связь есть', async () => {
     const result = await runProbe(
       detail(422, 'invalid_manifest', 'Манифест не разобран'),
       detail(404, 'sync_not_found', 'Синхронизация не найдена'),
+      detail(404, 'document_not_found', 'Документ не зарегистрирован'),
     );
 
     expect(result.ok).toBe(true);
     expect(result.steps.map((step) => [step.step, step.outcome])).toEqual([
       ['init', 'ok'],
       ['read', 'ok'],
+      ['blocks', 'ok'],
     ]);
   });
 
@@ -137,11 +139,64 @@ describe('проба не выдаёт неожиданное за успех', 
     expect(result.steps[0]).toMatchObject({ outcome: 'unexpected' });
   });
 
-  it('останавливается на первой преграде и второго шага не делает', async () => {
+  it('останавливается на первой преграде и следующих шагов не делает', async () => {
     // Второй ответ не задан намеренно: обращение за ним обрушило бы стенд, и
     // это и есть проверка того, что шага не было.
     const result = await runProbe(detail(401, 'invalid_principal', 'Удостоверение не признано'));
 
     expect(result.steps).toHaveLength(1);
+  });
+});
+
+/**
+ * Дефект, ради которого шаг `blocks` и появился: связь была, удостоверение
+ * признано, проект разрешён — и прогон всё равно падал, потому что
+ * единственный путь, по которому он забирает результаты, не сопоставлялся с
+ * маршрутом на той стороне. Двухшаговая проба этого не видела вовсе.
+ */
+describe('маршрут результатов проверяется отдельно от маршрута синхронизаций', () => {
+  const passedFirstTwo = [
+    detail(422, 'invalid_manifest', 'Манифест не разобран'),
+    detail(404, 'sync_not_found', 'Синхронизация не найдена'),
+  ] as const;
+
+  it('«маршрута нет» на чтении блоков не выдаётся за отсутствие документа', async () => {
+    const result = await runProbe(...passedFirstTwo, detail(404, 'not_found', 'Request rejected'));
+
+    expect(result.ok).toBe(false);
+    expect(result.steps[2]).toMatchObject({ step: 'blocks', outcome: 'unexpected', status: 404 });
+    expect(result.steps[2]?.message).toContain('GET /documents/{id}/blocks');
+    expect(result.steps[2]?.message).toContain('RDWEB_EXEC_BASE_URL');
+  });
+
+  it('404 без кода вовсе разбирается так же: тело отказа могло и не дойти', async () => {
+    const result = await runProbe(...passedFirstTwo, () => new Response('', { status: 404 }));
+
+    expect(result.steps[2]).toMatchObject({ outcome: 'unexpected', status: 404 });
+    expect(result.steps[2]?.message).toContain('маршрут');
+  });
+
+  it('«документа нет» на чтении синхронизации — тоже неожиданность, а не успех', async () => {
+    const result = await runProbe(
+      detail(422, 'invalid_manifest', 'Манифест не разобран'),
+      detail(404, 'document_not_found', 'Документ не зарегистрирован'),
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.steps[1]).toMatchObject({ step: 'read', outcome: 'unexpected' });
+  });
+
+  it('отданные результаты несуществующего документа — неожиданность, а не успех', async () => {
+    const result = await runProbe(
+      ...passedFirstTwo,
+      () =>
+        new Response(JSON.stringify({ items: [], next_cursor: null }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.steps[2]).toMatchObject({ step: 'blocks', outcome: 'unexpected' });
   });
 });

@@ -536,6 +536,35 @@ describe('неизменяемость производного и справо�
  * Проверяется и умолчание: строки в `app_settings` нет ни в одной базе, и
  * забытая настройка обязана означать строгий режим, а не открытый.
  */
+/**
+ * Идентификатор документа RD WEB уезжает В ПУТЬ, и слэш в нём стоил боевого
+ * прогона: ASGI на той стороне декодирует `%2F` до сопоставления маршрутов,
+ * `GET /documents/{external_document_id}/blocks` перестаёт находить ручку и
+ * отвечает `404 not_found`. Ограничение 0073 держит форму на уровне данных —
+ * там же, где сама строка, а не в договорённости вызывающего кода.
+ */
+describe('форма внешнего идентификатора документа (0073)', () => {
+  // Строка одна на папку (`folder_id` — первичный ключ), поэтому каждая
+  // попытка идёт с чистого места: иначе отказ по уникальности выдавал бы себя
+  // за отказ по форме, и ослабленное ограничение осталось бы незамеченным.
+  const insertDocument = async (external: string): Promise<unknown> => {
+    await db.query(`DELETE FROM rd_exec_documents WHERE folder_id = '${ID.folder}'`);
+    return db.query(
+      `INSERT INTO rd_exec_documents (folder_id, object_id, external_project_id, external_document_id)
+         VALUES ('${ID.folder}', '${ID.object}', 'idp-object-1', '${external}')`,
+    );
+  };
+
+  it('отвергает слэш: путь /documents/{id}/blocks принимает один сегмент', async () => {
+    await expect(insertDocument(`folder/${ID.folder}`)).rejects.toThrow();
+  });
+
+  it('принимает дефисную форму: контроль к предыдущему', async () => {
+    await expect(insertDocument(`folder-${ID.folder}`)).resolves.toBeDefined();
+    await db.query(`DELETE FROM rd_exec_documents WHERE folder_id = '${ID.folder}'`);
+  });
+});
+
 describe('отсроченные ключи области (0054, 0071)', () => {
   const OTHER_ORG = id(90);
   const COMPLECT = id(91);

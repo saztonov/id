@@ -72,9 +72,20 @@ const NON_TERMINAL_STATES: readonly ExecSyncRowState[] = [
  * это различие уже есть — папка живёт, `processing_bundles` пересобирается.
  * Префикс нужен, чтобы идентификатор читался человеком в интерфейсе RD WEB и
  * не выглядел безымянным uuid среди чужих проектов.
+ *
+ * **Разделитель — дефис, и это не косметика.** Значение уезжает В ПУТЬ
+ * (`GET /documents/{external_document_id}/blocks`), а путь на той стороне
+ * разбирает ASGI: uvicorn декодирует `%2F` ДО сопоставления маршрутов, поэтому
+ * кодированный слэш становится разделителем сегментов и шаблон
+ * `{external_document_id}` не сопоставляется вовсе. Прежнее `folder/{uuid}`
+ * доходило до `init` (там идентификатор идёт телом) и роняло прогон на
+ * `rd.sync_fetch`: RD WEB отвечал `404 not_found` из обработчика
+ * несопоставленного маршрута — не `document_not_found` из ручки, то есть даже
+ * не «документа нет», а «такого адреса нет». Форма закреплена CHECK
+ * `rd_exec_documents_document_path_chk` (0073) и предполётной проверкой снимка.
  */
 export function externalDocumentIdOf(folderId: string): string {
-  return `folder/${folderId}`;
+  return `folder-${folderId}`;
 }
 
 /**

@@ -165,6 +165,21 @@ beforeEach(async () => {
 });
 
 describe('документ логический, а не файловый', () => {
+  /**
+   * Идентификатор уезжает В ПУТЬ: `GET /documents/{external_document_id}/blocks`.
+   * Слэш в нём стоил прогона на бою — Starlette декодирует `%2F` ДО сопоставления
+   * маршрутов, кодированный слэш становится разделителем сегментов, и шаблон
+   * `{external_document_id}` (один сегмент) не сопоставляется вовсе: RD WEB
+   * отвечал `404 not_found` из обработчика несопоставленного маршрута, а не
+   * `document_not_found` из ручки.
+   */
+  it('переживает подстановку в путь: один сегмент, кодирование ничего не меняет', () => {
+    const external = externalDocumentIdOf(FOLDER);
+
+    expect(external).not.toContain('/');
+    expect(encodeURIComponent(external)).toBe(external);
+  });
+
   it('заводится один на папку и переживает повторные отправки', async () => {
     await insertLayoutBlock(id(200), 0, '0.1, 0.1, 0.9, 0.4');
     await insertRun(id(300));

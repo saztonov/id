@@ -113,13 +113,27 @@ export async function startFakeExecSync(options: FakeExecOptions = {}): Promise<
     },
   );
 
-  app.addHook('onRequest', async (request) => {
+  const prefix = '/api/executive/v1';
+
+  app.addHook('onRequest', async (request, reply) => {
     const requestId = request.headers['x-request-id'];
     state.calls.push({
       method: request.method,
       path: request.url,
       requestId: typeof requestId === 'string' ? requestId : null,
     });
+
+    // Кодированный слэш до обработчика не доходит НИКОГДА, и двойник обязан
+    // вести себя так же. Настоящий контур — ASGI: uvicorn декодирует путь до
+    // сопоставления маршрутов, `%2F` становится разделителем сегментов, и
+    // шаблон `{external_document_id}` перестаёт сопоставляться. Fastify же
+    // маршрутизирует по СЫРОМУ url, то есть принимал бы то, что боевой сервер
+    // отвергает: ровно этим двойник и промолчал, когда `folder/{uuid}` уехал
+    // в путь и прогон встал на `rd.sync_fetch` с `404 not_found` (S54).
+    if (/%2f/iu.test(request.url) && request.url.startsWith(`${prefix}/`)) {
+      return reply.code(404).send({ detail: fail(404, 'not_found', 'Request rejected') });
+    }
+    return undefined;
   });
 
   const authorize = (auth: string | undefined, scope: string): Detail | null => {
@@ -131,8 +145,6 @@ export async function startFakeExecSync(options: FakeExecOptions = {}): Promise<
     }
     return null;
   };
-
-  const prefix = '/api/executive/v1';
 
   // --- Шаг 1: init ---------------------------------------------------------
   app.post(`${prefix}/document-syncs/init`, async (request, reply) => {

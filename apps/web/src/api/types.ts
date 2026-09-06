@@ -953,7 +953,7 @@ export interface SettingsView {
  * из него вычеркнуто на сервере.
  */
 export interface IntegrationProbeStep {
-  step: 'init' | 'read';
+  step: 'init' | 'read' | 'blocks';
   outcome:
     | 'ok'
     | 'unreachable'

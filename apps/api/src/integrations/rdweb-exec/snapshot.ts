@@ -164,6 +164,17 @@ function assertWithinLimits(input: BuildSnapshotInput, blocks: readonly ExecSync
       );
     }
   }
+  // Документ — единственный из трёх, кто уезжает В ПУТЬ
+  // (`GET /documents/{external_document_id}/blocks`). Слэш там неотличим от
+  // разделителя сегментов: ASGI декодирует `%2F` до сопоставления маршрутов, и
+  // запрос не находит ручку вовсе. Проект идёт телом, а в `/document-syncs/{id}`
+  // подставляется `sync_id`, выданный сервером, — оба в путь не попадают.
+  if (input.externalDocumentId.includes('/')) {
+    problems.push(
+      `идентификатор документа «${input.externalDocumentId.slice(0, 32)}» содержит «/», ` +
+        'а путь /documents/{id}/blocks принимает один сегмент',
+    );
+  }
   if (problems.length > 0) {
     throw new SnapshotBuildError(
       `Комплект не укладывается в ограничения RD WEB: ${problems.join('; ')}. ` +

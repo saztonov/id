@@ -34,7 +34,7 @@ function build(blocks: readonly SnapshotBlockInput[], pageCount = 4) {
     externalSyncId: 'sync-1',
     externalProjectId: 'idp-object-1',
     projectName: 'Корпус 1',
-    externalDocumentId: 'folder/1f0f2b1e-0000-4000-8000-000000000001',
+    externalDocumentId: 'folder-1f0f2b1e-0000-4000-8000-000000000001',
     documentName: 'ЖБ конструкции',
     documentRevision: 'R1',
     baseGeneration: 0,
@@ -143,7 +143,7 @@ describe('лимиты §12 проверяются ДО отправки', () =>
         externalSyncId: 'sync-1',
         externalProjectId: 'idp-object-1',
         projectName: 'Корпус 1',
-        externalDocumentId: 'folder/x',
+        externalDocumentId: 'folder-x',
         documentName: 'x',
         documentRevision: 'R1',
         baseGeneration: 0,
@@ -157,6 +157,39 @@ describe('лимиты §12 проверяются ДО отправки', () =>
         blocks: [blockInput()],
       }),
     ).toThrow(SnapshotBuildError);
+  });
+});
+
+describe('идентификатор документа подставляется в путь', () => {
+  /**
+   * Отправка со слэшем ПРОХОДИТ `init` — там идентификатор идёт телом, — а
+   * ломается тремя задачами позже, на чтении результатов: `%2F` декодируется
+   * ASGI до сопоставления маршрутов, и `GET /documents/{id}/blocks` не находит
+   * ручку (`404 not_found`). Отказ на сборке снимка стоит секунды, отказ на
+   * `rd.sync_fetch` — загруженного комплекта на 111 МБ и оплаченного
+   * распознавания 293 блоков.
+   */
+  it('слэш отвергается до отправки, а не после оплаченного распознавания', () => {
+    expect(() =>
+      buildSnapshotBody({
+        externalSyncId: 'sync-1',
+        externalProjectId: 'idp-object-1',
+        projectName: 'Корпус 1',
+        externalDocumentId: 'folder/1f0f2b1e-0000-4000-8000-000000000001',
+        documentName: 'ЖБ конструкции',
+        documentRevision: 'R1',
+        baseGeneration: 0,
+        syncGeneration: 1,
+        document: { fileName: 'work.pdf', sizeBytes: 1024, sha256: 'a'.repeat(64), pageCount: 4 },
+        blocks: [blockInput()],
+      }),
+    ).toThrow(/содержит «\/»/u);
+  });
+
+  it('идентификатор без слэша проходит: контроль к предыдущему', () => {
+    expect(build([blockInput()]).body.external_document_id).toBe(
+      'folder-1f0f2b1e-0000-4000-8000-000000000001',
+    );
   });
 });
 

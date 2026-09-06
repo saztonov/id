@@ -1729,6 +1729,39 @@ export const sections = pgTable("sections", {
 	check("sections_sort_order_chk", sql`sort_order >= 0`),
 ]);
 
+export const rdExecDocuments = pgTable("rd_exec_documents", {
+	folderId: uuid("folder_id").primaryKey().notNull(),
+	objectId: uuid("object_id").notNull(),
+	externalProjectId: text("external_project_id").notNull(),
+	externalDocumentId: text("external_document_id").notNull(),
+	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
+	syncGeneration: bigint("sync_generation", { mode: "number" }).default(0).notNull(),
+	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
+	baseGeneration: bigint("base_generation", { mode: "number" }).default(0).notNull(),
+	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
+	nextBlockSeq: bigint("next_block_seq", { mode: "number" }).default(1).notNull(),
+	pdfRevisionNo: integer("pdf_revision_no").default(0).notNull(),
+	lastPdfSha256: text("last_pdf_sha256"),
+	resyncRequired: boolean("resync_required").default(false).notNull(),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	updatedAt: timestamp("updated_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+}, (table) => [
+	index("ix_rd_exec_documents_object").using("btree", table.objectId.asc().nullsLast().op("uuid_ops")),
+	foreignKey({
+			columns: [table.folderId, table.objectId],
+			foreignColumns: [folders.id, folders.objectId],
+			name: "rd_exec_documents_scope_fk"
+		}),
+	unique("rd_exec_documents_external_uq").on(table.externalDocumentId),
+	check("rd_exec_documents_project_chk", sql`(length(external_project_id) >= 1) AND (length(external_project_id) <= 128)`),
+	check("rd_exec_documents_document_chk", sql`(length(external_document_id) >= 1) AND (length(external_document_id) <= 128)`),
+	check("rd_exec_documents_generation_chk", sql`(sync_generation >= base_generation) AND (base_generation >= 0)`),
+	check("rd_exec_documents_seq_chk", sql`next_block_seq > 0`),
+	check("rd_exec_documents_pdf_sha_chk", sql`(last_pdf_sha256 IS NULL) OR (last_pdf_sha256 ~ '^[0-9a-f]{64}$'::text)`),
+	check("rd_exec_documents_pdf_rev_chk", sql`(pdf_revision_no = 0) = (last_pdf_sha256 IS NULL)`),
+	check("rd_exec_documents_document_path_chk", sql`POSITION(('/'::text) IN (external_document_id)) = 0`),
+]);
+
 export const complects = pgTable("complects", {
 	id: uuid().defaultRandom().primaryKey().notNull(),
 	folderId: uuid("folder_id").notNull(),
@@ -1761,38 +1794,6 @@ export const complects = pgTable("complects", {
 	unique("complects_scope_uq").on(table.contractorId, table.id, table.objectId),
 	unique("complects_folder_uq").on(table.folderId, table.id),
 	check("complects_ordinal_chk", sql`ordinal > 0`),
-]);
-
-export const rdExecDocuments = pgTable("rd_exec_documents", {
-	folderId: uuid("folder_id").primaryKey().notNull(),
-	objectId: uuid("object_id").notNull(),
-	externalProjectId: text("external_project_id").notNull(),
-	externalDocumentId: text("external_document_id").notNull(),
-	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
-	syncGeneration: bigint("sync_generation", { mode: "number" }).default(0).notNull(),
-	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
-	baseGeneration: bigint("base_generation", { mode: "number" }).default(0).notNull(),
-	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
-	nextBlockSeq: bigint("next_block_seq", { mode: "number" }).default(1).notNull(),
-	pdfRevisionNo: integer("pdf_revision_no").default(0).notNull(),
-	lastPdfSha256: text("last_pdf_sha256"),
-	resyncRequired: boolean("resync_required").default(false).notNull(),
-	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-	updatedAt: timestamp("updated_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-}, (table) => [
-	index("ix_rd_exec_documents_object").using("btree", table.objectId.asc().nullsLast().op("uuid_ops")),
-	foreignKey({
-			columns: [table.folderId, table.objectId],
-			foreignColumns: [folders.id, folders.objectId],
-			name: "rd_exec_documents_scope_fk"
-		}),
-	unique("rd_exec_documents_external_uq").on(table.externalDocumentId),
-	check("rd_exec_documents_project_chk", sql`(length(external_project_id) >= 1) AND (length(external_project_id) <= 128)`),
-	check("rd_exec_documents_document_chk", sql`(length(external_document_id) >= 1) AND (length(external_document_id) <= 128)`),
-	check("rd_exec_documents_generation_chk", sql`(sync_generation >= base_generation) AND (base_generation >= 0)`),
-	check("rd_exec_documents_seq_chk", sql`next_block_seq > 0`),
-	check("rd_exec_documents_pdf_sha_chk", sql`(last_pdf_sha256 IS NULL) OR (last_pdf_sha256 ~ '^[0-9a-f]{64}$'::text)`),
-	check("rd_exec_documents_pdf_rev_chk", sql`(pdf_revision_no = 0) = (last_pdf_sha256 IS NULL)`),
 ]);
 
 export const rdExecSyncs = pgTable("rd_exec_syncs", {

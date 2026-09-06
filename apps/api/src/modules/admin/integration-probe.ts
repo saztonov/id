@@ -41,7 +41,7 @@ const PREFIX = '/api/v1/admin/integrations';
 const manageSettings = requirePermission('settings.manage');
 
 const probeStepSchema = z.object({
-  step: z.enum(['init', 'read']),
+  step: z.enum(['init', 'read', 'blocks']),
   outcome: z.enum([
     'ok',
     'unreachable',

@@ -30,6 +30,21 @@
  * Шаг 2 читает заведомо отсутствующую синхронизацию и ждёт `404
  * sync_not_found` — это подтверждает право на чтение, которое порталу нужно
  * позже, чтобы забрать результаты по блокам.
+ *
+ * ## Почему шагов три, а не два
+ *
+ * Двух не хватило, и это выяснилось на бою: проба светила зелёным, пока прогон
+ * падал на `rd.sync_fetch`. Оба первых шага адресуют `/document-syncs/…`, а
+ * результаты лежат по ДРУГОМУ пути — `/documents/{id}/blocks`, — и именно он
+ * оказался недостижим (идентификатор со слэшем разваливал сопоставление
+ * маршрута на той стороне). Проба, не ходящая туда, куда ходит прогон, отвечает
+ * на вопрос «работает ли связь» только частью правды, поэтому шаг 3 читает
+ * блоки заведомо отсутствующего документа и ждёт `404 document_not_found`.
+ *
+ * Отсюда же и разбор `404 not_found` без уточняющего кода: так отвечает
+ * обработчик НЕСОПОСТАВЛЕННОГО маршрута, то есть «такого адреса нет» — не
+ * «ресурса нет». Склеивать эти два ответа нельзя: первый чинится адресом или
+ * версией RD WEB, второй не чинится вовсе и означает успех пробы.
  */
 import type { ExecSyncClient } from './client.js';
 import { ExecSyncError } from './port.js';
@@ -51,8 +66,15 @@ export const PROBE_TIMEOUT_MS = 5_000;
  */
 const ABSENT_SYNC_ID = 'portal-id-connection-probe';
 
+/**
+ * Документ, которого не может существовать. Отдельно от `ABSENT_SYNC_ID` и с
+ * тем же разделителем, что у боевых идентификаторов (`folder-{uuid}`): проба
+ * обязана проверять ровно ту форму пути, которой пользуется прогон.
+ */
+const ABSENT_DOCUMENT_ID = 'folder-portal-id-connection-probe';
+
 /** Шаг пробы. */
-export type ExecProbeStepName = 'init' | 'read';
+export type ExecProbeStepName = 'init' | 'read' | 'blocks';
 
 /** Вердикт шага: что именно чинить. */
 export type ExecProbeOutcome =
@@ -123,7 +145,17 @@ export function execSyncProbe(client: ExecSyncClient, externalProjectId: string)
         }),
       );
       steps.push(read);
-      return { ok: read.outcome === 'ok', steps };
+      if (read.outcome !== 'ok') return { ok: false, steps };
+
+      const blocks = await runStep('blocks', () =>
+        client.request<unknown>({
+          method: 'GET',
+          path: `/documents/${encodeURIComponent(ABSENT_DOCUMENT_ID)}/blocks`,
+          operation: 'probe_blocks',
+        }),
+      );
+      steps.push(blocks);
+      return { ok: blocks.outcome === 'ok', steps };
     },
   };
 }
@@ -160,6 +192,14 @@ async function runStep(
 const UNEXPECTED_SUCCESS: Readonly<Record<ExecProbeStepName, string>> = {
   init: 'RD WEB принял за снимок тело, снимком не являющееся: контур отвечает не по контракту.',
   read: 'RD WEB нашёл синхронизацию по идентификатору пробы, которой не может существовать.',
+  blocks: 'RD WEB отдал результаты документа, которого не может существовать.',
+};
+
+/** Адрес шага — он и называется в отказе «маршрут не найден». */
+const STEP_ROUTE: Readonly<Record<ExecProbeStepName, string>> = {
+  init: 'POST /document-syncs/init',
+  read: 'GET /document-syncs/{id}',
+  blocks: 'GET /documents/{id}/blocks',
 };
 
 /** Что означает отказ и что с ним делать. */
@@ -206,8 +246,23 @@ function describeFailure(step: ExecProbeStepName, error: ExecSyncError): ExecPro
   }
   if (status === 404 && code === 'sync_not_found') {
     return step === 'read'
-      ? at('ok', 'Право на чтение результатов есть.')
-      : at('unexpected', 'RD WEB ответил «синхронизация не найдена» на объявление снимка.');
+      ? at('ok', 'Синхронизации читаются: право на чтение есть.')
+      : at('unexpected', 'RD WEB ответил «синхронизация не найдена» не на чтение синхронизации.');
+  }
+  if (status === 404 && code === 'document_not_found') {
+    return step === 'blocks'
+      ? at('ok', 'Маршрут результатов отвечает: право на чтение блоков документа есть.')
+      : at('unexpected', 'RD WEB ответил «документ не найден» не на чтение результатов.');
+  }
+  if (status === 404 && (code === null || code === 'not_found')) {
+    // Так отвечает обработчик НЕСОПОСТАВЛЕННОГО маршрута: не «ресурса нет», а
+    // «такого адреса нет». Именно этим ответом падал `rd.sync_fetch`, пока
+    // проба, не ходившая по этому пути, показывала зелёный свет.
+    return at(
+      'unexpected',
+      `RD WEB не нашёл маршрут ${STEP_ROUTE[step]}: проверьте, что RDWEB_EXEC_BASE_URL ` +
+        'указывает на узел с контуром /api/executive/v1, а версия RD WEB не старее контракта.',
+    );
   }
   if (status === 422) {
     return step === 'init'
