@@ -596,8 +596,9 @@ export const secretReferenceResponseSchema = z.object({
  * Состояние интеграции.
  *
  * `verified` всегда `false`: наличие переменных окружения — это не проверенное
- * подключение. Живая проба появляется вместе с адаптерами RD WEB и proxy_llm;
- * до тех тех пор портал не имеет права утверждать, что связь есть.
+ * подключение, и эта выдача подключение не проверяет. Живая проба связи с RD WEB
+ * живёт отдельной ручкой и в состав настроек не входит: её ответ протухает
+ * быстрее, чем экран успевают перечитать (см. `integrationView`).
  */
 export const integrationStatusResponseSchema = z.object({
   name: z.enum(INTEGRATION_NAMES),

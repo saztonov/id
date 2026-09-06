@@ -173,6 +173,30 @@ async function settingOf(
   return found === undefined ? null : { value: found.value, isDefault: found.isDefault };
 }
 
+test('проверка связи с RD WEB предлагается там же, где провайдер, и молчит без настроек', async ({
+  page,
+}) => {
+  await signIn(page, KC.admin, '/admin?tab=settings');
+
+  // Кнопка стоит рядом с переключателем, который её и задействует: провайдер по
+  // умолчанию — RD WEB, значит она видна сразу.
+  const check = page.getByTestId('rdweb-exec-check');
+  await expect(check).toBeVisible();
+
+  // Состояние кнопки сверяется с ОТВЕТОМ сервера, а не с ожидаемой надписью:
+  // стенд поднят без RDWEB_EXEC_*, и проверять пробе нечего. Кнопка, доступная
+  // при несконфигурированной интеграции, отправила бы администратора искать
+  // отказ связи там, где не хватает переменной окружения.
+  const response = await page.request.get('/api/v1/admin/settings');
+  const body = (await response.json()) as { integrations: { name: string; status: string }[] };
+  expect(body.integrations.find((item) => item.name === 'rdweb_exec')?.status).toBe('incomplete');
+  await expect(check).toBeDisabled();
+
+  // Пока не нажимали — вердикта нет. Плашка, показанная до пробы, утверждала бы
+  // о связи то, чего никто не проверял.
+  await expect(page.getByTestId('rdweb-exec-check-result')).toHaveCount(0);
+});
+
 test('переключение провайдера распознавания доходит до настроек и предупреждает о шлюзе', async ({
   page,
 }) => {

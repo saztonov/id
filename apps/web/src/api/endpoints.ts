@@ -45,6 +45,7 @@ import type {
   FieldValue,
   CheckReport,
   FindingList,
+  IntegrationProbeResult,
   JobRunView,
   JobView,
   LayoutBlock,
@@ -1069,6 +1070,15 @@ export const admin = {
     ),
 
   queues: () => get<QueueSnapshot>(`${V1}/admin/jobs/queues`),
+
+  /**
+   * Живая проба связи с RD WEB. POST, а не GET: она ходит наружу, и открытие
+   * экрана не должно дёргать чужой сервис.
+   */
+  checkRdwebExec: () =>
+    request<IntegrationProbeResult>('POST', `${V1}/admin/integrations/rdweb-exec/check`).then(
+      (r) => r.data,
+    ),
 
   audit: (query?: { action?: string; entityType?: string; objectId?: string }) =>
     get<Page<AuditEntry>>(`${V1}/audit/entries`, {

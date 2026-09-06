@@ -204,6 +204,45 @@ describe('значения-заглушки', () => {
   });
 });
 
+describe('удостоверение RD WEB пригодно для заголовка', () => {
+  /** Полный набор переменных контура: они обязательны все вместе или никак. */
+  function execEnv(token: string): NodeJS.ProcessEnv {
+    return devEnv({
+      RDWEB_EXEC_BASE_URL: 'https://rdweb.example/',
+      RDWEB_EXEC_TOKEN: token,
+      RDWEB_EXEC_PROJECT_ID: 'idp-object-1',
+    });
+  }
+
+  it('отвергает токен со словом Bearer: схему клиент добавляет сам', () => {
+    // На проводе получилось бы `Bearer Bearer rdext_…`, и RD WEB, срезав схему,
+    // увидел бы мусор — то есть ответил бы «удостоверение не признано»,
+    // неотличимо от отозванного токена. Это и есть цена пропуска: часы поиска.
+    const problems = problemsOf(execEnv('Bearer rdext_S3cr3t'));
+
+    expect(problemAbout(problems, 'RDWEB_EXEC_TOKEN')).toContain('Bearer');
+  });
+
+  it('отвергает токен, обрамлённый кавычками из env-файла', () => {
+    for (const value of ['"rdext_S3cr3t"', "'rdext_S3cr3t'"]) {
+      expect(problemAbout(problemsOf(execEnv(value)), 'RDWEB_EXEC_TOKEN')).toContain('кавычк');
+    }
+  });
+
+  it('отвергает токен с переносом строки, приехавшим при копировании', () => {
+    expect(problemAbout(problemsOf(execEnv('rdext_S3\ncr3t')), 'RDWEB_EXEC_TOKEN')).toBeDefined();
+  });
+
+  it('форму самого удостоверения не проверяет: это правило чужой стороны', () => {
+    // Префикс `rdext_` — правило RD WEB, и повторённое здесь оно завело бы
+    // второе место, где может разойтись с первым. Непригодный префикс ловит
+    // живая проба связи, а не старт процесса.
+    expect(loadEnv(execEnv('token-without-any-known-prefix')).RDWEB_EXEC_TOKEN).toBe(
+      'token-without-any-known-prefix',
+    );
+  });
+});
+
 describe('полнота отчёта о проблемах', () => {
   it('перечисляет все нарушения кросс-проверок за один запуск, а не первое', () => {
     const problems = problemsOf(

@@ -95,6 +95,7 @@ import {
 import { registerAdminRoutes } from './modules/admin/routes.js';
 import { registerJobsConsoleRoutes } from './modules/admin/jobs-console.js';
 import { registerErrorJournalRoutes } from './modules/admin/error-journal.js';
+import { registerIntegrationProbeRoutes } from './modules/admin/integration-probe.js';
 import { registerPipelineFeedbackRoutes } from './modules/admin/pipeline-feedback.js';
 import { CLIENT_ERRORS_PATH, registerClientErrorRoutes } from './modules/client-errors/routes.js';
 import { registerAuditRoutes } from './modules/audit/routes.js';
@@ -113,6 +114,7 @@ import { registerRecognitionRoutes } from './modules/recognition/routes.js';
 import { registerDocumentRoutes } from './modules/documents/routes.js';
 import { queueSnapshot } from './db/repositories/jobs.js';
 import { createStorage, type StorageProvider } from './storage/provider.js';
+import { createExecSyncProbe, type ExecSyncProbe } from './integrations/rdweb-exec/index.js';
 import { LOCAL_UPLOAD_PATH } from './storage/local.js';
 
 /** Тела JSON. Файлы идут в S3 мимо API, поэтому лимит маленький. */
@@ -180,6 +182,13 @@ declare module 'fastify' {
      * ещё и новый секрет подписи у драйвера `local`.
      */
     storage: StorageProvider;
+    /**
+     * Проба связи с RD WEB (§10). `null` — интеграция не настроена.
+     *
+     * Собирается один раз вместе с прочими внешними клиентами, чтобы не
+     * потерять метрики и порог `SLOW_EXTERNAL_MS`.
+     */
+    execSyncProbe: ExecSyncProbe | null;
   }
 }
 
@@ -285,6 +294,13 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppInstan
   // именно оно (§11).
   const storage = createStorage(env, { metrics, logger });
 
+  // Проба связи с RD WEB собирается здесь по той же причине, что и хранилище:
+  // клиент, слепленный в обработчике ручки, остался бы без метрик и без
+  // сквозного `request_id`, то есть проверка связи сама выпала бы из
+  // наблюдаемости. `null` — интеграция не настроена; это законное состояние
+  // портала, а не сбой (§10).
+  const execSyncProbe = createExecSyncProbe(env, { metrics, logger });
+
   const { reporter: errorReporter, writer: errorJournal } = createErrorReporting({
     kind: env.ERROR_REPORTER,
     // `pg.Pool` подходит под `SqlExecutor` по форме, но у перегруженного
@@ -367,6 +383,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppInstan
   app.decorate('errorJournal', errorJournal);
   app.decorate('anomalies', anomalies);
   app.decorate('storage', storage);
+  app.decorate('execSyncProbe', execSyncProbe);
 
   /**
    * Сверка реестра правил с реализациями (§9.6).
@@ -695,6 +712,10 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppInstan
   // Обратная связь конвейера: дефекты качества, по которым дорабатывают промты
   // и модель обводок. Исключений они не бросают и в журнал ошибок не попадают.
   registerPipelineFeedbackRoutes(app);
+  // Проверка связи с RD WEB: до неё «настроено» и «работает» портал различал
+  // только запуском распознавания. Регистрация здесь и безусловно — по той же
+  // причине, что у соседей выше.
+  registerIntegrationProbeRoutes(app);
   // Приём ошибок браузера. Без него исключение при отрисовке гасит интерфейс
   // и не оставляет следа ни в одном журнале.
   registerClientErrorRoutes(app);

@@ -241,6 +241,7 @@ const EXPECTED: Readonly<Record<string, Access | Expectation>> = {
   'PATCH /api/v1/folders/:folderId': 'submission.upload',
   'PATCH /api/v1/layouts/:layoutId/blocks/:blockId': 'markup.edit',
   'POST /api/v1/admin/errors/:issueId/actions': 'settings.manage',
+  'POST /api/v1/admin/integrations/rdweb-exec/check': 'settings.manage',
   'POST /api/v1/admin/jobs/:jobId/cancel': 'settings.manage',
   'POST /api/v1/admin/jobs/:jobId/retry': 'settings.manage',
   'POST /api/v1/admin/jobs/maintenance/reaper': 'settings.manage',

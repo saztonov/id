@@ -9,14 +9,19 @@
  *
  * ## `verified` берётся с сервера, а не печатается
  *
- * Наличие переменных окружения — это НЕ проверенное подключение. Сегодня сервер
+ * Наличие переменных окружения — это НЕ проверенное подключение. Сервер
  * возвращает `verified` литеральным `false` (`integrationStatusResponseSchema`),
  * и рисовать вместо этого зелёную галочку значило бы утверждать связь, которой
  * никто не проверял. Но и печатать «нет» текстом, не глядя в ответ, нельзя:
- * такая колонка перестанет быть правдой в тот день, когда появится живая проба,
- * и никто этого не заметит — утверждение о состоянии интеграции, не связанное с
- * её состоянием, хуже пустого места. Поэтому значение читается, а отсутствие
- * поля названо отдельно.
+ * утверждение о состоянии интеграции, не связанное с её состоянием, хуже
+ * пустого места. Поэтому значение читается, а отсутствие поля названо отдельно.
+ *
+ * ## Живая проба стоит у провайдера, а не в этой колонке
+ *
+ * Связь проверяется кнопкой в карточке распознавания — рядом с переключателем,
+ * который её и задействует. В колонку результат не переносится сознательно: он
+ * протухает быстрее, чем экран перечитывают, и строка таблицы, помнящая удачную
+ * проверку получасовой давности, утверждала бы о связи ровно то, чего не знает.
  *
  * Переключатель анализа через RD WEB заблокирован по своей причине:
  * generic-эндпоинта у них нет (§0.3, п. 6), и об этом сказано прямо, а не
@@ -56,6 +61,7 @@ import { adminKeys } from '../../api/keys.js';
 import { describeError, isApiError } from '../../api/problem.js';
 import type {
   AppSetting,
+  IntegrationProbeResult,
   IntegrationStatus,
   SecretReference,
   SettingControl,
@@ -200,6 +206,41 @@ function settingString(view: SettingsView, key: string): string {
 }
 
 /**
+ * Что сказать по результату пробы связи.
+ *
+ * Отказ называется ПЕРВОЙ преградой, а не перечнем всех шагов: чинить надо её,
+ * а остальное всё равно останется непроверенным, пока она стоит. Текст
+ * удалённой стороны идёт отдельной строкой — без него «удостоверение не
+ * признано» и «сломан их обработчик» на экране выглядят одинаково, и именно на
+ * этом различии однажды потеряли полдня.
+ */
+function probeDescription(probe: IntegrationProbeResult): ReactNode {
+  if (!probe.configured) {
+    return probe.missing.length > 0
+      ? `Интеграция не настроена: окружению не хватает ${probe.missing.join(', ')}.`
+      : 'Интеграция не настроена.';
+  }
+
+  if (probe.ok) {
+    return 'Удостоверение признано, проект разрешён, контур включён, право на чтение результатов есть.';
+  }
+
+  const stopped = probe.steps.find((step) => step.outcome !== 'ok');
+  if (stopped === undefined) return 'Проба не дала результата.';
+
+  return (
+    <Space direction="vertical" size={4}>
+      <span>{stopped.message}</span>
+      {stopped.detail !== null && (
+        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+          Ответ RD WEB: {stopped.detail}
+        </Typography.Text>
+      )}
+    </Space>
+  );
+}
+
+/**
  * Карточка ветвления конвейера: провайдер распознавания и провайдер детекции.
  *
  * Настройки действуют только на НОВЫЕ прогоны — источник правды выполняющегося
@@ -242,6 +283,14 @@ function RecognitionSettingsCard({ view }: { view: SettingsView }): ReactNode {
   );
   /** Ошибка у поля по ключу настройки: клиентская или 422 сервера. */
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  /**
+   * Результат последней пробы связи.
+   *
+   * Живёт на экране, а не на сервере: сохранённая проверка через час говорила
+   * бы о позавчерашнем состоянии связи с той же уверенностью, что и о текущем,
+   * — а отозвать удостоверение на той стороне могут между двумя нажатиями.
+   */
+  const [probe, setProbe] = useState<IntegrationProbeResult | null>(null);
 
   const save = useMutation({
     mutationFn: (input: { key: string; value: unknown }) =>
@@ -260,6 +309,21 @@ function RecognitionSettingsCard({ view }: { view: SettingsView }): ReactNode {
         setFieldErrors((prev) => ({ ...prev, [input.key]: mapped.unmatched.join('; ') }));
         return;
       }
+      message.error(describeError(error));
+    },
+  });
+
+  /**
+   * Проба связи. Отказ контура — это её РЕЗУЛЬТАТ, а не ошибка запроса:
+   * уведомлением показывается только сбой самой ручки.
+   */
+  const checkRdweb = useMutation({
+    mutationFn: () => admin.checkRdwebExec(),
+    onSuccess: (result) => {
+      setProbe(result);
+    },
+    onError: (error) => {
+      setProbe(null);
       message.error(describeError(error));
     },
   });
@@ -314,6 +378,27 @@ function RecognitionSettingsCard({ view }: { view: SettingsView }): ReactNode {
               data-testid="recognition-provider-select"
             />
           </div>
+
+          {recognitionProvider === 'rdweb' && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxWidth: 420 }}>
+              <span>Связь с RD WEB</span>
+              <Button
+                loading={checkRdweb.isPending}
+                disabled={
+                  !canManage || rdwebExec === undefined || rdwebExec.status !== 'configured'
+                }
+                onClick={() => checkRdweb.mutate()}
+                data-testid="rdweb-exec-check"
+              >
+                Проверить подключение
+              </Button>
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                Портал объявит RD WEB пробный снимок и прочитает ответ: так проверяются разом
+                удостоверение, права, разрешённый проект и включённость контура. Ни документа, ни
+                синхронизации при этом не создаётся.
+              </Typography.Text>
+            </div>
+          )}
 
           {recognitionProvider === 'openrouter_vlm' && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxWidth: 460 }}>
@@ -397,6 +482,16 @@ function RecognitionSettingsCard({ view }: { view: SettingsView }): ReactNode {
               }
             />
           )}
+
+        {recognitionProvider === 'rdweb' && probe !== null && (
+          <Alert
+            type={probe.ok ? 'success' : 'error'}
+            showIcon
+            data-testid="rdweb-exec-check-result"
+            message={probe.ok ? 'Связь с RD WEB есть' : 'Связь с RD WEB не работает'}
+            description={probeDescription(probe)}
+          />
+        )}
 
         <Space wrap align="start" size={16}>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>

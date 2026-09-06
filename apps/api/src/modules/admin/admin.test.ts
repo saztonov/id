@@ -434,6 +434,11 @@ const ADMIN_PROBES: readonly AdminProbe[] = [
     route: `${P}/settings/:key`,
     url: `${P}/settings/orientation.probe_enabled`,
   },
+  {
+    method: 'POST',
+    route: `${P}/integrations/rdweb-exec/check`,
+    url: `${P}/integrations/rdweb-exec/check`,
+  },
   { method: 'GET', route: `${P}/prompts`, url: `${P}/prompts?limit=5` },
   {
     method: 'POST',
@@ -1014,6 +1019,41 @@ describe('настройки: секреты не хранятся и не от�
 
     const managed = await asAdmin('DELETE', `${P}/settings/ruleset.active_version_id`);
     expect(managed.statusCode).toBe(409);
+  });
+});
+
+// =====================================================================
+// Проверка связи с интеграцией
+// =====================================================================
+
+describe('проба связи с RD WEB отвечает вердиктом, а не общим отказом', () => {
+  /**
+   * Стенд настроен на `https://rdweb.invalid` — адрес, который по RFC 2606 не
+   * разрешается никогда. Это и проверяется: недостижимый узел обязан доехать до
+   * экрана как «адрес недоступен», а не как 500 ручки. Отличить недоступный
+   * адрес от отозванного удостоверения администратор должен по ответу пробы, и
+   * ровно за это она заведена.
+   */
+  it('недоступный узел объявляется недоступным, а не ошибкой портала', async () => {
+    const response = await asAdmin('POST', `${P}/integrations/rdweb-exec/check`);
+    expect(response.statusCode).toBe(200);
+
+    // Удостоверение не доезжает до ответа даже в тексте чужой ошибки.
+    expect(response.body).not.toContain(RDWEB_EXEC_TOKEN_VALUE);
+
+    const body = response.json<{
+      configured: boolean;
+      missing: string[];
+      ok: boolean;
+      steps: { step: string; outcome: string; status: number | null; message: string }[];
+    }>();
+
+    expect(body).toMatchObject({ configured: true, missing: [], ok: false });
+    // Проба останавливается на первой преграде: второй шаг при недоступном
+    // узле добавил бы строку, но не смысл.
+    expect(body.steps).toHaveLength(1);
+    expect(body.steps[0]).toMatchObject({ step: 'init', outcome: 'unreachable', status: null });
+    expect(body.steps[0]?.message).toContain('RDWEB_EXEC_BASE_URL');
   });
 });
 

@@ -945,6 +945,38 @@ export interface SettingsView {
   integrations: IntegrationStatus[];
 }
 
+/**
+ * Шаг живой пробы связи с интеграцией.
+ *
+ * `outcome` — не «успех/провал», а вердикт: чинить приходится разное, и экран
+ * обязан назвать что именно. `detail` — текст удалённой стороны, удостоверение
+ * из него вычеркнуто на сервере.
+ */
+export interface IntegrationProbeStep {
+  step: 'init' | 'read';
+  outcome:
+    | 'ok'
+    | 'unreachable'
+    | 'credential'
+    | 'scope'
+    | 'project'
+    | 'disabled'
+    | 'rate_limited'
+    | 'server'
+    | 'unexpected';
+  status: number | null;
+  code: string | null;
+  message: string;
+  detail: string | null;
+}
+
+export interface IntegrationProbeResult {
+  configured: boolean;
+  missing: string[];
+  ok: boolean;
+  steps: IntegrationProbeStep[];
+}
+
 export interface PromptTemplate {
   id: string;
   code: string;

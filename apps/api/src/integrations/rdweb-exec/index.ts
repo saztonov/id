@@ -16,6 +16,7 @@ import type { Metrics } from '../../observability/metrics.js';
 import { ExecSyncAdapter } from './adapter.js';
 import { ExecSyncClient } from './client.js';
 import type { ExecSyncPort } from './port.js';
+import { execSyncProbe, PROBE_TIMEOUT_MS, type ExecSyncProbe } from './probe.js';
 
 export * from './port.js';
 export { ExecSyncAdapter } from './adapter.js';
@@ -29,6 +30,15 @@ export {
   type SnapshotBlockInput,
   type SnapshotDocumentInput,
 } from './snapshot.js';
+export {
+  execSyncProbe,
+  PROBE_TIMEOUT_MS,
+  type ExecProbeOutcome,
+  type ExecProbeResult,
+  type ExecProbeStep,
+  type ExecProbeStepName,
+  type ExecSyncProbe,
+} from './probe.js';
 
 export interface CreateExecSyncOptions {
   readonly metrics: Metrics;
@@ -64,6 +74,45 @@ export function createExecSync(env: Env, options: CreateExecSyncOptions): ExecSy
       ...(options.fetchImpl !== undefined ? { fetchImpl: options.fetchImpl } : {}),
     }),
   });
+}
+
+/**
+ * Проба связи или `null`, если интеграция не настроена.
+ *
+ * Собирается той же фабричной дорогой и по тому же доводу, что и адаптер:
+ * клиент, слепленный в обработчике ручки, остался бы без метрик, без порога
+ * `SLOW_EXTERNAL_MS` и без сквозного `request_id` — то есть проба связи сама
+ * оказалась бы вне наблюдаемости.
+ *
+ * Отличается от рабочего клиента ровно одним: потолком ожидания. Проба стоит за
+ * нажатой кнопкой, и `RDWEB_EXEC_TIMEOUT_MS` (по умолчанию две минуты) держал
+ * бы администратора перед крутящимся индикатором дольше, чем тот готов поверить,
+ * что портал жив.
+ */
+export function createExecSyncProbe(
+  env: Env,
+  options: CreateExecSyncOptions,
+): ExecSyncProbe | null {
+  if (
+    env.RDWEB_EXEC_BASE_URL === undefined ||
+    env.RDWEB_EXEC_TOKEN === undefined ||
+    env.RDWEB_EXEC_PROJECT_ID === undefined
+  ) {
+    return null;
+  }
+
+  return execSyncProbe(
+    new ExecSyncClient({
+      baseUrl: env.RDWEB_EXEC_BASE_URL,
+      token: env.RDWEB_EXEC_TOKEN,
+      metrics: options.metrics,
+      logger: options.logger,
+      slowExternalMs: env.SLOW_EXTERNAL_MS,
+      timeoutMs: PROBE_TIMEOUT_MS,
+      ...(options.fetchImpl !== undefined ? { fetchImpl: options.fetchImpl } : {}),
+    }),
+    env.RDWEB_EXEC_PROJECT_ID,
+  );
 }
 
 /**
