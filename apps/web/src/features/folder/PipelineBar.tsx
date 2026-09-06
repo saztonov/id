@@ -105,7 +105,7 @@ export function PipelineBar({ folderId, editable }: PipelineBarProps): ReactNode
       if (query.state.error !== null) return false;
       const data = query.state.data;
       if (data === undefined) return pollingInterval;
-      return isBusy(data.stage, data.queued, data.running) ? pollingInterval : false;
+      return isBusy(data) ? pollingInterval : false;
     },
   });
 
@@ -217,7 +217,7 @@ export function PipelineBar({ folderId, editable }: PipelineBarProps): ReactNode
   // (`deferred`) остаётся ненулевым до конца обработки и потому называл
   // страницы ещё долго после того, как их дописали (см. шапку `state.ts`).
   const deferredStage = deferredStageOf(data);
-  const busy = isBusy(stage, queued, running);
+  const busy = isBusy(data);
   const activeStage = activeStageOf(data);
   // Постраничный счётчик разметки приезжает в той же сводке: своего запроса и
   // своего опроса у него нет намеренно (см. `LayoutProgress` на сервере).

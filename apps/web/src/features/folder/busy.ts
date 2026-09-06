@@ -36,11 +36,23 @@ export const PIPELINE_STAGES: readonly string[] = [
  * исполнителя, — это работа, которая идёт, просто ещё не начатая. Прежнее
  * условие смотрело только на `running`, и время ожидания воркера экран
  * показывал как простой.
+ *
+ * ## Почему мало одной сводной стадии
+ *
+ * Сводная стадия при единственной мёртвой задаче становится `failed` целиком
+ * (`summaryStage`), и по ней занятость читается как «не занят» — вместе со
+ * всем, что от неё зависит. На боевой папке это стоило кнопки «Стоп»:
+ * `doc.match_registry` умерла на ограничении БД, а распознавание в ту же
+ * секунду шло, 38 страниц из 220, — и остановить его с экрана было нечем.
+ * Труп прошлого шага не делает идущую работу законченной, поэтому занятость
+ * спрашивает ещё и постадийные счётчики: `pending` считает очередь и
+ * выполнение по стадиям и отказом не гасится.
  */
-export function isBusy(stage: string | null, queued: number, running: number): boolean {
-  if (stage === null) return false;
-  if (!PIPELINE_STAGES.includes(stage)) return false;
-  return queued > 0 || running > 0;
+export function isBusy(status: ProcessingStatus | null | undefined): boolean {
+  if (status === undefined || status === null) return false;
+  if (status.queued === 0 && status.running === 0) return false;
+  if (PIPELINE_STAGES.includes(status.stage)) return true;
+  return activeStageOf(status) !== null;
 }
 
 /**
@@ -65,7 +77,7 @@ export function activeStageOf(status: ProcessingStatus | null | undefined): stri
  */
 export function checksAhead(status: ProcessingStatus | null | undefined): boolean {
   if (status === undefined || status === null) return false;
-  if (!isBusy(status.stage, status.queued, status.running)) return false;
+  if (!isBusy(status)) return false;
   const now = activeStageOf(status) ?? status.stage;
   return now === 'recognition' || now === 'analysis' || now === 'checks';
 }

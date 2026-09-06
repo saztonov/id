@@ -66,14 +66,10 @@ export function ChecksTab({ folderId }: { folderId: string }): ReactNode {
       if (query.state.error !== null) return false;
       const data = query.state.data;
       if (data === undefined) return pollingInterval;
-      return isBusy(data.stage, data.queued, data.running) ? pollingInterval : false;
+      return isBusy(data) ? pollingInterval : false;
     },
   });
-  const busy = isBusy(
-    processing.data?.stage ?? null,
-    processing.data?.queued ?? 0,
-    processing.data?.running ?? 0,
-  );
+  const busy = isBusy(processing.data);
   /**
    * Опрос состава и замечаний, пока конвейер идёт (S50).
    *
