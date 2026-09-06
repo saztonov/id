@@ -79,12 +79,67 @@ test('отчёт проверки разложен по комплектам, а
   await expect(complect).toContainText('ОГРН не проходит проверку контрольной суммы');
 });
 
-test('экран ревизии держится живой лентой событий, а не только опросом', async ({ page }) => {
+/** Адрес ленты событий ревизии — им же перехватывается поток ниже. */
+const STREAM_URL = /\/api\/v1\/folders\/[^/]+\/events/u;
+
+/**
+ * Живой поток доказывается сетью, а не видом шапки.
+ *
+ * До этого сценарий ждал зелёную плашку «поток событий». Плашки больше нет:
+ * индикатор молчит, пока свежесть держит поток, — и проверка «плашки нет»
+ * доказывала бы ничего, потому что её нет и когда провайдер не смонтирован
+ * вовсе. Поэтому живость берётся с сети: ответ 200 с `text/event-stream`.
+ *
+ * Заодно проверяется то, что прежний тест пропустил бы: переключение вкладок
+ * НЕ переоткрывает поток. Провайдер живёт на уровне ревизии, и переоткрытие
+ * означало бы, что вкладки роняют соединение и проигрывают ленту заново.
+ */
+test('экран ревизии держится живой лентой событий, а шапка о ней молчит', async ({ page }) => {
+  const opened: string[] = [];
+  page.on('request', (request) => {
+    if (STREAM_URL.test(request.url())) opened.push(request.url());
+  });
+
+  // Ожидание ставится ДО входа: заголовки потока приходят сразу после
+  // навигации, и подписка после неё опоздала бы к собственному ответу.
+  const streamResponse = page.waitForResponse(
+    (response) => STREAM_URL.test(response.url()) && response.status() === 200,
+  );
   await signIn(page, KC.engineer, `/ids/folders/${IDS.folderMarkup}?tab=history`);
 
-  // Поток открывается на уровне ревизии и переживает переключение вкладок.
-  await expect(page.getByTestId('stream-status')).toHaveText('поток событий');
+  // Тело намеренно не читается: поток не закрывается, и `body()` ждал бы конца,
+  // которого нет.
+  expect((await streamResponse).headers()['content-type']).toContain('text/event-stream');
 
+  // Экран ревизии загружен — значит и шапка отрисована, и «плашки нет» говорит
+  // о шапке, а не о недорисованной странице.
+  await expect(page.getByRole('tab', { name: 'Файлы' })).toBeVisible();
+  await expect(page.getByTestId('stream-status')).toHaveCount(0);
+
+  const beforeSwitch = opened.length;
   await page.getByRole('tab', { name: 'Файлы' }).click();
-  await expect(page.getByTestId('stream-status')).toHaveText('поток событий');
+  await expect(page.getByTestId('file-input')).toBeVisible();
+  expect(opened).toHaveLength(beforeSwitch);
+  await expect(page.getByTestId('stream-status')).toHaveCount(0);
+});
+
+/**
+ * Деградация обязана быть громкой.
+ *
+ * Молчание шапки читается как «экран обновляется сам», и оно честно ровно
+ * потому, что потерянный поток о себе говорит. Без этой проверки индикатор
+ * можно было бы выключить целиком, и первый сценарий остался бы зелёным.
+ */
+test('потерянный поток называет себя, а не молчит вместе с живым', async ({ page }) => {
+  // Перехват ставится ДО входа: открытое соединение живёт до получаса, и отказ,
+  // включённый после, не оборвал бы его.
+  await page.route(STREAM_URL, (route) => route.abort('failed'));
+
+  await signIn(page, KC.engineer, `/ids/folders/${IDS.folderMarkup}?tab=history`);
+
+  // Первая же неудачная попытка переводит цикл в «восстанавливается» и держит
+  // его до исчерпания попыток; экран при этом остаётся рабочим — свежесть
+  // держит опрос.
+  await expect(page.getByTestId('stream-status')).toHaveText('поток восстанавливается');
+  await expect(page.getByRole('tab', { name: 'Файлы' })).toBeVisible();
 });

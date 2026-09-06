@@ -78,10 +78,6 @@ export type StreamStatus =
 
 export interface FolderStreamState {
   readonly status: StreamStatus;
-  /** Номер последнего принятого события: он же уходит в `Last-Event-ID`. */
-  readonly lastEventId: number | null;
-  readonly lastEventType: string | null;
-  readonly received: number;
   readonly attempts: number;
   readonly error: string | null;
   /**
@@ -302,17 +298,15 @@ function useFolderEventStream(folderId: string): FolderStreamState {
   const scheduleInvalidate = useInvalidationBatch(queryClient);
 
   const [status, setStatus] = useState<StreamStatus>('connecting');
-  const [lastEventId, setLastEventId] = useState<number | null>(null);
-  const [lastEventType, setLastEventType] = useState<string | null>(null);
-  const [received, setReceived] = useState(0);
   const [attempts, setAttempts] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [truncated, setTruncated] = useState(false);
   /** Ручное переподключение: смена значения перезапускает эффект. */
   const [restartToken, setRestartToken] = useState(0);
 
-  // Номер последнего события живёт в ref, а не только в состоянии: он нужен
-  // внутри цикла переподключения, который не перезапускается на каждый рендер.
+  // Номер последнего события живёт только в ref: он нужен внутри цикла
+  // переподключения, который не перезапускается на каждый рендер, и никому
+  // больше — на экран он не выводится.
   const cursor = useRef<number | null>(null);
   const retryHint = useRef<number>(BASE_RETRY_MS);
 
@@ -376,13 +370,12 @@ function useFolderEventStream(folderId: string): FolderStreamState {
 
               if (frame.id !== null) {
                 const parsed = Number(frame.id);
-                if (Number.isInteger(parsed)) {
-                  cursor.current = parsed;
-                  setLastEventId(parsed);
-                }
+                // Номер живёт только в ref: состояние на каждый кадр
+                // перерисовывало бы провайдера, а при открытии вкладки лента
+                // проигрывается с начала — на крупной ревизии это тысячи
+                // обновлений подряд ради числа, которого никто не видит.
+                if (Number.isInteger(parsed)) cursor.current = parsed;
               }
-              setLastEventType(frame.event);
-              setReceived((count) => count + 1);
               invalidateFor(scheduleInvalidate, folderId, frame.event);
             },
           });
@@ -449,15 +442,12 @@ function useFolderEventStream(folderId: string): FolderStreamState {
   return useMemo<FolderStreamState>(
     () => ({
       status,
-      lastEventId,
-      lastEventType,
-      received,
       attempts,
       error,
       truncated,
       pollingIntervalMs: status === 'live' ? false : FALLBACK_POLL_MS,
       reconnect,
     }),
-    [status, lastEventId, lastEventType, received, attempts, error, truncated, reconnect],
+    [status, attempts, error, truncated, reconnect],
   );
 }
