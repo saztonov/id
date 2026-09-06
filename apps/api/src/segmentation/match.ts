@@ -127,15 +127,25 @@ export function documentNumbersOf(
  *
  * Перечисление закрытое: основание уходит в БД и в отчёт, и «похож» без
  * названной причины проверяющему бесполезен.
+ *
+ * Список объявлен ЗНАЧЕНИЕМ, а тип выведен из него: у типа нет рантайма, и
+ * сверить его с CHECK базы нельзя ничем, кроме внимательности автора. Её не
+ * хватило — S53 добавил `annex_pages` в тип, миграцию не написал, и первая же
+ * строка описи с этим основанием убила `doc.match_registry` на бою. Теперь
+ * расхождение ловит тест (`match-basis.test.ts`), а ловить ему нечего, пока
+ * перечисление одно.
  */
-export type CandidateBasis =
+export const CANDIDATE_BASES = [
   /** Номер совпал, но сразу у нескольких документов: различить их сверка не может. */
-  | 'doc_no'
-  | 'doc_type'
-  | 'issued_at'
-  | 'doc_type_and_issued_at'
+  'doc_no',
+  'doc_type',
+  'issued_at',
+  'doc_type_and_issued_at',
   /** Строка описывает приложение, а родителей подходящего вида несколько (S53). */
-  | 'annex_pages';
+  'annex_pages',
+] as const;
+
+export type CandidateBasis = (typeof CANDIDATE_BASES)[number];
 
 export interface RegistryCandidate {
   readonly documentId: string;
@@ -143,9 +153,17 @@ export interface RegistryCandidate {
   readonly score: number;
 }
 
+/**
+ * Исход сверки строки описи — второе перечисление, уезжающее в БД дословно
+ * (`registry_rows.match_state`), и по той же причине объявлено значением.
+ */
+export const MATCH_STATES = ['matched', 'missing', 'extra', 'ambiguous', 'candidate'] as const;
+
+export type MatchState = (typeof MATCH_STATES)[number];
+
 export interface RegistryMatch {
   readonly rowNo: number;
-  readonly matchState: 'matched' | 'missing' | 'extra' | 'ambiguous' | 'candidate';
+  readonly matchState: MatchState;
   readonly matchedDocumentId: string | null;
   /** `null` там, где счёта нет: `missing` и `ambiguous` не выбирают документ. */
   readonly matchScore: number | null;
