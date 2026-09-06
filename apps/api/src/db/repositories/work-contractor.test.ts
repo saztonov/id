@@ -47,6 +47,7 @@ const USER = id(4);
 /** Подставленный портал комплект: его исполнителя конвейер вправе заменить. */
 const FOLDER_ASSUMED = id(10);
 const DOCUMENT_ASSUMED = id(12);
+const COMPLECT_ASSUMED = id(13);
 
 /** Названный человеком: его портал не трогает никогда. */
 const FOLDER_NAMED = id(20);
@@ -77,6 +78,10 @@ const FIXTURE: readonly string[] = [
   `UPDATE folders SET contractor_assumed = true WHERE id = '${FOLDER_RAW}'`,
   `INSERT INTO logical_documents (id, folder_id, object_id, contractor_id, ordinal, title)
      VALUES ('${DOCUMENT_ASSUMED}', '${FOLDER_ASSUMED}', '${OBJECT}', '${ORG_ASSUMED}', 1, 'АОСР')`,
+  // Комплект — четвёртая копия исполнителя, и появилась она позже остальных
+  // (0059). Без неё в фикстуре замена исполнителя проходила на пустом месте.
+  `INSERT INTO complects (id, folder_id, object_id, contractor_id, ordinal)
+     VALUES ('${COMPLECT_ASSUMED}', '${FOLDER_ASSUMED}', '${OBJECT}', '${ORG_ASSUMED}', 1)`,
 
   `INSERT INTO folders
        (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
@@ -128,6 +133,15 @@ describe('replaceAssumedContractor', () => {
       `SELECT contractor_id FROM logical_documents WHERE id = '${DOCUMENT_ASSUMED}'`,
     );
     expect(documents[0]?.contractor_id).toBe(ORG_FROM_ACT);
+
+    // Комплект — четвёртая копия. Пока её не переписывали, замена исполнителя
+    // отвергалась ключом `complects_folder_fk` целиком: боевая папка «ИД Мастер
+    // апрель 2026» простояла на этом отказе одиннадцать часов и девяносто три
+    // попытки, а конвейер за ним не дошёл ни до описи, ни до проверки.
+    const complects = await testDb.query<{ contractor_id: string }>(
+      `SELECT contractor_id FROM complects WHERE id = '${COMPLECT_ASSUMED}'`,
+    );
+    expect(complects[0]?.contractor_id).toBe(ORG_FROM_ACT);
   });
 
   it('о замене узнаёт поток событий папки', async () => {

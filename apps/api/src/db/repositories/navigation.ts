@@ -683,12 +683,18 @@ async function announceFolderCardChange(
  * ## Почему нужна отсрочка ключей
  *
  * `contractor_id` денормализован вниз по дереву составными ключами, и все они
- * `NOT DEFERRABLE` до миграции 0054. Порядка, в котором `UPDATE` проходит, не
+ * `NOT DEFERRABLE` до миграций 0054 и 0071. Порядка, в котором `UPDATE` проходит,
+ * не
  * существует: папка первой — отказ от документов, документы первыми — отказ от
  * папки. `SET CONSTRAINTS ... DEFERRED` переносит проверку на коммит, НЕ отменяя
  * её: оборванная ссылка внутри транзакции всё равно не доживёт до конца. Ключи
  * перечислены поимённо, а не `ALL`: отсрочить то, о чём никто не думал, — это
  * уже другое решение.
+ *
+ * Комплект — четвёртая копия исполнителя, и появилась она позже прочих (0059).
+ * Пока её здесь не было, боевая папка «ИД Мастер апрель 2026» простояла
+ * одиннадцать часов и девяносто три попытки на отказе `complects_folder_fk`, а
+ * конвейер за этой задачей не доходил ни до описи, ни до проверки.
  *
  * Возвращает `true`, если исполнитель был записан именно этим вызовом.
  */
@@ -699,7 +705,7 @@ export async function replaceAssumedContractor(
 ): Promise<boolean> {
   return db.transaction(async (tx) => {
     await tx.execute(sql`
-      set constraints logical_documents_scope_fk, findings_scope_fk deferred
+      set constraints logical_documents_scope_fk, findings_scope_fk, complects_folder_fk deferred
     `);
 
     const updated = await tx.execute<{ id: string }>(sql`
@@ -724,6 +730,10 @@ export async function replaceAssumedContractor(
     `);
     await tx.execute(sql`
       update findings set contractor_id = ${contractorId}::uuid
+       where folder_id = ${folderId}::uuid
+    `);
+    await tx.execute(sql`
+      update complects set contractor_id = ${contractorId}::uuid
        where folder_id = ${folderId}::uuid
     `);
 

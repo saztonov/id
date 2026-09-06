@@ -536,8 +536,9 @@ describe('неизменяемость производного и справо�
  * Проверяется и умолчание: строки в `app_settings` нет ни в одной базе, и
  * забытая настройка обязана означать строгий режим, а не открытый.
  */
-describe('отсроченные ключи области (0054)', () => {
+describe('отсроченные ключи области (0054, 0071)', () => {
   const OTHER_ORG = id(90);
+  const COMPLECT = id(91);
 
   beforeAll(async () => {
     await db.query(
@@ -548,6 +549,14 @@ describe('отсроченные ключи области (0054)', () => {
     await db.query(
       `INSERT INTO object_contractors (object_id, contractor_id)
          VALUES ('${ID.object}', '${OTHER_ORG}') ON CONFLICT DO NOTHING`,
+    );
+    // Комплект — четвёртая копия исполнителя (0059). Пока её не было в этом
+    // наборе, отсрочка проверялась на трёх, и ключ комплекта — единственный
+    // неотсрочиваемый из четырёх — оставался недоказанным.
+    await db.query(
+      `INSERT INTO complects (id, folder_id, object_id, contractor_id, ordinal)
+         VALUES ('${COMPLECT}', '${ID.folder}', '${ID.object}', '${ID.contractor}', 1)
+       ON CONFLICT DO NOTHING`,
     );
   });
 
@@ -560,7 +569,7 @@ describe('отсроченные ключи области (0054)', () => {
   it('в отсрочке промежуточное состояние проходит, а оборванная ссылка падает на COMMIT', async () => {
     await db.query('BEGIN');
     await db.query(`
-      SET CONSTRAINTS logical_documents_scope_fk, findings_scope_fk DEFERRED
+      SET CONSTRAINTS logical_documents_scope_fk, findings_scope_fk, complects_folder_fk DEFERRED
     `);
 
     // Промежуточное состояние: у папки новый исполнитель, у документов — ещё
@@ -581,7 +590,7 @@ describe('отсроченные ключи области (0054)', () => {
     const move = async (to: string): Promise<void> => {
       await db.query('BEGIN');
       await db.query(`
-        SET CONSTRAINTS logical_documents_scope_fk, findings_scope_fk DEFERRED
+        SET CONSTRAINTS logical_documents_scope_fk, findings_scope_fk, complects_folder_fk DEFERRED
       `);
       await db.query(`UPDATE folders SET contractor_id = '${to}' WHERE id = '${ID.folder}'`);
       await db.query(
@@ -590,6 +599,9 @@ describe('отсроченные ключи области (0054)', () => {
       );
       await db.query(
         `UPDATE findings SET contractor_id = '${to}' WHERE folder_id = '${ID.folder}'`,
+      );
+      await db.query(
+        `UPDATE complects SET contractor_id = '${to}' WHERE folder_id = '${ID.folder}'`,
       );
       await db.query('COMMIT');
     };
