@@ -63,6 +63,8 @@ const FOLDER_OTHER = id(15);
 const FOLDER_STUCK = id(17);
 /** Комплект для проверки shadow-режима: dry-run отказывает, а не молчит. */
 const FOLDER_DRY = id(19);
+/** Комплект с ИДУЩИМ прогоном RD WEB: нажатие обязано заказывать ЕГО цепочке. */
+const FOLDER_RD = id(23);
 
 const USER_A = id(20);
 const USER_B = id(21);
@@ -87,6 +89,12 @@ const PAGE_DRY = id(44);
 const BUNDLE_DRY = id(56);
 const LAYOUT_DRY = id(57);
 const BLOCK_DRY = id(58);
+const FILE_RD = id(35);
+const PAGE_RD = id(45);
+const BUNDLE_RD = id(59);
+const LAYOUT_RD = id(60);
+const BLOCK_RD = id(61);
+const RUN_RD = id(62);
 
 const SHA_READY = 'a'.repeat(64);
 const SHA_WORKING = 'b'.repeat(64);
@@ -94,6 +102,7 @@ const SHA_BARE = 'c'.repeat(64);
 const SHA_OTHER = 'd'.repeat(64);
 const SHA_STUCK = 'e'.repeat(64);
 const SHA_DRY = 'f'.repeat(64);
+const SHA_RD = '1'.repeat(64);
 
 /** Коды промптов стадии recognize: без них распознавание не запускается. */
 const RECOGNIZE_PROMPTS = [
@@ -235,6 +244,17 @@ beforeAll(async () => {
     `INSERT INTO source_pages (id, folder_id, source_file_id, file_page_index, folder_ordinal, width_px, height_px, rotation)
        VALUES ('${PAGE_DRY}', '${FOLDER_DRY}', '${FILE_DRY}', 0, 0, 1654, 2339, 0)`,
 
+    // --- Комплект с идущим прогоном RD WEB ---
+    `INSERT INTO folders
+       (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
+     VALUES ('${FOLDER_RD}', '${OBJECT}', '${ORG_A}', '${ORG_A}', 'roofing', DATE '2026-01-01', 'Комплект на RD WEB', '${USER_A}')`,
+    `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
+       VALUES ('${SHA_RD}', 'blobs/${SHA_RD}', 1024, 'application/pdf')`,
+    `INSERT INTO source_files (id, folder_id, blob_sha256, file_name, sort_order, verify_state)
+       VALUES ('${FILE_RD}', '${FOLDER_RD}', '${SHA_RD}', 'Исполнительная.pdf', 0, 'ok')`,
+    `INSERT INTO source_pages (id, folder_id, source_file_id, file_page_index, folder_ordinal, width_px, height_px, rotation)
+       VALUES ('${PAGE_RD}', '${FOLDER_RD}', '${FILE_RD}', 0, 0, 1654, 2339, 0)`,
+
     // Распознавание — через VLM: у ветки RD WEB нет RD-документа, и прогон
     // отказал бы по причине, к этим маршрутам отношения не имеющей.
     `INSERT INTO app_settings (key, value) VALUES ('recognition.provider', '"openrouter_vlm"')`,
@@ -305,6 +325,45 @@ beforeAll(async () => {
         block_type, shape_type, x0, y0, x1, y1, sort_order, source, detector_provenance)
        VALUES ('${BLOCK_DRY}', '${LAYOUT_DRY}', '${FOLDER_DRY}', '${BUNDLE_DRY}', '${PAGE_DRY}', 0,
                '${OBJECT}', 'text', 'rectangle', 0.1, 0.1, 0.9, 0.4, 0, 'auto', 'rf_detr')`,
+  );
+
+  // Комплект с ИДУЩИМ прогоном RD WEB: его цепочка — `rd.sync_*`, и нажатие
+  // «2. Распознать» обязано заказывать продолжение ЕЙ. Прежде маршрут ставил
+  // сюда `vlm.finalize_run` — задачу чужой ветки, которая на живом RD-прогоне
+  // объявляет его страницы осиротевшими и зовёт чужую модель.
+  await db.query(
+    `INSERT INTO processing_bundles (id, folder_id, aggregate_manifest_hash, working_pdf_blob_sha256, builder_version)
+       VALUES ('${BUNDLE_RD}', '${FOLDER_RD}', '${manifestHash(SHA_RD)}', '${SHA_WORKING}', 'bundle/1+pdf-lib')`,
+  );
+  await db.query(
+    `INSERT INTO processing_bundle_pages (bundle_id, folder_id, working_page_index, source_page_id)
+       VALUES ('${BUNDLE_RD}', '${FOLDER_RD}', 0, '${PAGE_RD}')`,
+  );
+  await db.query(
+    `INSERT INTO layout_revisions (id, folder_id, object_id, bundle_id, revision_no, state, blocks_hash)
+       VALUES ('${LAYOUT_RD}', '${FOLDER_RD}', '${OBJECT}', '${BUNDLE_RD}', 1, 'draft', '${'9'.repeat(64)}')`,
+  );
+  await db.query(
+    `INSERT INTO layout_blocks
+       (id, layout_revision_id, folder_id, bundle_id, source_page_id, working_page_index, object_id,
+        block_type, shape_type, x0, y0, x1, y1, sort_order, source, detector_provenance)
+       VALUES ('${BLOCK_RD}', '${LAYOUT_RD}', '${FOLDER_RD}', '${BUNDLE_RD}', '${PAGE_RD}', 0,
+               '${OBJECT}', 'text', 'rectangle', 0.1, 0.1, 0.9, 0.4, 0, 'auto', 'rf_detr')`,
+  );
+  await db.query(
+    `INSERT INTO recognition_runs
+       (id, folder_id, layout_revision_id, local_layout_hash, working_pdf_sha256, status, settings_snapshot)
+       VALUES ('${RUN_RD}', '${FOLDER_RD}', '${LAYOUT_RD}', '${'9'.repeat(64)}', '${SHA_WORKING}', 'running',
+               '{"version": 3, "provider": "rdweb", "contract": "rdweb.executive_document_snapshot.v1",
+                 "externalProjectId": "idp-object-1", "model": null, "dryRun": false}'::jsonb)`,
+  );
+  // Звено цепочки, стоящее в очереди в момент нажатия: опрос живёт двадцать
+  // пять минут, и чаще всего человек нажимает именно при нём.
+  await db.query(
+    `INSERT INTO jobs (type, payload, status, attempts, max_attempts, dedupe_key)
+       VALUES ('rd.sync_poll',
+               '{"folderId": "${FOLDER_RD}", "recognitionRunId": "${RUN_RD}"}'::jsonb,
+               'queued', 4, 240, 'rd.sync_poll:${RUN_RD}:sync-${FOLDER_RD}-g1-r0')`,
   );
 
   // Пачка детекции, исчерпавшая попытки. Ровно то, что осталось в проде от
@@ -931,6 +990,55 @@ describe('POST /folders/{id}/check с выбором режима', () => {
       `SELECT count(*) AS count FROM recognition_runs WHERE folder_id = '${FOLDER_DRY}'`,
     );
     expect(Number(runs[0]?.count ?? 0)).toBe(1);
+  });
+});
+
+/**
+ * Нажатие поверх идущего прогона RD WEB (S54).
+ *
+ * S50 научил кнопку не выбрасывать идущую работу, а заказывать ей «доведи до
+ * проверки». Заказ записывался постановкой `vlm.finalize_run` — и это верно
+ * ровно для одной из двух веток распознавания. У прогона RD WEB своя цепочка
+ * `rd.sync_*`, а финализация VLM провайдера не спрашивает: не найдя живых
+ * `vlm.recognize_page`, она объявляет страницы прогона осиротевшими, помечает
+ * их отказом и уводит комплект на дораспознавание чужой моделью — поверх
+ * работы, которую в эту минуту делает RD WEB.
+ *
+ * Поэтому заказ поднимается У ЗАДАЧ ПРОГОНА, а чужая задача не ставится вовсе.
+ *
+ * Набор идёт ДО того, что выключает неизменяемость: та настройка глобальна и
+ * обратно не возвращается.
+ */
+describe('POST /folders/{id}/check поверх идущего прогона RD WEB', () => {
+  it('поднимает заказ у цепочки rd.sync_*, а не ставит задачу ветки VLM', async () => {
+    const response = await as(KC.a, 'POST', `/api/v1/folders/${FOLDER_RD}/check`, {
+      idempotencyKey: 'check-rd-continue',
+    });
+
+    expect(response.statusCode).toBe(202);
+    const body = response.json<{ stage: string; continuedRun?: boolean }>();
+    expect(body.stage).toBe('recognition');
+    expect(body.continuedRun).toBe(true);
+
+    // Заказ записан туда, где его прочитает цепочка, которая идёт.
+    const poll = await db.query<{ payload: { autoContinue?: boolean } }>(
+      `SELECT payload FROM jobs WHERE type = 'rd.sync_poll'
+         AND payload->>'recognitionRunId' = '${RUN_RD}'`,
+    );
+    expect(poll[0]?.payload.autoContinue).toBe(true);
+
+    // Чужая ветка не тронута: её задача на RD-прогоне разрушительна.
+    const foreign = await db.query<{ count: string | number }>(
+      `SELECT count(*) AS count FROM jobs WHERE type = 'vlm.finalize_run'
+         AND payload->>'recognitionRunId' = '${RUN_RD}'`,
+    );
+    expect(Number(foreign[0]?.count ?? 0)).toBe(0);
+
+    // Работа та же: второго прогона нет, идущий не закрыт.
+    const runs = await db.query<{ status: string }>(
+      `SELECT status FROM recognition_runs WHERE folder_id = '${FOLDER_RD}'`,
+    );
+    expect(runs.map((run) => run.status)).toEqual(['running']);
   });
 });
 

@@ -229,6 +229,14 @@ export async function startFakeExecSync(options: FakeExecOptions = {}): Promise<
         detail: fail(409, 'stale_generation', 'sync_generation не больше текущей серверной.'),
       });
     }
+    if (state.faults.staleBaseNextInit) {
+      // Однократно: конфликт §9 лечится пересборкой снимка, и вторая подряд
+      // отповедь заперла бы её на месте.
+      state.faults = { ...state.faults, staleBaseNextInit: false };
+      return reply.code(409).send({
+        detail: fail(409, 'stale_base_generation', 'base_generation отстала от серверной.'),
+      });
+    }
     if (body.base_generation < document.generation) {
       return reply.code(409).send({
         detail: fail(409, 'stale_base_generation', 'base_generation отстала от серверной.'),
@@ -317,6 +325,14 @@ export async function startFakeExecSync(options: FakeExecOptions = {}): Promise<
     const sync = state.syncs.get(syncId);
     if (sync === undefined) {
       return reply.code(404).send({ detail: fail(404, 'sync_not_found', 'Отправка неизвестна.') });
+    }
+    if (state.faults.unverifiedNextComplete) {
+      // Однократно: портал отвечает на этот код ровно одним кругом докачки, и
+      // второй отказ подряд превратил бы сценарий в проверку потолка кругов.
+      state.faults = { ...state.faults, unverifiedNextComplete: false };
+      return reply.code(422).send({
+        detail: fail(422, 'upload_not_verified', 'PDF не загружен или его хеш не совпал.'),
+      });
     }
     if (sync.uploadRequired && !sync.uploaded) {
       return reply.code(422).send({

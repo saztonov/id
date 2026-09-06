@@ -129,7 +129,7 @@ async function insertBlock(blockId: string, page: number, rect: string): Promise
   );
 }
 
-async function startRun(): Promise<string> {
+async function startRun(options: { readonly requestId?: string } = {}): Promise<string> {
   const blocks = await listLayoutBlocks(db, SCOPE, LAYOUT);
   expect(blocks.length).toBeGreaterThan(0);
   const { run } = await startRecognitionRun(db, SCOPE, {
@@ -146,10 +146,25 @@ async function startRun(): Promise<string> {
   });
   await enqueueSystemJob(db, {
     type: 'rd.sync_prepare',
-    payload: { folderId: FOLDER, recognitionRunId: run.id },
+    payload: {
+      folderId: FOLDER,
+      recognitionRunId: run.id,
+      ...(options.requestId === undefined ? {} : { request_id: options.requestId }),
+    },
     dedupeKey: dedupeKeyFor('rd.sync_prepare', run.id),
   });
   return run.id;
+}
+
+/** Задачи цепочки этого прогона: тип, ключ и payload — в порядке появления. */
+async function chainJobs(
+  runId: string,
+): Promise<readonly { type: string; dedupe_key: string; payload: Record<string, unknown> }[]> {
+  return testDb.query<{ type: string; dedupe_key: string; payload: Record<string, unknown> }>(
+    `SELECT type, dedupe_key, payload FROM jobs
+      WHERE type LIKE 'rd.sync_%' AND payload->>'recognitionRunId' = '${runId}'
+      ORDER BY created_at`,
+  );
 }
 
 async function countOf(table: string, runId: string): Promise<number> {
@@ -520,6 +535,113 @@ describe('выключенная зона номера на крупных ли�
 
     expect(await warningCodes(runId)).not.toContain('large_sheet_number_zone_off');
 
+    await resetRun(runId);
+  }, 180_000);
+});
+
+/**
+ * Что обязано пережить переход между звеньями цепочки.
+ *
+ * Цепочка `rd.sync_*` — девять переходов, и на каждом обработчик собирает
+ * payload следующего звена ЗАНОВО. Пока перенос делали вручную, его не сделали
+ * нигде: заказ «доведи до конца» доезжал только до головы, и прогон,
+ * закончившийся успехом, молча не звал анализ. Тем же движением терялся
+ * `request_id`, и связать нажатие человека с отказом на шестом звене по
+ * журналам двух систем было нечем.
+ *
+ * Свидетелем здесь взят `request_id`, а не сам заказ: он переносится тем же
+ * хелпером, но не тащит за собой стадии 14–19 — этому стенду их исполнять
+ * нечем. Доезд самого заказа доказывает `segmentation.integration.test.ts`,
+ * где собран весь конвейер.
+ */
+describe('заказ и след запроса переживают каждое звено цепочки (S54)', () => {
+  async function requestIdsOf(runId: string): Promise<readonly (string | null)[]> {
+    const jobs = await chainJobs(runId);
+    expect(jobs.length).toBeGreaterThan(1);
+    return jobs.map((job) => (job.payload['request_id'] as string | undefined) ?? null);
+  }
+
+  it('счастливый путь: след доезжает до финализации', async () => {
+    const requestId = 'req-exec-happy';
+    const runId = await startRun({ requestId });
+    await drainQueue();
+
+    expect((await runOutcome(runId)).status).toBe('done');
+    const types = (await chainJobs(runId)).map((job) => job.type);
+    expect(types).toContain('rd.sync_finalize');
+    expect(await requestIdsOf(runId)).toEqual(types.map(() => requestId));
+    await resetRun(runId);
+  }, 180_000);
+
+  it('круг докачки после upload_not_verified след не теряет', async () => {
+    // Аварийное звено: `complete` отвечает 422, портал делает ровно один круг
+    // `upload:retry → complete`. Именно такие переходы срабатывают, когда
+    // что-то пошло не так, — то есть когда довести прогон до конца важнее
+    // всего.
+    fake.setFaults({ unverifiedNextComplete: true });
+    const requestId = 'req-exec-upload-retry';
+    const runId = await startRun({ requestId });
+    await drainQueue();
+
+    const jobs = await chainJobs(runId);
+    expect(jobs.map((job) => job.dedupe_key).some((key) => key.endsWith(':retry'))).toBe(true);
+    expect((await runOutcome(runId)).status).toBe('done');
+    expect(await requestIdsOf(runId)).toEqual(jobs.map(() => requestId));
+    await resetRun(runId);
+  }, 180_000);
+
+  it('пересборка снимка после 409 след не теряет', async () => {
+    // Второе аварийное звено: конфликт §9 уводит на `rd.sync_resync`, а тот
+    // возвращается в `rd.sync_prepare` со следующей генерацией.
+    fake.setFaults({ staleBaseNextInit: true });
+    const requestId = 'req-exec-resync';
+    const runId = await startRun({ requestId });
+    await drainQueue();
+
+    const jobs = await chainJobs(runId);
+    expect(jobs.map((job) => job.type)).toContain('rd.sync_resync');
+    expect(await requestIdsOf(runId)).toEqual(jobs.map(() => requestId));
+    await resetRun(runId);
+  }, 180_000);
+});
+
+/**
+ * Ключ дедупликации не сводит вместе задачи разных прогонов.
+ *
+ * Ключи цепочки строились от `external_sync_id`, то есть от ПАПКИ и генерации,
+ * а генерация растёт только после успешного `init`. Прогон, упавший на первом
+ * звене, оставлял мёртвую задачу — а мёртвая задача ключ держит намеренно
+ * (0039: «мертвеца разбирает человек»). Следующее «Распознать» на той же папке
+ * строило тот же ключ, получало `created: false` на чужом мертвеце и повисало
+ * `running` без единой живой задачи. В боевой базе такие мины лежат по двум
+ * папкам с эпохи S53.
+ */
+describe('мертвец прежнего прогона не запирает следующий (S54)', () => {
+  it('новый прогон строит свою цепочку, а не упирается в чужой ключ', async () => {
+    const documents = await testDb.query<{ sync_generation: string | number }>(
+      `SELECT sync_generation FROM rd_exec_documents WHERE folder_id = '${FOLDER}'`,
+    );
+    // Ключ, который построил бы ТЕКУЩИЙ код для следующего прогона: генерация
+    // растёт на единицу, круг пересборки нулевой.
+    const next = Number(documents[0]?.sync_generation ?? 0) + 1;
+    const poisoned = `rd.sync_init:sync-${FOLDER}-g${String(next)}-r0`;
+    const strangerRun = id(900);
+    await testDb.query(
+      `INSERT INTO jobs (type, payload, status, attempts, max_attempts, dedupe_key, last_error)
+         VALUES ('rd.sync_init',
+                 '{"folderId": "${FOLDER}", "recognitionRunId": "${strangerRun}"}'::jsonb,
+                 'failed', 3, 3, '${poisoned}', 'RD WEB ответил <n>: invalid_principal')`,
+    );
+
+    const runId = await startRun();
+    await drainQueue();
+
+    expect((await runOutcome(runId)).status).toBe('done');
+    const init = (await chainJobs(runId)).filter((job) => job.type === 'rd.sync_init');
+    expect(init).toHaveLength(1);
+    expect(init[0]?.dedupe_key).not.toBe(poisoned);
+
+    await testDb.query(`DELETE FROM jobs WHERE dedupe_key = '${poisoned}'`);
     await resetRun(runId);
   }, 180_000);
 });

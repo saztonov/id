@@ -90,6 +90,8 @@ export {
   listLiveRecognizePageJobs,
   readExtractFanState,
   readJobAutoContinue,
+  readRunAutoContinue,
+  raiseAutoContinueForRun,
   publishOutboxBatch,
   queueSnapshot,
   reapExpiredLeases,

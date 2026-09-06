@@ -517,7 +517,13 @@ beforeAll(async () => {
   });
   await enqueueSystemJob(db, {
     type: 'rd.sync_prepare',
-    payload: { folderId: FOLDER, recognitionRunId: run.id },
+    // Сквозной прогон, как его заказывает кнопка «2. Распознать»: анализ обязан
+    // начаться САМ. До S54 здесь стояла ручная постановка `doc.classify_pages`
+    // — она и была симптомом: заказ терялся на первом же переходе цепочки
+    // `rd.sync_*`, прогон заканчивался успехом, а комплект оставался
+    // неразобранным. Стадии 14–19 ниже теперь доказывают ещё и то, что заказ
+    // доехал.
+    payload: { folderId: FOLDER, recognitionRunId: run.id, autoContinue: true },
     dedupeKey: dedupeKeyFor('rd.sync_prepare', run.id),
   });
   await drainQueue();
@@ -527,12 +533,14 @@ beforeAll(async () => {
   );
   expect(runs[0]?.status).toBe('done');
 
+  const classify = await testDb.query<{ payload: { autoContinue?: boolean } }>(
+    `SELECT payload FROM jobs WHERE type = 'doc.classify_pages'
+       AND payload->>'folderId' = '${FOLDER}'`,
+  );
+  expect(classify).toHaveLength(1);
+  expect(classify[0]?.payload.autoContinue).toBe(true);
+
   // Стадии 14–19: то, ради чего написан файл.
-  await enqueueSystemJob(db, {
-    type: 'doc.classify_pages',
-    payload: { folderId: FOLDER },
-    dedupeKey: dedupeKeyFor('doc.classify_pages', FOLDER),
-  });
   await drainQueue();
 }, 600_000);
 
@@ -889,8 +897,14 @@ describe('провайдер модели', () => {
     // Платить за подтверждение того, что уже сказал якорь, незачем, а второй
     // источник правды с правом опровергнуть первый — прямой путь к молчаливым
     // расхождениям.
-    expect(llmSeen.length).toBeGreaterThan(0);
-    expect(llmSeen.length).toBeLessThan(PAGE_TEXTS.length);
+    //
+    // Считается стадия КЛАССИФИКАЦИИ, а не все вызовы подряд: с S54 сквозной
+    // заказ доезжает до конца сам, и тот же прогон зовёт модель ещё дважды — на
+    // извлечении реквизитов и на разборе заполнения. Сравнивать их сумму с
+    // числом страниц значит сравнивать разное с разным.
+    const classify = llmSeen.filter((entry) => entry.stage === 'page_classify');
+    expect(classify.length).toBeGreaterThan(0);
+    expect(classify.length).toBeLessThan(PAGE_TEXTS.length);
   });
 
   it('ответ, не разбирающийся как JSON, не роняет задачу и не даёт метку', async () => {
@@ -960,10 +974,20 @@ describe('провайдер модели', () => {
       // Системная часть действительно попала в скан — иначе проверка
       // доказывала бы, что пуст `userPrompt`. Слово берётся по стадии: с S27
       // модель зовёт не только классификация, но и извлечение реквизитов —
-      // прежде оно молча пропускалось из-за неопубликованного промта.
-      expect(entry.effective).toContain(
-        entry.stage === 'page_classify' ? 'классифицируешь' : 'извлекаешь',
-      );
+      // прежде оно молча пропускалось из-за неопубликованного промта. С S54 к
+      // ним прибавился разбор заполнения: сквозной заказ доезжает до проверок
+      // сам, и его промт обязан быть так же чист от раздела работ.
+      //
+      // Незнакомая стадия ронять тест обязана: молчаливый пропуск означал бы,
+      // что системную часть новой стадии не проверяет никто.
+      const marker: Record<string, string> = {
+        page_classify: 'классифицируешь',
+        extract: 'извлекаешь',
+        check: 'проверяешь',
+      };
+      const expected = marker[entry.stage];
+      expect(expected, `стадия ${entry.stage} не описана в тесте`).toBeDefined();
+      expect(entry.effective).toContain(expected);
       expect(entry.effective.length).toBeGreaterThan(entry.userPrompt.length);
     }
   });

@@ -72,6 +72,23 @@ export interface FakeExecFaults {
   errorNext: boolean;
   /** Ответить 429 на следующий вызов init и назвать Retry-After. */
   rateLimitNextInit: number | null;
+  /**
+   * Ответить `422 upload_not_verified` на следующий `complete` — ровно один раз.
+   *
+   * Аварийное звено цепочки: портал отвечает на этот код кругом докачки
+   * (`complete → upload:retry → complete`). Без отказа-однократки такое звено
+   * не воспроизводится вовсе, и проверить, что заказ его переживает, нечем.
+   */
+  unverifiedNextComplete: boolean;
+  /**
+   * Ответить `409 stale_base_generation` на следующий `init` — ровно один раз.
+   *
+   * Второе аварийное звено: конфликт §9 уводит на `rd.sync_resync`, а тот
+   * пересобирает снимок и возвращается в `rd.sync_prepare` со следующей
+   * генерацией. Отказ снимается после первого срабатывания, иначе пересборка
+   * упиралась бы в него бесконечно.
+   */
+  staleBaseNextInit: boolean;
 }
 
 export const EMPTY_FAULTS: FakeExecFaults = {
@@ -80,6 +97,8 @@ export const EMPTY_FAULTS: FakeExecFaults = {
   supersedeNext: false,
   errorNext: false,
   rateLimitNextInit: null,
+  unverifiedNextComplete: false,
+  staleBaseNextInit: false,
 };
 
 /**

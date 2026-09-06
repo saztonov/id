@@ -36,6 +36,7 @@ import {
   insertBlockResultIdempotent,
   readExtractFanState,
   readJobAutoContinue,
+  readRunAutoContinue,
   listRunBlockEnvelopes,
   listRunBlockIds,
   listRunPages,
@@ -1675,19 +1676,40 @@ function execSyncDeps(options: PipelineJobsOptions): ExecSyncDeps {
     /**
      * Переход «распознавание → анализ» при сквозном прогоне (S21).
      *
-     * Заказ перечитывается из строки задачи, а не берётся из payload: между
-     * захватом попытки и решением проходят минуты, и человек мог нажать
-     * «Проверить» уже после захвата. Тот же довод и тот же приём, что у
-     * финализации VLM.
+     * Заказ спрашивается у ПРОГОНА, а не только у своей строки задачи. Своя
+     * строка отвечает на вопрос «нажали ли „Проверить“ уже после захвата
+     * попытки» — между захватом и решением проходят минуты, и `enqueueSystemJob`
+     * поднимает флаг у стоящей задачи. Но у цепочки RD WEB девять переходов, и
+     * заказ, положенный в голову, до этой строки может не доехать вовсе — так и
+     * было до S54: прогон заканчивался успехом, а комплект оставался
+     * неразобранным. Поэтому третий источник — вся цепочка прогона.
+     *
+     * Отказ от анализа записывается в журнал. Прежде он не оставлял НИКАКОГО
+     * следа, и потому дефект жил незамеченным: на экране это выглядело как
+     * законченное распознавание без всякой причины остановки.
      */
     continueWithAnalysis: async (ctx, target) => {
       const wanted =
-        (await readJobAutoContinue(db, ctx.jobId)) || ctx.payload.autoContinue === true;
-      if (!wanted) return;
+        ctx.payload.autoContinue === true ||
+        (await readJobAutoContinue(db, ctx.jobId)) === true ||
+        (await readRunAutoContinue(db, target.folderId, target.runId));
+      if (!wanted) {
+        ctx.logger.info(
+          { event: 'recognition_finished_without_analysis', recognition_run_id: target.runId },
+          'сквозной прогон не заказан: анализ не ставится',
+        );
+        return;
+      }
+      /*
+       * Ключ — папка, как и у ветки VLM: анализ это свойство КОМПЛЕКТА, а не
+       * прогона. Ключ с прогоном разводил бы два прогона одной папки,
+       * вернувшихся почти одновременно, в две параллельные цепочки анализа —
+       * над одними и теми же логическими документами, реестром и графом.
+       */
       await ctx.enqueue({
         type: 'doc.classify_pages',
         payload: { folderId: target.folderId, autoContinue: true },
-        dedupeKey: `doc.classify_pages:${target.folderId}:${target.runId}`,
+        dedupeKey: `doc.classify_pages:${target.folderId}`,
       });
     },
   };

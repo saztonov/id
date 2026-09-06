@@ -329,6 +329,69 @@ export async function readJobAutoContinue(db: JobExecutor, jobId: string): Promi
   return row === undefined ? null : row.auto_continue === true;
 }
 
+/**
+ * Заказан ли сквозной прогон хоть у одной задачи ЭТОГО прогона.
+ *
+ * Заказ принадлежит прогону, а не звену. У ветки RD WEB цепочка из девяти
+ * переходов, и каждый обработчик собирает payload следующего звена заново:
+ * «не забыть перенести» — это надежда, а не гарантия, и однажды она не
+ * оправдалась целиком. Голова цепочки заказ несёт всегда (его кладёт
+ * `startRecognition`), поэтому вопрос «заказывали ли доведение до конца» имеет
+ * ответ независимо от того, сколько звеньев его потеряли по дороге.
+ *
+ * Скоуп — прогон, поэтому соседний прогон той же папки своего заказа сюда не
+ * добавит. `folderId` в предикате — ради частичного `ix_jobs_folder`.
+ *
+ * Строки завершённых задач не удаляются (сборки мусора у очереди нет), так что
+ * ответ не зависит от того, докуда цепочка успела дойти.
+ */
+export async function readRunAutoContinue(
+  db: JobExecutor,
+  folderId: string,
+  runId: string,
+): Promise<boolean> {
+  const rows = await db.execute<{ ordered: boolean | null }>(sql`
+    select coalesce(bool_or(coalesce((${jobs.payload} ->> 'autoContinue')::boolean, false)), false)
+             as ordered
+      from ${jobs}
+     where ${jobs.payload} ->> 'folderId' = ${folderId}
+       and ${jobs.payload} ->> 'recognitionRunId' = ${runId}
+  `);
+  return rows.rows[0]?.ordered === true;
+}
+
+/**
+ * Поднять заказ у ЖИВЫХ задач прогона; возвращает идентификаторы поднятых.
+ *
+ * Нажатие «2. Распознать» поверх идущего прогона — это заказ «доведи до
+ * проверки» (S50). Записать его надо туда, где его прочитают, а какое из
+ * девяти звеньев цепочки стоит в очереди в эту секунду — заранее неизвестно;
+ * поэтому поднимаются все живые задачи прогона, а не одна названная.
+ *
+ * Живые — это `queued` и `running`. Мёртвая (`failed`) задача продолжения не
+ * даст: подняв флаг у неё, маршрут ответил бы «заказ принят» там, где цепочка
+ * уже оборвалась, — то есть соврал бы.
+ *
+ * Флаг монотонный (`false → true`), как и у `enqueueSystemJob`: сквозной
+ * прогон — заказ, который однажды сделан.
+ */
+export async function raiseAutoContinueForRun(
+  db: JobExecutor,
+  folderId: string,
+  runId: string,
+): Promise<readonly string[]> {
+  const raised = await db.execute<{ id: string }>(sql`
+    update ${jobs}
+       set payload = payload || '{"autoContinue":true}'::jsonb, updated_at = now()
+     where ${jobs.payload} ->> 'folderId' = ${folderId}
+       and ${jobs.payload} ->> 'recognitionRunId' = ${runId}
+       and ${jobs.status} in ('queued', 'running')
+       and coalesce((${jobs.payload} ->> 'autoContinue')::boolean, false) = false
+    returning id
+  `);
+  return raised.rows.map((row) => row.id);
+}
+
 // =====================================================================
 // Захват и жизненный цикл
 // =====================================================================

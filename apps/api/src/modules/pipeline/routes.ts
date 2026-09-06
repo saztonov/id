@@ -61,6 +61,7 @@ import {
   cancelPendingJobsOfStage,
   computeProcessingStatus,
   enqueueJob,
+  raiseAutoContinueForRun,
 } from '../../db/repositories/jobs.js';
 import { appendAudit } from '../../db/repositories/audit.js';
 import { auditEmailHmac } from '../../db/repositories/admin.js';
@@ -328,6 +329,25 @@ function registerMarkupRoute(app: AppInstance): void {
 // Кнопка «Проверить»
 // =====================================================================
 
+/**
+ * Чем распознаёт прогон — по его собственному снимку настроек.
+ *
+ * Настройка портала здесь не годится: её меняют, а прогон обязан дочитываться
+ * тем же провайдером, которым начат (ADR-0007 пиннит его в снимок ровно за
+ * этим). Снимок объявлен как `unknown` и у прогонов прежних версий поля может
+ * не быть вовсе.
+ *
+ * Неизвестный провайдер трактуется как НЕ-VLM: ошибка в эту сторону означает
+ * непоставленную задачу финализации, а в обратную — задачу чужой ветки на
+ * живом прогоне, то есть испорченную работу.
+ */
+function providerOfRun(run: { readonly settingsSnapshot: unknown }): string | null {
+  const snapshot = run.settingsSnapshot;
+  if (typeof snapshot !== 'object' || snapshot === null) return null;
+  const provider = (snapshot as Record<string, unknown>)['provider'];
+  return typeof provider === 'string' ? provider : null;
+}
+
 function registerCheckRoute(app: AppInstance): void {
   app.post(
     `${PREFIX}/folders/:folderId/check`,
@@ -398,30 +418,57 @@ function registerCheckRoute(app: AppInstance): void {
        * результат больше не нужен», и его ветка ниже осталась прежней.
        */
       if (active !== undefined && mode !== 'full') {
-        const continued = await enqueueJob(app.db, scope, {
-          type: 'vlm.finalize_run',
-          payload: tracePayload({
-            folderId,
-            recognitionRunId: active.id,
-            autoContinue: true,
-          }),
-          dedupeKey: dedupeKeyFor('vlm.finalize_run', active.id),
-        });
+        /*
+         * Заказ поднимается У ЗАДАЧ ПРОГОНА — у той цепочки, которая идёт.
+         *
+         * До S54 маршрут ставил `vlm.finalize_run` безусловно, и для ветки
+         * RD WEB это была не бесполезная задача, а разрушительная: финализация
+         * VLM провайдера не спрашивает, живых `vlm.recognize_page` у RD-прогона
+         * не находит, объявляет все его страницы осиротевшими, помечает
+         * отказом — и уводит комплект на дораспознавание чужой моделью поверх
+         * работы, которую в эту минуту делает RD WEB.
+         */
+        const raised = await raiseAutoContinueForRun(app.db, folderId, active.id);
+        const continued =
+          providerOfRun(active) === 'openrouter_vlm'
+            ? await enqueueJob(app.db, scope, {
+                type: 'vlm.finalize_run',
+                payload: tracePayload({
+                  folderId,
+                  recognitionRunId: active.id,
+                  autoContinue: true,
+                }),
+                dedupeKey: dedupeKeyFor('vlm.finalize_run', active.id),
+              })
+            : null;
+        /*
+         * Живая задача — единственное, чем заказ может быть исполнен. Прогон,
+         * у которого не осталось ни одной, идёт не «ещё чуть-чуть», а никуда:
+         * ответить на это «принято» значило бы отправить человека ждать того,
+         * чего не случится.
+         */
+        if (continued === null && raised.length === 0) {
+          throw conflict(
+            'У идущего прогона не осталось живых задач: цепочка оборвалась. ' +
+              'Откройте «Историю» — там видно, на какой задаче и с каким отказом.',
+          );
+        }
         request.log.info(
           {
             event: 'recognition_run_continued',
             folder_id: folderId,
             run_id: active.id,
-            job_id: continued.jobId,
-            job_created: continued.created,
+            job_id: continued?.jobId ?? null,
+            job_created: continued?.created ?? false,
+            raised_jobs: raised.length,
           },
           'идущий прогон распознавания получил заказ довести комплект до проверки',
         );
         return reply.code(202).send({
           stage: 'recognition',
           recognitionRunId: active.id,
-          jobId: continued.jobId,
-          jobCreated: continued.created,
+          jobId: continued?.jobId ?? (raised[0] as string),
+          jobCreated: continued?.created ?? false,
           retriedPages: 0,
           continuedRun: true,
         });

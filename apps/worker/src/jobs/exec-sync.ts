@@ -454,10 +454,42 @@ async function routeConflict<K extends ExecJobType>(
 
   await ctx.enqueue({
     type: 'rd.sync_resync',
-    payload: { folderId: target.folderId, recognitionRunId: target.runId },
+    payload: { folderId: target.folderId, recognitionRunId: target.runId, ...carry(ctx) },
     dedupeKey: `rd.sync_resync:${target.runId}:${String(target.recoveryRound + 1)}`,
   });
   throw error;
+}
+
+/**
+ * Что обязано пережить переход к следующему звену цепочки.
+ *
+ * Цепочка `rd.sync_*` — девять переходов, и каждый обработчик собирает payload
+ * следующего звена ЗАНОВО. Пока перенос делали руками, его не сделали нигде:
+ * заказ «доведи до конца» доезжал только до головы, прогон заканчивался
+ * успехом, а комплект оставался неразобранным — молча, потому что отказ от
+ * анализа не оставлял следа. Тем же движением терялся `request_id`, и связать
+ * нажатие человека с отказом на шестом звене по журналам двух систем было
+ * нечем.
+ *
+ * Перенос — это читаемость консоли задач и сквозной след, а НЕ механизм
+ * принятия решения: «идти ли в анализ» решает `continueWithAnalysis`, читая
+ * заказ по прогону целиком. Два механизма на один вопрос завели бы место, где
+ * они расходятся; здесь их нет.
+ *
+ * Поле опускается, когда его нет, а не пишется `false` — тем же приёмом и по
+ * той же причине, что `forwardAutoContinue` в `segmentation.ts`: пошаговый путь
+ * инженера не должен отличаться от прежнего ни одним байтом payload.
+ */
+function carry(ctx: {
+  readonly payload: {
+    readonly autoContinue?: boolean | undefined;
+    readonly request_id?: string | undefined;
+  };
+}): { autoContinue?: true; request_id?: string } {
+  return {
+    ...(ctx.payload.autoContinue === true ? { autoContinue: true as const } : {}),
+    ...(ctx.payload.request_id === undefined ? {} : { request_id: ctx.payload.request_id }),
+  };
 }
 
 // =====================================================================
@@ -678,10 +710,22 @@ export function createSyncPrepareHandler(deps: ExecSyncDeps): JobHandler<'rd.syn
         generation: plan.syncGeneration,
       });
 
+      /*
+       * Ключ цепочки называет ПРОГОН, а не только отправку.
+       *
+       * `external_sync_id` — ключ идемпотентности контракта (§9), и он остаётся
+       * в ключе: внутри прогона он константа, поэтому повтор задачи по-прежнему
+       * склеивается сам с собой. Но собран он из папки и генерации, а генерация
+       * растёт только после УСПЕШНОГО `init`. Прогон, упавший на первом звене,
+       * оставлял мёртвую задачу — а мёртвая задача ключ держит намеренно
+       * (0039: «мертвеца разбирает человек»), — и следующее «Распознать» на той
+       * же папке строило тот же ключ, получало существующего мертвеца ЧУЖОГО
+       * прогона и повисало `running` без единой живой задачи.
+       */
       await ctx.enqueue({
         type: 'rd.sync_init',
-        payload: { folderId: target.folderId, recognitionRunId: target.runId },
-        dedupeKey: `rd.sync_init:${externalSyncId}`,
+        payload: { folderId: target.folderId, recognitionRunId: target.runId, ...carry(ctx) },
+        dedupeKey: `rd.sync_init:${target.runId}:${externalSyncId}`,
       });
     });
   };
@@ -735,8 +779,8 @@ export function createSyncInitHandler(deps: ExecSyncDeps): JobHandler<'rd.sync_i
       const next = result.uploadRequired ? 'rd.sync_upload' : 'rd.sync_complete';
       await ctx.enqueue({
         type: next,
-        payload: { folderId: target.folderId, recognitionRunId: target.runId },
-        dedupeKey: `${next}:${sync.externalSyncId}`,
+        payload: { folderId: target.folderId, recognitionRunId: target.runId, ...carry(ctx) },
+        dedupeKey: `${next}:${target.runId}:${sync.externalSyncId}`,
       });
     });
   };
@@ -839,8 +883,8 @@ export function createSyncUploadHandler(deps: ExecSyncDeps): JobHandler<'rd.sync
       await deps.recordSyncState(sync.id, 'uploaded', { remoteState: result.state });
       await ctx.enqueue({
         type: 'rd.sync_complete',
-        payload: { folderId: target.folderId, recognitionRunId: target.runId },
-        dedupeKey: `rd.sync_complete:${sync.externalSyncId}`,
+        payload: { folderId: target.folderId, recognitionRunId: target.runId, ...carry(ctx) },
+        dedupeKey: `rd.sync_complete:${target.runId}:${sync.externalSyncId}`,
       });
     });
   };
@@ -875,8 +919,8 @@ export function createSyncCompleteHandler(deps: ExecSyncDeps): JobHandler<'rd.sy
           if (sync.uploadAttempts <= 1) {
             await ctx.enqueue({
               type: 'rd.sync_upload',
-              payload: { folderId: target.folderId, recognitionRunId: target.runId },
-              dedupeKey: `rd.sync_upload:${sync.externalSyncId}:retry`,
+              payload: { folderId: target.folderId, recognitionRunId: target.runId, ...carry(ctx) },
+              dedupeKey: `rd.sync_upload:${target.runId}:${sync.externalSyncId}:retry`,
             });
             return;
           }
@@ -894,8 +938,8 @@ export function createSyncCompleteHandler(deps: ExecSyncDeps): JobHandler<'rd.sy
       await ctx.emit('recognition.sync_completed', { recognitionRunId: target.runId });
       await ctx.enqueue({
         type: 'rd.sync_poll',
-        payload: { folderId: target.folderId, recognitionRunId: target.runId },
-        dedupeKey: `rd.sync_poll:${sync.externalSyncId}`,
+        payload: { folderId: target.folderId, recognitionRunId: target.runId, ...carry(ctx) },
+        dedupeKey: `rd.sync_poll:${target.runId}:${sync.externalSyncId}`,
       });
     });
   };
@@ -977,8 +1021,8 @@ export function createSyncPollHandler(
 
         await ctx.enqueue({
           type: 'rd.sync_fetch',
-          payload: { folderId: target.folderId, recognitionRunId: target.runId },
-          dedupeKey: `rd.sync_fetch:${sync.externalSyncId}`,
+          payload: { folderId: target.folderId, recognitionRunId: target.runId, ...carry(ctx) },
+          dedupeKey: `rd.sync_fetch:${target.runId}:${sync.externalSyncId}`,
         });
         return;
       }
@@ -1082,12 +1126,8 @@ export function createSyncFetchHandler(deps: ExecSyncDeps): JobHandler<'rd.sync_
 
       await ctx.enqueue({
         type: 'rd.sync_finalize',
-        payload: {
-          folderId: target.folderId,
-          recognitionRunId: target.runId,
-          ...(ctx.payload.autoContinue === true ? { autoContinue: true } : {}),
-        },
-        dedupeKey: `rd.sync_finalize:${sync.externalSyncId}`,
+        payload: { folderId: target.folderId, recognitionRunId: target.runId, ...carry(ctx) },
+        dedupeKey: `rd.sync_finalize:${target.runId}:${sync.externalSyncId}`,
       });
     });
   };
@@ -1429,7 +1469,7 @@ export function createSyncResyncHandler(deps: ExecSyncDeps): JobHandler<'rd.sync
 
       await ctx.enqueue({
         type: 'rd.sync_prepare',
-        payload: { folderId: target.folderId, recognitionRunId: target.runId },
+        payload: { folderId: target.folderId, recognitionRunId: target.runId, ...carry(ctx) },
         dedupeKey: `rd.sync_prepare:${target.runId}:g${String(lifted)}`,
       });
     });
