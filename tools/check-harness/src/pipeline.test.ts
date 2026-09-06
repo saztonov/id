@@ -10,11 +10,11 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { RULE_CATALOG } from '@id/rules';
 
-import { runPackage } from './pipeline.js';
+import { runPackage, type PackageRunResult } from './pipeline.js';
 import { assertUnderTemp, renderPackageReport, writePackageReport } from './report.js';
 
 const MD = `# Document: synthetic.pdf
@@ -176,6 +176,14 @@ describe('runPackage', () => {
  * Папка живёт только в `temp/` и в репозиторий не входит (§1.4, ПДн), поэтому
  * набор пропускается там, где её нет, — тем же приёмом, что и корпусный тест
  * реестра приложений в `@id/api`.
+ *
+ * Разбор идёт в `beforeAll`, а не в теле `describe`, и это не стиль. Тело
+ * пропущенного набора vitest всё равно исполняет — ему нужно собрать имена
+ * тестов, — поэтому `runPackage` звался и там, где папки нет, и падал на её
+ * отсутствии ещё до первого утверждения. Пропуск, который вместо пропуска
+ * роняет файл, — это не пропуск: `pnpm gate:clean` не проходил ни разу с тех
+ * пор, как набор появился, потому что чистое дерево собирается из гита, а
+ * `temp/` в гите нет. `beforeAll` пропущенного набора не исполняется.
  */
 const MASTER_DIR = fileURLToPath(
   new URL('../../../temp/MD/new/ИД_Мастер_апрель_2026', import.meta.url),
@@ -184,7 +192,11 @@ const MASTER_DIR = fileURLToPath(
 const masterAvailable = existsSync(MASTER_DIR);
 
 describe.skipIf(!masterAvailable)('папка «ИД Мастер апрель 2026» на настоящей выгрузке', () => {
-  const master = runPackage(MASTER_DIR, { today: '2026-04-30', unconfiguredProfile: false });
+  let master: PackageRunResult;
+
+  beforeAll(() => {
+    master = runPackage(MASTER_DIR, { today: '2026-04-30', unconfiguredProfile: false });
+  });
 
   it('все 220 листов разобраны, ничьих почти нет', () => {
     expect(master.pages).toHaveLength(220);
