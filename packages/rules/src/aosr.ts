@@ -2131,16 +2131,54 @@ function evaluateSro(graph: CheckGraph): RuleResult {
   if (contractor?.inn != null && digitsOf(contractor.inn) !== '') {
     seen.set(digitsOf(contractor.inn), anchorOf('folder', graph.folder.id));
   }
+
+  const findings: RuleFinding[] = [];
+  const unreadable = new Set<string>();
+
   for (const act of aosrActs(graph)) {
     const value = actField(act, AOSR_FIELDS.contractorInn);
     const text = trimmedText(value);
     if (text === null) continue;
+
+    /**
+     * Реквизит с посторонним знаком в реестр не идёт.
+     *
+     * `digitsOf` выбрасывает всё, кроме цифр, и «77/8203762» превращается в
+     * девятизначное «778203762» — значение, которого в акте не напечатано.
+     * Реестр СРО его, разумеется, не знает, и правило сообщало бы «подрядчик не
+     * найден в реестре саморегулируемых организаций» — обвинение по знаку,
+     * который поставил распознаватель. Признак общий с `AOSR.HDR.021`–`023`
+     * (`UNREADABLE_IDENTIFIER`): у одного и того же значения не бывает разных
+     * приговоров у соседних правил.
+     *
+     * На боевой папке «ИД Мастер апрель 2026» реестр недоступен, и ветка молчит;
+     * подключение источника без этой проверки дало бы ошибку на ровном месте.
+     */
+    if (UNREADABLE_IDENTIFIER.test(text)) {
+      if (unreadable.has(text)) continue;
+      unreadable.add(text);
+      findings.push(
+        unknown({
+          ...anchorOfField(act, value),
+          origin: 'deterministic',
+          message:
+            `ИНН «${text}» в шапке акта ${actLabel(act)} прочитан со знаком, которого в ИНН ` +
+            'быть не может — сверить членство в СРО нечем.',
+          hint: 'Сверьте ИНН со сканом акта и введите значение вручную.',
+        }),
+      );
+      continue;
+    }
+
     const digits = digitsOf(text);
     if (digits === '') continue;
     if (!seen.has(digits)) seen.set(digits, anchorOfField(act, value));
   }
 
   if (seen.size === 0) {
+    // Нечитаемые значения уже названы своими замечаниями: сказать вдобавок
+    // «ИНН не известен» значило бы сообщить об одной беде дважды.
+    if (findings.length > 0) return fromFindings(findings);
     return fromFindings([
       unknown({
         ...anchorOf('folder', graph.folder.id),
@@ -2151,7 +2189,6 @@ function evaluateSro(graph: CheckGraph): RuleResult {
     ]);
   }
 
-  const findings: RuleFinding[] = [];
   for (const [inn, anchor] of seen) {
     const records = lookup.records.filter((record) => digitsOf(record.memberInn) === inn);
     if (records.length === 0) {
@@ -2650,29 +2687,6 @@ function evaluateTransferOrg(graph: CheckGraph): RuleResult {
       (value): value is string => value !== null,
     );
 
-  /**
-   * Виды, у которых организацию не прочитал НИ ОДИН документ папки.
-   *
-   * Разница существенна. У одного документа реквизит не извлёкся — это его
-   * беда, и о ней сообщают правила заполненности; правилу сверки здесь молчать
-   * правильно. У всех документов вида — это молчит портал, и тогда «правило
-   * прошло» неотличимо от «правило не смотрело»: на папке «ИД Мастер апрель
-   * 2026» организации не было ни у одной из двенадцати исполнительных схем,
-   * REG.114 отвечало вердиктом без замечаний, и четыре строки описи, где схемы
-   * ООО «МАСТЕР» записаны за ИП Михальским, остались неназванными.
-   */
-  const silentTypes = new Set<string>();
-  const byType = new Map<string, DocumentNode[]>();
-  for (const document of graph.documents) {
-    if (document.docTypeCode === null) continue;
-    const list = byType.get(document.docTypeCode) ?? [];
-    list.push(document);
-    byType.set(document.docTypeCode, list);
-  }
-  for (const [code, documents] of byType) {
-    if (documents.every((document) => organizationOf(document).length === 0)) silentTypes.add(code);
-  }
-
   const findings: RuleFinding[] = [];
   let checked = 0;
 
@@ -2684,25 +2698,27 @@ function evaluateTransferOrg(graph: CheckGraph): RuleResult {
     const document = documentById(graph, row.matchedDocumentId);
     if (document === null) continue;
 
+    /**
+     * Организация документа не прочитана — сверять не с чем, и правило молчит.
+     *
+     * S56 пробовал отвечать здесь «не проверено», когда реквизита нет ни у
+     * одного документа вида: «правило прошло» не должно быть неотличимо от
+     * «правило не смотрело». Замысел верный, исполнение — нет: вид считался
+     * молчащим по всем документам папки, включая те, у которых организации нет
+     * ПО СХЕМЕ. На боевой папке это дало восемнадцать «не проверено» и ни
+     * одного верного случая: двенадцать строк реестров приложений (`registry` —
+     * поля организации в схеме нет вовсе) и шесть строк журнала авторского
+     * надзора, где организация как раз прочитана, но реквизитом `designer_org`,
+     * которого нет в списке выше.
+     *
+     * Отсюда откат к молчанию. Различать «портал не смотрел» и «портал
+     * посмотрел и согласен» правило по одному списку реквизитов не может: для
+     * этого надо знать, объявляет ли схема вида организацию вообще, — а это
+     * знание живёт в каталоге видов, и читать его правило начнёт вместе с
+     * заменой сверки на суждение модели (ADR-0028).
+     */
     const named = organizationOf(document);
-    if (named.length === 0) {
-      if (document.docTypeCode !== null && silentTypes.has(document.docTypeCode)) {
-        findings.push(
-          unknown({
-            ...anchorOf('registry_row', row.id),
-            origin: 'deterministic',
-            message:
-              `В строке описи передачи (${transferRowLabel(row)}) организация указана как ` +
-              `«${rowOrg}», а у самого документа она не прочитана — как и у всех документов ` +
-              `этого вида в папке, поэтому сверить графу не с чем.`,
-            hint: 'Откройте документ, введите организацию вручную и подтвердите реквизит.',
-          }),
-        );
-      }
-      // Одиночный пропуск реквизита — граница извлечения одного документа, а не
-      // расхождение описи: о неполноте реквизитов сообщают правила заполненности.
-      continue;
-    }
+    if (named.length === 0) continue;
 
     checked += 1;
     const wanted = normalizeOrgName(rowOrg);
