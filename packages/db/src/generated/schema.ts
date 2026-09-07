@@ -1860,6 +1860,47 @@ export const rdExecSyncs = pgTable("rd_exec_syncs", {
 	check("rd_exec_syncs_terminal_chk", sql`(state <> 'terminal'::text) OR (remote_state IS NOT NULL)`),
 ]);
 
+export const registryRowLabels = pgTable("registry_row_labels", {
+	registryRowId: uuid("registry_row_id").primaryKey().notNull(),
+	folderId: uuid("folder_id").notNull(),
+	matchVerdict: text("match_verdict").notNull(),
+	expectedDocumentId: uuid("expected_document_id"),
+	checkLabels: jsonb("check_labels").default([]).notNull(),
+	labeledBy: uuid("labeled_by").notNull(),
+	labeledAt: timestamp("labeled_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	seenValidationRunId: uuid("seen_validation_run_id"),
+}, (table) => [
+	index("ix_registry_row_labels_folder").using("btree", table.folderId.asc().nullsLast().op("uuid_ops")),
+	foreignKey({
+			columns: [table.registryRowId],
+			foreignColumns: [registryRows.id],
+			name: "registry_row_labels_registry_row_id_fkey"
+		}).onDelete("cascade"),
+	foreignKey({
+			columns: [table.folderId],
+			foreignColumns: [folders.id],
+			name: "registry_row_labels_folder_id_fkey"
+		}),
+	foreignKey({
+			columns: [table.expectedDocumentId],
+			foreignColumns: [logicalDocuments.id],
+			name: "registry_row_labels_expected_document_id_fkey"
+		}).onDelete("set null"),
+	foreignKey({
+			columns: [table.labeledBy],
+			foreignColumns: [users.id],
+			name: "registry_row_labels_labeled_by_fkey"
+		}),
+	foreignKey({
+			columns: [table.seenValidationRunId],
+			foreignColumns: [validationRuns.id],
+			name: "registry_row_labels_seen_validation_run_id_fkey"
+		}).onDelete("set null"),
+	check("registry_row_labels_verdict_chk", sql`match_verdict = ANY (ARRAY['correct'::text, 'wrong_document'::text, 'not_in_folder'::text, 'unclear'::text])`),
+	check("registry_row_labels_checks_array_chk", sql`jsonb_typeof(check_labels) = 'array'::text`),
+	check("registry_row_labels_expected_chk", sql`(expected_document_id IS NULL) OR (match_verdict <> 'correct'::text)`),
+]);
+
 export const userObjectScopes = pgTable("user_object_scopes", {
 	userId: uuid("user_id").notNull(),
 	objectId: uuid("object_id").notNull(),

@@ -198,6 +198,9 @@ const EXPECTED: Readonly<Record<string, Access | Expectation>> = {
   'GET /api/v1/folders/:folderId/bundles': 'markup.read',
   'GET /api/v1/folders/:folderId/check-report': 'submission.read',
   'GET /api/v1/folders/:folderId/checks': 'submission.read',
+  // Табло качества сверки (S57): показатель, а не тайна — читает всякий, кто
+  // видит папку.
+  'GET /api/v1/folders/:folderId/match-scoreboard': 'submission.read',
   'GET /api/v1/folders/:folderId/classifications': 'submission.read',
   'GET /api/v1/folders/:folderId/deletion-preview': 'submission.delete',
   'GET /api/v1/folders/:folderId/documents': 'submission.read',
@@ -328,6 +331,20 @@ const EXPECTED: Readonly<Record<string, Access | Expectation>> = {
   'PUT /api/v1/folders/:folderId/files/order': 'submission.upload',
   'PUT /api/v1/folders/:folderId/pages/:sourcePageId/manual-label': 'document.edit',
   'PUT /api/v1/folders/:folderId/pages/:sourcePageId/orientation': 'markup.edit',
+  /**
+   * Метка инженера на строке перечня (S57).
+   *
+   * Право `checks.run`: метка — суждение о работе портала, и ставит её тот, кто
+   * вправе эту работу запускать. Положительная проба не выполняется — строки
+   * перечня в наборе проб нет, а создавать её ради одного маршрута значило бы
+   * заводить в реестре прав знание о разборе описи.
+   */
+  'PUT /api/v1/registry-rows/:registryRowId/label': {
+    access: 'checks.run',
+    params: { registryRowId: '00000000-0000-4000-8000-000000000001' },
+    body: { matchVerdict: 'correct' },
+    noPositiveProbe: 'строки перечня в наборе проб нет: маршрут ответил бы 404',
+  },
   'PUT /api/v1/uploads/local': 'public',
 };
 

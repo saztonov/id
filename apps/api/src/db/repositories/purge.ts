@@ -138,6 +138,11 @@ export const DERIVED_DELETES: readonly PurgeStep[] = [
   { table: 'document_relations', where: (id: SQL) => sql`folder_id = ${id}` },
   { table: 'material_documents', where: (id: SQL) => sql`folder_id = ${id}` },
   { table: 'page_assignments', where: (id: SQL) => sql`folder_id = ${id}` },
+  // Метки инженера — свидетельство ЧЕЛОВЕКА о строке, и переживать сброс
+  // конвейера они не могут технически: строки перечня пересоздаются разбором, а
+  // метка ссылается на строку. Зато таблица обязана быть в списке: без неё
+  // удаление строк упало бы внешним ключом посреди операции (S57).
+  { table: 'registry_row_labels', where: (id: SQL) => sql`folder_id = ${id}` },
   { table: 'registry_row_candidates', where: (id: SQL) => sql`folder_id = ${id}` },
   { table: 'registry_rows', where: (id: SQL) => sql`folder_id = ${id}` },
   { table: 'logical_documents', where: (id: SQL) => sql`folder_id = ${id}` },

@@ -29,6 +29,13 @@ import {
   loadChecksCoverage,
 } from '../../db/repositories/checks.js';
 import { buildCheckReport } from '../../db/repositories/check-report.js';
+import { listRegistryRows } from '../../db/repositories/documents.js';
+import {
+  listRegistryRowLabels,
+  readMatchPromptVersion,
+  saveRegistryRowLabel,
+  scoreRegistryMatching,
+} from '../../db/repositories/registry-labels.js';
 import { enqueueJob } from '../../db/repositories/jobs.js';
 import { findFolderForFiles } from '../../db/repositories/files.js';
 import { dedupeKeyFor } from '../../jobs/types.js';
@@ -37,6 +44,10 @@ import {
   findingListSchema,
   findingQuerySchema,
   folderIdParamSchema,
+  matchScoreboardSchema,
+  registryRowIdParamSchema,
+  registryRowLabelBodySchema,
+  registryRowLabelResponseSchema,
   ruleCatalogListSchema,
   runChecksResponseSchema,
   validationRunListSchema,
@@ -200,5 +211,77 @@ export function registerCheckRoutes(app: AppInstance): void {
         defaultParams: { ...spec.defaultParams },
       })),
     }),
+  );
+  /**
+   * Метка инженера на строке перечня — вход табло качества (S57).
+   *
+   * Право `checks.run`, а не `submission.read`: метка — суждение о работе
+   * портала, и ставит её тот, кто вправе эту работу запускать. Читать её может
+   * всякий, кто видит папку: табло — не тайна, а показатель.
+   */
+  app.put(
+    `${PREFIX}/registry-rows/:registryRowId/label`,
+    {
+      preHandler: runChecks,
+      schema: {
+        params: registryRowIdParamSchema,
+        body: registryRowLabelBodySchema,
+        response: { 200: registryRowLabelResponseSchema },
+      },
+    },
+    async (request) => {
+      const { scope, user } = currentAuth(request);
+      const { registryRowId } = request.params;
+      const body = request.body;
+
+      const outcome = await saveRegistryRowLabel(app.db, scope, user.id, {
+        registryRowId,
+        matchVerdict: body.matchVerdict,
+        expectedDocumentId: body.expectedDocumentId ?? null,
+        checkLabels: body.checkLabels ?? [],
+        seenValidationRunId: body.seenValidationRunId ?? null,
+      });
+
+      // Невидимая строка не отличается от несуществующей: иначе ответ сообщал
+      // бы о существовании чужой папки тому, кому её видеть нельзя (§16).
+      if (!outcome.saved) throw notFound('Строка перечня не найдена.');
+      return outcome;
+    },
+  );
+
+  /**
+   * Табло качества сверки по папке (S57).
+   *
+   * Считается на лету из меток и текущих решений: снимок пришлось бы обновлять
+   * при каждом прогоне и при каждой метке, а расхождение снимка с данными в
+   * измерительном инструменте обесценивает его целиком.
+   */
+  app.get(
+    `${PREFIX}/folders/:folderId/match-scoreboard`,
+    {
+      preHandler: readChecks,
+      schema: { params: folderIdParamSchema, response: { 200: matchScoreboardSchema } },
+    },
+    async (request) => {
+      const { scope } = currentAuth(request);
+      const { folderId } = request.params;
+
+      const [rows, labels, promptVersion] = await Promise.all([
+        listRegistryRows(app.db, scope, folderId),
+        listRegistryRowLabels(app.db, scope, folderId),
+        readMatchPromptVersion(app.db, folderId),
+      ]);
+
+      return scoreRegistryMatching({
+        folderId,
+        promptVersion,
+        rows: rows.map((row) => ({
+          id: row.id,
+          matchState: row.matchState,
+          checks: row.checks.map((check) => ({ kind: check.kind, status: check.status })),
+        })),
+        labels,
+      });
+    },
   );
 }

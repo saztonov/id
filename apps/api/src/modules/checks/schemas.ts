@@ -247,3 +247,56 @@ export const ruleCatalogEntrySchema = z.object({
 });
 
 export const ruleCatalogListSchema = z.object({ items: z.array(ruleCatalogEntrySchema) });
+
+/**
+ * Метка инженера на строке перечня (S57).
+ *
+ * Вход табло качества: портал судит сверку моделью, и «стало ли лучше»
+ * отвечается только человеком, посмотревшим на строку. Оси две и они
+ * независимы — сопоставление и замечания, — поэтому и полей два, а не одно
+ * сводное.
+ */
+export const registryRowLabelBodySchema = z.object({
+  matchVerdict: z.enum(['correct', 'wrong_document', 'not_in_folder', 'unclear']),
+  /** Какой документ отвечает строке на самом деле; без него «не тот» неизмеримо. */
+  expectedDocumentId: z.uuid().nullish(),
+  checkLabels: z
+    .array(
+      z.object({
+        kind: z.string().min(1).max(40),
+        verdict: z.enum(['confirmed', 'false_alarm', 'missed']),
+      }),
+    )
+    .max(10)
+    .optional(),
+  /** Прогон, который человек видел, когда ставил метку. */
+  seenValidationRunId: z.uuid().nullish(),
+});
+
+export const registryRowLabelResponseSchema = z.object({ saved: z.boolean() });
+
+export const registryRowIdParamSchema = z.object({ registryRowId: z.uuid() });
+
+/** Табло качества сверки по папке: две независимые оси. */
+export const matchScoreboardSchema = z.object({
+  folderId: z.string(),
+  promptVersion: z.number().nullable(),
+  match: z.object({
+    labeled: z.number(),
+    correct: z.number(),
+    wrongDocument: z.number(),
+    notInFolder: z.number(),
+    unclear: z.number(),
+    claimed: z.number(),
+    undetermined: z.number(),
+  }),
+  checks: z.object({
+    confirmed: z.number(),
+    falseAlarm: z.number(),
+    missed: z.number(),
+    byKind: z.record(
+      z.string(),
+      z.object({ confirmed: z.number(), falseAlarm: z.number(), missed: z.number() }),
+    ),
+  }),
+});
