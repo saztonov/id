@@ -198,6 +198,24 @@ export interface DocumentNode {
 }
 
 /** Строка реестра приложений и её сверка (§8.3). */
+/**
+ * Расхождение (или согласие) одной графы строки перечня с реквизитом документа.
+ *
+ * `unsure` — не «нет расхождения», а «сверить не удалось»: реквизит не
+ * прочитан либо модель не уверена. Слить его с `ok` значило бы выдать
+ * непроверенное за проверенное — ровно то, чего §0.5 не прощает.
+ */
+export interface RowCheckNode {
+  readonly kind: string;
+  readonly rowCell: string;
+  readonly documentFieldCode: string | null;
+  readonly status: 'ok' | 'mismatch' | 'unsure';
+  readonly confidence: number;
+  readonly message: string;
+  readonly rowQuote: string;
+  readonly docQuote: string | null;
+}
+
 export interface RegistryRowNode {
   readonly id: string;
   /** Документ-реестр, которому принадлежит строка. */
@@ -223,7 +241,27 @@ export interface RegistryRowNode {
   readonly issuedAt: string | null;
   readonly matchedDocumentId: string | null;
   readonly matchScore: number | null;
-  readonly matchState: 'matched' | 'missing' | 'ambiguous' | 'candidate';
+  readonly matchState: 'matched' | 'missing' | 'ambiguous' | 'candidate' | 'undetermined';
+  /**
+   * Кто решил, по какому признаку и с каким доводом (S57).
+   *
+   * До S57 у строки был только счёт, и правила с отчётом восстанавливали из
+   * него смысл порогами. Число смысла не хранит: 0.7 означало и «приложение
+   * найдено по родителю», и «совпало числовое ядро номера», и подпись у обоих
+   * получалась одна.
+   */
+  readonly matchedBy: 'rule' | 'llm';
+  readonly matchBasis: string | null;
+  readonly matchNote: string | null;
+  /**
+   * Проверки СОДЕРЖАНИЯ строки: верно ли она описывает найденный документ.
+   *
+   * Их даёт та же стадия, что сопоставляет строку, и по той же причине:
+   * сравнение графы «Организация» с реквизитом документа — вопрос смысла, а не
+   * формы. Правила их РЕТРАНСЛИРУЮТ, а не выносят заново: второе мнение о том
+   * же факте дало бы два замечания с правом противоречить друг другу.
+   */
+  readonly checks: readonly RowCheckNode[];
   /**
    * Документы, похожие на строку по виду или дате, но номером не подтверждённые.
    *

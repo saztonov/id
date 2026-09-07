@@ -75,7 +75,7 @@ import type {
   RuleRunCounts,
   RuleSnapshotEntry,
 } from '@id/rules';
-import { deriveMaterials, isFallbackCode } from '@id/rules';
+import { deriveMaterials, isFallbackCode, LLM_REVIEW_CODES } from '@id/rules';
 import { TRANSFER_TYPE } from '../../segmentation/transfer-registry.js';
 import type { AuthScope } from '../../auth/scope.js';
 import { conflict, internal, notFound } from '../../lib/problem.js';
@@ -430,12 +430,24 @@ export async function loadCheckGraph(
         matchedDocumentId: registryRows.matchedDocumentId,
         matchScore: registryRows.matchScore,
         matchState: registryRows.matchState,
+        matchedBy: registryRows.matchedBy,
+        matchBasis: registryRows.matchBasis,
+        matchNote: registryRows.matchNote,
+        checks: registryRows.checks,
         complectId: registryRows.complectId,
       })
       .from(registryRows)
       .where(eq(registryRows.folderId, input.folderId))
       .orderBy(asc(registryRows.documentId), asc(registryRows.ordinal))
-  ).map((row) => ({ ...row, matchState: row.matchState as RegistryRowNode['matchState'] }));
+  ).map((row) => ({
+    ...row,
+    matchState: row.matchState as RegistryRowNode['matchState'],
+    matchedBy: row.matchedBy === 'llm' ? ('llm' as const) : ('rule' as const),
+    // Форма проверок утверждается там, где они РОЖДАЮТСЯ (`acceptDecisions`).
+    // Вторая схема того же ответа разошлась бы с первой на первой же правке, а
+    // правилам довольно знать, что это список.
+    checks: Array.isArray(row.checks) ? (row.checks as RegistryRowNode['checks']) : [],
+  }));
 
   // Кандидаты — одним запросом на ревизию, а не по строке: правило REG.101
   // читает их для КАЖДОГО документа, и запрос на строку превратил бы одну
@@ -859,9 +871,22 @@ export async function saveFindings(
  * Тот удаляет ВСЕ замечания прогона перед вставкой — он единственный писатель
  * и вправе так делать. ИИ-стадия приходит вторым писателем в тот же прогон, и
  * та же семантика стёрла бы результат движка правил. Здесь удаляются только
- * собственные строки (`origin = 'llm'`), поэтому повтор задачи заменяет свой
- * выход целиком и не трогает чужой — то же правило «задача заменяет свой выход»,
- * что и у остальных стадий (§12).
+ * собственные строки, поэтому повтор задачи заменяет свой выход целиком и не
+ * трогает чужой — то же правило «задача заменяет свой выход», что и у остальных
+ * стадий (§12).
+ *
+ * ## Почему «свои» — это КОДЫ, а не всё `origin = 'llm'` (S57)
+ *
+ * Пока у портала была одна ИИ-стадия, происхождение и авторство совпадали. С
+ * появлением сверки перечней моделью замечаний с `origin = 'llm'` стало два
+ * рода: `LLM.FILL.*` пишет эта стадия, `REG.113`–`REG.117` — движок правил,
+ * ретранслируя расхождения, найденные сверкой. Удаление по происхождению
+ * снесло бы вторые: ИИ-проверка заполнения идёт ПОСЛЕ прогона правил и стёрла
+ * бы их выход молча, оставив отчёт без половины находок.
+ *
+ * Поэтому граница проведена по набору кодов стадии. Он закрыт и объявлен в
+ * каталоге правил — там же, где объявлено, что детерминированного оценщика у
+ * этих кодов нет.
  *
  * Инвариант БД `findings_llm_blocking_chk` (никакого `is_blocking` без
  * подтверждения человеком) здесь не дублируется проверкой: он в схеме, и
@@ -882,7 +907,13 @@ export async function saveLlmFindings(
   return db.transaction(async (tx) => {
     const removed = await tx
       .delete(findings)
-      .where(and(eq(findings.validationRunId, input.validationRunId), eq(findings.origin, 'llm')))
+      .where(
+        and(
+          eq(findings.validationRunId, input.validationRunId),
+          eq(findings.origin, 'llm'),
+          inArray(findings.ruleCode, [...LLM_REVIEW_CODES]),
+        ),
+      )
       .returning({ id: findings.id });
 
     let written = 0;

@@ -50,6 +50,7 @@ import {
 } from './testing.js';
 import type {
   RegistryRowNode,
+  RowCheckNode,
   CheckGraph,
   DocumentNode,
   ExternalRegistriesSnapshot,
@@ -1381,92 +1382,14 @@ describe('REG.112 — раздел описи не сопоставлен акт
   });
 });
 
-describe('REG.113 — номер акта в строке описи против акта раздела', () => {
-  const transfer = makeDocument({ docTypeCode: 'transfer_registry' });
+describe('REG.113–117 — расхождения строки описи, найденные сверкой', () => {
+  const transfer = makeDocument({ docTypeCode: 'transfer_registry', title: 'Опись передачи' });
+  const scheme = makeDocument({ docTypeCode: 'exec_scheme', title: 'Исполнительная схема' });
 
-  function graphWithRow(docNameRaw: string, actNumber = '58-ОТ/-1 этаж'): CheckGraph {
-    const act = makeAct(replacing(healthyActFields(), text(AOSR_FIELDS.actNumber, actNumber)), {
-      complectId: 'complect-1',
-    });
-    return makeGraph({
-      object: makeObject({ name: 'Автостоянка' }),
-      documents: [act, transfer],
-      transferRows: [
-        makeRegistryRow({
-          registryDocumentId: transfer.id,
-          sectionTitle: '11. Устройство шпатлевки, поз. 11.2',
-          docNameRaw,
-          docNoRaw: '1.1',
-          complectId: 'complect-1',
-        }),
-      ],
-    });
-  }
-
-  it('строка называет акт своего раздела — pass', () => {
-    expect(verdictOf('REG.113', graphWithRow('Реестр к АОСР № 58-ОТ/-1 этаж'))).toBe('pass');
-  });
-
-  it('потерянная цифра в номере акта — замечание с обоими номерами', () => {
-    // Строка 11.2 боевой описи «ИД Мастер апрель 2026»: акт № 58-ОТ/-1 этаж,
-    // а в строке напечатано «№ 5-ОТ/-1 этаж».
-    const graph = graphWithRow('Реестр к АОСР № 5-ОТ/-1 этаж');
-    expect(verdictOf('REG.113', graph)).toBe('fail');
-    expect(messagesOf('REG.113', graph)[0]).toContain('5-ОТ/-1 этаж');
-    expect(messagesOf('REG.113', graph)[0]).toContain('58-ОТ/-1 этаж');
-  });
-
-  it('чужой номер акта в строке 12.2 находится так же', () => {
-    const graph = graphWithRow('Реестр к АОСР № 50-ОТ/-1 этаж', '59-ОТ/-1 этаж');
-    expect(verdictOf('REG.113', graph)).toBe('fail');
-  });
-
-  it('различие в гомоглифах опечаткой описи не считается', () => {
-    // «ОТ» латиницей против кириллицы — след чтения, а не расхождение бумаги.
-    expect(verdictOf('REG.113', graphWithRow('Реестр к АОСР № 58-OT/-1 этаж'))).toBe('pass');
-  });
-
-  it('строка без ссылки на акт правилом не трогается', () => {
-    expect(verdictOf('REG.113', graphWithRow('Паспорт качества'))).toBe('n_a');
-  });
-
-  it('без описи правило неприменимо', () => {
-    expect(verdictOf('REG.113', actGraph(healthyActFields()))).toBe('n_a');
-  });
-
-  it('различие только в знаке перед единицей привязки даёт undetermined', () => {
-    // Папка «ИД Мастер апрель 2026», акты № 51-ОТ и № 54-ОТ: опись, п. 3 и п. 4
-    // печатают «-1 этаж», а заголовок акта прочитан как «1 этаж» — и на другом
-    // прогоне того же скана минус читался. Решить по тексту, опечатка это или
-    // чтение, нельзя, и обвинять опись на таком основании правило не вправе.
-    const graph = graphWithRow('Реестр к АОСР № 51-ОТ/-1 этаж', '51-ОТ/1 этаж');
-    expect(verdictOf('REG.113', graph)).toBe('undetermined');
-    expect(messagesOf('REG.113', graph)[0]).toContain('51-ОТ/-1 этаж');
-    expect(messagesOf('REG.113', graph)[0]).toContain('51-ОТ/1 этаж');
-  });
-
-  it('поблажка держится на единице привязки, а не на любом минусе', () => {
-    // Чувствительность: без привязки к «этаж»/«этап» тот же приём погасил бы
-    // расхождение «12-ОТ/-1» и «12-ОТ/1» в номере, где минус несёт смысл.
-    const graph = graphWithRow('Реестр к АОСР № 58-ОТ/-1', '58-ОТ/1');
-    expect(verdictOf('REG.113', graph)).toBe('fail');
-  });
-
-  it('расхождение в цифре при том же знаке остаётся замечанием', () => {
-    const graph = graphWithRow('Реестр к АОСР № 5-ОТ/1 этаж', '58-ОТ/1 этаж');
-    expect(verdictOf('REG.113', graph)).toBe('fail');
-  });
-});
-
-describe('REG.114 — организация в строке описи против документа', () => {
-  const transfer = makeDocument({ docTypeCode: 'transfer_registry' });
-
-  function graphWithOrg(rowOrg: string, documentOrg: string | null): CheckGraph {
-    const scheme = makeDocument({
-      docTypeCode: 'exec_scheme',
-      title: 'Исполнительная схема № 52.1-ОТ/-1 ЭТАЖ',
-      fields: documentOrg === null ? [] : [text('issuer', documentOrg)],
-    });
+  function graphWithCheck(
+    check: Partial<RowCheckNode> & { readonly kind: string },
+    row: Partial<Parameters<typeof makeRegistryRow>[0]> = {},
+  ): CheckGraph {
     return makeGraph({
       documents: [scheme, transfer],
       transferRows: [
@@ -1475,119 +1398,100 @@ describe('REG.114 — организация в строке описи прот
           sectionTitle: '5. Устройство шпатлевки, поз. 5.16',
           docNameRaw: 'Исполнительная схема устройства стен',
           docNoRaw: '52.1-ОТ/-1 ЭТАЖ',
-          orgRaw: rowOrg,
           matchState: 'matched',
           matchedDocumentId: scheme.id,
+          matchedBy: 'llm',
+          checks: [
+            {
+              rowCell: 'org_raw',
+              documentFieldCode: 'executor',
+              status: 'mismatch',
+              confidence: 0.9,
+              message: 'организация указана как «ИП Михальский», а схему составило ООО «МАСТЕР»',
+              rowQuote: 'ИП Михальский Андрей Владимирович',
+              docQuote: 'ООО «МАСТЕР»',
+              ...check,
+            },
+          ],
+          ...row,
         }),
       ],
     });
   }
 
-  it('одна и та же организация — pass', () => {
-    expect(verdictOf('REG.114', graphWithOrg('ООО "МАСТЕР"', 'ООО «МАСТЕР»'))).toBe('pass');
-  });
-
-  it('полная форма собственности в документе совпадением не мешает', () => {
-    expect(
-      verdictOf(
-        'REG.114',
-        graphWithOrg('ООО "МАСТЕР"', 'Общество с ограниченной ответственностью «МАСТЕР»'),
-      ),
-    ).toBe('pass');
-  });
-
-  it('организация схемы читается из её собственного реквизита «executor»', () => {
-    // Схема вида `exec_scheme` называет организацию полем `executor`
-    // («Организация, составившая схему»), и оно заполнено у девяти схем папки
-    // «ИД Мастер апрель 2026». Реквизита не было в списке, который читает
-    // правило, — и четыре строки описи с чужим лицом ни разу не сравнивались.
-    const scheme = makeDocument({
-      docTypeCode: 'exec_scheme',
-      title: 'Исполнительная схема № 52.1-ОТ/-1 ЭТАЖ',
-      fields: [text('executor', 'ООО «МАСТЕР»')],
-    });
-    const graph = makeGraph({
-      documents: [scheme, transfer],
-      transferRows: [
-        makeRegistryRow({
-          registryDocumentId: transfer.id,
-          sectionTitle: '5. Устройство шпатлевки, поз. 5.16',
-          docNameRaw: 'Исполнительная схема устройства стен',
-          docNoRaw: '52.1-ОТ/-1 ЭТАЖ',
-          orgRaw: 'ИП Михальский Андрей Владимирович',
-          matchState: 'matched',
-          matchedDocumentId: scheme.id,
-        }),
-      ],
-    });
-    expect(verdictOf('REG.114', graph)).toBe('fail');
-    expect(messagesOf('REG.114', graph)[0]).toContain('Михальский');
-  });
-
-  it('чужое лицо в строке описи — замечание с обоими наименованиями', () => {
+  it('расхождение организации у найденного документа — замечание с текстом модели', () => {
     // Строки 5.16, 7.16, 9.16 и 11.16 боевой описи «ИД Мастер апрель 2026»:
-    // схемы ООО «МАСТЕР» записаны за подрядчиком другой работы.
-    const graph = graphWithOrg('ИП Михальский Андрей Владимирович', 'ООО «МАСТЕР»');
+    // схемы ООО «МАСТЕР» записаны за подрядчиком другой работы. Прежнее правило
+    // их не сравнивало — реквизит `executor` не попал в список, который оно
+    // читало.
+    const graph = graphWithCheck({ kind: 'org' });
     expect(verdictOf('REG.114', graph)).toBe('fail');
     expect(messagesOf('REG.114', graph)[0]).toContain('Михальский');
     expect(messagesOf('REG.114', graph)[0]).toContain('МАСТЕР');
   });
 
-  it('организация документа не прочитана — правило молчит', () => {
-    // Граница извлечения, а не расхождение описи: о неполноте реквизитов
-    // сообщают правила заполненности.
-    //
-    // S56 отвечал здесь «не проверено», когда реквизита нет ни у одного
-    // документа вида. Замысел был верен — «правило прошло» не должно быть
-    // неотличимо от «правило не смотрело», — но вид считался молчащим по всем
-    // документам папки, включая те, у которых организации нет ПО СХЕМЕ: на
-    // боевой папке ветка дала восемнадцать «не проверено» (двенадцать строк
-    // реестров приложений и шесть строк журнала надзора, где организация как раз
-    // прочитана реквизитом `designer_org`) и ни одного верного случая.
-    // Различать эти случаи по списку реквизитов правило не может — нужно знать
-    // схему вида, и это знание придёт вместе с ADR-0028.
-    expect(verdictOf('REG.114', graphWithOrg('ООО "МАСТЕР"', null))).toBe('n_a');
+  it('замечание сверки несёт происхождение «llm», а не выдаётся за детерминированное', () => {
+    // Судила модель, и прятать это значило бы выдать вероятностный вывод за
+    // вывод формы. Прецедент — `externalUnavailable`, который так же несёт своё
+    // происхождение.
+    const result = evaluate('REG.114', graphWithCheck({ kind: 'org' }));
+    expect(result.findings?.[0]?.origin).toBe('llm');
   });
 
-  it('документ без реквизита не мешает сверять соседние строки', () => {
-    // Чувствительность к предыдущему: молчание относится к СВОЕЙ строке, а не
-    // выключает правило целиком.
-    const bare = makeDocument({ docTypeCode: 'exec_scheme', title: 'Схема без реквизита' });
-    const named = makeDocument({
-      docTypeCode: 'exec_scheme',
-      title: 'Схема с реквизитом',
-      fields: [text('executor', 'ООО «МАСТЕР»')],
-    });
-    const graph = makeGraph({
-      documents: [bare, named, transfer],
-      transferRows: [
-        makeRegistryRow({
-          registryDocumentId: transfer.id,
-          sectionTitle: '5. Устройство шпатлевки, поз. 5.16',
-          docNameRaw: 'Исполнительная схема устройства стен',
-          docNoRaw: '52.1-ОТ/-1 ЭТАЖ',
-          orgRaw: 'ООО "МАСТЕР"',
-          matchState: 'matched',
-          matchedDocumentId: bare.id,
-        }),
-        makeRegistryRow({
-          registryDocumentId: transfer.id,
-          sectionTitle: '7. Устройство шпатлевки потолка, поз. 7.16',
-          docNameRaw: 'Исполнительная схема устройства потолка',
-          docNoRaw: '54.1-ОТ/-1 ЭТАЖ',
-          orgRaw: 'ИП Михальский Андрей Владимирович',
-          matchState: 'matched',
-          matchedDocumentId: named.id,
-        }),
-      ],
-    });
-    expect(verdictOf('REG.114', graph)).toBe('fail');
-    expect(messagesOf('REG.114', graph)).toHaveLength(1);
-    expect(messagesOf('REG.114', graph)[0]).toContain('Михальский');
+  it('расхождение у НЕ сопоставленной строки — «не проверено», а не обвинение', () => {
+    // Расхождение с документом, который сам под вопросом, — два предположения
+    // подряд. Сложить их в утверждение значило бы обвинить комплект дважды за
+    // одну неуверенность.
+    const graph = graphWithCheck(
+      { kind: 'org' },
+      { matchState: 'candidate', matchedDocumentId: null },
+    );
+    expect(verdictOf('REG.114', graph)).toBe('undetermined');
+    expect(messagesOf('REG.114', graph)[0]).toContain('не подтверждено');
   });
 
-  it('без описи правило неприменимо', () => {
-    expect(verdictOf('REG.114', actGraph(healthyActFields()))).toBe('n_a');
+  it('«сверить не удалось» замечания не даёт вовсе', () => {
+    // `unsure` — не «расхождения нет», а «сверить нечем»: реквизит не прочитан
+    // либо модель не уверена. Выдать это за находку — то же, что за отсутствие.
+    const graph = graphWithCheck({ kind: 'org', status: 'unsure' });
+    expect(verdictOf('REG.114', graph)).toBe('n_a');
+  });
+
+  it('согласие граф даёт «pass», а не «неприменимо»', () => {
+    // Разница существенна: «портал сверил и согласен» и «портал не смотрел» —
+    // разные ответы, и второй не должен маскироваться первым.
+    const graph = graphWithCheck({ kind: 'org', status: 'ok' });
+    expect(verdictOf('REG.114', graph)).toBe('pass');
+  });
+
+  it('ссылка на чужой акт — код REG.113', () => {
+    // Строки 11.2 и 12.2 боевой описи: раздел относится к акту № 58-ОТ, а в
+    // наименовании строки назван № 5-ОТ.
+    const graph = graphWithCheck({
+      kind: 'act_reference',
+      message: 'назван акт № 5-ОТ/-1 этаж, тогда как раздел относится к акту № 58-ОТ/-1 этаж',
+    });
+    expect(verdictOf('REG.113', graph)).toBe('fail');
+    expect(verdictOf('REG.114', graph)).toBe('n_a');
+  });
+
+  it('иная запись того же номера — отдельный код с тяжестью «к сведению»', () => {
+    // Минус подземного этажа читается неустойчиво: два прогона одного скана
+    // дали «-1 этаж» и «1 этаж». Это след чтения, а не дефект бумаги, и место
+    // ему рядом с истёкшим сертификатом, а не среди расхождений комплекта.
+    const graph = graphWithCheck({
+      kind: 'number_form',
+      message: 'номер записан как «51-ОТ/1 этаж», а в документе — «51-ОТ/-1 этаж»',
+    });
+    const result = evaluate('REG.115', graph);
+    expect(result.verdict).toBe('fail');
+    expect(specOf('REG.115').defaultSeverity).toBe('info');
+  });
+
+  it('без описи правила неприменимы', () => {
+    for (const code of ['REG.113', 'REG.114', 'REG.115', 'REG.116', 'REG.117']) {
+      expect(verdictOf(code, actGraph(healthyActFields()))).toBe('n_a');
+    }
   });
 });
 

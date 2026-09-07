@@ -2498,257 +2498,89 @@ function evaluateTransferSections(graph: CheckGraph): RuleResult {
 }
 
 /**
- * Ссылка на акт внутри наименования строки описи.
+ * Расхождения строки перечня, найденные стадией сверки (S57).
  *
- * Опись называет приложения через их акт: «Реестр к АОСР № 58-ОТ/-1 этаж»,
- * «Приложение к акту № 12-К». Номер обрывается на запятой, скобке и слове
- * «от», за которым идёт дата: дальше начинается уже не номер.
+ * ## Почему правило РЕТРАНСЛИРУЕТ, а не судит само
+ *
+ * Прежде REG.113 и REG.114 сравнивали сами: первое вынимало номер акта из
+ * наименования строки регулярным выражением, второе сверяло графу
+ * «Организация» со списком реквизитов, который приходилось помнить наизусть.
+ * Оба списка отставали от каталога — `executor` и `designer_org` в него не
+ * попали, и четыре строки описи, ради которых правило написано, ни разу не
+ * сравнивались, — а регулярное выражение спотыкалось о минус подземного этажа.
+ *
+ * Сравнение вернулось туда, где оно и есть, — к смыслу: его делает модель,
+ * видя строку и документ целиком. Правило отвечает за другое: что с найденным
+ * расхождением делать. Тяжесть берётся из снимка набора, порог уверенности —
+ * из его параметров, а «портал не уверен» остаётся «не проверено», а не
+ * превращается в обвинение.
+ *
+ * ## Почему кодов пять, а не один
+ *
+ * Тяжесть и порог живут в снимке (§3.7), и один код на все расхождения означал
+ * бы одну тяжесть на все: несовпадение организации и иная запись того же номера
+ * получили бы одинаковый вес. Ошибка в лице — дефект комплекта; иная запись
+ * номера — почти всегда чтение, и её место в отчёте «к сведению».
+ *
+ * ## Что делает эта функция
+ *
+ * Замечания ОДНОГО вида расхождений по всем строкам описи; вид ей называет
+ * спецификация правила, и потому пять кодов делят одну реализацию.
+ *
+ * `open` только у строки с НАЙДЕННЫМ документом: расхождение с документом,
+ * который сам под вопросом, — это два предположения подряд, и портал обязан
+ * сказать об этом вслух (`undetermined`), а не сложить их в утверждение.
+ *
+ * Происхождение замечания — `llm`: судила модель, и прятать это значило бы
+ * выдать вероятностный вывод за детерминированный. Прецедент —
+ * `externalUnavailable`, который так же несёт своё происхождение.
  */
-const ACT_REFERENCE = /(?:АОСР|акт[уеа]?)\s*(?:№|N)\s*([^,;()|]+?)(?=\s*(?:от\s|$|[,;()|]))/iu;
-
-/**
- * Знак перед единицей привязки читается неустойчиво, и вина за него не назначается.
- *
- * Подземный этаж нумеруют минусом — «48-ОТ/-1 этаж», — и минус этот тонкий:
- * на папке «ИД Мастер апрель 2026» два прогона одного и того же скана прочли
- * заголовки актов № 51-ОТ и № 54-ОТ по-разному, с минусом и без. Опись, п. 3 и
- * п. 4 самих актов печатают его везде. У актов № 52-ОТ и № 57-ОТ обратное:
- * минуса нет именно в заголовке, а всюду ниже он есть, — и это расхождение
- * внутри документа, о котором сообщает `LLM.FILL.030`.
- *
- * Обе формы неотличимы по тексту, и правило, обвиняющее опись, ошибается в
- * первом случае и указывает не на ту сторону во втором. Поэтому различие ТОЛЬКО
- * в этом знаке даёт «не проверено» с обоими прочтениями, а решает человек по
- * скану.
- *
- * Поблажка узкая: знак снимается лишь там, где за ним идёт число и единица
- * привязки. В номере без единицы («58-ОТ/-1» против «58-ОТ/1») минус несёт
- * смысл, и расхождение остаётся замечанием.
- *
- * Формы единиц считаются той же нормализацией, что и номера: написать их
- * свёрнутый вид руками значило бы завести вторую таблицу гомоглифов, которая
- * разойдётся с первой на первом же уточнении.
- */
-const FOLDED_ATTACHMENT_UNITS = ['ЭТАЖ', 'ЭТАП'].map((unit) => normalizeDocNo(unit).folded);
-
-const UNSTABLE_ATTACHMENT_SIGN = new RegExp(
-  String.raw`(?<=\/)-(?=\d+(?:${FOLDED_ATTACHMENT_UNITS.join('|')}))`,
-  'gu',
-);
-
-function withoutAttachmentSign(folded: string): string {
-  return folded.replace(UNSTABLE_ATTACHMENT_SIGN, '');
-}
-
-/**
- * REG.113 — номер акта в строке описи расходится с актом её раздела.
- *
- * Строка описи, названная «Реестр к АОСР № X», принадлежит разделу, у которого
- * есть свой акт. Разойтись они не могут: это один и тот же акт, названный
- * дважды. Расхождение — опечатка описи, и она не безобидна: инженер читает
- * опись как оглавление папки и ищет реестр не у того акта.
- *
- * На боевой папке «ИД Мастер апрель 2026» таких строк две: в разделе акта
- * № 58-ОТ/-1 этаж напечатано «Реестр к АОСР № 5-ОТ/-1 этаж» (потерянная
- * цифра), в разделе акта № 59-ОТ/-1 этаж — «Реестр к АОСР № 50-ОТ/-1 этаж».
- * Обе нашла только ИИ-стадия; движок правил их не видел, хотя обе стороны
- * сравнения у него на руках. Место правила было размечено ещё в S53
- * комментарием разбора описи, но самого правила не было.
- *
- * ## Почему сравнение через фолдинг, а не посимвольно
- *
- * Обе стороны прочитаны OCR, и различие в одной букве («ОТ» латиницей против
- * кириллицы) опечаткой описи не является. Фолдинг гомоглифов (§8.3) снимает
- * ровно этот класс различий и оставляет содержательные: «5» против «58» и
- * «50» против «59» переживают его невредимыми.
- *
- * ## Знак перед единицей привязки исключён из сравнения
- *
- * Различие ТОЛЬКО в нём даёт «не проверено», а не обвинение описи:
- * см. `UNSTABLE_ATTACHMENT_SIGN`.
- */
-function evaluateTransferActReference(graph: CheckGraph): RuleResult {
+function relayRowChecks(graph: CheckGraph, kind: string): RuleResult {
   if (graph.transferRows.length === 0) return notApplicable(NO_TRANSFER);
-
-  /**
-   * Номер акта берётся у САМОГО акта комплекта, а не у строки описи.
-   *
-   * Комплекты в графе отдельным списком не лежат: единственный носитель номера
-   * — акт, и его `complectId` и связывает раздел описи с номером.
-   */
-  const actNumbers = new Map<string, string>();
-  for (const act of aosrActs(graph)) {
-    if (act.complectId === null) continue;
-    // `act_number` заполняет ИИ-ступень извлечения, и на офлайн-прогоне его
-    // нет вовсе. Запасной источник — общий номер документа: у акта он тот же.
-    const number =
-      actTextOf(act, ACT_FIELDS.actNumber) ??
-      NUMBER_FIELDS.map((code) => trimmedText(field(act, code))).find(
-        (value): value is string => value !== null,
-      ) ??
-      null;
-    if (number !== null && number.trim() !== '') actNumbers.set(act.complectId, number.trim());
-  }
-  if (actNumbers.size === 0) {
-    return notApplicable('ни у одного акта папки не распознан номер');
-  }
 
   const findings: RuleFinding[] = [];
   let checked = 0;
 
   for (const row of graph.transferRows) {
-    if (row.complectId === null) continue;
-    const actNumber = actNumbers.get(row.complectId);
-    if (actNumber === undefined) continue;
+    for (const check of row.checks) {
+      if (check.kind !== kind) continue;
+      if (check.status === 'ok') {
+        checked += 1;
+        continue;
+      }
+      if (check.status === 'unsure') continue;
 
-    const reference = ACT_REFERENCE.exec(row.docNameRaw)?.[1]?.trim() ?? '';
-    if (reference === '') continue;
+      checked += 1;
+      const where = transferRowLabel(row);
+      const anchor = anchorOf('registry_row', row.id);
+      const confirmed = row.matchState === 'matched' && row.matchedDocumentId !== null;
 
-    checked += 1;
-    const referenceFolded = normalizeDocNo(reference).folded;
-    const actFolded = normalizeDocNo(actNumber).folded;
-    if (referenceFolded === actFolded) continue;
-
-    if (withoutAttachmentSign(referenceFolded) === withoutAttachmentSign(actFolded)) {
       findings.push(
-        unknown({
-          ...anchorOf('registry_row', row.id),
-          origin: 'deterministic',
-          message:
-            `В строке описи передачи (${transferRowLabel(row)}) назван акт № ${reference}, ` +
-            `а в заголовке акта раздела номер прочитан как № ${actNumber}: различие только ` +
-            `в знаке перед единицей привязки — решить по тексту, опечатка это или чтение, нельзя.`,
-          hint: 'Откройте скан заголовка акта и подтвердите его номер вручную.',
-        }),
+        confirmed
+          ? defect({
+              ...anchor,
+              origin: 'llm',
+              confidence: check.confidence,
+              message: `В строке описи передачи (${where}) ${check.message}.`,
+              hint: 'Сверьте строку описи с документом и исправьте расходящуюся сторону.',
+            })
+          : unknown({
+              ...anchor,
+              origin: 'llm',
+              confidence: check.confidence,
+              message:
+                `В строке описи передачи (${where}) ${check.message}, ` +
+                'но сам документ строке ещё не сопоставлен — расхождение не подтверждено.',
+              hint: 'Сначала определите документ строки, затем сверьте расхождение.',
+            }),
       );
-      continue;
     }
-
-    findings.push(
-      defect({
-        ...anchorOf('registry_row', row.id),
-        origin: 'deterministic',
-        message:
-          `В строке описи передачи (${transferRowLabel(row)}) назван акт № ${reference}, ` +
-          `тогда как раздел описи относится к акту № ${actNumber}.`,
-        hint: 'Исправьте номер акта в строке описи либо проверьте, к какому акту относится документ.',
-      }),
-    );
   }
 
-  return summarize(findings, checked, 'ни одна строка описи передачи не ссылается на номер акта');
-}
-
-/**
- * Реквизиты, любым из которых документ называет СВОЮ организацию.
- *
- * Их несколько, и выбирать один нельзя: опись пишет в графе «Организация,
- * составившая документ» то изготовителя («ООО „КНАУФ ГИПС“» у паспорта), то
- * орган, выдавший бумагу («ООО „Прогресс“» у сертификата), то подрядчика
- * («ООО „МАСТЕР“» у исполнительной схемы). Совпадение с ЛЮБЫМ из них означает,
- * что опись и документ говорят об одном лице.
- */
-const ORG_FIELDS: readonly string[] = [
-  'issuer',
-  'manufacturer',
-  'applicant',
-  'contractor_name',
-  /**
-   * `executor` — «Организация, составившая схему» из схемы вида `exec_scheme`.
-   *
-   * Реквизит существовал и заполнялся ИИ-ступенью с самого начала («ООО
-   * „МАСТЕР“» у девяти схем папки «ИД Мастер апрель 2026»), но в этом списке
-   * его не было, и правило уходило по ветке «организация документа не
-   * прочитана — сверять не с чем». Четыре строки описи, где схемы ООО «МАСТЕР»
-   * записаны за ИП Михальским, из-за одной недостающей строки списка остались
-   * неназванными: правило, написанное ровно ради них, ни разу их не сравнило.
-   */
-  'executor',
-];
-
-/**
- * REG.114 — организация в строке описи расходится с документом.
- *
- * Графа «Организация, составившая документ» — часть утверждения описи о
- * составе папки, и до S55 её не сверял никто: сверка идёт по номеру, а
- * организация не участвует в ней намеренно (`match.ts`). Из-за этого опись
- * могла назвать чужое лицо, и портал молчал: в папке «ИД Мастер апрель 2026»
- * четыре исполнительные схемы ООО «МАСТЕР» записаны за ИП Михальским —
- * подрядчиком другой работы, — и ни одно правило об этом не сообщило.
- *
- * Замечание мягкое и адресовано строке описи: расхождение чаще означает
- * опечатку описи, чем чужой документ в папке, а решает человек.
- */
-function evaluateTransferOrg(graph: CheckGraph): RuleResult {
-  if (graph.transferRows.length === 0) return notApplicable(NO_TRANSFER);
-
-  const organizationOf = (document: DocumentNode): readonly string[] =>
-    ORG_FIELDS.map((code) => trimmedText(field(document, code))).filter(
-      (value): value is string => value !== null,
-    );
-
-  const findings: RuleFinding[] = [];
-  let checked = 0;
-
-  for (const row of graph.transferRows) {
-    if (row.matchedDocumentId === null) continue;
-    const rowOrg = row.orgRaw?.trim() ?? '';
-    if (rowOrg === '') continue;
-
-    const document = documentById(graph, row.matchedDocumentId);
-    if (document === null) continue;
-
-    /**
-     * Организация документа не прочитана — сверять не с чем, и правило молчит.
-     *
-     * S56 пробовал отвечать здесь «не проверено», когда реквизита нет ни у
-     * одного документа вида: «правило прошло» не должно быть неотличимо от
-     * «правило не смотрело». Замысел верный, исполнение — нет: вид считался
-     * молчащим по всем документам папки, включая те, у которых организации нет
-     * ПО СХЕМЕ. На боевой папке это дало восемнадцать «не проверено» и ни
-     * одного верного случая: двенадцать строк реестров приложений (`registry` —
-     * поля организации в схеме нет вовсе) и шесть строк журнала авторского
-     * надзора, где организация как раз прочитана, но реквизитом `designer_org`,
-     * которого нет в списке выше.
-     *
-     * Отсюда откат к молчанию. Различать «портал не смотрел» и «портал
-     * посмотрел и согласен» правило по одному списку реквизитов не может: для
-     * этого надо знать, объявляет ли схема вида организацию вообще, — а это
-     * знание живёт в каталоге видов, и читать его правило начнёт вместе с
-     * заменой сверки на суждение модели (ADR-0028).
-     */
-    const named = organizationOf(document);
-    if (named.length === 0) continue;
-
-    checked += 1;
-    const wanted = normalizeOrgName(rowOrg);
-    if (wanted === '') continue;
-
-    const agreed = named.some((value) => {
-      const actual = normalizeOrgName(value);
-      return (
-        actual !== '' && (actual === wanted || actual.includes(wanted) || wanted.includes(actual))
-      );
-    });
-    if (agreed) continue;
-
-    findings.push(
-      defect({
-        ...anchorOf('registry_row', row.id),
-        origin: 'deterministic',
-        message:
-          `В строке описи передачи (${transferRowLabel(row)}) организация указана как «${rowOrg}», ` +
-          `а в самом документе названа «${named.join('», «')}».`,
-        hint: 'Исправьте организацию в строке описи либо проверьте, тот ли документ приложен.',
-      }),
-    );
+  if (checked === 0) {
+    return notApplicable('ни одна строка описи передачи не сверена по этому признаку');
   }
-
-  return summarize(
-    findings,
-    checked,
-    'ни у одной строки описи передачи нет одновременно организации и найденного документа',
-  );
+  return fromFindings(findings);
 }
 
 interface SpecInput {
@@ -3181,7 +3013,7 @@ export const TRANSFER_REGISTRY_RULES: readonly RuleSpec[] = [
     requiresSectionProfile: false,
     requiresExternalRegistry: null,
     defaultParams: {},
-    evaluate: (graph) => evaluateTransferActReference(graph),
+    evaluate: (graph) => relayRowChecks(graph, 'act_reference'),
   },
   {
     code: 'REG.114',
@@ -3195,7 +3027,49 @@ export const TRANSFER_REGISTRY_RULES: readonly RuleSpec[] = [
     requiresSectionProfile: false,
     requiresExternalRegistry: null,
     defaultParams: {},
-    evaluate: (graph) => evaluateTransferOrg(graph),
+    evaluate: (graph) => relayRowChecks(graph, 'org'),
+  },
+  {
+    code: 'REG.115',
+    title: 'Номер в строке описи передачи записан иначе, чем в документе',
+    docTypeCode: null,
+    level: 'folder',
+    kind: 'registry',
+    defaultSeverity: 'info',
+    defaultBlocking: false,
+    waiverRoles: waiversFor(false),
+    requiresSectionProfile: false,
+    requiresExternalRegistry: null,
+    defaultParams: {},
+    evaluate: (graph) => relayRowChecks(graph, 'number_form'),
+  },
+  {
+    code: 'REG.116',
+    title: 'Дата в строке описи передачи расходится с документом',
+    docTypeCode: null,
+    level: 'folder',
+    kind: 'registry',
+    defaultSeverity: 'warning',
+    defaultBlocking: false,
+    waiverRoles: waiversFor(false),
+    requiresSectionProfile: false,
+    requiresExternalRegistry: null,
+    defaultParams: {},
+    evaluate: (graph) => relayRowChecks(graph, 'date'),
+  },
+  {
+    code: 'REG.117',
+    title: 'Число листов в строке описи передачи расходится с документом',
+    docTypeCode: null,
+    level: 'folder',
+    kind: 'registry',
+    defaultSeverity: 'warning',
+    defaultBlocking: false,
+    waiverRoles: waiversFor(false),
+    requiresSectionProfile: false,
+    requiresExternalRegistry: null,
+    defaultParams: {},
+    evaluate: (graph) => relayRowChecks(graph, 'sheets'),
   },
 ];
 

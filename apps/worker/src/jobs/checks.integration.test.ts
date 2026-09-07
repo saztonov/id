@@ -61,12 +61,13 @@ import {
   loadEnv,
   loadPdfLibModule,
   NoopErrorReporter,
+  saveLlmFindings,
   type Database,
   type PdfToolkit,
   type StorageProvider,
 } from '@id/api';
 
-import { createWorkerRegistry } from './pipeline.js';
+import { createWorkerRegistry, SYSTEM_SCOPE } from './pipeline.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
 const MIGRATIONS_DIR = join(ROOT, 'migrations');
@@ -1055,6 +1056,57 @@ describe('троичная логика на сквозном прогоне', (
             WHERE message = ${lit('Испытание ограничения БД')}`,
         ),
       ).toBe(0);
+    });
+  });
+
+  describe('два писателя origin = llm не стирают друг друга (S57)', () => {
+    /**
+     * ИИ-проверка заполнения приходит ПОСЛЕ прогона правил и заменяет свой
+     * выход. Пока происхождение и авторство совпадали, «свой выход» законно
+     * означал всё `origin = 'llm'`. С появлением сверки перечней моделью таких
+     * замечаний стало два рода: `LLM.FILL.*` пишет ИИ-проверка, а
+     * `REG.113`–`REG.117` — движок правил, ретранслируя расхождения сверки.
+     * Удаление по происхождению снесло бы вторые молча, и отчёт остался бы без
+     * половины находок.
+     */
+    const WRITERS_RUN = id(920);
+    const REVIEW_FINDING = id(921);
+    const RELAY_FINDING = id(922);
+
+    beforeAll(async () => {
+      await testDb.query(
+        `INSERT INTO validation_runs (id, folder_id, ruleset_version_id)
+           VALUES ('${WRITERS_RUN}', '${FOLDER}', '${RULESET_VERSION}')`,
+      );
+      for (const [findingId, ruleCode] of [
+        [REVIEW_FINDING, 'LLM.FILL.010'],
+        [RELAY_FINDING, 'REG.114'],
+      ] as const) {
+        await testDb.query(
+          `INSERT INTO findings (id, validation_run_id, folder_id, object_id, contractor_id,
+                                 rule_code, severity, state, origin, is_blocking,
+                                 target_type, target_id, message)
+             VALUES ('${findingId}', '${WRITERS_RUN}', '${FOLDER}', '${OBJECT}',
+                     '${ORG_CONTRACTOR}', '${ruleCode}', 'warning', 'open', 'llm', false,
+                     'folder', '${FOLDER}', ${lit('Испытание двух писателей')})`,
+        );
+      }
+    });
+
+    afterAll(async () => {
+      await testDb.query(`DELETE FROM findings WHERE validation_run_id = '${WRITERS_RUN}'`);
+      await testDb.query(`DELETE FROM validation_runs WHERE id = '${WRITERS_RUN}'`);
+    });
+
+    it('запись ИИ-проверки уносит свои строки и не трогает ретранслированные', async () => {
+      await saveLlmFindings(db, SYSTEM_SCOPE, {
+        validationRunId: WRITERS_RUN,
+        folderId: FOLDER,
+        findings: [],
+      });
+
+      const rows = await findingsOf(WRITERS_RUN);
+      expect(rows.map((row) => row.rule_code)).toEqual(['REG.114']);
     });
   });
 

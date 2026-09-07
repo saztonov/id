@@ -139,6 +139,13 @@ export function makeRegistryRow(patch: Partial<RegistryRowNode> = {}): RegistryR
     matchedDocumentId: null,
     matchScore: null,
     matchState: 'missing',
+    // Умолчание — прежнее поведение: решала лестница номеров, проверок
+    // содержания не делалось. Тест, которому нужна сверка моделью, называет их
+    // сам, и молчаливого «портал проверил» здесь не возникает.
+    matchedBy: 'rule',
+    matchBasis: null,
+    matchNote: null,
+    checks: [],
     candidateDocumentIds: [],
     ...patch,
   };

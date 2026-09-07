@@ -333,6 +333,19 @@ export function runPackage(dir: string, options: HarnessOptions): PackageRunResu
               : decision?.matchState === 'candidate'
                 ? 'candidate'
                 : 'missing',
+        /**
+         * Стенд остаётся на ПРЕДФИЛЬТРЕ: модели у него нет по построению (S57).
+         *
+         * Сверку по смыслу судит стадия `registry_match`, а стенд её не зовёт —
+         * как не зовёт и остальные ИИ-ступени (см. шапку файла). Поэтому автор
+         * решения здесь всегда лестница, довода нет, и проверок содержания нет
+         * тоже: правила REG.113–117 на стенде честно отвечают «неприменимо»
+         * вместо того, чтобы молчать зелёным.
+         */
+        matchedBy: 'rule' as const,
+        matchBasis: null,
+        matchNote: null,
+        checks: [],
         candidateDocumentIds: (decision?.candidates ?? []).map((candidate) => candidate.documentId),
         // Стенд разбирает только реестры приложений: у их строк комплект один
         // на весь перечень и в строке не хранится (его несут строки описи).
@@ -401,6 +414,12 @@ export function runPackage(dir: string, options: HarnessOptions): PackageRunResu
         matchedDocumentId: null,
         matchScore: null,
         matchState: 'missing',
+        // Модели у стенда нет: сверку по смыслу судит стадия registry_match
+        // (S57), а стенд её не зовёт — как и остальные ИИ-ступени.
+        matchedBy: 'rule' as const,
+        matchBasis: null,
+        matchNote: null,
+        checks: [],
         candidateDocumentIds: [],
         complectId: row.complectId ?? null,
       });
