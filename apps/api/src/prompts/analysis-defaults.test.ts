@@ -1,5 +1,5 @@
 /**
- * Встроенные тексты промптов стадий анализа существуют для всех трёх стадий.
+ * Встроенные тексты промптов стадий анализа существуют у каждой стадии.
  *
  * Регрессия на состояние, в котором портал прожил от S8 до S27: три LLM-ступени
  * анализа читали промт только из каталога и при пустом ответе пропускали себя
@@ -15,11 +15,20 @@ import { describe, expect, it } from 'vitest';
 
 import { LLM_REVIEW_PROMPT } from '../checks/llm-review-prompt.js';
 import { FIELD_EXTRACT_PROMPT, PAGE_CLASSIFY_PROMPT } from '../segmentation/prompts.js';
+import { REGISTRY_MATCH_PROMPT } from '../segmentation/registry-match-prompt.js';
 import { analysisPromptDefaultByStage, ANALYSIS_PROMPT_STAGES } from './analysis-defaults.js';
 
 describe('встроенные промты стадий анализа', () => {
-  it('покрывают все три стадии текстового анализа', () => {
-    expect([...ANALYSIS_PROMPT_STAGES].sort()).toEqual(['check', 'extract', 'page_classify']);
+  it('покрывают все стадии текстового анализа', () => {
+    // Список ожидаемых стадий выписан, а не выведен из самого реестра: иначе
+    // проверка сводилась бы к «реестр равен себе». Новая стадия обязана
+    // появиться здесь осознанно — на S57 она этого и потребовала.
+    expect([...ANALYSIS_PROMPT_STAGES].sort()).toEqual([
+      'check',
+      'extract',
+      'page_classify',
+      'registry_match',
+    ]);
   });
 
   it('у каждой стадии есть непустой текст, и код совпадает со стадией', () => {
@@ -41,6 +50,7 @@ describe('встроенные промты стадий анализа', () => 
     expect(analysisPromptDefaultByStage('page_classify')?.text).toBe(PAGE_CLASSIFY_PROMPT);
     expect(analysisPromptDefaultByStage('extract')?.text).toBe(FIELD_EXTRACT_PROMPT);
     expect(analysisPromptDefaultByStage('check')?.text).toBe(LLM_REVIEW_PROMPT);
+    expect(analysisPromptDefaultByStage('registry_match')?.text).toBe(REGISTRY_MATCH_PROMPT);
   });
 
   it('незнакомая стадия — null, а не бросок', () => {
