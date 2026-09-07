@@ -201,8 +201,17 @@ export function sectionTally(section: ReportSection): string | null {
   // не «сколько строк без замечаний», а «сколько названного нашлось». Слово
   // «найдено» здесь несёт смысл: строка описи либо нашла свой документ, либо
   // нет, третьего у неё не бывает.
+  //
+  // Считаются только СТРОКИ описи. Первой позицией секции стоит сама опись как
+  // документ папки (`transferSection`), и «найтись в папке» она не может по
+  // построению: на папке «ИД Мастер апрель 2026» знаменатель показывал 181 при
+  // ста восьмидесяти строках, то есть цифру полноты занижала запись о самом
+  // перечне.
   if (section.kind === 'transfer') {
-    return `${String(ok)} из ${String(counted.length)} строк найдено в папке`;
+    const rows = counted.filter((row) => row.kind === 'registry_row');
+    if (rows.length === 0) return null;
+    const found = rows.filter((row) => row.status === 'ok').length;
+    return `${String(found)} из ${String(rows.length)} строк найдено в папке`;
   }
 
   return `${String(ok)} из ${String(counted.length)} без замечаний`;

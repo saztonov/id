@@ -413,6 +413,18 @@ function annexParentType(name: string): string | null {
   return null;
 }
 
+/**
+ * Строка описи называет приложение к другому документу.
+ *
+ * Признак нужен ОТЧЁТУ: подпись строки обязана говорить, чем она найдена, а
+ * найдена такая строка структурой, а не сравнением номеров (`ANNEX_SCORE`).
+ * Второго шаблона для этого не заводится — читатель спрашивает здесь, иначе
+ * копии разойдутся и отчёт начнёт подписывать строки не тем, чем они найдены.
+ */
+export function namesAnnexOfParent(docNameRaw: string): boolean {
+  return annexParentType(docNameRaw) !== null;
+}
+
 const STRUCTURAL_ROW_TYPES: readonly (readonly [RegExp, string])[] = [
   [/^\s*(?:АОСР|Акт\s+освидетельствован)/iu, 'aosr'],
   [

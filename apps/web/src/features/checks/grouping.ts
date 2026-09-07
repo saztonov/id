@@ -119,6 +119,33 @@ export type RunState =
  * вывода нет» — это не «всё в порядке», и слить их значило бы выдать
  * непроверенное за проверенное.
  */
+/**
+ * Мягкие оговорки прогона: предупреждения и «к сведению» — РАЗНЫМИ словами.
+ *
+ * Замечание уровня `info` говорит о факте, который сам по себе комплект не
+ * порочит, и говорит это прямо в своём тексте: «сертификат истёк 16.05.2026
+ * (дата проверки — 07.09.2026); на действительность комплекта в момент
+ * выполнения работ это само по себе не влияет». Сложенные с предупреждениями,
+ * такие замечания завышают тревогу: на папке «ИД Мастер апрель 2026» их
+ * двенадцать — по одному на каждую копию одного сертификата, — и в сводке
+ * 38 предупреждений превращались в 50.
+ *
+ * Строка не исчезает: факт остаётся названным, но своим словом. Считают обе
+ * плашки одинаково — иначе развёрнутая и краткая разошлись бы молча.
+ */
+function softParts(counts: ChecksSummary['counts']): readonly string[] {
+  const parts: string[] = [];
+  if (counts.openWarnings > 0) {
+    parts.push(
+      `${String(counts.openWarnings)} ${plural(counts.openWarnings, 'предупреждение', 'предупреждения', 'предупреждений')}`,
+    );
+  }
+  if (counts.openInfo > 0) {
+    parts.push(`${String(counts.openInfo)} к сведению`);
+  }
+  return parts;
+}
+
 function reservationsOf(summary: ChecksSummary): readonly string[] {
   const { coverage, counts } = summary;
   const parts: string[] = [];
@@ -128,12 +155,7 @@ function reservationsOf(summary: ChecksSummary): readonly string[] {
       `${String(counts.openErrors)} ${plural(counts.openErrors, 'ошибка', 'ошибки', 'ошибок')}`,
     );
   }
-  const soft = counts.openWarnings + counts.openInfo;
-  if (soft > 0) {
-    parts.push(
-      `${String(soft)} ${plural(soft, 'предупреждение', 'предупреждения', 'предупреждений')}`,
-    );
-  }
+  parts.push(...softParts(counts));
   /**
    * «Портал прочитал иначе» — тоже оговорка, но НЕ дефект бумаги (S44).
    *
@@ -279,12 +301,7 @@ export function summaryText(summary: ChecksSummary, state: RunState): string {
       `${String(counts.openErrors)} ${plural(counts.openErrors, 'ошибка', 'ошибки', 'ошибок')}`,
     );
   }
-  const soft = counts.openWarnings + counts.openInfo;
-  if (soft > 0) {
-    parts.push(
-      `${String(soft)} ${plural(soft, 'предупреждение', 'предупреждения', 'предупреждений')}`,
-    );
-  }
+  parts.push(...softParts(counts));
   /**
    * «Портал прочитал иначе» — тоже оговорка, но НЕ дефект бумаги (S44).
    *

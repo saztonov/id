@@ -14,7 +14,15 @@ import { registryRowVerdict } from './check-report.js';
 const verdict = (
   matchState: 'matched' | 'missing' | 'ambiguous' | 'candidate',
   score: number | null,
-) => registryRowVerdict({ matchState, matchScore: score, where: ', стр. 42', candidates: '' });
+  annexOfParent = false,
+) =>
+  registryRowVerdict({
+    matchState,
+    matchScore: score,
+    where: ', стр. 42',
+    candidates: '',
+    annexOfParent,
+  });
 
 describe('registryRowVerdict', () => {
   it('точное совпадение номера — найден', () => {
@@ -31,6 +39,19 @@ describe('registryRowVerdict', () => {
     const outcome = verdict('matched', 0.85);
     expect(outcome.status).toBe('ok');
     expect(outcome.text).toContain('начертание номера отличается');
+  });
+
+  it('приложение, найденное по родителю, не обвиняется в несовпадении номера', () => {
+    // Строка «Приложение к экспертному заключению № б/н» своего номера не
+    // имеет: сверка находит её по СТРУКТУРЕ — приложение лежит листом внутри
+    // родителя, — и счёт 0.7 говорит именно об этом. На папке «ИД Мастер
+    // апрель 2026» двадцать таких строк подписаны «номер совпал не полностью —
+    // проверьте документ», то есть проверяющего звали сверять номер, которого
+    // в описи нет.
+    const outcome = verdict('matched', 0.7, true);
+    expect(outcome.status).toBe('ok');
+    expect(outcome.text).toContain('приложение');
+    expect(outcome.text).not.toContain('не полностью');
   });
 
   it('совпадение по куску номера остаётся предупреждением', () => {

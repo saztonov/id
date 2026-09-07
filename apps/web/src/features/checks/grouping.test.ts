@@ -360,6 +360,30 @@ describe('summaryText', () => {
     );
   });
 
+  it('«к сведению» считается отдельно от предупреждений', () => {
+    // Замечание уровня `info` говорит о факте, который комплект не порочит, и
+    // говорит это прямо в тексте («на действительность комплекта в момент
+    // выполнения работ это само по себе не влияет»). На папке «ИД Мастер апрель
+    // 2026» двенадцать таких замечаний превращали 38 предупреждений в 50.
+    const text = summaryText(
+      summary({
+        counts: {
+          openErrors: 0,
+          openWarnings: 38,
+          extractionQuality: 0,
+          openInfo: 12,
+          undetermined: 0,
+          externalUnavailable: 0,
+          waived: 0,
+        },
+      }),
+      { kind: 'done_with_issues', tone: 'warning', reservations: [] },
+    );
+    expect(text).toContain('38 предупреждений');
+    expect(text).toContain('12 к сведению');
+    expect(text).not.toContain('50 предупреждений');
+  });
+
   it('пустой результат называется словами, а не пустой строкой', () => {
     expect(summaryText(summary(), DONE)).toContain('Проверка выполнена: ошибок не найдено.');
   });

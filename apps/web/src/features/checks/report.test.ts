@@ -230,12 +230,25 @@ describe('sectionTally', () => {
     // Опись перечисляет папку, и её счёт отвечает на другой вопрос: строка
     // описи либо нашла свой документ, либо нет, третьего у неё не бывает.
     const rows = [
-      row({ id: 'a', status: 'ok' }),
-      row({ id: 'b', status: 'warning' }),
-      row({ id: 'c', status: 'unchecked' }),
+      row({ id: 'a', kind: 'registry_row', status: 'ok' }),
+      row({ id: 'b', kind: 'registry_row', status: 'warning' }),
+      row({ id: 'c', kind: 'registry_row', status: 'unchecked' }),
     ];
 
     expect(sectionTally(section({ kind: 'transfer', rows }))).toBe('1 из 2 строк найдено в папке');
+  });
+
+  it('саму опись в знаменатель не берёт', () => {
+    // Первой позицией секции стоит документ-опись, и «найтись в папке» она не
+    // может по построению: на папке «ИД Мастер апрель 2026» знаменатель
+    // показывал 181 при ста восьмидесяти строках описи.
+    const rows = [
+      row({ id: 'doc', kind: 'document', status: 'warning' }),
+      row({ id: 'a', kind: 'registry_row', status: 'ok' }),
+      row({ id: 'b', kind: 'registry_row', status: 'ok' }),
+    ];
+
+    expect(sectionTally(section({ kind: 'transfer', rows }))).toBe('2 из 2 строк найдено в папке');
   });
 
   it('молчит в секции замечаний: там каждая строка и есть замечание', () => {

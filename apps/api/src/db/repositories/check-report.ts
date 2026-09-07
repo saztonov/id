@@ -47,7 +47,7 @@
 import { asc, eq } from 'drizzle-orm';
 import { complects, ruleDefinitions, folders } from '@id/db';
 import { isAnalysisAnchor, isQualityDocCode, isRegistryCode } from '@id/doc-types';
-import { FOLDED_SCORE } from '../../segmentation/match.js';
+import { FOLDED_SCORE, namesAnnexOfParent } from '../../segmentation/match.js';
 import { TRANSFER_TYPE } from '../../segmentation/transfer-registry.js';
 
 import type { AuthScope } from '../../auth/scope.js';
@@ -492,6 +492,14 @@ export function registryRowVerdict(input: {
   readonly where: string;
   /** Хвост «: похоже на стр. 19, 20» либо пустая строка. */
   readonly candidates: string;
+  /**
+   * Строка описи называет ПРИЛОЖЕНИЕ к документу, и найдена она по нему.
+   *
+   * Признак берётся у сверки (`namesAnnexOfParent`), а не пересчитывается здесь
+   * вторым шаблоном: разойдись копии — отчёт стал бы подписывать строки не тем,
+   * чем они найдены, и разошлось бы это молча.
+   */
+  readonly annexOfParent?: boolean;
 }): { readonly status: ReportRowStatus; readonly text: string } {
   const score = input.matchScore ?? 1;
 
@@ -520,7 +528,28 @@ export function registryRowVerdict(input: {
    */
   const foldedOnly = input.matchState === 'matched' && score >= FOLDED_SCORE && score < 1;
 
+  /**
+   * У приложения своего номера нет — и обвинять его в несовпадении номера нельзя.
+   *
+   * Опись пишет такой строке «№ б/н», а сверка находит её ступенью «приложение →
+   * родитель»: приложение физически лежит листом внутри родительского документа,
+   * и решение принято СТРУКТУРОЙ, а не порогом сравнения номеров. Подпись
+   * «номер совпал не полностью — проверьте документ» звала проверяющего сверить
+   * то, чего в описи не напечатано: на папке «ИД Мастер апрель 2026» так
+   * помечены двадцать строк из ста восьмидесяти.
+   *
+   * Точное совпадение номера подписывается как раньше: если приложение всё же
+   * названо своим номером и он сошёлся, добавлять оговорку не за чем.
+   */
+  const annexByParent = input.matchState === 'matched' && score < 1 && input.annexOfParent === true;
+
   if (input.matchState === 'matched') {
+    if (annexByParent) {
+      return {
+        status: 'ok',
+        text: `найден в комплекте как приложение к названному документу${input.where}`,
+      };
+    }
     if (foldedOnly) {
       return {
         status: 'ok',
@@ -903,6 +932,7 @@ class ReportFacts {
       matchScore: row.matchScore,
       where: page === null ? '' : `, стр. ${String(page.number)}`,
       candidates: this.candidatePages(row.candidateDocumentIds),
+      annexOfParent: namesAnnexOfParent(row.docNameRaw),
     });
     const status = verdict.status;
     const statusText = verdict.text;

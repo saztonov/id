@@ -660,6 +660,13 @@ function evaluateHeaderParties(graph: CheckGraph): RuleResult {
  *
  * Пробел и дефис исключены: это разделители разрядов, их печатают в бумаге.
  * Всё остальное — буква, косая черта, вертикальная — в оригинале не стоит.
+ *
+ * Признак читают ОБА правила, судящие ИНН и ОГРН шапки: `AOSR.HDR.021` и
+ * `AOSR.HDR.022` (контрольная сумма) и `AOSR.HDR.023` (сверка со справочником).
+ * Разойдись они — одна и та же цифра дала бы разом «проверить нечем» и
+ * обвинение в неверном реквизите, и это ровно то, что случилось на папке
+ * «ИД Мастер апрель 2026»: S55 научил поблажке HDR.021 и не тронул HDR.023.
+ * Новый потребитель значения обязан спросить здесь, а не завести свою копию.
  */
 const UNREADABLE_IDENTIFIER = /[^\d\s\-‐‑–—]/u;
 
@@ -792,25 +799,47 @@ function evaluateCounterpartyTriple(graph: CheckGraph): RuleResult {
 
     checked += 1;
 
+    /**
+     * Расхождение со справочником считается ТОЛЬКО у читаемого значения.
+     *
+     * Посторонний знак означает, что цифру поставил распознаватель, а не
+     * составитель акта, — и тогда расходится чтение, а не реквизит. Признак
+     * общий с `AOSR.HDR.021`/`AOSR.HDR.022` (`UNREADABLE_IDENTIFIER`), иначе
+     * одно и то же значение получает у соседних правил разные приговоры.
+     */
+    const unreadable = (label: string, value: string, node: FieldNode | null): RuleFinding =>
+      unknown({
+        ...anchorOfField(act, node),
+        origin: 'deterministic',
+        message:
+          `${label} «${value}» в шапке акта ${actLabel(act)} прочитан со знаком, ` +
+          `которого в ${label} быть не может — сверить со справочником нечем.`,
+        hint: `Сверьте ${label} со сканом акта и введите значение вручную.`,
+      });
+
     if (inn !== null && party.inn !== null && digitsOf(party.inn) !== digitsOf(inn)) {
       findings.push(
-        defect({
-          ...anchorOfField(act, innValue),
-          origin: 'deterministic',
-          message: `ИНН в шапке акта ${actLabel(act)} — «${inn}» — расходится со справочником: у контрагента «${party.name}» указан ИНН ${party.inn}.`,
-          hint: 'Сверьте ИНН с выпиской из ЕГРЮЛ и исправьте расходящуюся сторону — акт или карточку контрагента.',
-        }),
+        UNREADABLE_IDENTIFIER.test(inn)
+          ? unreadable('ИНН', inn, innValue)
+          : defect({
+              ...anchorOfField(act, innValue),
+              origin: 'deterministic',
+              message: `ИНН в шапке акта ${actLabel(act)} — «${inn}» — расходится со справочником: у контрагента «${party.name}» указан ИНН ${party.inn}.`,
+              hint: 'Сверьте ИНН с выпиской из ЕГРЮЛ и исправьте расходящуюся сторону — акт или карточку контрагента.',
+            }),
       );
     }
 
     if (ogrn !== null && party.ogrn !== null && digitsOf(party.ogrn) !== digitsOf(ogrn)) {
       findings.push(
-        defect({
-          ...anchorOfField(act, ogrnValue),
-          origin: 'deterministic',
-          message: `ОГРН в шапке акта ${actLabel(act)} — «${ogrn}» — расходится со справочником: у контрагента «${party.name}» указан ОГРН ${party.ogrn}.`,
-          hint: 'Сверьте ОГРН с выпиской из ЕГРЮЛ и исправьте расходящуюся сторону — акт или карточку контрагента.',
-        }),
+        UNREADABLE_IDENTIFIER.test(ogrn)
+          ? unreadable('ОГРН', ogrn, ogrnValue)
+          : defect({
+              ...anchorOfField(act, ogrnValue),
+              origin: 'deterministic',
+              message: `ОГРН в шапке акта ${actLabel(act)} — «${ogrn}» — расходится со справочником: у контрагента «${party.name}» указан ОГРН ${party.ogrn}.`,
+              hint: 'Сверьте ОГРН с выпиской из ЕГРЮЛ и исправьте расходящуюся сторону — акт или карточку контрагента.',
+            }),
       );
     }
 
@@ -2441,6 +2470,40 @@ function evaluateTransferSections(graph: CheckGraph): RuleResult {
 const ACT_REFERENCE = /(?:АОСР|акт[уеа]?)\s*(?:№|N)\s*([^,;()|]+?)(?=\s*(?:от\s|$|[,;()|]))/iu;
 
 /**
+ * Знак перед единицей привязки читается неустойчиво, и вина за него не назначается.
+ *
+ * Подземный этаж нумеруют минусом — «48-ОТ/-1 этаж», — и минус этот тонкий:
+ * на папке «ИД Мастер апрель 2026» два прогона одного и того же скана прочли
+ * заголовки актов № 51-ОТ и № 54-ОТ по-разному, с минусом и без. Опись, п. 3 и
+ * п. 4 самих актов печатают его везде. У актов № 52-ОТ и № 57-ОТ обратное:
+ * минуса нет именно в заголовке, а всюду ниже он есть, — и это расхождение
+ * внутри документа, о котором сообщает `LLM.FILL.030`.
+ *
+ * Обе формы неотличимы по тексту, и правило, обвиняющее опись, ошибается в
+ * первом случае и указывает не на ту сторону во втором. Поэтому различие ТОЛЬКО
+ * в этом знаке даёт «не проверено» с обоими прочтениями, а решает человек по
+ * скану.
+ *
+ * Поблажка узкая: знак снимается лишь там, где за ним идёт число и единица
+ * привязки. В номере без единицы («58-ОТ/-1» против «58-ОТ/1») минус несёт
+ * смысл, и расхождение остаётся замечанием.
+ *
+ * Формы единиц считаются той же нормализацией, что и номера: написать их
+ * свёрнутый вид руками значило бы завести вторую таблицу гомоглифов, которая
+ * разойдётся с первой на первом же уточнении.
+ */
+const FOLDED_ATTACHMENT_UNITS = ['ЭТАЖ', 'ЭТАП'].map((unit) => normalizeDocNo(unit).folded);
+
+const UNSTABLE_ATTACHMENT_SIGN = new RegExp(
+  String.raw`(?<=\/)-(?=\d+(?:${FOLDED_ATTACHMENT_UNITS.join('|')}))`,
+  'gu',
+);
+
+function withoutAttachmentSign(folded: string): string {
+  return folded.replace(UNSTABLE_ATTACHMENT_SIGN, '');
+}
+
+/**
  * REG.113 — номер акта в строке описи расходится с актом её раздела.
  *
  * Строка описи, названная «Реестр к АОСР № X», принадлежит разделу, у которого
@@ -2461,6 +2524,11 @@ const ACT_REFERENCE = /(?:АОСР|акт[уеа]?)\s*(?:№|N)\s*([^,;()|]+?)(?
  * кириллицы) опечаткой описи не является. Фолдинг гомоглифов (§8.3) снимает
  * ровно этот класс различий и оставляет содержательные: «5» против «58» и
  * «50» против «59» переживают его невредимыми.
+ *
+ * ## Знак перед единицей привязки исключён из сравнения
+ *
+ * Различие ТОЛЬКО в нём даёт «не проверено», а не обвинение описи:
+ * см. `UNSTABLE_ATTACHMENT_SIGN`.
  */
 function evaluateTransferActReference(graph: CheckGraph): RuleResult {
   if (graph.transferRows.length === 0) return notApplicable(NO_TRANSFER);
@@ -2500,7 +2568,24 @@ function evaluateTransferActReference(graph: CheckGraph): RuleResult {
     if (reference === '') continue;
 
     checked += 1;
-    if (normalizeDocNo(reference).folded === normalizeDocNo(actNumber).folded) continue;
+    const referenceFolded = normalizeDocNo(reference).folded;
+    const actFolded = normalizeDocNo(actNumber).folded;
+    if (referenceFolded === actFolded) continue;
+
+    if (withoutAttachmentSign(referenceFolded) === withoutAttachmentSign(actFolded)) {
+      findings.push(
+        unknown({
+          ...anchorOf('registry_row', row.id),
+          origin: 'deterministic',
+          message:
+            `В строке описи передачи (${transferRowLabel(row)}) назван акт № ${reference}, ` +
+            `а в заголовке акта раздела номер прочитан как № ${actNumber}: различие только ` +
+            `в знаке перед единицей привязки — решить по тексту, опечатка это или чтение, нельзя.`,
+          hint: 'Откройте скан заголовка акта и подтвердите его номер вручную.',
+        }),
+      );
+      continue;
+    }
 
     findings.push(
       defect({
@@ -2526,7 +2611,23 @@ function evaluateTransferActReference(graph: CheckGraph): RuleResult {
  * («ООО „МАСТЕР“» у исполнительной схемы). Совпадение с ЛЮБЫМ из них означает,
  * что опись и документ говорят об одном лице.
  */
-const ORG_FIELDS: readonly string[] = ['issuer', 'manufacturer', 'applicant', 'contractor_name'];
+const ORG_FIELDS: readonly string[] = [
+  'issuer',
+  'manufacturer',
+  'applicant',
+  'contractor_name',
+  /**
+   * `executor` — «Организация, составившая схему» из схемы вида `exec_scheme`.
+   *
+   * Реквизит существовал и заполнялся ИИ-ступенью с самого начала («ООО
+   * „МАСТЕР“» у девяти схем папки «ИД Мастер апрель 2026»), но в этом списке
+   * его не было, и правило уходило по ветке «организация документа не
+   * прочитана — сверять не с чем». Четыре строки описи, где схемы ООО «МАСТЕР»
+   * записаны за ИП Михальским, из-за одной недостающей строки списка остались
+   * неназванными: правило, написанное ровно ради них, ни разу их не сравнило.
+   */
+  'executor',
+];
 
 /**
  * REG.114 — организация в строке описи расходится с документом.
@@ -2544,6 +2645,34 @@ const ORG_FIELDS: readonly string[] = ['issuer', 'manufacturer', 'applicant', 'c
 function evaluateTransferOrg(graph: CheckGraph): RuleResult {
   if (graph.transferRows.length === 0) return notApplicable(NO_TRANSFER);
 
+  const organizationOf = (document: DocumentNode): readonly string[] =>
+    ORG_FIELDS.map((code) => trimmedText(field(document, code))).filter(
+      (value): value is string => value !== null,
+    );
+
+  /**
+   * Виды, у которых организацию не прочитал НИ ОДИН документ папки.
+   *
+   * Разница существенна. У одного документа реквизит не извлёкся — это его
+   * беда, и о ней сообщают правила заполненности; правилу сверки здесь молчать
+   * правильно. У всех документов вида — это молчит портал, и тогда «правило
+   * прошло» неотличимо от «правило не смотрело»: на папке «ИД Мастер апрель
+   * 2026» организации не было ни у одной из двенадцати исполнительных схем,
+   * REG.114 отвечало вердиктом без замечаний, и четыре строки описи, где схемы
+   * ООО «МАСТЕР» записаны за ИП Михальским, остались неназванными.
+   */
+  const silentTypes = new Set<string>();
+  const byType = new Map<string, DocumentNode[]>();
+  for (const document of graph.documents) {
+    if (document.docTypeCode === null) continue;
+    const list = byType.get(document.docTypeCode) ?? [];
+    list.push(document);
+    byType.set(document.docTypeCode, list);
+  }
+  for (const [code, documents] of byType) {
+    if (documents.every((document) => organizationOf(document).length === 0)) silentTypes.add(code);
+  }
+
   const findings: RuleFinding[] = [];
   let checked = 0;
 
@@ -2555,13 +2684,25 @@ function evaluateTransferOrg(graph: CheckGraph): RuleResult {
     const document = documentById(graph, row.matchedDocumentId);
     if (document === null) continue;
 
-    const named = ORG_FIELDS.map((code) => trimmedText(field(document, code))).filter(
-      (value): value is string => value !== null,
-    );
-    // Организация документа не прочитана — сверять не с чем. Это граница
-    // извлечения, а не расхождение описи, и замечания она не заслуживает:
-    // о неполноте реквизитов сообщают правила заполненности.
-    if (named.length === 0) continue;
+    const named = organizationOf(document);
+    if (named.length === 0) {
+      if (document.docTypeCode !== null && silentTypes.has(document.docTypeCode)) {
+        findings.push(
+          unknown({
+            ...anchorOf('registry_row', row.id),
+            origin: 'deterministic',
+            message:
+              `В строке описи передачи (${transferRowLabel(row)}) организация указана как ` +
+              `«${rowOrg}», а у самого документа она не прочитана — как и у всех документов ` +
+              `этого вида в папке, поэтому сверить графу не с чем.`,
+            hint: 'Откройте документ, введите организацию вручную и подтвердите реквизит.',
+          }),
+        );
+      }
+      // Одиночный пропуск реквизита — граница извлечения одного документа, а не
+      // расхождение описи: о неполноте реквизитов сообщают правила заполненности.
+      continue;
+    }
 
     checked += 1;
     const wanted = normalizeOrgName(rowOrg);
