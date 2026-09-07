@@ -86,17 +86,25 @@ test('посев стенда ложится на схему целиком', as
  * потому что его не стало. Числа держат сценарии — четыре страницы у папки с
  * разметкой это `markup.spec.ts:26`, два блока — выбор блока в панели, комплект —
  * группировка отчёта проверки.
+ *
+ * Четвёртая папка — под перепроверку (S55). Она единственная, у которой есть
+ * ОПУБЛИКОВАННОЕ распознавание: без версии текста страницы маршрут «3. Проверить»
+ * честно отказывает, и сценарий проверял бы отказ вместо кнопки.
  */
 test('посев даёт состав, на который опираются сценарии', async () => {
-  expect(await countOf('folders')).toBe(3);
+  expect(await countOf('folders')).toBe(4);
   expect(await countOf('complects')).toBe(1);
-  expect(await countOf('source_files')).toBe(2);
-  expect(await countOf('source_pages')).toBe(5);
-  expect(await countOf('processing_bundle_pages')).toBe(5);
-  expect(await countOf('layout_blocks')).toBe(2);
+  expect(await countOf('source_files')).toBe(3);
+  expect(await countOf('source_pages')).toBe(6);
+  expect(await countOf('processing_bundle_pages')).toBe(6);
+  expect(await countOf('layout_blocks')).toBe(3);
   expect(await countOf('logical_documents')).toBe(1);
-  expect(await countOf('validation_runs')).toBe(2);
-  expect(await countOf('findings')).toBe(2);
+  expect(await countOf('validation_runs')).toBe(3);
+  expect(await countOf('findings')).toBe(3);
+  // Ровно один прогон распознавания и ровно одна версия текста: они и означают
+  // «распознано» для маршрута перепроверки, и обе обязаны пережить нажатие.
+  expect(await countOf('recognition_runs')).toBe(1);
+  expect(await countOf('page_text_versions')).toBe(1);
 
   const [folder] = await db.query(
     `select title, section_code from folders where id = '00000000-0000-4000-8000-000000000013'`,

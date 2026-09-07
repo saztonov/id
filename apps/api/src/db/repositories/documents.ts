@@ -877,6 +877,48 @@ export interface ApplySegmentationOutcome {
 }
 
 /**
+ * Условие «документ подтверждён ЧЕЛОВЕКОМ» — один источник на два вызывающих.
+ *
+ * Смотрим на `confirmation_source`, а не на один `is_confirmed`: границы,
+ * собранные конвейером, он же и подтверждает, и запрет на пересборку
+ * собственной работы означал бы запрет разбирать комплект повторно вообще.
+ *
+ * Вынесено из `applySegmentation` в константу, потому что условие понадобилось
+ * второму месту — маршруту «3. Проверить», который обязан отказать ДО
+ * постановки задачи. Две копии одного предиката разошлись бы молча, и разошлись
+ * бы в худшую сторону: маршрут пропускал бы то, что транзакция потом отвергает,
+ * то есть человек получал бы «принято» и мёртвую задачу вместо ответа.
+ */
+const HUMAN_CONFIRMED_DOCUMENT = and(
+  eq(logicalDocuments.isConfirmed, true),
+  eq(logicalDocuments.confirmationSource, 'human'),
+);
+
+/**
+ * Сколько документов ревизии подтверждено человеком.
+ *
+ * Ноль означает, что повторный разбор пройдёт: `applySegmentation` отвергает
+ * пересегментацию ровно по этому условию. Число, а не признак, — оно уходит в
+ * текст отказа маршрута, где «переписала бы 3 документа» говорит инженеру, что
+ * именно он потеряет, а «нельзя» не говорит.
+ */
+export async function countHumanConfirmedDocuments(
+  db: Database,
+  scope: AuthScope,
+  folderId: string,
+): Promise<number> {
+  // Область видимости — на каждом чтении, как и везде в репозиториях: маршрут
+  // мог разрешить папку раньше, но полагаться на память вызывающего репозиторий
+  // не вправе.
+  await requireVisibleFolder(db, scope, folderId);
+  const rows = await db
+    .select({ id: logicalDocuments.id })
+    .from(logicalDocuments)
+    .where(and(eq(logicalDocuments.folderId, folderId), HUMAN_CONFIRMED_DOCUMENT));
+  return rows.length;
+}
+
+/**
  * Пересегментация ревизии ОДНОЙ транзакцией.
  *
  * Порядок операций не переставляется, и каждый шаг существует по своей причине:
@@ -928,21 +970,13 @@ export async function applySegmentation(
       // отменяет. Счёт возвращается в тексте отказа: «переписала бы 3 из 12»
       // говорит инженеру, что именно он потеряет, а «нельзя» — не говорит.
       //
-      // Смотрим на `confirmation_source`, а не на один `is_confirmed` (S27):
-      // границы, собранные конвейером, он же и подтверждает — иначе не поедет
-      // нарезка, — и запрещать пересборку собственной работы значило бы
-      // запретить её вообще после первого же прогона. Запирает только решение
-      // человека; тот же фильтр стоит в триггере `logical_documents_confirmed_lock`.
+      // Само условие — в `HUMAN_CONFIRMED_DOCUMENT` (S27): его же читает маршрут
+      // «3. Проверить», отказывая ДО постановки задачи. Тот же фильтр стоит в
+      // триггере `logical_documents_confirmed_lock` (0016) — третьем рубеже.
       const confirmed = await tx
         .select({ id: logicalDocuments.id, ordinal: logicalDocuments.ordinal })
         .from(logicalDocuments)
-        .where(
-          and(
-            eq(logicalDocuments.folderId, input.folderId),
-            eq(logicalDocuments.isConfirmed, true),
-            eq(logicalDocuments.confirmationSource, 'human'),
-          ),
-        );
+        .where(and(eq(logicalDocuments.folderId, input.folderId), HUMAN_CONFIRMED_DOCUMENT));
       if (confirmed.length > 0) {
         throw conflict(
           `Ревизия содержит ${confirmed.length} подтверждённых человеком документов: ` +

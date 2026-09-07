@@ -33,7 +33,12 @@ import { afterAll, beforeAll, expect, it } from 'vitest';
 import { createPgliteDatabase, type TestDatabase } from '@id/db-harness';
 import { loadMigrations } from '@id/migrator';
 
-import { DERIVED_DELETES, PIPELINE_RESET_DELETES, FOLDER_DELETES } from './purge.js';
+import {
+  CHECKS_RESET_DELETES,
+  DERIVED_DELETES,
+  PIPELINE_RESET_DELETES,
+  FOLDER_DELETES,
+} from './purge.js';
 
 const MIGRATIONS_DIR = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -259,4 +264,57 @@ it('сброс конвейера сохраняет порядок DERIVED_DELE
   expect(reset).toContain('block_results');
   expect(reset).toContain('current_block_result');
   expect(reset).toContain('recognition_runs');
+});
+
+/**
+ * Стирание прошлой проверки — тоже подмножество, и оно обязано быть УЗКИМ.
+ *
+ * Утверждение структурное по той же причине, что и соседнее, но цена ошибки
+ * здесь другая и обратная. Список `PIPELINE_RESET_DELETES` опасен неполнотой —
+ * забытая таблица даёт `foreign key violation`. Этот опасен ПОЛНОТОЙ: лишняя
+ * строка в нём сносит распознанный текст, ради сохранения которого кнопка
+ * «3. Проверить» и заведена, — и сносит молча, потому что операция при этом
+ * завершится успехом. Поэтому перечислено не только то, что уходит, но и
+ * поимённо то, что обязано остаться.
+ */
+it('стирание проверки не выходит за пределы прогонов правил', () => {
+  const derived = DERIVED_DELETES.map((step) => step.table);
+  const reset = CHECKS_RESET_DELETES.map((step) => step.table);
+
+  // Ровно три таблицы, и порядок топологический: доказательства ссылаются на
+  // замечания, замечания — на прогон.
+  expect(reset).toEqual(['finding_evidence', 'findings', 'validation_runs']);
+
+  // Порядок получен фильтром по общему списку, а не переписан руками.
+  expect(reset).toEqual(derived.filter((table) => reset.includes(table)));
+
+  /*
+   * Распознанное, разметка и разобранное — переживают нажатие.
+   *
+   * `page_text_versions` первым в списке не случайно: это и есть тот готовый
+   * текст, по которому идёт повторный разбор. Документы и реквизиты перечислены
+   * потому, что их заменяют САМИ обработчики цепочки анализа
+   * (`applySegmentation`, `saveFieldValues`, `saveDocumentRelations`), и снос
+   * их отсюда, снаружи их транзакций, оставил бы комплект пустым, если бы
+   * цепочка потом не доехала.
+   */
+  for (const table of [
+    'page_text_versions',
+    'block_results',
+    'current_block_result',
+    'recognition_runs',
+    'recognition_run_pages',
+    'layout_blocks',
+    'layout_revisions',
+    'logical_documents',
+    'page_assignments',
+    'field_values',
+    'registry_rows',
+    'complects',
+    'materials',
+    'rd_exec_blocks',
+    'rd_exec_documents',
+  ]) {
+    expect(reset).not.toContain(table);
+  }
 });

@@ -265,6 +265,15 @@ export interface CheckPipelineResult {
   readonly continuedRun?: boolean;
 }
 
+export interface RecheckPipelineResult {
+  readonly jobId: string;
+  readonly jobCreated: boolean;
+  /** Сколько прошлых прогонов правил стёрто. Ноль — проверок ещё не было. */
+  readonly clearedRuns: number;
+  /** Сколько задач прошлого разбора снято с очереди перед стартом. */
+  readonly cancelledJobs: number;
+}
+
 export interface StopPipelineResult {
   readonly cancelledJobs: number;
   readonly recognitionRunId: string | null;
@@ -309,6 +318,20 @@ export const pipeline = {
     request<CheckPipelineResult>('POST', `${V1}/folders/${folderId}/check`, {
       idempotencyKey: newIdempotencyKey('pipeline-check'),
       body: { mode },
+    }).then((r) => r.data),
+
+  /**
+   * Переразбор и перепроверка по УЖЕ РАСПОЗНАННОМУ тексту (S55).
+   *
+   * Отдельный вызов от `check`, а не её четвёртый режим: `check` решает, с чего
+   * продолжить, по состоянию ревизии, и при выключенной неизменяемости
+   * (ADR-0015) уходит в распознавание даже на разобранном комплекте. Здесь
+   * распознанное неприкосновенно по построению маршрута, и обещать это вызовом,
+   * который «обычно» его не трогает, было бы нельзя.
+   */
+  recheck: (folderId: string) =>
+    request<RecheckPipelineResult>('POST', `${V1}/folders/${folderId}/recheck`, {
+      idempotencyKey: newIdempotencyKey('pipeline-recheck'),
     }).then((r) => r.data),
 
   /**

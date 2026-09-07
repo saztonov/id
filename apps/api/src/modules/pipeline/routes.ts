@@ -53,7 +53,10 @@ import { currentAuth } from '../../middleware/require-auth.js';
 import { requirePermission } from '../../middleware/require-permission.js';
 import { tracePayload, updateContext } from '../../observability/context.js';
 import { assertPlanBuildable, listBundles, loadBundlePlan } from '../../db/repositories/bundles.js';
-import { listLogicalDocuments } from '../../db/repositories/documents.js';
+import {
+  countHumanConfirmedDocuments,
+  listLogicalDocuments,
+} from '../../db/repositories/documents.js';
 import { findFolderForFiles } from '../../db/repositories/files.js';
 import {
   appendFolderEvent,
@@ -65,7 +68,7 @@ import {
 } from '../../db/repositories/jobs.js';
 import { appendAudit } from '../../db/repositories/audit.js';
 import { auditEmailHmac } from '../../db/repositories/admin.js';
-import { resetPipelineForFolder } from '../../db/repositories/purge.js';
+import { resetChecksForFolder, resetPipelineForFolder } from '../../db/repositories/purge.js';
 import {
   applyTextCoverageFallback,
   FALLBACK_LAYOUT_THRESHOLDS,
@@ -93,6 +96,7 @@ import {
   checkRequestSchema,
   checkResponseSchema,
   recognitionProgressSchema,
+  recheckResponseSchema,
   folderIdParamSchema,
   runIdParamSchema,
   startMarkupPipelineResponseSchema,
@@ -107,8 +111,219 @@ const readPipeline = requirePermission('markup.read');
 export function registerPipelineRoutes(app: AppInstance): void {
   registerMarkupRoute(app);
   registerCheckRoute(app);
+  registerRecheckRoute(app);
   registerStopRoute(app);
   registerProgressRoute(app);
+}
+
+// =====================================================================
+// Кнопка «3. Проверить»
+// =====================================================================
+
+/**
+ * Перезапуск всего, что считается по УЖЕ РАСПОЗНАННОМУ тексту (S55).
+ *
+ * ## Зачем отдельная кнопка, если «2. Распознать» умеет то же самое
+ *
+ * Умеет, но недостижимо. Ветка правил в `registerCheckRoute` открывается только
+ * при `done`, а `done` умножен на `enforceGates`: в режиме тестирования
+ * (ADR-0015) любое нажатие уходит в распознавание. И даже в строгом режиме до
+ * неё не добраться с экрана — после первого законченного прогона кнопка
+ * превращается в список из двух пунктов, «только ошибки» и «полностью», и оба
+ * зовут модель. Первый — гарантированно: `listPagesToRerecognize` добавляет
+ * страницы всех документов с открытыми замечаниями, то есть ровно те, ради
+ * которых правила и переписывают.
+ *
+ * Заказчик формулирует потребность прямо: правила обработки переписываются
+ * регулярно, и применять их, заново читая моделью то, что уже прочитано и лежит
+ * в базе, — это часы ожидания и деньги за сделанную работу.
+ *
+ * ## Почему перезапускается ВЕСЬ разбор, а не один прогон правил
+ *
+ * Потому что «правила обработки» — это не только `packages/rules`. Извлечение
+ * реквизитов, классификация страниц и разбор описи переписываются тем же
+ * решением и тем же коммитом, а читают они ТОТ ЖЕ сохранённый текст. Кнопка,
+ * ставящая только `checks.run`, применяла бы половину изменений и молчала бы о
+ * второй половине — то есть отвечала бы на вопрос «всё ли учтено» словом «да»,
+ * не имея на это оснований.
+ *
+ * Поэтому ставится `doc.classify_pages` — голова цепочки анализа. Модель она
+ * зовёт (извлечение реквизитов идёт через неё), но НИ ОДНОЙ страницы заново не
+ * распознаёт: `layout_*`, `recognition_runs`, `block_results` и
+ * `page_text_versions` нажатие не трогает ни одним запросом.
+ *
+ * ## Почему сноса производного анализа здесь нет
+ *
+ * Он не нужен: записи стадии устроены как «удалить своё по `folder_id` и
+ * вставить заново» в одной транзакции — `applySegmentation`,
+ * `savePageClassifications`, `saveFieldValues`, `saveRegistryRows`,
+ * `saveRegistryMatches`, `saveDocumentRelations`. Второй список тех же таблиц
+ * в `purge.ts` разошёлся бы с обработчиками при первой же новой таблице, и
+ * разошёлся бы молча.
+ *
+ * Стирается ровно одно — прошлые прогоны правил, и по причине, которой у
+ * обработчиков нет: `saveFindings` заменяет строки ТОЛЬКО своего прогона, а
+ * `findings.target_id` внешнего ключа не имеет (0006). После пересегментации
+ * прошлые замечания указывали бы на удалённые документы, оставаясь на вид
+ * настоящими.
+ */
+function registerRecheckRoute(app: AppInstance): void {
+  app.post(
+    `${PREFIX}/folders/:folderId/recheck`,
+    {
+      preHandler: runPipeline,
+      schema: {
+        params: folderIdParamSchema,
+        response: { 202: recheckResponseSchema },
+      },
+    },
+    async (request, reply) => {
+      const { scope } = currentAuth(request);
+      const { folderId } = request.params;
+      const idempotencyKey = requireIdempotencyKey(request);
+
+      // Ревизия разрешается ПЕРВОЙ, до любого суждения о её состоянии: иначе
+      // чужая ревизия получала бы отказ о данных, которых спрашивающий видеть
+      // не вправе (то же соображение, что в `registerCheckRoute`).
+      const folder = await findFolderForFiles(app.db, scope, folderId);
+      if (folder === null) throw notFound('Ревизия поставки не найдена.');
+      updateContext({ folderId, objectId: folder.objectId });
+
+      /**
+       * Идущее распознавание — отказ, а не очередь. И спрашивается ПЕРВЫМ.
+       *
+       * Порядок вопросов — это порядок причин, которые услышит человек. Пока
+       * прогон идёт, опубликованного текста по нему ещё нет, и проверка
+       * публикации, стоящая раньше, отвечала бы «распознанного текста нет,
+       * нажмите «2. Распознать»» — то есть звала бы начать заново ровно то, что
+       * в эту минуту и идёт.
+       *
+       * Прогон в работе вот-вот перепишет тот самый текст, по которому пойдёт
+       * разбор. Разбор, начатый сейчас, читал бы половину старого текста и
+       * половину нового и завершился бы успехом — то есть дал бы заключение, не
+       * соответствующее ни одному состоянию комплекта.
+       */
+      const runs = await listRecognitionRuns(app.db, scope, folderId);
+      if (runs.some((run) => run.status === 'running')) {
+        throw conflict(
+          'Распознавание ещё идёт. Дождитесь его окончания — проверка запустится ' +
+            'сама, а «3. Проверить» понадобится только для следующего перезапуска.',
+        );
+      }
+
+      /**
+       * Опубликованное распознавание — условие существования кнопки.
+       *
+       * «Проверить» работает ПО ГОТОВОМУ ТЕКСТУ, и без него нажатие не имеет
+       * смысла ни в одном прочтении: молча увести человека на распознавание
+       * значило бы подменить дешёвое действие дорогим, а поставить разбор
+       * поверх пустоты — выдать мёртвую задачу за принятую работу.
+       *
+       * Ревизия разметки в вопрос НЕ входит намеренно. Анализ читает
+       * `page_text_versions`, а они принадлежат ревизии поставки, не разметке:
+       * спросив «распознана ли ПОСЛЕДНЯЯ разметка», маршрут отказывал бы на
+       * комплекте, где блоки перевыделили после распознавания, — то есть ровно
+       * там, где перепроверить готовый текст и требуется.
+       */
+      const recognized = await hasPublishedRecognition(app.db, scope, { folderId });
+      if (!recognized) {
+        throw conflict(
+          'Распознанного текста у комплекта нет: перепроверять нечего. ' +
+            'Нажмите «2. Распознать» — «3. Проверить» перезапускает разбор уже ' +
+            'распознанного, не вызывая модель по страницам.',
+        );
+      }
+
+      /**
+       * Подтверждённые человеком документы: отказ ЗДЕСЬ, а не внутри задачи.
+       *
+       * `applySegmentation` отвергает пересегментацию по этому же условию, но
+       * делает это в транзакции воркера. Без рубежа на маршруте человек получал
+       * бы 202 «принято», а причину искал бы в консоли задач — там, где чужие
+       * задачи всех папок портала и куда ведущий комплект не ходит.
+       */
+      const confirmed = await countHumanConfirmedDocuments(app.db, scope, folderId);
+      if (confirmed > 0) {
+        throw conflict(
+          `Ревизия содержит ${String(confirmed)} подтверждённых человеком документов: ` +
+            'повторный разбор переписал бы их. Снимите подтверждение явным действием.',
+        );
+      }
+
+      /**
+       * Снятие задач ДВУХ стадий — до постановки новой.
+       *
+       * `ux_jobs_dedupe_key` (0039) держит ключ на `failed`, и мёртвая
+       * `checks.run:<folderId>` от прошлого прогона слила бы с собой
+       * автопостановку проверки хвостом `graph.build`: разбор прошёл бы, а
+       * правила молча не исполнились. Стадия `recognition` не трогается — она и
+       * есть то, что нажатие обязано сохранить.
+       */
+      const cancelledJobs = await cancelJobsOfFolder(app.db, folderId, {
+        stages: ['analysis', 'checks'],
+      });
+
+      const clearedRuns = await resetChecksForFolder(app.db, folderId);
+
+      /**
+       * `autoContinue` обязателен.
+       *
+       * Хвост `graph.build` ставит прогон правил только по заказу (S50, чтение
+       * `readAutoContinue` из БД). Без признака цепочка дошла бы до графа и
+       * встала, а экран показал бы «готово» при непроверенном комплекте.
+       */
+      const { jobId, created } = await enqueueJob(app.db, scope, {
+        type: 'doc.classify_pages',
+        payload: tracePayload({ folderId, autoContinue: true }),
+        dedupeKey: dedupeKeyFor('doc.classify_pages', folderId, idempotencyKey),
+      });
+
+      /**
+       * Префикс `checks.` несёт смысл, а не оформление.
+       *
+       * Клиент выбирает, что обесценить, по части типа события ДО точки
+       * (`stream.tsx`, `invalidateFor`). Область `checks` гасит список
+       * замечаний, прогоны и отчёт о составе во ВСЕХ открытых вкладках; область
+       * `pipeline` не гасит ничего, кроме сводки стадий, — и стёртая проверка
+       * продолжала бы висеть на экране у второго проверяющего как настоящая.
+       */
+      await appendFolderEvent(app.db, {
+        folderId,
+        eventType: 'checks.restarted',
+        payload: { cancelledJobs, clearedRuns, jobId, jobCreated: created },
+      });
+
+      await appendAudit(app.db, scope, {
+        emailHmac: auditEmailHmac(app.env.AUDIT_HMAC_KEY, currentAuth(request).user.email),
+        ip: request.ip,
+        requestId: request.id,
+        action: 'pipeline.recheck',
+        entityType: 'folder',
+        entityId: folderId,
+        objectId: folder.objectId,
+        payload: { cancelledJobs, clearedRuns },
+      });
+
+      request.log.info(
+        {
+          event: 'pipeline_recheck_started',
+          folder_id: folderId,
+          cancelled_jobs: cancelledJobs,
+          cleared_runs: clearedRuns,
+          job_id: jobId,
+        },
+        'разбор и проверка перезапущены по уже распознанному тексту',
+      );
+
+      return reply.code(202).send({
+        stage: 'analysis',
+        jobId,
+        jobCreated: created,
+        cancelledJobs,
+        clearedRuns,
+      });
+    },
+  );
 }
 
 // =====================================================================

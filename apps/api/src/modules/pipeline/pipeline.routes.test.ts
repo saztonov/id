@@ -668,6 +668,299 @@ describe('POST /folders/{id}/check', () => {
 });
 
 // =====================================================================
+// Кнопка «3. Проверить» (S55)
+// =====================================================================
+
+/**
+ * Перезапуск разбора по УЖЕ РАСПОЗНАННОМУ тексту.
+ *
+ * Комплект набора свой, а не доставшийся от предыдущих наборов: те доводят свои
+ * папки до разных состояний по ходу дела, и утверждение «распознавание не
+ * тронуто» на общем комплекте доказывало бы не то, что нужно, а порядок
+ * выполнения файла.
+ */
+describe('POST /folders/{id}/recheck', () => {
+  const FOLDER = id(200);
+  const FILE = id(201);
+  const PAGE = id(202);
+  const BUNDLE = id(203);
+  const LAYOUT = id(204);
+  const BLOCK = id(205);
+  const RUN_DOC = id(206);
+  const RUN = id(207);
+  const ARTIFACT = id(208);
+  const VALIDATION_RUN = id(209);
+  const FINDING = id(210);
+  const DOCUMENT = id(211);
+  const SHA_RECHECK = '7'.repeat(64);
+
+  /** Снимок распознанного и размеченного: он обязан пережить любое нажатие. */
+  async function recognitionSnapshot(): Promise<Record<string, number>> {
+    const tables = [
+      'recognition_runs',
+      'page_text_versions',
+      'artifact_versions',
+      'layout_revisions',
+      'layout_blocks',
+      'processing_bundles',
+    ];
+    const snapshot: Record<string, number> = {};
+    for (const table of tables) {
+      const column = table === 'artifact_versions' ? 'recognition_run_id' : 'folder_id';
+      const where =
+        table === 'artifact_versions'
+          ? `recognition_run_id IN (SELECT id FROM recognition_runs WHERE folder_id = '${FOLDER}')`
+          : `${column} = '${FOLDER}'`;
+      const rows = await db.query<{ count: string | number }>(
+        `SELECT count(*) AS count FROM ${table} WHERE ${where}`,
+      );
+      snapshot[table] = Number(rows[0]?.count ?? 0);
+    }
+    return snapshot;
+  }
+
+  beforeAll(async () => {
+    await db.query(
+      `INSERT INTO folders
+         (id, object_id, contractor_id, managed_by_contractor_id, section_code, period, title, created_by)
+       VALUES ('${FOLDER}', '${OBJECT}', '${ORG_A}', '${ORG_A}', 'roofing', DATE '2026-01-01',
+               'Комплект под перепроверку', '${USER_A}')`,
+    );
+    await db.query(
+      `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
+         VALUES ('${SHA_RECHECK}', 'blobs/${SHA_RECHECK}', 1024, 'application/pdf')`,
+    );
+    await db.query(
+      `INSERT INTO source_files (id, folder_id, blob_sha256, file_name, sort_order, verify_state)
+         VALUES ('${FILE}', '${FOLDER}', '${SHA_RECHECK}', 'Перепроверка.pdf', 0, 'ok')`,
+    );
+    await db.query(
+      `INSERT INTO source_pages (id, folder_id, source_file_id, file_page_index, folder_ordinal,
+                                 width_px, height_px, rotation)
+         VALUES ('${PAGE}', '${FOLDER}', '${FILE}', 0, 0, 1654, 2339, 0)`,
+    );
+    await db.query(
+      `INSERT INTO processing_bundles (id, folder_id, aggregate_manifest_hash, working_pdf_blob_sha256, builder_version)
+         VALUES ('${BUNDLE}', '${FOLDER}', '${manifestHash(SHA_RECHECK)}', '${SHA_WORKING}', 'bundle/1+pdf-lib')`,
+    );
+    await db.query(
+      `INSERT INTO processing_bundle_pages (bundle_id, folder_id, working_page_index, source_page_id)
+         VALUES ('${BUNDLE}', '${FOLDER}', 0, '${PAGE}')`,
+    );
+    await db.query(
+      `INSERT INTO layout_revisions (id, folder_id, object_id, bundle_id, revision_no, state)
+         VALUES ('${LAYOUT}', '${FOLDER}', '${OBJECT}', '${BUNDLE}', 1, 'draft')`,
+    );
+    await db.query(
+      `INSERT INTO layout_blocks
+         (id, layout_revision_id, folder_id, bundle_id, source_page_id, working_page_index, object_id,
+          block_type, shape_type, x0, y0, x1, y1, sort_order, source, detector_provenance)
+       VALUES ('${BLOCK}', '${LAYOUT}', '${FOLDER}', '${BUNDLE}', '${PAGE}', 0,
+               '${OBJECT}', 'text', 'rectangle', 0.1, 0.1, 0.9, 0.4, 0, 'auto', 'rf_detr')`,
+    );
+    await db.query(
+      `INSERT INTO rd_run_documents (id, layout_revision_id, rd_document_id, rd_project_id)
+         VALUES ('${RUN_DOC}', '${LAYOUT}', 'doc-recheck', 'prj-portal')`,
+    );
+    // «Распознано» — это ОПУБЛИКОВАНО: статус `done` плюс версия текста
+    // страницы. Только пара из них означает, что перепроверять есть что.
+    await db.query(
+      `INSERT INTO recognition_runs (id, folder_id, layout_revision_id, rd_run_document_id,
+                                     local_layout_hash, working_pdf_sha256, status, finished_at)
+         VALUES ('${RUN}', '${FOLDER}', '${LAYOUT}', '${RUN_DOC}',
+                 '${'8'.repeat(64)}', '${SHA_WORKING}', 'done', now())`,
+    );
+    await db.query(
+      `INSERT INTO artifact_versions (id, recognition_run_id, kind, s3_key, artifact_sha256, byte_size)
+         VALUES ('${ARTIFACT}', '${RUN}', 'blocks_json', 'artifacts/recheck.json', '${'9'.repeat(64)}', 64)`,
+    );
+    await db.query(
+      `INSERT INTO page_text_versions
+         (folder_id, source_page_id, recognition_run_id, artifact_version_id, text_md, text_sha256)
+         VALUES ('${FOLDER}', '${PAGE}', '${RUN}', '${ARTIFACT}', 'АОСР № 12', '${'a'.repeat(64)}')`,
+    );
+  });
+
+  /** Прошлая проверка со ссылкой на текст: её и обязано стереть нажатие. */
+  async function seedPreviousCheck(): Promise<void> {
+    const versions = await db.query<{ id: string }>(
+      `SELECT id FROM ruleset_versions ORDER BY published_at LIMIT 1`,
+    );
+    const texts = await db.query<{ id: string }>(
+      `SELECT id FROM page_text_versions WHERE folder_id = '${FOLDER}' LIMIT 1`,
+    );
+    await db.query(
+      `INSERT INTO validation_runs (id, folder_id, ruleset_version_id, started_at, finished_at, counts)
+         VALUES ('${VALIDATION_RUN}', '${FOLDER}', '${versions[0]?.id ?? ''}', now(), now(),
+                 '{"rulesEvaluated": 3, "findings": 1}'::jsonb)`,
+    );
+    await db.query(
+      `INSERT INTO findings (id, validation_run_id, folder_id, object_id, contractor_id, rule_code,
+                             severity, state, origin, is_blocking, target_type, target_id,
+                             source_page_id, message, hint)
+         VALUES ('${FINDING}', '${VALIDATION_RUN}', '${FOLDER}', '${OBJECT}', '${ORG_A}',
+                 'AOSR.HDR.022', 'warning', 'open', 'deterministic', false, 'source_page',
+                 '${PAGE}', '${PAGE}', 'Замечание прошлой проверки', 'Оно обязано исчезнуть')`,
+    );
+    await db.query(
+      `INSERT INTO finding_evidence (finding_id, page_text_version_id, quote, char_span)
+         VALUES ('${FINDING}', '${texts[0]?.id ?? ''}', 'АОСР', int4range(0, 4))`,
+    );
+  }
+
+  it('заголовок идемпотентности обязателен', async () => {
+    const response = await as(KC.a, 'POST', `/api/v1/folders/${FOLDER}/recheck`);
+    expect(response.statusCode).toBe(400);
+  });
+
+  it('чужая ревизия недостижима', async () => {
+    const response = await as(KC.a, 'POST', `/api/v1/folders/${FOLDER_OTHER}/recheck`, {
+      idempotencyKey: 'recheck-other',
+    });
+    // Не 409 «распознавания нет»: такой ответ отличал бы существующую чужую
+    // ревизию от несуществующей, то есть был бы утечкой о чужой поставке (§16).
+    expect(response.statusCode).toBe(404);
+  });
+
+  it('без распознанного текста отказывает и называет вторую кнопку', async () => {
+    // У этого комплекта разметка есть, а опубликованного распознавания нет —
+    // ровно то состояние, в котором перепроверять нечего.
+    const response = await as(KC.a, 'POST', `/api/v1/folders/${FOLDER_BARE}/recheck`, {
+      idempotencyKey: 'recheck-bare',
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.body).toContain('2. Распознать');
+
+    // Молчаливой постановки при отказе быть не должно.
+    const jobs = await db.query<{ count: string | number }>(
+      `SELECT count(*) AS count FROM jobs
+        WHERE type = 'doc.classify_pages' AND payload->>'folderId' = '${FOLDER_BARE}'`,
+    );
+    expect(Number(jobs[0]?.count ?? 0)).toBe(0);
+  });
+
+  it('идущее распознавание — отказ, и его очередь остаётся нетронутой', async () => {
+    await db.query(`UPDATE recognition_runs SET status = 'running' WHERE id = '${RUN}'`);
+
+    const response = await as(KC.a, 'POST', `/api/v1/folders/${FOLDER}/recheck`, {
+      idempotencyKey: 'recheck-running',
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.body).toContain('Распознавание ещё идёт');
+
+    await db.query(`UPDATE recognition_runs SET status = 'done' WHERE id = '${RUN}'`);
+  });
+
+  it('документы, подтверждённые человеком, запирают перезапуск с числом в отказе', async () => {
+    await db.query(
+      `INSERT INTO logical_documents
+         (id, folder_id, object_id, contractor_id, doc_type_code, ordinal, title,
+          is_confirmed, confirmation_source, confirmed_by, confirmed_at)
+       VALUES ('${DOCUMENT}', '${FOLDER}', '${OBJECT}', '${ORG_A}', 'aosr', 1, 'АОСР № 12',
+               true, 'human', '${USER_A}', now())`,
+    );
+
+    const response = await as(KC.a, 'POST', `/api/v1/folders/${FOLDER}/recheck`, {
+      idempotencyKey: 'recheck-confirmed',
+    });
+
+    expect(response.statusCode).toBe(409);
+    // Число, а не «нельзя»: инженер обязан понять, что именно он потеряет.
+    expect(response.body).toContain('1 подтверждённых человеком документов');
+
+    // Тот же документ, подтверждённый КОНВЕЙЕРОМ, перезапуску не мешает: иначе
+    // комплект нельзя было бы перепроверить ни разу после первого разбора.
+    await db.query(
+      `UPDATE logical_documents SET confirmation_source = 'machine', confirmed_by = NULL
+        WHERE id = '${DOCUMENT}'`,
+    );
+  });
+
+  it('ставит разбор с признаком продолжения, стирает прошлую проверку и щадит распознанное', async () => {
+    await seedPreviousCheck();
+
+    /*
+     * Мертвец прошлой цепочки. Ключи внутренних звеньев идут БЕЗ суффикса
+     * идемпотентности, а частичный уникальный индекс держит их на `failed`, —
+     * поэтому неснятая мёртвая задача молча погасила бы новую цепочку: звено
+     * вернуло бы `created: false` и завершилось успехом, не сделав ничего.
+     */
+    await db.query(
+      `INSERT INTO jobs (type, payload, status, max_attempts, dedupe_key)
+         VALUES ('graph.build', '{"folderId":"${FOLDER}"}'::jsonb, 'failed', 5,
+                 'graph.build:${FOLDER}')`,
+    );
+
+    const before = await recognitionSnapshot();
+
+    const response = await as(KC.a, 'POST', `/api/v1/folders/${FOLDER}/recheck`, {
+      idempotencyKey: 'recheck-1',
+    });
+
+    expect(response.statusCode).toBe(202);
+    const body = response.json<{
+      stage: string;
+      jobCreated: boolean;
+      clearedRuns: number;
+      cancelledJobs: number;
+    }>();
+    // Стадия названа честно: перезапускается ВЕСЬ разбор, а не один прогон
+    // правил, и обещать «проверка» там, где работы на минуты, нельзя.
+    expect(body.stage).toBe('analysis');
+    expect(body.jobCreated).toBe(true);
+    expect(body.clearedRuns).toBe(1);
+    expect(body.cancelledJobs).toBeGreaterThan(0);
+
+    /*
+     * Признак продолжения — главное утверждение набора.
+     *
+     * `graph.build` ставит прогон правил ТОЛЬКО по заказу, и без флага цепочка
+     * дошла бы до графа и встала: задача успешна, полоса конвейера показывает
+     * «готово», проверок нет. Отличить это от исправной работы по журналу
+     * нечем, поэтому проверяется сам payload.
+     */
+    const queued = await db.query<{ auto_continue: string | null; status: string }>(
+      `SELECT payload->>'autoContinue' AS auto_continue, status FROM jobs
+        WHERE type = 'doc.classify_pages' AND payload->>'folderId' = '${FOLDER}'`,
+    );
+    expect(queued).toHaveLength(1);
+    // Читается ПОЛЕ, а не текст payload: пробелы в выводе `jsonb` — свойство
+    // печати, и утверждение о них ломалось бы от версии драйвера, ничего не
+    // говоря о самом признаке.
+    expect(queued[0]?.auto_continue).toBe('true');
+
+    // Мертвец снят: ключ освобождён, и цепочка доедет до правил.
+    const dead = await db.query<{ status: string }>(
+      `SELECT status FROM jobs WHERE dedupe_key = 'graph.build:${FOLDER}'`,
+    );
+    expect(dead[0]?.status).toBe('cancelled');
+
+    // Прошлая проверка стёрта целиком, вместе с доказательствами.
+    for (const table of ['validation_runs', 'findings']) {
+      const rows = await db.query<{ count: string | number }>(
+        `SELECT count(*) AS count FROM ${table} WHERE folder_id = '${FOLDER}'`,
+      );
+      expect(Number(rows[0]?.count ?? 0)).toBe(0);
+    }
+    const evidence = await db.query<{ count: string | number }>(
+      `SELECT count(*) AS count FROM finding_evidence WHERE finding_id = '${FINDING}'`,
+    );
+    expect(Number(evidence[0]?.count ?? 0)).toBe(0);
+
+    /*
+     * И обещание кнопки: распознанное и размеченное на месте до строки.
+     *
+     * Без этой проверки «не трогает распознавание» остаётся словами в
+     * комментарии, а подмена `resetChecksForFolder` на `resetPipelineForFolder`
+     * прошла бы зелёной — и стоила бы пользователю часов работы модели.
+     */
+    expect(await recognitionSnapshot()).toEqual(before);
+  });
+});
+
+// =====================================================================
 // Кнопка «Стоп»
 // =====================================================================
 

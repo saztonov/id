@@ -50,6 +50,15 @@ export const IDS = {
   folderEmpty: id(11),
   folderMarkup: id(13),
   folderReview: id(15),
+  /**
+   * Папка с РАСПОЗНАННЫМ текстом: единственная, где живёт «3. Проверить».
+   *
+   * Отдельная, а не признак на существующей: кнопка требует опубликованного
+   * распознавания, а добавить его к `folderMarkup` значило бы поменять
+   * состояние, на котором стоят спеки разметки и доказательств, — и поменять
+   * молча.
+   */
+  folderRecheck: id(17),
 
   userContractor: id(20),
   userEngineer: id(21),
@@ -97,6 +106,19 @@ export const IDS = {
   findingWithBlock: id(86),
   /** Комплект папки на проверке: отчёт группируется по комплектам (S44). */
   complectReview: id(90),
+
+  /** Состав папки под перепроверку — вплоть до версии текста страницы. */
+  fileRecheck: id(100),
+  pageRecheck: id(101),
+  bundleRecheck: id(102),
+  layoutRecheck: id(103),
+  blockRecheck: id(104),
+  rdRunDocRecheck: id(105),
+  runRecheck: id(106),
+  artifactRecheck: id(107),
+  /** Прошлая проверка: нажатие обязано её стереть. */
+  validationRunRecheck: id(108),
+  findingRecheck: id(109),
 };
 
 /** Проблемы журнала ошибок (§11): экрану нужны данные, а вызвать 500 из теста нечем. */
@@ -195,6 +217,7 @@ export function fixtureSql({ sha, size, aggregateHash }) {
   const workingSha = 'b'.repeat(64);
   const reviewSha = 'c'.repeat(64);
   const derivedSha = 'd'.repeat(64);
+  const recheckSha = 'e'.repeat(64);
 
   /**
    * Папка заводится общим помощником `@id/db-harness`, а не выписанным здесь
@@ -304,6 +327,59 @@ export function fixtureSql({ sha, size, aggregateHash }) {
                    ${block.sortOrder}, 'auto', 'rf_detr')`,
     ),
 
+    // --- Папка под перепроверку: распознавание есть, документов нет ---
+    //
+    // Состояние выбрано ровно под кнопку «3. Проверить»: опубликованное
+    // распознавание (без него маршрут честно отказывает) и НИ ОДНОГО
+    // подтверждённого человеком документа (иначе повторный разбор переписал бы
+    // чужую работу, и маршрут отказывает снова). Прошлый прогон правил здесь
+    // тоже есть — нажатие обязано его стереть, и без него проверять было бы
+    // нечего.
+    ...folder(
+      IDS.folderRecheck,
+      'Комплект под перепроверку',
+      IDS.orgContractor,
+      IDS.userContractor,
+    ),
+    `INSERT INTO stored_blobs (sha256, s3_key, size_bytes, mime)
+       VALUES ('${recheckSha}', '${blobKey(recheckSha)}', 2048, 'application/pdf')`,
+    `INSERT INTO source_files (id, folder_id, blob_sha256, file_name, sort_order, verify_state)
+       VALUES ('${IDS.fileRecheck}', '${IDS.folderRecheck}', '${recheckSha}', 'Перепроверка.pdf', 0, 'ok')`,
+    `INSERT INTO source_pages (id, folder_id, source_file_id, file_page_index, folder_ordinal,
+                               width_px, height_px, rotation)
+       VALUES ('${IDS.pageRecheck}', '${IDS.folderRecheck}', '${IDS.fileRecheck}', 0, 0, 1654, 2339, 0)`,
+    `INSERT INTO processing_bundles (id, folder_id, aggregate_manifest_hash, working_pdf_blob_sha256, builder_version)
+       VALUES ('${IDS.bundleRecheck}', '${IDS.folderRecheck}',
+               '${aggregateHash([{ blobSha256: recheckSha, sortOrder: 0 }])}',
+               '${workingSha}', 'bundle/1+qpdf')`,
+    `INSERT INTO processing_bundle_pages (bundle_id, folder_id, working_page_index, source_page_id)
+       VALUES ('${IDS.bundleRecheck}', '${IDS.folderRecheck}', 0, '${IDS.pageRecheck}')`,
+    `INSERT INTO layout_revisions (id, folder_id, object_id, bundle_id, revision_no, state)
+       VALUES ('${IDS.layoutRecheck}', '${IDS.folderRecheck}', '${IDS.object}', '${IDS.bundleRecheck}', 1, 'draft')`,
+    `INSERT INTO layout_blocks (id, layout_revision_id, folder_id, bundle_id, source_page_id,
+                                working_page_index, object_id, block_type, shape_type,
+                                x0, y0, x1, y1, sort_order, source, detector_provenance)
+       VALUES ('${IDS.blockRecheck}', '${IDS.layoutRecheck}', '${IDS.folderRecheck}', '${IDS.bundleRecheck}',
+               '${IDS.pageRecheck}', 0, '${IDS.object}', 'text', 'rectangle',
+               0.1, 0.1, 0.9, 0.4, 0, 'auto', 'rf_detr')`,
+    // RD-документ прогона: `startRecognitionRun` без него отвечает 409, и он же
+    // требуется внешним ключом прогона.
+    `INSERT INTO rd_run_documents (id, layout_revision_id, rd_document_id, rd_project_id)
+       VALUES ('${IDS.rdRunDocRecheck}', '${IDS.layoutRecheck}', 'rd-doc-e2e-2', 'rd-project-e2e')`,
+    `INSERT INTO recognition_runs (id, folder_id, layout_revision_id, rd_run_document_id,
+                                   local_layout_hash, working_pdf_sha256, status, finished_at)
+       VALUES ('${IDS.runRecheck}', '${IDS.folderRecheck}', '${IDS.layoutRecheck}', '${IDS.rdRunDocRecheck}',
+               '${'7'.repeat(64)}', '${workingSha}', 'done', now())`,
+    // «Распознано» — это ОПУБЛИКОВАНО, а не «прогон закрыт»: маршрут спрашивает
+    // именно про версию текста страницы, и статус `done` без неё означал бы
+    // прогон в режиме проверки провайдера, не давший ни строки.
+    `INSERT INTO artifact_versions (id, recognition_run_id, kind, s3_key, artifact_sha256, byte_size)
+       VALUES ('${IDS.artifactRecheck}', '${IDS.runRecheck}', 'blocks_json', 'artifacts/recheck.json',
+               '${'9'.repeat(64)}', 128)`,
+    `INSERT INTO page_text_versions
+       (folder_id, source_page_id, recognition_run_id, artifact_version_id, text_md, text_sha256)
+       VALUES ('${IDS.folderRecheck}', '${IDS.pageRecheck}', '${IDS.runRecheck}', '${IDS.artifactRecheck}',
+               'Акт освидетельствования скрытых работ № 12', '${'8'.repeat(64)}')`,
     // --- Папка под экран проверки ---
     ...folder(IDS.folderReview, 'Комплект на проверке', IDS.orgContractor, IDS.userContractor),
     // Хэш состава у папки намеренно НЕ совпадает с хэшем её рабочего документа:
@@ -414,6 +490,20 @@ export function fixtureSql({ sha, size, aggregateHash }) {
                'deterministic', false, 'source_page', '${IDS.page1}',
                '${IDS.page1}', '${IDS.blockB}',
                'Штамп на странице не читается целиком', 'Проверьте рамку штампа на второй странице')`,
+    // Прошлая проверка папки под перепроверку. Стоит ЗДЕСЬ, а не рядом с самой
+    // папкой: `validation_runs.ruleset_version_id` объявлен NOT NULL, а набор
+    // правил вставляется выше по списку — порядок в фикстуре свободен ровно до
+    // внешних ключей.
+    `INSERT INTO validation_runs (id, folder_id, ruleset_version_id, started_at, finished_at, counts)
+       VALUES ('${IDS.validationRunRecheck}', '${IDS.folderRecheck}', '${IDS.rulesetVersion}',
+               now(), now(), '{"rulesEvaluated": 7, "findings": 1}'::jsonb)`,
+    `INSERT INTO findings (id, validation_run_id, folder_id, object_id, contractor_id, rule_code,
+                            severity, state, origin, is_blocking, target_type, target_id,
+                            source_page_id, message, hint)
+       VALUES ('${IDS.findingRecheck}', '${IDS.validationRunRecheck}', '${IDS.folderRecheck}',
+               '${IDS.object}', '${IDS.orgContractor}', 'AOSR.HDR.022', 'warning', 'open',
+               'deterministic', false, 'source_page', '${IDS.pageRecheck}', '${IDS.pageRecheck}',
+               'Замечание прошлой проверки', 'Оно обязано исчезнуть после перепроверки')`,
     // У `validation_runs` нет ни object_id, ни contractor_id: область видимости
     // прогона определяется его папкой. Списывать состав колонок с §3 плана
     // нельзя — источник правды это миграция.

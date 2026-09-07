@@ -296,6 +296,7 @@ const EXPECTED: Readonly<Record<string, Access | Expectation>> = {
   'POST /api/v1/folders/:folderId/files/upload/init': 'submission.upload',
   'POST /api/v1/folders/:folderId/layout': 'markup.edit',
   'POST /api/v1/folders/:folderId/markup': 'pipeline.run',
+  'POST /api/v1/folders/:folderId/recheck': 'pipeline.run',
   'POST /api/v1/folders/:folderId/recognize': 'recognition.start',
   'POST /api/v1/folders/:folderId/segment': 'document.edit',
   'POST /api/v1/folders/:folderId/stop': 'pipeline.run',
