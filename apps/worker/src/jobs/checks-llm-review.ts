@@ -101,7 +101,7 @@ export interface ChecksLlmReviewDeps {
     readonly latencyMs: number;
     readonly structuredResult: unknown;
     readonly requestId: string | null;
-  }): Promise<void>;
+  }): Promise<string>;
 
   /**
    * Сигнал о качестве извлечения (§11, ADR-0010).

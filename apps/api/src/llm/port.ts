@@ -42,7 +42,9 @@ export type LlmStage =
   // Зонд разворота страницы (0052, ADR-0020). Как и `recognize`, идёт через
   // `VlmPort`, а не через этот текстовый порт: стадия здесь нужна только как
   // значение `ai_runs.stage`, разделяемое обоими путями аудита.
-  | 'orientation';
+  | 'orientation'
+  /** Сверка строк перечня с документами комплекта (S57). */
+  | 'registry_match';
 
 /** Провайдеры; совпадают с CHECK `ai_runs_provider_chk`. `rdweb` заблокирован (§0.3 п.6). */
 export type LlmProviderName = 'proxy_llm' | 'rdweb' | 'recorded';

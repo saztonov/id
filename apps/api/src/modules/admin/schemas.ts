@@ -634,6 +634,8 @@ export const promptStageSchema = z.enum([
   // Зонд разворота страницы (0052, ADR-0020). Стадия своя, а не `recognize`:
   // у его строки `ai_runs` нет прогона распознавания.
   'orientation',
+  // Сверка строк перечня с документами комплекта (S57).
+  'registry_match',
 ]);
 
 export const promptListQuerySchema = adminPageQuerySchema.extend({

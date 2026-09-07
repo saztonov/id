@@ -103,6 +103,11 @@ function harness(behaviour: (index: number) => Promise<LlmCallResult>, pageCount
     saveRegistryMatches: () => Promise.resolve({ updated: 0, skipped: 0 }),
     saveDocumentRelations: () => Promise.resolve({ removed: 0, written: 0, skipped: 0 }),
     observeCandidate: () => Promise.resolve({ created: false, occurrences: 1 }),
+    // Веер сверки перечней моделью (S57) этой стадии не касается: фикстура
+    // объявляет порты пустыми, чтобы отсутствие сверки не выглядело поломкой.
+    matchPartitions: () => Promise.resolve([]),
+    matchPartition: () => Promise.resolve(null),
+    matchFanState: () => Promise.resolve({ live: 0, dead: 0, total: 0 }),
     stagePrompt: () => Promise.resolve(PROMPT),
     callLlm: (input) => {
       calls.push(calls.length);
@@ -116,7 +121,10 @@ function harness(behaviour: (index: number) => Promise<LlmCallResult>, pageCount
         cost: input.cost,
         structuredResult: input.structuredResult,
       });
-      return Promise.resolve();
+      // Строка аудита отдаёт свой идентификатор (S57): сверка перечней хранит
+      // его в строке, чтобы «почему портал так решил» отвечалось вызовом, а не
+      // перебором прогона.
+      return Promise.resolve('ai-run-1');
     },
   };
 

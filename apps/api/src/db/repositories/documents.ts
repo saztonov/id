@@ -1634,6 +1634,24 @@ export async function listFieldValues(
 // Реестр приложений (задачи 17 и 18)
 // =====================================================================
 
+/**
+ * Проверка одной графы строки против реквизита найденного документа (S57).
+ *
+ * Форма повторяет `RowCheck` из `segmentation/match-llm.ts` — там она
+ * порождается, здесь читается. Дублирование объявления намеренное: репозиторий
+ * не зависит от модуля сверки, а расхождение формы поймает тест разбора.
+ */
+export interface RowCheckView {
+  readonly kind: string;
+  readonly rowCell: string;
+  readonly documentFieldCode: string | null;
+  readonly status: 'ok' | 'mismatch' | 'unsure';
+  readonly confidence: number;
+  readonly message: string;
+  readonly rowQuote: string;
+  readonly docQuote: string | null;
+}
+
 export interface RegistryRowView {
   readonly id: string;
   readonly folderId: string;
@@ -1654,6 +1672,18 @@ export interface RegistryRowView {
   readonly matchedDocumentId: string | null;
   readonly matchScore: number | null;
   readonly matchState: MatchState;
+  /**
+   * Кто решил и по какому признаку — вместо перевода счёта в слова (S57).
+   *
+   * До S57 отчёт восстанавливал довод из числа порогами (0.85 — «начертание
+   * отличается», ниже — «совпал не полностью»), и сорок строк боевой папки
+   * получили одну подпись на четыре разных случая. Число довода не заменяет.
+   */
+  readonly matchedBy: 'rule' | 'llm';
+  readonly matchBasis: string | null;
+  readonly matchNote: string | null;
+  /** Проверки содержания строки: та ли организация, тот ли акт назван, та ли дата. */
+  readonly checks: readonly RowCheckView[];
   /**
    * Комплект строки.
    *
@@ -1752,6 +1782,24 @@ export interface RegistryMatch {
   readonly matchScore: number | null;
   readonly matchState: MatchState;
   /**
+   * Кто принял решение: лестница номеров или модель (S57).
+   *
+   * Хранится рядом со счётом, потому что `match_score` у них значит разное — у
+   * лестницы это счёт ступени, у модели уверенность, — и складывать их в одну
+   * шкалу нельзя. Отсутствие поля означает прежнее поведение: решила лестница.
+   */
+  readonly matchedBy?: 'rule' | 'llm';
+  /** Признак, по которому документ признан подходящим; `null` — документа нет. */
+  readonly matchBasis?: string | null;
+  /** Довод словами — то, что увидит проверяющий вместо числа. */
+  readonly matchNote?: string | null;
+  /** Строка `ai_runs` того вызова, которым решение получено. */
+  readonly matchAiRunId?: string | null;
+  /** Проверки СОДЕРЖАНИЯ строки: верно ли она описывает найденный документ. */
+  readonly checks?: readonly unknown[];
+  /** Где в тексте перечня лежат ячейки строки — для ссылок в замечаниях. */
+  readonly rowAnchors?: Readonly<Record<string, unknown>> | null;
+  /**
    * Похожие документы у строки в состоянии `candidate`.
    *
    * Пишутся вместе с решением и в той же транзакции: кандидат без решения —
@@ -1810,6 +1858,14 @@ export async function saveRegistryMatches(
             matchedDocumentId: match.matchedDocumentId,
             matchScore: match.matchScore,
             matchState: match.matchState,
+            // Умолчания повторяют прежнее поведение: задача 18 о новых полях не
+            // знает, и её решения обязаны выглядеть ровно так, как выглядели.
+            matchedBy: match.matchedBy ?? 'rule',
+            matchBasis: match.matchBasis ?? null,
+            matchNote: match.matchNote ?? null,
+            matchAiRunId: match.matchAiRunId ?? null,
+            checks: match.checks ?? [],
+            rowAnchors: match.rowAnchors ?? null,
           })
           .where(eq(registryRows.id, match.registryRowId))
           .returning({ id: registryRows.id });
@@ -1862,6 +1918,10 @@ export async function listRegistryRows(
       matchedDocumentId: registryRows.matchedDocumentId,
       matchScore: registryRows.matchScore,
       matchState: registryRows.matchState,
+      matchedBy: registryRows.matchedBy,
+      matchBasis: registryRows.matchBasis,
+      matchNote: registryRows.matchNote,
+      checks: registryRows.checks,
       complectId: registryRows.complectId,
       registryDocTypeCode: logicalDocuments.docTypeCode,
     })
@@ -1895,6 +1955,12 @@ export async function listRegistryRows(
   return rows.map(({ registryDocTypeCode, ...row }) => ({
     ...row,
     matchState: row.matchState as MatchState,
+    matchedBy: row.matchedBy === 'llm' ? ('llm' as const) : ('rule' as const),
+    // Столбец объявлен `jsonb` и приходит как `unknown`. Форма проверяется там,
+    // где значение РОЖДАЕТСЯ (`acceptDecisions`), и повторная проверка здесь
+    // означала бы вторую схему того же ответа — расходящуюся с первой при
+    // первой же правке. Здесь достаточно того, что это массив.
+    checks: Array.isArray(row.checks) ? (row.checks as RegistryRowView['checks']) : [],
     registryKind:
       registryDocTypeCode === TRANSFER_TYPE ? ('transfer' as const) : ('annex' as const),
     candidateDocumentIds: byRow.get(row.id) ?? [],

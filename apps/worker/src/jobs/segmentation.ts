@@ -80,6 +80,7 @@ import {
   type LlmProviderName,
   type LogicalDocumentView,
   type MatchableDocument,
+  type MatchPartitionInput,
   type RegistryPartition,
   type ScopedDocument,
   type TransferGroupCandidate,
@@ -134,10 +135,23 @@ export const FIELD_EXTRACT_STAGE = 'extract';
  * (`checks-llm-review.ts`), но объявлен здесь, потому что здесь объявлен порт.
  */
 export type LlmTextStage =
-  typeof PAGE_CLASSIFY_STAGE | typeof FIELD_EXTRACT_STAGE | typeof LLM_REVIEW_STAGE;
+  | typeof PAGE_CLASSIFY_STAGE
+  | typeof FIELD_EXTRACT_STAGE
+  | typeof LLM_REVIEW_STAGE
+  | typeof REGISTRY_MATCH_STAGE;
 
 /** Стадия и код промта ИИ-проверки заполнения (§9.1, S21). */
 export const LLM_REVIEW_STAGE = 'check';
+
+/**
+ * Стадия и код промта сверки строк перечня с документами комплекта (S57).
+ *
+ * Единица вызова здесь не документ, а ВЫБОРКА: раздел описи со своими строками
+ * и документами своего акта. Меньше её единицы быть не может — решение о строке
+ * принимается на фоне остальных строк раздела, иначе один и тот же документ
+ * достаётся двум строкам сразу, и портал сообщает о полноте, которой нет.
+ */
+export const REGISTRY_MATCH_STAGE = 'registry_match';
 
 /**
  * Промт стадии: опубликованный, иначе встроенный (S27).
@@ -289,6 +303,26 @@ export interface SegmentationDeps {
     readonly matches: readonly RegistryMatch[];
   }): Promise<{ readonly updated: number; readonly skipped: number }>;
 
+  /**
+   * Выборки сверки: раздел описи со своими строками и документами своего акта.
+   *
+   * Возвращает только КЛЮЧИ и размеры — постановщик веера не должен тянуть в
+   * память всю папку ради того, чтобы разложить работу. Содержимое выборки
+   * читает уже её собственная задача (`matchPartition`).
+   */
+  matchPartitions(
+    folderId: string,
+  ): Promise<readonly { readonly key: string; readonly rows: number }[]>;
+
+  /** Содержимое одной выборки; `null` — выборка исчезла между постановкой и работой. */
+  matchPartition(folderId: string, key: string): Promise<MatchPartitionInput | null>;
+
+  /** Состояние веера сверки: остался ли кто-то, кто ещё считает. */
+  matchFanState(
+    folderId: string,
+    generation: string,
+  ): Promise<{ readonly live: number; readonly dead: number; readonly total: number }>;
+
   saveDocumentRelations(input: {
     readonly folderId: string;
     readonly relations: readonly DocumentRelationInput[];
@@ -353,7 +387,15 @@ export interface SegmentationDeps {
     readonly latencyMs: number;
     readonly structuredResult: unknown;
     readonly requestId: string | null;
-  }): Promise<void>;
+    /**
+     * Возвращает идентификатор записанной строки `ai_runs` (S57).
+     *
+     * До сих пор он был не нужен: аудит писался и забывался. Сверка моделью
+     * хранит его В СТРОКЕ перечня (`match_ai_run_id`) — иначе «почему портал
+     * так решил» отвечается только временем и стадией, то есть перебором
+     * вызовов прогона.
+     */
+  }): Promise<string>;
 }
 
 /**
@@ -1764,10 +1806,21 @@ export function createMatchRegistryHandler(
     ctx.logger.info({ counts }, 'реестр сверен с комплектом');
     await ctx.emit('documents.registry_matched', counts);
 
+    /**
+     * Дальше — сверка моделью, а не сразу граф (S57).
+     *
+     * Задача 18 осталась ПРЕДФИЛЬТРОМ: она отвечает на вопрос, на который
+     * отвечает арифметика, — совпал ли номер посимвольно или после свёртки
+     * написания. Всё, что ниже этой границы, решает модель, зная строку целиком.
+     *
+     * Граф ставит следующая стадия — на обеих своих ветках, и когда модель
+     * отработала, и когда её не позвали вовсе. Ставить его ещё и здесь значило
+     * бы строить граф по предфильтру, пока сверка идёт.
+     */
     await ctx.enqueue({
-      type: 'graph.build',
+      type: 'doc.match_plan',
       payload: { folderId, ...forwardAutoContinue(ctx) },
-      dedupeKey: `graph.build:${folderId}`,
+      dedupeKey: `doc.match_plan:${folderId}`,
     });
   };
 }

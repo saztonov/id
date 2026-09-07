@@ -35,6 +35,9 @@ import {
   assembleRecognitionResult,
   insertBlockResultIdempotent,
   readExtractFanState,
+  readMatchFanState,
+  registryPartitions,
+  documentNumbersOf,
   readJobAutoContinue,
   readRunAutoContinue,
   listRunBlockEnvelopes,
@@ -118,6 +121,7 @@ import {
   listPageClassifications,
   listPromptTemplates,
   listRegistryRows,
+  TRANSFER_TYPE,
   loadDocumentPageText,
   loadSegmentationPages,
   observeDocTypeCandidate,
@@ -187,6 +191,8 @@ import {
 } from './file-verify.js';
 import { createSignatureProbeHandler, type SignatureProbeDeps } from './signature-probe.js';
 import { createMaterializePdfHandler, type MaterializeDeps } from './delivery.js';
+import { normalizeDocNo } from '@id/contracts';
+import { DOC_TYPES, fieldsForType } from '@id/doc-types';
 import { createInternalRegistryProviders } from '@id/rules';
 import { createChecksRunHandler, createChecksSummarizeHandler, type ChecksDeps } from './checks.js';
 import {
@@ -213,7 +219,22 @@ import {
   type OrientationProbeDeps,
 } from './orientation-probe.js';
 import { createLayoutStartHandler, type LayoutStartDeps } from './layout-start.js';
+import type {
+  FolderHit,
+  KeyedPartition,
+  MatchPartitionInput,
+  PromptDocument,
+  RegistryRowView,
+  ScopedDocument,
+  FieldValueView,
+  LogicalDocumentView,
+} from '@id/api';
 import { createChecksLlmReviewHandler, type ChecksLlmReviewDeps } from './checks-llm-review.js';
+import {
+  createMatchFinalizeHandler,
+  createMatchPartitionHandler,
+  createMatchPlanHandler,
+} from './registry-match-llm.js';
 import { createModelStore } from '../detection/model-store.js';
 import { WorkingPdfCache } from '../lib/pdf-cache.js';
 import {
@@ -2068,8 +2089,35 @@ function segmentationDeps(options: PipelineJobsOptions): SegmentationDeps {
           },
 
     recordAiRun: async (input) => {
-      await recordAiRun(db, await scopeOf(input.folderId), input);
+      const run = await recordAiRun(db, await scopeOf(input.folderId), input);
+      return run.id;
     },
+
+    /**
+     * Выборки сверки — ключами, без содержимого.
+     *
+     * Постановщик веера не должен тянуть в память всю папку: ему нужно знать
+     * только, СКОЛЬКО работы и как её адресовать. Строки без сравнимого
+     * состояния сюда не попадают — выборка, где всё уже решено посимвольно,
+     * вызова модели не стоит.
+     */
+    matchPartitions: async (folderId) => {
+      const scope = await scopeOf(folderId);
+      const context = await matchContext(db, scope, folderId);
+      return context.partitions
+        .filter((partition) => partition.rows.length > 0)
+        .map((partition) => ({ key: partition.key, rows: partition.rows.length }));
+    },
+
+    matchPartition: async (folderId, key) => {
+      const scope = await scopeOf(folderId);
+      const context = await matchContext(db, scope, folderId);
+      const partition = context.partitions.find((candidate) => candidate.key === key);
+      if (partition === undefined) return null;
+      return context.build(partition);
+    },
+
+    matchFanState: async (folderId, generation) => readMatchFanState(db, folderId, generation),
   };
 }
 
@@ -2276,6 +2324,12 @@ export function registerPipelineJobs(
   registry.register('doc.extract_finalize', createExtractFinalizeHandler(segmentation));
   registry.register('doc.parse_registry', createParseRegistryHandler(segmentation));
   registry.register('doc.match_registry', createMatchRegistryHandler(segmentation));
+  // Сверка перечней моделью (S57). Регистрируется безусловно: отсутствие промта
+  // или провайдера — пропуск стадии с названной причиной, а не отсутствующий
+  // обработчик. Постановщик сам ставит `graph.build`, если звать некого.
+  registry.register('doc.match_plan', createMatchPlanHandler(segmentation));
+  registry.register('doc.match_partition', createMatchPartitionHandler(segmentation));
+  registry.register('doc.match_finalize', createMatchFinalizeHandler(segmentation));
   registry.register('graph.build', createGraphBuildHandler(segmentation));
 
   // Сверка описи передачи с комплектами папки (S20). Терминальная задача: она
@@ -2320,4 +2374,160 @@ export function registerPipelineJobs(
  */
 export function createWorkerRegistry(options: PipelineJobsOptions): JobRegistry {
   return registerPipelineJobs(createMaintenanceRegistry(), options);
+}
+
+// =====================================================================
+// Контекст сверки перечней моделью (S57)
+// =====================================================================
+
+/**
+ * Всё, что нужно вееру сверки, собранное один раз на папку.
+ *
+ * Собирается дважды за прогон — постановщиком (ради числа выборок) и каждой
+ * задачей выборки (ради содержимого), — и это осознанная плата: альтернатива
+ * значила бы хранить копию папки в payload очереди, где она устареет к моменту
+ * исполнения. Чтения дешёвые и все по индексам.
+ */
+async function matchContext(
+  db: PipelineJobsOptions['db'],
+  scope: AuthScope,
+  folderId: string,
+): Promise<{
+  readonly partitions: readonly KeyedPartition<RegistryRowView>[];
+  readonly build: (partition: KeyedPartition<RegistryRowView>) => Promise<MatchPartitionInput>;
+}> {
+  const documents = await listLogicalDocuments(db, scope, folderId);
+  const rows = await listRegistryRows(db, scope, folderId);
+
+  const facts = new Map(
+    documents.map((document) => [
+      document.id,
+      {
+        isTransfer: document.docTypeCode === TRANSFER_TYPE,
+        complectId: document.complectId,
+      },
+    ]),
+  );
+
+  const fieldsOf = new Map<string, readonly FieldValueView[]>();
+  for (const document of documents) {
+    fieldsOf.set(document.id, await listFieldValues(db, SYSTEM_SCOPE, document.id));
+  }
+
+  const scoped: ScopedDocument[] = documents.map((document) => ({
+    documentId: document.id,
+    docTypeCode: document.docTypeCode,
+    complectId: document.complectId,
+    numbers: documentNumbersOf(fieldsOf.get(document.id) ?? [], document.docTypeCode),
+    issuedAt:
+      (fieldsOf.get(document.id) ?? []).find((value) => value.fieldCode === 'issued_at')
+        ?.valueDate ?? null,
+    title: document.title,
+    pageCount: document.pageCount,
+  }));
+
+  const partitions = registryPartitions(scoped, rows, (registryDocumentId) => {
+    return facts.get(registryDocumentId) ?? { isTransfer: false, complectId: null };
+  });
+
+  /** Где лежит документ — словами, для довода «найден в другом разделе». */
+  const placeOf = (documentId: string): string => {
+    const complectId = scoped.find((item) => item.documentId === documentId)?.complectId ?? null;
+    if (complectId === null) return 'вне разделов описи';
+    const ordinal = [...new Set(scoped.map((item) => item.complectId))]
+      .filter((id): id is string => id !== null)
+      .indexOf(complectId);
+    return ordinal < 0 ? 'в другом разделе' : `в разделе ${String(ordinal + 1)}`;
+  };
+
+  const build = async (
+    partition: KeyedPartition<RegistryRowView>,
+  ): Promise<MatchPartitionInput> => {
+    const shown = new Set(partition.documents.map((document) => document.documentId));
+
+    /**
+     * Второй круг — по ВСЕЙ папке и детерминированно.
+     *
+     * Считается заранее и без модели: строка, которой выборка не подошла, чаще
+     * всего описывает документ соседнего раздела, и узнать это стоит сравнения
+     * номеров, а не второго вызова.
+     */
+    const folderWide: Record<string, FolderHit> = {};
+    for (const row of partition.rows) {
+      if (row.docNoNorm === null && row.docNoFolded === null) continue;
+      const hit = scoped.find(
+        (document) =>
+          !shown.has(document.documentId) &&
+          document.numbers.some((number) => {
+            const norm = normalizeDocNo(number);
+            return norm.normalized === row.docNoNorm || norm.folded === row.docNoFolded;
+          }),
+      );
+      if (hit !== undefined) {
+        folderWide[row.id] = { documentId: hit.documentId, where: placeOf(hit.documentId) };
+      }
+    }
+
+    return {
+      key: partition.key,
+      scope: scopeTitleOf(partition, documents),
+      rows: partition.rows,
+      documents: partition.documents.map((document) =>
+        toPromptDocumentOf(document, fieldsOf.get(document.documentId) ?? []),
+      ),
+      folderWide,
+      anchors: {},
+    };
+  };
+
+  return { partitions, build };
+}
+
+/** Заголовок выборки: что именно сверяется — раздел описи или перечень акта. */
+function scopeTitleOf(
+  partition: KeyedPartition<RegistryRowView>,
+  documents: readonly LogicalDocumentView[],
+): string {
+  const registry = documents.find((document) => document.id === partition.registryDocumentId);
+  const kind = registry?.docTypeCode === TRANSFER_TYPE ? 'опись передачи' : 'реестр приложений';
+  const section = partition.rows[0]?.sectionTitle ?? null;
+  return section === null
+    ? `${kind}, ${String(partition.rows.length)} строк`
+    : `${kind}, раздел «${section}», ${String(partition.rows.length)} строк`;
+}
+
+/**
+ * Документ выборки для промта: реквизиты — ПОДПИСЯМИ каталога.
+ *
+ * Подписью, а не кодом: роль организации в документе модель читает из подписи
+ * поля, и списка «какие коды считать организацией» здесь нет вовсе. Такой
+ * список дважды подводил портал — `executor` и `designer_org` в него не попали
+ * и остались непрочитанными, хотя ИИ-ступень их заполняла.
+ */
+function toPromptDocumentOf(
+  document: ScopedDocument,
+  fields: readonly FieldValueView[],
+): PromptDocument {
+  const type = DOC_TYPES.find((candidate) => candidate.code === document.docTypeCode);
+  const labels = new Map(
+    (type === undefined ? [] : fieldsForType(type.fieldSchema, type.kind)).map((field) => [
+      field.code,
+      field.label,
+    ]),
+  );
+
+  const lines: string[] = [];
+  for (const field of fields) {
+    const value = field.valueText ?? field.valueDate ?? null;
+    if (value === null || value.trim() === '') continue;
+    lines.push(`${labels.get(field.fieldCode) ?? field.fieldCode}: ${value.trim()}`);
+  }
+
+  return {
+    documentId: document.documentId,
+    kind: type?.name ?? document.docTypeCode ?? 'вид не определён',
+    title: document.title,
+    pageCount: document.pageCount ?? null,
+    fields: lines,
+  };
 }

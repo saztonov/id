@@ -591,6 +591,59 @@ export const JOB_DEFINITIONS = {
     leaseMs: DEFAULT_LEASE_MS,
     priority: DEFAULT_PRIORITY,
   },
+  /**
+   * Постановщик веера сверки моделью (S57).
+   *
+   * Своих вызовов модели у неё нет: она считает выборки — раздел описи со
+   * своими строками и документами своего акта — и ставит по задаче на каждую.
+   * Единица веера именно выборка, а не строка: решение о строке принимается на
+   * фоне остальных строк раздела, иначе один документ достаётся двум строкам.
+   *
+   * Нет промта или провайдера — задача не падает, а сразу ставит `graph.build`
+   * с названной причиной: сверка остаётся на предфильтре, и портал говорит об
+   * этом вслух (образец — `checks.llm_review`).
+   */
+  'doc.match_plan': {
+    queue: 'io',
+    payload: analysisPayload,
+    stage: 'analysis',
+    maxAttempts: 3,
+    leaseMs: DEFAULT_LEASE_MS,
+    priority: DEFAULT_PRIORITY,
+  },
+  /**
+   * Одна выборка: один вызов модели (S57).
+   *
+   * `generation` — идентификатор постановщика, тот же приём, что у веера
+   * извлечения: без него барьер не отличил бы свои задачи от задач следующего
+   * прогона, а повторная сверка ставит веер заново.
+   *
+   * Пять минут аренды: выборка — один вызов, и потолок обязан отличать
+   * «шлюз завис» от «работа идёт». Отказ одной выборки не убивает папку —
+   * её строки остаются на предфильтре, а барьер называет их число.
+   */
+  'doc.match_partition': {
+    queue: 'llm',
+    payload: analysisPayload.extend({ generation: uuid, partitionKey: z.string().min(1) }),
+    stage: 'analysis',
+    maxAttempts: 3,
+    leaseMs: 300_000,
+    priority: DEFAULT_PRIORITY,
+  },
+  /**
+   * Барьер веера сверки и единственный преемник `graph.build` (S57).
+   *
+   * Очередь `io`, а не `llm`, по той же причине, что у `doc.extract_finalize`:
+   * барьер, ждущий свой веер в той же очереди, занимал бы место того, чего ждёт.
+   */
+  'doc.match_finalize': {
+    queue: 'io',
+    payload: analysisPayload.extend({ generation: uuid }),
+    stage: 'analysis',
+    maxAttempts: 240,
+    leaseMs: DEFAULT_LEASE_MS,
+    priority: DEFAULT_PRIORITY,
+  },
   'graph.build': {
     queue: 'io',
     payload: analysisPayload,

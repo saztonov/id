@@ -63,6 +63,7 @@ const STAGES: Record<string, string> = {
   extract: 'Извлечение реквизитов',
   check: 'Проверка правилом',
   summary: 'Сводка',
+  registry_match: 'Сверка перечня с папкой',
 };
 
 const STATE_LABELS: Record<PromptState, string> = {

@@ -89,6 +89,7 @@ export {
   enqueueSystemJob,
   listLiveRecognizePageJobs,
   readExtractFanState,
+  readMatchFanState,
   readJobAutoContinue,
   readRunAutoContinue,
   raiseAutoContinueForRun,
@@ -521,6 +522,37 @@ export {
 } from './checks/llm-review.js';
 export type { LlmReviewDeps, LlmReviewOutcome, ReviewDocument } from './checks/llm-review.js';
 export { LLM_REVIEW_PROMPT, renderReviewUserPrompt } from './checks/llm-review-prompt.js';
+export {
+  acceptDecisions,
+  mergeLlmMatches,
+  registryMatchResponseSchema,
+  MIN_MATCH_CONFIDENCE,
+  LLM_MATCH_REASONS,
+  ROW_CHECK_KINDS,
+  ROW_CHECK_STATUSES,
+  DECISION_DUPLICATE_ROW,
+  DECISION_FOREIGN_DOCUMENT,
+  DECISION_QUOTE_NOT_GIVEN,
+  DECISION_UNKNOWN_ROW,
+} from './segmentation/match-llm.js';
+export type {
+  FolderHit,
+  LlmRowDecision,
+  MatchPartitionInput,
+  MergedRow,
+  PartitionRow,
+  PrefilterRow,
+  RowCheck,
+} from './segmentation/match-llm.js';
+export {
+  REGISTRY_MATCH_PROMPT,
+  renderRegistryMatchPrompt,
+} from './segmentation/registry-match-prompt.js';
+export type {
+  PromptDocument,
+  PromptPartition,
+  PromptRow,
+} from './segmentation/registry-match-prompt.js';
 
 export {
   EXTRACT_QUOTE_NOT_MAPPED,
@@ -565,7 +597,12 @@ export type {
 /**
  * Выборки кандидатов сверки — одна реализация на воркер и офлайн-стенд (S53).
  */
-export { annexCandidates, transferPartitions } from './segmentation/candidates.js';
+export {
+  annexCandidates,
+  registryPartitions,
+  transferPartitions,
+} from './segmentation/candidates.js';
+export type { KeyedPartition, RegistryFacts } from './segmentation/candidates.js';
 export type { RegistryPartition, ScopedDocument } from './segmentation/candidates.js';
 
 /**

@@ -102,3 +102,74 @@ export function transferPartitions<Row extends { readonly complectId: string | n
     rows: rowsOfComplect,
   }));
 }
+
+/** Выборка вместе с ключом, по которому её адресует веер сверки (S57). */
+export interface KeyedPartition<Row> extends RegistryPartition<Row> {
+  readonly key: string;
+  readonly registryDocumentId: string;
+  readonly complectId: string | null;
+}
+
+/** Чем перечень является для выборки: описью папки или перечнем приложений акта. */
+export interface RegistryFacts {
+  readonly isTransfer: boolean;
+  /** Комплект самого перечня; у описи не используется — комплект несёт строка. */
+  readonly complectId: string | null;
+}
+
+/**
+ * Все выборки папки с устойчивыми ключами (S57).
+ *
+ * Ключ нужен потому, что выборку теперь считает одна задача, а обрабатывает
+ * другая: между ними лежит очередь, и передавать содержимое выборки в payload
+ * значило бы хранить в очереди копию папки. Ключ должен переживать пересчёт —
+ * поэтому он собран из идентификаторов, а не из порядкового номера: строки
+ * перенумеровываются при каждом разборе перечня.
+ *
+ * Функция общая для задачи 18, веера сверки моделью и офлайн-стенда по той же
+ * причине, что и остальное в этом файле: разошедшиеся копии правила «кого
+ * показывать строке» уже приводили к тому, что стенд судил папку не тем
+ * правилом, которым судит портал.
+ */
+export function registryPartitions<
+  Row extends { readonly documentId: string; readonly complectId: string | null },
+>(
+  documents: readonly ScopedDocument[],
+  rows: readonly Row[],
+  factsOf: (registryDocumentId: string) => RegistryFacts,
+): readonly KeyedPartition<Row>[] {
+  const byRegistry = new Map<string, Row[]>();
+  for (const row of rows) {
+    const bucket = byRegistry.get(row.documentId);
+    if (bucket === undefined) byRegistry.set(row.documentId, [row]);
+    else bucket.push(row);
+  }
+
+  const out: KeyedPartition<Row>[] = [];
+  for (const [registryDocumentId, rowsOfRegistry] of byRegistry) {
+    const facts = factsOf(registryDocumentId);
+    if (!facts.isTransfer) {
+      out.push({
+        key: `${registryDocumentId}:annex`,
+        registryDocumentId,
+        complectId: facts.complectId,
+        documents: annexCandidates(documents, facts.complectId),
+        rows: rowsOfRegistry,
+      });
+      continue;
+    }
+
+    for (const partition of transferPartitions(documents, rowsOfRegistry)) {
+      const complectId = partition.rows[0]?.complectId ?? null;
+      out.push({
+        key: `${registryDocumentId}:${complectId ?? 'none'}`,
+        registryDocumentId,
+        complectId,
+        documents: partition.documents,
+        rows: partition.rows,
+      });
+    }
+  }
+
+  return out;
+}

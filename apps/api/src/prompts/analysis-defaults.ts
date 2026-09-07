@@ -39,6 +39,7 @@
  * добавляется одна и в одном месте.
  */
 import { LLM_REVIEW_PROMPT } from '../checks/llm-review-prompt.js';
+import { REGISTRY_MATCH_PROMPT } from '../segmentation/registry-match-prompt.js';
 import { FIELD_EXTRACT_PROMPT, PAGE_CLASSIFY_PROMPT } from '../segmentation/prompts.js';
 import type { PromptText } from '../segmentation/prompts.js';
 
@@ -49,7 +50,7 @@ import type { PromptText } from '../segmentation/prompts.js';
  * `@id/api` не может зависеть от воркера, а разойтись им не даёт
  * `analysis-defaults.test.ts`.
  */
-export type AnalysisPromptStage = 'page_classify' | 'extract' | 'check';
+export type AnalysisPromptStage = 'page_classify' | 'extract' | 'check' | 'registry_match';
 
 export interface AnalysisPromptDefault {
   /**
@@ -76,6 +77,20 @@ const ANALYSIS_PROMPT_DEFAULTS: Readonly<Record<AnalysisPromptStage, AnalysisPro
     code: 'check',
     stage: 'check',
     text: LLM_REVIEW_PROMPT,
+  },
+  /**
+   * Сверка строк перечня с документами комплекта (S57).
+   *
+   * Стадия отличается от трёх соседних единицей вызова: не документ, а
+   * ВЫБОРКА — раздел описи со своими строками и документами своего акта.
+   * Меньше её единицы быть не может: решение о строке принимается на фоне
+   * остальных строк раздела, иначе один и тот же документ достаётся двум
+   * строкам сразу.
+   */
+  registry_match: {
+    code: 'registry_match',
+    stage: 'registry_match',
+    text: REGISTRY_MATCH_PROMPT,
   },
 };
 

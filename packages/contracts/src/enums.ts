@@ -298,8 +298,23 @@ export type ExtractedBy = z.infer<typeof extractedBySchema>;
  * комплекте лежит документ того же вида либо той же даты. Состояние документ
  * НЕ выбирает (`matched_document_id` пуст) и ребра графа не строит: иначе
  * похожесть по виду молча стала бы основанием для правил дат (§9.2).
+ *
+ * `undetermined` — портал НЕ СОПОСТАВИЛ, и это не то же самое, что `missing`
+ * (S57). На `missing` правило REG.110 отвечает «в комплекте не найден
+ * документ», а отчёт печатает «нет в комплекте»: оба утверждают, что бумаги в
+ * папке нет. Между тем строка остаётся ненайденной и когда выборка кандидатов
+ * оказалась не той (документ лежит в чужом разделе описи), и когда данных не
+ * хватило, и когда модель недоступна. Утверждать отсутствие вправе только тот,
+ * кто искал по всей папке.
  */
-export const matchStateSchema = z.enum(['matched', 'missing', 'extra', 'ambiguous', 'candidate']);
+export const matchStateSchema = z.enum([
+  'matched',
+  'missing',
+  'extra',
+  'ambiguous',
+  'candidate',
+  'undetermined',
+]);
 export type MatchState = z.infer<typeof matchStateSchema>;
 
 /** Откуда взят материал в графе проверки (§9.3, `AOSR.P3`). */

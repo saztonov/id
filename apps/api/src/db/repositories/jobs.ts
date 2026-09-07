@@ -1249,15 +1249,16 @@ export interface ExtractFanState {
   readonly total: number;
 }
 
-export async function readExtractFanState(
+async function readFanState(
   db: JobExecutor,
+  jobType: string,
   folderId: string,
   generation: string,
 ): Promise<ExtractFanState> {
   const rows = await db.execute<{ status: string; n: number }>(sql`
     select ${jobs.status} as status, count(*)::int as n
       from ${jobs}
-     where ${jobs.type} = 'doc.extract_document'
+     where ${jobs.type} = ${jobType}
        and ${jobs.payload} ->> 'folderId' = ${folderId}
        and ${jobs.payload} ->> 'generation' = ${generation}
      group by ${jobs.status}
@@ -1272,6 +1273,29 @@ export async function readExtractFanState(
     else dead += row.n;
   }
   return { live, dead, done, total: live + dead + done };
+}
+
+export async function readExtractFanState(
+  db: JobExecutor,
+  folderId: string,
+  generation: string,
+): Promise<ExtractFanState> {
+  return readFanState(db, 'doc.extract_document', folderId, generation);
+}
+
+/**
+ * Состояние веера сверки перечней моделью (S57).
+ *
+ * Тот же вопрос и тот же разрез, что у веера извлечения, — поэтому и запрос
+ * один: два счётчика с одинаковым смыслом разошлись бы при первой же правке
+ * условия «кто считается живым».
+ */
+export async function readMatchFanState(
+  db: JobExecutor,
+  folderId: string,
+  generation: string,
+): Promise<ExtractFanState> {
+  return readFanState(db, 'doc.match_partition', folderId, generation);
 }
 
 /**

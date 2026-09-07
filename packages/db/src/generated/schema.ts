@@ -660,39 +660,6 @@ export const currentBlockResult = pgTable("current_block_result", {
 		}),
 ]);
 
-export const aiRuns = pgTable("ai_runs", {
-	id: uuid().defaultRandom().primaryKey().notNull(),
-	folderId: uuid("folder_id").notNull(),
-	stage: text().notNull(),
-	provider: text().notNull(),
-	model: text().notNull(),
-	promptCode: text("prompt_code"),
-	promptVersion: integer("prompt_version"),
-	inputHash: text("input_hash"),
-	outputHash: text("output_hash"),
-	tokensIn: integer("tokens_in"),
-	tokensOut: integer("tokens_out"),
-	cost: numeric({ precision: 12, scale:  4 }),
-	latencyMs: integer("latency_ms"),
-	structuredResult: jsonb("structured_result"),
-	requestId: text("request_id"),
-	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-}, (table) => [
-	index("ix_ai_runs_folder").using("btree", table.folderId.asc().nullsLast().op("timestamptz_ops"), table.createdAt.desc().nullsFirst().op("timestamptz_ops")),
-	index("ix_ai_runs_request").using("btree", table.requestId.asc().nullsLast().op("text_ops")),
-	index("ix_ai_runs_stage").using("btree", table.stage.asc().nullsLast().op("timestamptz_ops"), table.createdAt.desc().nullsFirst().op("text_ops")),
-	foreignKey({
-			columns: [table.folderId],
-			foreignColumns: [folders.id],
-			name: "ai_runs_folder_id_fkey"
-		}),
-	check("ai_runs_provider_chk", sql`provider = ANY (ARRAY['proxy_llm'::text, 'rdweb'::text, 'recorded'::text])`),
-	check("ai_runs_input_hash_chk", sql`input_hash ~ '^[0-9a-f]{64}$'::text`),
-	check("ai_runs_output_hash_chk", sql`output_hash ~ '^[0-9a-f]{64}$'::text`),
-	check("ai_runs_tokens_chk", sql`((tokens_in IS NULL) OR (tokens_in >= 0)) AND ((tokens_out IS NULL) OR (tokens_out >= 0))`),
-	check("ai_runs_stage_chk", sql`stage = ANY (ARRAY['page_classify'::text, 'doc_split'::text, 'extract'::text, 'check'::text, 'summary'::text, 'recognize'::text, 'orientation'::text])`),
-]);
-
 export const pageTextVersions = pgTable("page_text_versions", {
 	id: uuid().defaultRandom().primaryKey().notNull(),
 	folderId: uuid("folder_id").notNull(),
@@ -742,6 +709,39 @@ export const pageTextVersions = pgTable("page_text_versions", {
 	check("page_text_versions_sha256_chk", sql`text_sha256 ~ '^[0-9a-f]{64}$'::text`),
 	check("page_text_versions_offset_convention_chk", sql`offset_convention = 'utf16-code-unit'::text`),
 	check("page_text_versions_render_version_chk", sql`render_version ~ '^[a-z0-9][a-z0-9._-]*$'::text`),
+]);
+
+export const aiRuns = pgTable("ai_runs", {
+	id: uuid().defaultRandom().primaryKey().notNull(),
+	folderId: uuid("folder_id").notNull(),
+	stage: text().notNull(),
+	provider: text().notNull(),
+	model: text().notNull(),
+	promptCode: text("prompt_code"),
+	promptVersion: integer("prompt_version"),
+	inputHash: text("input_hash"),
+	outputHash: text("output_hash"),
+	tokensIn: integer("tokens_in"),
+	tokensOut: integer("tokens_out"),
+	cost: numeric({ precision: 12, scale:  4 }),
+	latencyMs: integer("latency_ms"),
+	structuredResult: jsonb("structured_result"),
+	requestId: text("request_id"),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+}, (table) => [
+	index("ix_ai_runs_folder").using("btree", table.folderId.asc().nullsLast().op("timestamptz_ops"), table.createdAt.desc().nullsFirst().op("timestamptz_ops")),
+	index("ix_ai_runs_request").using("btree", table.requestId.asc().nullsLast().op("text_ops")),
+	index("ix_ai_runs_stage").using("btree", table.stage.asc().nullsLast().op("timestamptz_ops"), table.createdAt.desc().nullsFirst().op("text_ops")),
+	foreignKey({
+			columns: [table.folderId],
+			foreignColumns: [folders.id],
+			name: "ai_runs_folder_id_fkey"
+		}),
+	check("ai_runs_provider_chk", sql`provider = ANY (ARRAY['proxy_llm'::text, 'rdweb'::text, 'recorded'::text])`),
+	check("ai_runs_input_hash_chk", sql`input_hash ~ '^[0-9a-f]{64}$'::text`),
+	check("ai_runs_output_hash_chk", sql`output_hash ~ '^[0-9a-f]{64}$'::text`),
+	check("ai_runs_tokens_chk", sql`((tokens_in IS NULL) OR (tokens_in >= 0)) AND ((tokens_out IS NULL) OR (tokens_out >= 0))`),
+	check("ai_runs_stage_chk", sql`stage = ANY (ARRAY['page_classify'::text, 'doc_split'::text, 'extract'::text, 'check'::text, 'summary'::text, 'recognize'::text, 'orientation'::text, 'registry_match'::text])`),
 ]);
 
 export const pageAssignments = pgTable("page_assignments", {
@@ -828,41 +828,6 @@ export const fieldValues = pgTable("field_values", {
 	check("field_values_span_bounds_chk", sql`(char_span IS NULL) OR (lower(char_span) >= 0)`),
 ]);
 
-export const registryRows = pgTable("registry_rows", {
-	id: uuid().defaultRandom().primaryKey().notNull(),
-	folderId: uuid("folder_id").notNull(),
-	documentId: uuid("document_id").notNull(),
-	rowNo: integer("row_no").notNull(),
-	sectionTitle: text("section_title"),
-	docNameRaw: text("doc_name_raw").notNull(),
-	docNoRaw: text("doc_no_raw"),
-	orgRaw: text("org_raw"),
-	docNoNorm: text("doc_no_norm"),
-	docNoFolded: text("doc_no_folded"),
-	validFrom: date("valid_from"),
-	validTo: date("valid_to"),
-	issuedAt: date("issued_at"),
-	matchedDocumentId: uuid("matched_document_id"),
-	matchScore: doublePrecision("match_score"),
-	matchState: text("match_state").default('missing').notNull(),
-	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-	ordinal: integer().notNull(),
-	complectId: uuid("complect_id"),
-}, (table) => [
-	index("ix_registry_rows_complect").using("btree", table.complectId.asc().nullsLast().op("uuid_ops")),
-	index("ix_registry_rows_document_ordinal").using("btree", table.documentId.asc().nullsLast().op("int4_ops"), table.ordinal.asc().nullsLast().op("int4_ops")),
-	index("ix_registry_rows_folder").using("btree", table.folderId.asc().nullsLast().op("uuid_ops")),
-	index("ix_registry_rows_matched").using("btree", table.matchedDocumentId.asc().nullsLast().op("uuid_ops")),
-	index("ix_registry_rows_no_folded").using("btree", table.docNoFolded.asc().nullsLast().op("text_ops")),
-	index("ix_registry_rows_no_norm").using("btree", table.docNoNorm.asc().nullsLast().op("text_ops")),
-	unique("registry_rows_ordinal_uq").on(table.documentId, table.ordinal),
-	check("registry_rows_row_no_chk", sql`row_no > 0`),
-	check("registry_rows_match_score_chk", sql`(match_score IS NULL) OR ((match_score >= (0)::double precision) AND (match_score <= (1)::double precision))`),
-	check("registry_rows_matched_chk", sql`(match_state <> 'matched'::text) OR (matched_document_id IS NOT NULL)`),
-	check("registry_rows_ordinal_chk", sql`ordinal >= 0`),
-	check("registry_rows_match_state_chk", sql`match_state = ANY (ARRAY['matched'::text, 'missing'::text, 'extra'::text, 'ambiguous'::text, 'candidate'::text])`),
-]);
-
 export const materials = pgTable("materials", {
 	id: uuid().defaultRandom().primaryKey().notNull(),
 	folderId: uuid("folder_id").notNull(),
@@ -886,6 +851,57 @@ export const materials = pgTable("materials", {
 	unique("materials_folder_id_uq").on(table.folderId, table.id),
 	check("materials_source_chk", sql`source = ANY (ARRAY['act_p3'::text, 'registry'::text, 'quality_doc'::text, 'manual'::text])`),
 	check("materials_category_chk", sql`(category_code IS NULL) OR (category_code ~ '^[a-z][a-z0-9_]*$'::text)`),
+]);
+
+export const registryRows = pgTable("registry_rows", {
+	id: uuid().defaultRandom().primaryKey().notNull(),
+	folderId: uuid("folder_id").notNull(),
+	documentId: uuid("document_id").notNull(),
+	rowNo: integer("row_no").notNull(),
+	sectionTitle: text("section_title"),
+	docNameRaw: text("doc_name_raw").notNull(),
+	docNoRaw: text("doc_no_raw"),
+	orgRaw: text("org_raw"),
+	docNoNorm: text("doc_no_norm"),
+	docNoFolded: text("doc_no_folded"),
+	validFrom: date("valid_from"),
+	validTo: date("valid_to"),
+	issuedAt: date("issued_at"),
+	matchedDocumentId: uuid("matched_document_id"),
+	matchScore: doublePrecision("match_score"),
+	matchState: text("match_state").default('missing').notNull(),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	ordinal: integer().notNull(),
+	complectId: uuid("complect_id"),
+	matchedBy: text("matched_by").default('rule').notNull(),
+	matchBasis: text("match_basis"),
+	matchNote: text("match_note"),
+	matchAiRunId: uuid("match_ai_run_id"),
+	checks: jsonb().default([]).notNull(),
+	rowAnchors: jsonb("row_anchors"),
+}, (table) => [
+	index("ix_registry_rows_complect").using("btree", table.complectId.asc().nullsLast().op("uuid_ops")),
+	index("ix_registry_rows_document_ordinal").using("btree", table.documentId.asc().nullsLast().op("int4_ops"), table.ordinal.asc().nullsLast().op("int4_ops")),
+	index("ix_registry_rows_folder").using("btree", table.folderId.asc().nullsLast().op("uuid_ops")),
+	index("ix_registry_rows_matched").using("btree", table.matchedDocumentId.asc().nullsLast().op("uuid_ops")),
+	index("ix_registry_rows_no_folded").using("btree", table.docNoFolded.asc().nullsLast().op("text_ops")),
+	index("ix_registry_rows_no_norm").using("btree", table.docNoNorm.asc().nullsLast().op("text_ops")),
+	foreignKey({
+			columns: [table.matchAiRunId],
+			foreignColumns: [aiRuns.id],
+			name: "registry_rows_match_ai_run_fk"
+		}).onDelete("set null"),
+	unique("registry_rows_ordinal_uq").on(table.documentId, table.ordinal),
+	check("registry_rows_row_no_chk", sql`row_no > 0`),
+	check("registry_rows_match_score_chk", sql`(match_score IS NULL) OR ((match_score >= (0)::double precision) AND (match_score <= (1)::double precision))`),
+	check("registry_rows_matched_chk", sql`(match_state <> 'matched'::text) OR (matched_document_id IS NOT NULL)`),
+	check("registry_rows_ordinal_chk", sql`ordinal >= 0`),
+	check("registry_rows_matched_by_chk", sql`matched_by = ANY (ARRAY['rule'::text, 'llm'::text])`),
+	check("registry_rows_match_basis_chk", sql`(match_basis IS NULL) OR (match_basis = ANY (ARRAY['doc_no'::text, 'annex_pages'::text, 'batch_no'::text, 'name_and_date'::text]))`),
+	check("registry_rows_basis_needs_match_chk", sql`(match_basis IS NULL) OR (matched_document_id IS NOT NULL)`),
+	check("registry_rows_checks_array_chk", sql`jsonb_typeof(checks) = 'array'::text`),
+	check("registry_rows_row_anchors_object_chk", sql`(row_anchors IS NULL) OR (jsonb_typeof(row_anchors) = 'object'::text)`),
+	check("registry_rows_match_state_chk", sql`match_state = ANY (ARRAY['matched'::text, 'missing'::text, 'extra'::text, 'ambiguous'::text, 'candidate'::text, 'undetermined'::text])`),
 ]);
 
 export const batches = pgTable("batches", {
@@ -1248,7 +1264,7 @@ export const promptTemplates = pgTable("prompt_templates", {
 	check("prompt_templates_version_chk", sql`version > 0`),
 	check("prompt_templates_state_chk", sql`state = ANY (ARRAY['draft'::text, 'test'::text, 'published'::text, 'archived'::text])`),
 	check("prompt_templates_published_chk", sql`(state <> 'published'::text) OR ((published_at IS NOT NULL) AND (published_by IS NOT NULL))`),
-	check("prompt_templates_stage_chk", sql`stage = ANY (ARRAY['page_classify'::text, 'doc_split'::text, 'extract'::text, 'check'::text, 'summary'::text, 'recognize'::text, 'orientation'::text])`),
+	check("prompt_templates_stage_chk", sql`stage = ANY (ARRAY['page_classify'::text, 'doc_split'::text, 'extract'::text, 'check'::text, 'summary'::text, 'recognize'::text, 'orientation'::text, 'registry_match'::text])`),
 ]);
 
 export const outbox = pgTable("outbox", {
@@ -2109,7 +2125,7 @@ export const registryRowCandidates = pgTable("registry_row_candidates", {
 		}).onDelete("cascade"),
 	primaryKey({ columns: [table.documentId, table.registryRowId], name: "registry_row_candidates_pk"}),
 	check("registry_row_candidates_score_chk", sql`(score >= (0)::double precision) AND (score <= (1)::double precision)`),
-	check("registry_row_candidates_basis_chk", sql`basis = ANY (ARRAY['doc_no'::text, 'doc_type'::text, 'issued_at'::text, 'doc_type_and_issued_at'::text, 'annex_pages'::text])`),
+	check("registry_row_candidates_basis_chk", sql`basis = ANY (ARRAY['doc_no'::text, 'doc_type'::text, 'issued_at'::text, 'doc_type_and_issued_at'::text, 'annex_pages'::text, 'batch_no'::text, 'name_and_date'::text])`),
 ]);
 
 export const recognitionRunPages = pgTable("recognition_run_pages", {
