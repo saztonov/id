@@ -165,6 +165,34 @@ describe('mergeLlmMatches', () => {
     expect(row?.matchNote).toContain('не ответила');
   });
 
+  it('коллизия номера переживает молчание модели', () => {
+    // Предфильтр УСТАНОВИЛ факт: один номер сошёлся у нескольких документов, и
+    // различить их сравнением номеров нельзя. Стереть это в «портал не
+    // сопоставил» значило бы выбросить работу, которая сделана и верна.
+    const collided: PrefilterRow = {
+      rowId: 'row-collision',
+      matchState: 'ambiguous',
+      matchedDocumentId: null,
+      matchScore: null,
+      candidates: [
+        { documentId: 'doc-1', basis: 'doc_no' },
+        { documentId: 'doc-2', basis: 'doc_no' },
+      ],
+    };
+
+    const [row] = mergeLlmMatches([collided], []);
+    expect(row?.matchState).toBe('ambiguous');
+    expect(row?.candidates).toHaveLength(2);
+  });
+
+  it('«номер не совпал» без модели остаётся неизвестностью, а не отсутствием', () => {
+    // Чувствительность к предыдущему: сохраняется УСТАНОВЛЕННОЕ, а не всё
+    // подряд. После снятия нижних ступеней «предфильтр не нашёл» означает лишь
+    // «номер не совпал», и про наличие документа в папке не говорит ничего.
+    const [row] = mergeLlmMatches([unresolved], []);
+    expect(row?.matchState).toBe('undetermined');
+  });
+
   it('точное совпадение переживает молчание модели', () => {
     const [row] = mergeLlmMatches([exact], []);
     expect(row?.matchState).toBe('matched');

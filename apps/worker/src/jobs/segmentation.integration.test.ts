@@ -984,6 +984,7 @@ describe('провайдер модели', () => {
         page_classify: 'классифицируешь',
         extract: 'извлекаешь',
         check: 'проверяешь',
+        registry_match: 'сверяешь',
       };
       const expected = marker[entry.stage];
       expect(expected, `стадия ${entry.stage} не описана в тесте`).toBeDefined();
