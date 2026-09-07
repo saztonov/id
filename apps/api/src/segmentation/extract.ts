@@ -50,6 +50,7 @@ import {
   resolveDocType,
 } from '@id/doc-types';
 import { OPENER_RE } from './document-openers.js';
+import { isSeparator, tableCells } from './md-table.js';
 import type { ExtractedField, TextEvidence } from './types.js';
 
 /** Страница на входе извлечения. */
@@ -108,10 +109,24 @@ interface RawHit {
   readonly confidence: number;
   readonly start: number;
   readonly end: number;
+  /**
+   * Разобранные строки таблицы «показатель / норма / факт».
+   *
+   * Есть только у находок табличных реквизитов: правило сравнения читает
+   * `value_json`, а не текст, и склеенная строка ему бесполезна.
+   */
+  readonly rows?: readonly NormFactRow[];
+}
+
+/** Строка таблицы показателей: как её ждёт `normFactRows` в правилах. */
+interface NormFactRow {
+  readonly indicator: string;
+  readonly norm: string;
+  readonly fact: string;
 }
 
 /** Как сводятся находки со всех страниц в одно значение реквизита. */
-type Merge = 'text' | 'date' | 'number' | 'list';
+type Merge = 'text' | 'date' | 'number' | 'list' | 'rows';
 
 /**
  * Что правило знает о документе, кроме текста страницы (S53).
@@ -338,7 +353,28 @@ function labelledDate(labels: readonly string[]): RegExp {
  * Число продолжений ограничено: без потолка одна строка таблицы утянула бы в
  * номер половину соседней ячейки.
  */
-const NUMBER_TAIL = String.raw`(?:[^\S\n]+(?:\d+|(?!ООО|ОАО|ЗАО|ПАО|АО|ИП|ГОСТ|ТУ|СТО|СП|ОТ|ПО|ДО|ВЫДАН|С)[A-ZА-Я][0-9A-ZА-Я./\-]*)){0,4}`;
+/**
+ * Единица привязки в конце номера: «48-ОТ/-1 этаж», «59-ОТ/1 этап».
+ *
+ * Исключение из правила регистра выше, и оно закрытое. Стройка нумерует акты
+ * по месту работ, и напечатанное строчными «этаж» — часть номера, а не проза:
+ * в описи папки «ИД Мастер апрель 2026» номер набран целиком («№ 48-ОТ/-1
+ * этаж»), а в самом акте хвост отбрасывался, и `number` становился
+ * «48-ОТ/-1». Двенадцать строк описи из-за этого сходились с актами лишь
+ * частичным вхождением (счёт 0.6) вместо точного равенства — и все двенадцать
+ * актов одинаково подписывались «номер совпал не полностью», то есть
+ * настоящее расхождение в номере было бы неотличимо от совпадения.
+ *
+ * Список слов закрыт и состоит из единиц привязки, а не из любых строчных
+ * слов: «от», «с», «по», «выдан» по-прежнему заканчивают номер.
+ *
+ * «Корпус» в список НЕ входит, и это проверено тестом: наименование объекта
+ * пишут «№ 77:07:0010004:24, корпус 1», и слово вытягивало кадастровый номер
+ * из-под признака формы записи, которым он и отбраковывается.
+ */
+const NUMBER_UNIT = String.raw`(?:[Ээ][Тт][Аа][ЖжПп])`;
+
+const NUMBER_TAIL = String.raw`(?:[^\S\n]+(?:\d+|${NUMBER_UNIT}(?![\p{L}])|(?!ООО|ОАО|ЗАО|ПАО|АО|ИП|ГОСТ|ТУ|СТО|СП|ОТ|ПО|ДО|ВЫДАН|С)[A-ZА-Я][0-9A-ZА-Я./\-]*)){0,4}`;
 
 /**
  * Полужирное `**` не входит в номер и не мешает шаблону сомкнуться.
@@ -749,7 +785,7 @@ function ownNumber(text: string): (hit: RawHit) => boolean {
  * определения коэффициента уплотнения» — заголовок листа, и дата в нём своя.
  */
 const FOREIGN_DATE_OWNER =
-  /(?:договор|соглашени|протокол|сертификат|свидетельств|паспорт|приказ|распоряжени|решени|аттестат|письм|накладн|лицензи|выписк|удостоверени|заключени|разрешени|методик|доверенност|альбом)/iu;
+  /(?:договор|соглашени|протокол|сертификат|свидетельств|паспорт|приказ|распоряжени|решени|аттестат|письм|накладн|лицензи|выписк|удостоверени|заключени|разрешени|методик|доверенност|альбом|заявлени|заявк|уполномочивани|регистрационн[а-я]*\s+номер)/iu;
 
 /**
  * Сколько строк выше находки просматривается в поисках владельца чужой даты.
@@ -920,7 +956,21 @@ const HEADING_NUMBER_LOOKAHEAD = 2;
  * Своим название считается только при совпадении с видом документа: «Сертификат
  * соответствия № …» на листе паспорта называет чужую бумагу. Вид строки
  * определяется тем же каталогом, что и у классификатора страниц.
+ *
+ * ## Почему значение берётся общим хвостом номера
+ *
+ * Прежде ступень брала ОДИН токен до первого пробела, и этого хватало ровно
+ * для ячейки таблицы. На заголовке акта «АКТ освидетельствования скрытых
+ * работ №48-ОТ/-1 этаж» она обрывала номер на пробеле: `number` становился
+ * «48-ОТ/-1», тогда как опись и сам бланк печатают «48-ОТ/-1 этаж». Ступень
+ * стоит выше сильного шаблона и потому побеждала его — двенадцать актов папки
+ * «ИД Мастер апрель 2026» сходились со своими строками описи не равенством, а
+ * вхождением куска номера (счёт 0.6). Общий хвост `NUMBER_TAIL` знает и про
+ * единицу привязки, и про служебные слова, а разделитель графы `|` в него не
+ * входит — ячейка «| Паспорт № | 357 |» читается как читалась.
  */
+const OWN_TITLE_NUMBER = new RegExp(String.raw`^[\s|*_]*(${NUMBER_HEAD}${NUMBER_TAIL})`, 'du');
+
 function ownTitleNumberHits(text: string, docTypeCode: string | null): readonly RawHit[] {
   if (docTypeCode === null || isFallbackCode(docTypeCode)) return [];
 
@@ -944,15 +994,15 @@ function ownTitleNumberHits(text: string, docTypeCode: string | null): readonly 
     if (resolved !== docTypeCode) continue;
 
     const rest = line.slice(sign + 1);
-    const value = /^[\s|*_]*([^\s|*]+)/u.exec(rest);
-    const captured = value?.[1] ?? '';
-    if (captured === '') continue;
+    const value = OWN_TITLE_NUMBER.exec(rest);
+    const captured = value?.[1]?.trim() ?? '';
+    const span = value?.indices?.[1];
+    if (captured === '' || span === undefined) continue;
 
-    const at = rest.indexOf(captured);
     hits.push({
       value: captured,
-      start: start + sign + 1 + at,
-      end: start + sign + 1 + at + captured.length,
+      start: start + sign + 1 + span[0],
+      end: start + sign + 1 + span[0] + captured.length,
       confidence: CONFIDENCE.ownLabel,
     });
   }
@@ -1025,6 +1075,95 @@ function findDocumentNumber(text: string, context: RuleContext): readonly RawHit
   );
 }
 
+/**
+ * Таблица «показатель / норма / факт» на листе паспорта или сертификата.
+ *
+ * ## Зачем она извлекается отдельной ступенью
+ *
+ * `PASS.610` сравнивает фактическое значение с нормой, напечатанной рядом, и
+ * ради этого сравнения существует. На боевом корпусе оно не срабатывало ни
+ * разу: реквизит, который правило читает, никем не заполнялся, и правило
+ * отвечало «ни в одном паспорте нет таблицы „Норма по НД / Фактически“ —
+ * сравнивать нечего». В паспорте № 112 папки «ИД Мастер апрель 2026»
+ * водоудерживающая способность 97,7 % при норме «не менее 98» — и все шесть
+ * копий паспорта прошли проверку молча; дефект нашла только ИИ-стадия, и то в
+ * одной копии из шести.
+ *
+ * ## Как таблица опознаётся
+ *
+ * По ШАПКЕ, а не по положению: у паспорта КНАУФ она «Наименование показателя |
+ * Нормативное значение | Фактическое значение», у паспорта краски — «№ |
+ * Наименование показателей | Норма | Результат анализа». Число и порядок граф
+ * разные, общее — смысл заголовков, и колонки ищутся по нему.
+ *
+ * Шапка ищется среди ВСЕХ строк таблицы, а не только в её заголовке: OCR
+ * склеивает таблицу реквизитов бланка и таблицу испытаний в один блок, и
+ * заголовком блока оказывается шапка первой из них.
+ *
+ * Таблица без графы нормы не берётся вовсе. Паспорт «КНАУФ-Тифенгрунд» печатает
+ * «Наименование показателя | Фактическое значение» — сравнивать не с чем, и
+ * выдумывать норму здесь значило бы нарушить §8.1.
+ */
+const NORM_FACT_INDICATOR_HEADER = /показател|наименовани/iu;
+const NORM_FACT_NORM_HEADER = /норм|требовани/iu;
+const NORM_FACT_FACT_HEADER = /фактическ|результат|факт\b/iu;
+
+function normFactHits(text: string): readonly RawHit[] {
+  const lines = text.split('\n');
+  const offsets: number[] = [];
+  let offset = 0;
+  for (const line of lines) {
+    offsets.push(offset);
+    offset += line.length + 1;
+  }
+
+  const hits: RawHit[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const header = tableCells(lines[index]);
+    if (header === null || isSeparator(header)) continue;
+
+    const indicator = header.findIndex((cell) => NORM_FACT_INDICATOR_HEADER.test(cell));
+    const norm = header.findIndex((cell) => NORM_FACT_NORM_HEADER.test(cell));
+    const fact = header.findIndex((cell) => NORM_FACT_FACT_HEADER.test(cell));
+    if (indicator < 0 || norm < 0 || fact < 0) continue;
+    if (indicator === norm || indicator === fact || norm === fact) continue;
+
+    const width = Math.max(indicator, norm, fact) + 1;
+    const rows: NormFactRow[] = [];
+    let last = index;
+    for (let below = index + 1; below < lines.length; below += 1) {
+      const cells = tableCells(lines[below]);
+      if (cells === null) break;
+      if (isSeparator(cells)) continue;
+      if (cells.length < width) break;
+
+      const row = {
+        indicator: cells[indicator] ?? '',
+        norm: cells[norm] ?? '',
+        fact: cells[fact] ?? '',
+      };
+      // Строка без показателя — подпись под таблицей либо её продолжение:
+      // приписать ей норму соседней строки значило бы сравнить чужие числа.
+      if (row.indicator === '') break;
+      rows.push(row);
+      last = below;
+    }
+
+    if (rows.length === 0) continue;
+
+    const start = offsets[index] ?? 0;
+    hits.push({
+      value: rows.map((row) => `${row.indicator}: ${row.norm} / ${row.fact}`).join('; '),
+      confidence: CONFIDENCE.labelled,
+      start,
+      end: (offsets[last] ?? start) + (lines[last]?.length ?? 0),
+      rows,
+    });
+  }
+
+  return hits;
+}
+
 const BASE_RULES: readonly RuleSpec[] = [
   {
     fieldCode: 'number',
@@ -1043,11 +1182,36 @@ const BASE_RULES: readonly RuleSpec[] = [
       // «от <дата>» разбирается ОДНИМ шаблоном на две ступени: они различаются
       // не формой записи, а ответом на вопрос «чья это дата», и второй шаблон
       // разошёлся бы с первым на первом же уточнении.
+      //
+      // Разметка перед предлогом входит в допустимое начало наравне с пробелом
+      // и скобкой. Свидетельство о государственной регистрации печатает свою
+      // дату жирной строкой «**от 06.12.2016 г.**» под номером, и без этого
+      // звёздочка закрывала находку: датой выдачи становилась дата заявления,
+      // а у части копий — дата решения Комиссии таможенного союза 2010 года,
+      // после чего `DATE.311` сообщал «документ выдан 5800 дней назад».
       const introduced = sweep(
         text,
-        new RegExp(String.raw`(?:^|[\s|(])от\s*[;,]?\s*(${ANY_DATE})`, 'gidu'),
+        new RegExp(String.raw`(?:^|[\s|(*_])от\s*[;,]?\s*(${ANY_DATE})`, 'gidu'),
         CONFIDENCE.labelled,
       );
+
+      /**
+       * Начало срока действия — дата выдачи бланка, который печатает срок.
+       *
+       * У сертификата соответствия собственной «даты выдачи» в бланке нет:
+       * единственная его дата — «действителен с 17.05.2023 г. по 16.05.2026
+       * г.». Ступень стоит выше «от <дата> вне заголовка» не по осторожности:
+       * все «от» на таком листе принадлежат чужим документам — свидетельству
+       * органа по сертификации, протоколу испытаний, аттестату лаборатории, —
+       * и портал брал датой выдачи 13.10.2020, дату свидетельства органа.
+       * Та же мысль уже записана в `LABELLED_DATE_CODES`: начало срока и есть
+       * выдача, поэтому `valid_from` не считается «занявшим» дату.
+       */
+      const validFrom = sweep(
+        text,
+        new RegExp(String.raw`(?:^|[\s|(*_])[сc]\s*[;,]?\s*(${ANY_DATE})\s*[;,]?\s*по\s`, 'gidu'),
+        CONFIDENCE.labelled,
+      ).filter(outsideEsignStamp(text));
       return firstOf(
         sweep(
           text,
@@ -1079,6 +1243,7 @@ const BASE_RULES: readonly RuleSpec[] = [
         // сертификата двумя строками выше не делает своей дату отраслевого
         // соглашения, названного строкой находки.
         introduced.filter(atDocumentHeading(text)).filter(ownDate(text)),
+        validFrom,
         // «от <дата>» вне заголовка — только если владелец даты не назван.
         introduced.filter(ownDate(text)),
         // Голая дата без подписи: в документе она может быть чем угодно —
@@ -1305,6 +1470,16 @@ const TYPE_RULES: readonly RuleSpec[] = [
     find: (text) => sweep(text, GOST_TU, CONFIDENCE.shaped),
   },
   {
+    fieldCode: 'indicators',
+    merge: 'rows',
+    find: (text) => normFactHits(text),
+  },
+  {
+    fieldCode: 'mechanical_properties',
+    merge: 'rows',
+    find: (text) => normFactHits(text),
+  },
+  {
     fieldCode: 'concrete_class',
     merge: 'text',
     find: (text) =>
@@ -1486,6 +1661,28 @@ function runRule(
         );
 
   if (rule.merge === 'list') return listField(rule.fieldCode, verified);
+
+  if (rule.merge === 'rows') {
+    // Таблиц на листе может быть несколько (паспорт печатают в две колонки, а
+    // копии подшивают подряд): берётся самая длинная, а при равной длине —
+    // первая. Склеивать их нельзя: это разные таблицы разных документов.
+    const tables = verified.filter((hit) => (hit.rows?.length ?? 0) > 0);
+    if (tables.length === 0) return null;
+    const widest = tables.reduce((left, right) =>
+      (right.rows?.length ?? 0) > (left.rows?.length ?? 0) ? right : left,
+    );
+
+    return {
+      fieldCode: rule.fieldCode,
+      valueText: widest.value,
+      valueDate: null,
+      valueNum: null,
+      valueJson: widest.rows ?? [],
+      confidence: widest.confidence,
+      extractedBy: 'rule',
+      evidence: evidenceOf(widest),
+    };
+  }
 
   // Из нескольких находок берётся самая уверенная, при равенстве — первая по
   // порядку страниц: реквизит документа печатается в заголовке, а повторы в

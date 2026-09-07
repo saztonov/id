@@ -105,8 +105,28 @@ describe('countFindings', () => {
       openWarnings: 1,
       openInfo: 1,
       undetermined: 1,
+      externalUnavailable: 0,
       waived: 1,
       extractionQuality: 0,
     });
+  });
+
+  it('«не проверено» без подключённого реестра считается ещё и отдельно', () => {
+    // Проверка по внешнему реестру не выполняется вовсе: источника данных нет.
+    // Такое «не проверено» говорит о портале, а не о папке, и на боевой папке
+    // его пятнадцать из ста сорока четырёх.
+    const counts = countFindings([
+      finding({ id: 'f1', state: 'undetermined' }),
+      finding({
+        id: 'f2',
+        ruleCode: 'EXT.SRO.140',
+        state: 'undetermined',
+        origin: 'external_unavailable',
+      }),
+    ]);
+
+    // Общее число непроверенного не уменьшается: оговорка называет его часть.
+    expect(counts.undetermined).toBe(2);
+    expect(counts.externalUnavailable).toBe(1);
   });
 });

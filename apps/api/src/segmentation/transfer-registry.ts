@@ -413,25 +413,48 @@ const HIERARCHICAL_POSITION = /^(\d{1,4})\.(\d{1,4})\.?$/u;
  * Возвращает `null`, когда выровнять нечем: строка отбрасывается, как и до S50.
  */
 function alignmentShift(cells: readonly string[], layout: TransferColumns): number | null {
-  if (cells.length === layout.count) return 0;
   if (Math.abs(cells.length - layout.count) > 1) return null;
-  if (layout.pos === null) return null;
+  const pos = layout.pos;
+  if (pos === null) return cells.length === layout.count ? 0 : null;
+
+  const anchored = (shift: number): boolean => {
+    const candidate = cells[pos + shift];
+    if (candidate === undefined) return false;
+    const value = candidate.replace(/\.$/u, '');
+    return value !== '' && POSITION_NO.test(value);
+  };
 
   /**
-   * Лишняя графа бывает и в начале строки, и в конце, и это разные сдвиги.
+   * Сошедшийся счёт граф ещё не значит, что графы на своих местах.
    *
-   * Пустая графа справа раскладку не двигает вовсе (сдвиг 0), потерянная
-   * слева двигает всё на единицу. Различает их якорь: номер позиции обязан
-   * оказаться на своём месте. Порядок проверки — от «ничего не сдвинулось» к
-   * сдвигу, потому что первое и вероятнее, и безопаснее.
+   * Потерянная слева графа и добавленная справа компенсируют друг друга в
+   * счёте, и строка выглядит целой. На стр. 2 боевой папки «ИД Мастер апрель
+   * 2026» так пришли строки «5.15» и «5.16»: пропала ведущая пустая графа
+   * счётчика разделов, а в хвосте появилась лишняя пустая. Счёт сошёлся,
+   * сдвиг признавался нулевым — и наименование уезжало в номер документа
+   * («ООО "ТК"ОЛИМППРОЕКТ"» стало номером ЖАН, «ИП Михальский Андрей
+   * Владимирович» — номером исполнительной схемы). Строка 5.16 получила
+   * «нет в комплекте», а лежащая в папке схема 52.1-ОТ/-1ЭТАЖ — «не названа
+   * описью»: два замечания на ровном месте.
+   *
+   * Сдвиг влево при сошедшемся счёте требует ДВУХ подтверждений сразу, иначе
+   * он крал бы последнюю графу у правильно прочитанных строк:
+   *
+   * - якорь не на своём месте, а на графу левее — то есть графы действительно
+   *   уехали, а не строка устроена иначе;
+   * - последняя графа пуста — терять при сдвиге нечего.
    */
-  for (const shift of [0, cells.length - layout.count]) {
-    const candidate = cells[layout.pos + shift];
-    if (candidate === undefined) continue;
-    const value = candidate.replace(/\.$/u, '');
-    if (value !== '' && POSITION_NO.test(value)) return shift;
+  const compensated = cells.length === layout.count && cells[cells.length - 1] === '';
+  const candidates = compensated ? [0, -1] : [0, cells.length - layout.count];
+
+  for (const shift of candidates) {
+    if (anchored(shift)) return shift;
   }
-  return null;
+
+  // Строка без номера позиции — не повод её терять: у продолжений и у строк
+  // формы А номера позиции нет вовсе, а раскладка при сошедшемся счёте
+  // остаётся прежней.
+  return cells.length === layout.count ? 0 : null;
 }
 
 function toCount(value: string): number | null {

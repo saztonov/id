@@ -133,6 +133,8 @@ export const checksSummarySchema = z.object({
     extractionQuality: z.int().nonnegative(),
     openInfo: z.int().nonnegative(),
     undetermined: z.int().nonnegative(),
+    /** Часть «не проверено», которую портал не смотрел: реестры не подключены. */
+    externalUnavailable: z.int().nonnegative(),
     waived: z.int().nonnegative(),
   }),
 });

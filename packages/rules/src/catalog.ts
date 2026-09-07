@@ -110,7 +110,16 @@ export const RULE_SEED_BATCHES: readonly RuleSeedBatch[] = [
     // задача сверки была снята вместе с таблицами реестров (миграция 0058), а
     // документ остался. Три правила возвращают ей роль эталона состава.
     migration: '0067_seed_transfer_registry_rules',
-    rules: TRANSFER_REGISTRY_RULES,
+    rules: TRANSFER_REGISTRY_RULES.filter((spec) => !['REG.113', 'REG.114'].includes(spec.code)),
+  },
+  {
+    // Номер акта в строке описи против акта её раздела (S55). Место правила
+    // было размечено ещё в S53 комментарием разбора описи, а самого правила не
+    // было: две опечатки боевой папки («Реестр к АОСР № 5-ОТ» в разделе акта
+    // № 58-ОТ, «№ 50-ОТ» в разделе акта № 59-ОТ) находила только ИИ-стадия,
+    // хотя обе стороны сравнения у движка на руках.
+    migration: '0074_seed_transfer_act_reference_rule',
+    rules: TRANSFER_REGISTRY_RULES.filter((spec) => ['REG.113', 'REG.114'].includes(spec.code)),
   },
 ];
 

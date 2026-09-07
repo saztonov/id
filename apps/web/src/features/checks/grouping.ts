@@ -152,9 +152,29 @@ function reservationsOf(summary: ChecksSummary): readonly string[] {
       `в ${String(counts.extractionQuality)} ${plural(counts.extractionQuality, 'месте', 'местах', 'местах')} портал прочитал иначе`,
     );
   }
-  if (counts.undetermined > 0) {
+  /**
+   * «Не проверено» портала и «не проверено» папки — разное (S55).
+   *
+   * Членство в СРО, национальный реестр специалистов и график строительства
+   * проверяются внешними реестрами, которых в MVP нет вовсе. Их замечания
+   * появляются на каждой папке одинаково и от её состава не зависят: слитые с
+   * остальными, они отправляют инженера искать в комплекте то, чего портал не
+   * смотрел в принципе. На боевой папке это пятнадцать «не проверено» из ста
+   * сорока четырёх.
+   *
+   * Общее число при этом не уменьшается: оговорка называет, какая его часть
+   * от портала, а не прячет её.
+   */
+  const ownUndetermined = counts.undetermined - counts.externalUnavailable;
+  if (ownUndetermined > 0) {
     parts.push(
-      `${String(counts.undetermined)} ${plural(counts.undetermined, 'замечание', 'замечания', 'замечаний')} не проверено`,
+      `${String(ownUndetermined)} ${plural(ownUndetermined, 'замечание', 'замечания', 'замечаний')} не проверено`,
+    );
+  }
+  if (counts.externalUnavailable > 0) {
+    parts.push(
+      `${String(counts.externalUnavailable)} ${plural(counts.externalUnavailable, 'проверка', 'проверки', 'проверок')} ` +
+        `не ${plural(counts.externalUnavailable, 'выполнена', 'выполнены', 'выполнены')}: внешние реестры не подключены`,
     );
   }
   if (coverage.pagesRecognized < coverage.pagesTotal) {
@@ -283,8 +303,14 @@ export function summaryText(summary: ChecksSummary, state: RunState): string {
       `в ${String(counts.extractionQuality)} ${plural(counts.extractionQuality, 'месте', 'местах', 'местах')} портал прочитал иначе`,
     );
   }
-  if (counts.undetermined > 0) {
-    parts.push(`${String(counts.undetermined)} не проверено`);
+  // Та же граница, что в оговорках плашки: «не проверено» портала не смешано
+  // с «не проверено» папки.
+  const ownUndetermined = counts.undetermined - counts.externalUnavailable;
+  if (ownUndetermined > 0) {
+    parts.push(`${String(ownUndetermined)} не проверено`);
+  }
+  if (counts.externalUnavailable > 0) {
+    parts.push(`${String(counts.externalUnavailable)} без внешних реестров`);
   }
 
   return `${read}. ${foundText(state, parts)}`;

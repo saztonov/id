@@ -372,6 +372,55 @@ describe('parseTransferRegistry, открытый мир', () => {
     expect(result.rows[1]?.docNoRaw).toBe('88');
   });
 
+  it('потерянная слева графа с лишней пустой справа выравнивается тоже', () => {
+    // Стр. 2 боевой папки «ИД Мастер апрель 2026»: счёт граф сошёлся, а графы
+    // уехали влево. Разбор признавал сдвиг нулевым, и наименование становилось
+    // номером документа — строка получала «нет в комплекте», а лежащий в папке
+    // документ «не назван описью».
+    const result = parseTransferRegistry({
+      pages: [
+        page(
+          'y-4',
+          [
+            FORM_B_HEADER,
+            '|---|---|---|---|---|---|---|---|',
+            '|  | 1.1 | Сертификат | №77 | ООО "Тест" | от 01.02.2024 | 1 | 1 |',
+            '| 1.2 | Паспорт | №88 | ООО "Тест" | от 02.02.2024 | 1 | 2 |  |',
+          ].join('\n'),
+        ),
+      ],
+    });
+
+    expect(result.rows).toHaveLength(2);
+    expect(result.rows[1]?.rowNo).toBe('1.2');
+    expect(result.rows[1]?.docNameRaw).toBe('Паспорт');
+    expect(result.rows[1]?.docNoRaw).toBe('88');
+    expect(result.rows[1]?.orgRaw).toBe('ООО "Тест"');
+    expect(result.rows[1]?.issuedAt).toBe('2024-02-02');
+    expect(result.rows[1]?.pagesRaw).toBe('2');
+  });
+
+  it('правильно прочитанная строка с пустым хвостом влево не съезжает', () => {
+    // Чувствительность к предыдущему: сдвиг требует, чтобы якорь стоял левее
+    // своего места. Здесь он на месте, и последняя графа остаётся графой.
+    const result = parseTransferRegistry({
+      pages: [
+        page(
+          'y-5',
+          [
+            FORM_B_HEADER,
+            '|---|---|---|---|---|---|---|---|',
+            '|  | 1.1 | Сертификат | №77 | ООО "Тест" | от 01.02.2024 | 1 |  |',
+          ].join('\n'),
+        ),
+      ],
+    });
+
+    expect(result.rows[0]?.rowNo).toBe('1.1');
+    expect(result.rows[0]?.docNameRaw).toBe('Сертификат');
+    expect(result.rows[0]?.docNoRaw).toBe('77');
+  });
+
   it('строку, которую выровнять нечем, разбор по-прежнему отбрасывает', () => {
     const result = parseTransferRegistry({
       pages: [

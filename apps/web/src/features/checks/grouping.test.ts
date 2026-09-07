@@ -65,6 +65,7 @@ function summary(over: Partial<ChecksSummary> = {}): ChecksSummary {
       extractionQuality: 0,
       openInfo: 0,
       undetermined: 0,
+      externalUnavailable: 0,
       waived: 0,
     },
     ...over,
@@ -186,6 +187,7 @@ describe('runStateOf', () => {
           extractionQuality: 0,
           openInfo: 0,
           undetermined: 0,
+          externalUnavailable: 0,
           waived: 0,
         },
       }),
@@ -207,6 +209,7 @@ describe('runStateOf', () => {
           extractionQuality: 0,
           openInfo: 0,
           undetermined: 2,
+          externalUnavailable: 0,
           waived: 0,
         },
       }),
@@ -216,6 +219,35 @@ describe('runStateOf', () => {
       kind: 'done_with_issues',
       tone: 'warning',
       reservations: ['2 замечания не проверено'],
+    });
+  });
+
+  it('непроверенное портала названо отдельно от непроверенного папки', () => {
+    // Членство в СРО, НРС и график строительства проверяются реестрами,
+    // которых в MVP нет: на боевой папке это пятнадцать «не проверено» из ста
+    // сорока четырёх, и, слитые с остальными, они зовут искать в комплекте то,
+    // чего портал не смотрел вовсе.
+    const state = runStateOf(
+      summary({
+        counts: {
+          openErrors: 0,
+          openWarnings: 0,
+          extractionQuality: 0,
+          openInfo: 0,
+          undetermined: 5,
+          externalUnavailable: 3,
+          waived: 0,
+        },
+      }),
+      true,
+    );
+    expect(state).toEqual({
+      kind: 'done_with_issues',
+      tone: 'warning',
+      reservations: [
+        '2 замечания не проверено',
+        '3 проверки не выполнены: внешние реестры не подключены',
+      ],
     });
   });
 
@@ -252,6 +284,7 @@ describe('runStateOf', () => {
           extractionQuality: 0,
           openInfo: 0,
           undetermined: 0,
+          externalUnavailable: 0,
           waived: 0,
         },
       }),
@@ -316,6 +349,7 @@ describe('summaryText', () => {
           extractionQuality: 0,
           openInfo: 0,
           undetermined: 0,
+          externalUnavailable: 0,
           waived: 0,
         },
       }),

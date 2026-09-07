@@ -47,6 +47,7 @@
 import { asc, eq } from 'drizzle-orm';
 import { complects, ruleDefinitions, folders } from '@id/db';
 import { isAnalysisAnchor, isQualityDocCode, isRegistryCode } from '@id/doc-types';
+import { FOLDED_SCORE } from '../../segmentation/match.js';
 import { TRANSFER_TYPE } from '../../segmentation/transfer-registry.js';
 
 import type { AuthScope } from '../../auth/scope.js';
@@ -476,6 +477,81 @@ function executionKey(complectId: string | null, ruleCode: string): string {
  * читаются пятью методами, и протаскивание их через сигнатуры превратило бы
  * каждую в список из восьми одинаковых аргументов.
  */
+/**
+ * Как строка описи или реестра выглядит в отчёте.
+ *
+ * Вынесено отдельной функцией не ради стиля: подпись строки — единственное, что
+ * читает проверяющий, и она должна проверяться без базы. Ровно здесь решается,
+ * какое совпадение выдаётся за найденный документ, а какое зовёт человека
+ * сверить руками.
+ */
+export function registryRowVerdict(input: {
+  readonly matchState: RegistryRowView['matchState'];
+  readonly matchScore: number | null;
+  /** Хвост «, стр. 42» либо пустая строка. */
+  readonly where: string;
+  /** Хвост «: похоже на стр. 19, 20» либо пустая строка. */
+  readonly candidates: string;
+}): { readonly status: ReportRowStatus; readonly text: string } {
+  const score = input.matchScore ?? 1;
+
+  /**
+   * Совпадение по КУСКУ номера не выдаётся за проверенный факт.
+   *
+   * Сверка отдаёт такие строки с пониженным счётом (`match.ts`, последние
+   * ступени лестницы): документ найден, но совпал не весь номер. Показать это
+   * как «данные верны» значило бы скрыть от проверяющего единственное место,
+   * где решение принял порог, а не равенство.
+   */
+  const partial = input.matchState === 'matched' && score < 1;
+
+  /**
+   * Начертание букв — не оговорка о СОСТАВЕ папки.
+   *
+   * Фолдинг гомоглифов (§8.3) складывает кириллическую «С» с латинской «C»:
+   * номер тот же, разошлось чтение. Строка описи «RU.CMIK.001.H.00270»
+   * (латиница) и бланк «RU.СМИК.001.Н.00270» (кириллица) — один документ, и
+   * сообщать о нём «номер совпал не полностью» значит звать проверяющего туда,
+   * где проверять нечего: на папке «ИД Мастер апрель 2026» так помечены
+   * двадцать четыре строки из ста восьмидесяти одной.
+   *
+   * Оговорка не исчезает, а уходит в текст строки; счёт остаётся пониженным, и
+   * §9.1 по-прежнему видит, что решение принято с допуском.
+   */
+  const foldedOnly = input.matchState === 'matched' && score >= FOLDED_SCORE && score < 1;
+
+  if (input.matchState === 'matched') {
+    if (foldedOnly) {
+      return {
+        status: 'ok',
+        text: `найден в комплекте, начертание номера отличается${input.where}`,
+      };
+    }
+    return partial
+      ? { status: 'warning', text: `номер совпал не полностью — проверьте документ${input.where}` }
+      : { status: 'ok', text: `найден в комплекте${input.where}` };
+  }
+
+  if (input.matchState === 'missing') return { status: 'error', text: 'нет в комплекте' };
+
+  if (input.matchState === 'ambiguous') {
+    return {
+      status: 'warning',
+      text: 'номер подошёл нескольким документам — какой именно, неизвестно',
+    };
+  }
+
+  if (input.matchState === 'candidate') {
+    // Кандидат ничего не утверждает: номер не совпал, а похожий документ в
+    // комплекте есть. Решает человек — и решать ему нечем, пока строка не
+    // называет, ЧТО именно похоже: «похожих документов 2» отправляет
+    // проверяющего листать комплект руками, хотя страницы известны серверу.
+    return { status: 'warning', text: `номер не совпал; сверьте вручную${input.candidates}` };
+  }
+
+  return { status: 'warning', text: 'документ комплекта не назван ни одной строкой реестра' };
+}
+
 class ReportFacts {
   private readonly context: FindingContext;
   private readonly checked: boolean;
@@ -822,38 +898,14 @@ class ReportFacts {
      * как «данные верны» значило бы скрыть от проверяющего единственное место,
      * где решение принял порог, а не равенство.
      */
-    const partial = row.matchState === 'matched' && (row.matchScore ?? 1) < 1;
-
-    const status: ReportRowStatus =
-      row.matchState === 'matched'
-        ? partial
-          ? 'warning'
-          : 'ok'
-        : row.matchState === 'missing'
-          ? 'error'
-          : row.matchState === 'ambiguous'
-            ? 'warning'
-            : row.matchState === 'candidate'
-              ? 'warning'
-              : 'warning';
-    const where = page === null ? '' : `, стр. ${String(page.number)}`;
-    const statusText =
-      row.matchState === 'matched'
-        ? partial
-          ? `номер совпал не полностью — проверьте документ${where}`
-          : `найден в комплекте${where}`
-        : row.matchState === 'missing'
-          ? 'нет в комплекте'
-          : row.matchState === 'ambiguous'
-            ? 'номер подошёл нескольким документам — какой именно, неизвестно'
-            : row.matchState === 'candidate'
-              ? // Кандидат ничего не утверждает: номер не совпал, а похожий
-                // документ в комплекте есть. Решает человек — и решать ему
-                // нечем, пока строка не называет, ЧТО именно похоже: «похожих
-                // документов 2» отправляет проверяющего листать комплект
-                // руками, хотя страницы известны серверу.
-                `номер не совпал; сверьте вручную${this.candidatePages(row.candidateDocumentIds)}`
-              : 'документ комплекта не назван ни одной строкой реестра';
+    const verdict = registryRowVerdict({
+      matchState: row.matchState,
+      matchScore: row.matchScore,
+      where: page === null ? '' : `, стр. ${String(page.number)}`,
+      candidates: this.candidatePages(row.candidateDocumentIds),
+    });
+    const status = verdict.status;
+    const statusText = verdict.text;
 
     return {
       id: row.id,

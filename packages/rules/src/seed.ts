@@ -184,6 +184,15 @@ export const BUILTIN_RULESETS: readonly BuiltinRuleset[] = [
     migration: '0068_builtin_ruleset_2',
     version: 'builtin-2',
     bootstrap: false,
+    specs: seededBefore('0068_builtin_ruleset_2'),
+  },
+  {
+    // Номер акта в строке описи против акта раздела (S55): REG.113. Снимок
+    // опубликованного набора неизменяем, поэтому пополнение каталога приезжает
+    // новой версией, а не строкой в действующей.
+    migration: '0075_builtin_ruleset_3',
+    version: 'builtin-3',
+    bootstrap: false,
     specs: RULE_CATALOG_WITH_RETIRED,
   },
 ];

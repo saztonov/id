@@ -81,6 +81,20 @@ export const EVIDENCE_FIELDS = {
   /** Типовые (`extract.ts`). */
   ndReference: 'nd_reference',
   ndRequirements: 'nd_requirements',
+  /**
+   * Таблица «показатель / норма по НД / фактически».
+   *
+   * Код у каждого вида свой, и читать надо ИМЕННО тот, что объявлен в его
+   * схеме. До S55 `PASS.610` и `MILL.630` читали `nd_requirements` — код,
+   * которого нет ни в схеме паспорта качества (там `indicators`), ни в схеме
+   * сертификата качества металла (там `mechanical_properties`). Оба правила
+   * исправно исполнялись и не находили ничего: паспорт № 112 папки «ИД Мастер
+   * апрель 2026» с водоудерживающей способностью 97,7 % при норме «не менее
+   * 98» прошёл проверку шесть раз подряд. Ровно этот класс расхождения
+   * описан в `field-codes.test.ts`.
+   */
+  indicators: 'indicators',
+  mechanicalProperties: 'mechanical_properties',
   concreteClass: 'concrete_class',
   steelClass: 'steel_class',
   ageDays: 'age_days',
@@ -380,6 +394,22 @@ function requisitesRule(spec: {
  * «сравнение не сошлось» — разные ответы, и склеить их значило бы объявить
  * дефектом отсутствие таблицы, которой в форме документа может не быть вовсе.
  */
+/** Слова, которыми норма объявляет себя односторонней. */
+const QUALIFIER =
+  /(?:не\s+менее|не\s+ниже|не\s+меньше|не\s+ранее|не\s+более|не\s+выше|не\s+больше|не\s+превыша)/iu;
+
+/** Тот же квалификатор, вынесенный из названия показателя, — приставкой к норме. */
+function qualifierOf(indicator: string): string {
+  const found = QUALIFIER.exec(indicator);
+  return found === null ? '' : `${found[0]} `;
+}
+
+/** Ячейка, состоящая ровно из числа: измерение, а не обозначение с цифрой. */
+const PLAIN_NUMBER = /^\s*[-+]?\d+(?:[.,]\d+)?\s*$/u;
+
+/** Диапазон в графе факта: два числа, соединённые дефисом или многоточием. */
+const RANGE_FACT = /\d\s*(?:[-]|\.\.\.)\s*\d/u;
+
 function normFactFindings(document: DocumentNode, fieldCode: string): RuleFinding[] | null {
   const source = field(document, fieldCode);
   if (source === null) return null;
@@ -389,15 +419,68 @@ function normFactFindings(document: DocumentNode, fieldCode: string): RuleFindin
   const findings: RuleFinding[] = [];
   for (const row of rows) {
     const indicator = row.indicator === '' ? 'показатель без названия' : row.indicator;
-    const requirement = parseRequirement(row.norm);
+    /**
+     * Квалификатор нормы бланк печатает в графе ПОКАЗАТЕЛЯ.
+     *
+     * «Влажность сухой смеси, % не более | 0,2 | 0,11» — норма односторонняя,
+     * и без квалификатора она разбирается точным равенством: факт 0,11
+     * объявляется нарушением нормы 0,2. Так на паспортах «Сен-Гобен» папки «ИД
+     * Мастер апрель 2026» появлялись ложные ошибки там, где значение в норме с
+     * запасом.
+     *
+     * Квалификатор берётся из названия показателя, только если в самой норме
+     * его нет: напечатанное в графе нормы всегда сильнее.
+     */
+    const requirement = parseRequirement(
+      QUALIFIER.test(row.norm) ? row.norm : qualifierOf(row.indicator) + row.norm,
+    );
 
     if (requirement.status === 'unparsed') {
+      /**
+       * Качественный показатель автосравнению не подлежит вовсе.
+       *
+       * «Внешний вид краски | Вязкая жидкость без посторонних включений |
+       * Соотв.» — строка, в которой нет чисел ни с одной стороны. Требовать по
+       * ней ручной проверки не за чем: сравнивать нечего не потому, что портал
+       * чего-то не понял, а потому, что предмета сравнения нет. На папке «ИД
+       * Мастер апрель 2026» такие строки давали три десятка «не проверено» на
+       * ровном месте.
+       *
+       * «Цвет пленки краски | Должен соответствовать вееру | RAL 9003» — тот
+       * же случай: число внутри обозначения цвета измерением не является,
+       * поэтому фактом считается только ЧИСТОЕ число.
+       *
+       * Числовая норма при нечисловом факте остаётся `undetermined`: там
+       * сравнение задумано и не состоялось, и пустая графа паспорта — дефект
+       * бумаги, о котором сказать надо. ПУСТАЯ графа нормы тоже остаётся
+       * замечанием (§8.1): бланк не заполнен, и молчать об этом нельзя.
+       */
+      if (!requirement.empty && !PLAIN_NUMBER.test(row.fact)) continue;
+
       // Норма в документе не напечатана либо не приводится к числовому
       // требованию. Придумать её здесь значило бы нарушить §8.1.
       findings.push(
         unknown({
           ...at(document, source),
           message: `${docLabel(document)}, показатель «${indicator}»: ${requirement.reason} — требуется ручная проверка`,
+          hint: 'сверьте фактическое значение с нормой по НД вручную',
+        }),
+      );
+      continue;
+    }
+
+    /**
+     * Факт-диапазон сравнению не поддаётся.
+     *
+     * «1464 -1700» в графе факта — это разброс по партии, а не измерение:
+     * взять из него первое число и сравнить с нормой значит судить о партии по
+     * её краю. Ответ здесь — «требуется ручная проверка», а не вердикт.
+     */
+    if (RANGE_FACT.test(row.fact)) {
+      findings.push(
+        unknown({
+          ...at(document, source),
+          message: `${docLabel(document)}, показатель «${indicator}»: фактическое значение «${row.fact}» дано диапазоном — требуется ручная проверка`,
           hint: 'сверьте фактическое значение с нормой по НД вручную',
         }),
       );
@@ -567,7 +650,7 @@ const PASS_610: RuleSpec = {
     const findings: RuleFinding[] = [];
     let compared = 0;
     for (const document of documents) {
-      const rowFindings = normFactFindings(document, EVIDENCE_FIELDS.ndRequirements);
+      const rowFindings = normFactFindings(document, EVIDENCE_FIELDS.indicators);
       if (rowFindings === null) continue;
       compared += 1;
       findings.push(...rowFindings);
@@ -695,11 +778,11 @@ const MILL_630: RuleSpec = {
 
       // Механические свойства сравниваются с нормой ИЗ САМОГО сертификата.
       // Таблицы классов проката в коде нет и не будет (§8.1).
-      const mechanical = normFactFindings(document, EVIDENCE_FIELDS.ndRequirements);
+      const mechanical = normFactFindings(document, EVIDENCE_FIELDS.mechanicalProperties);
       if (mechanical === null) {
         findings.push(
           unknown({
-            ...at(document, field(document, EVIDENCE_FIELDS.ndRequirements)),
+            ...at(document, field(document, EVIDENCE_FIELDS.mechanicalProperties)),
             message: `${docLabel(document)}: нормы механических свойств в сертификате не напечатаны, сравнить фактические значения не с чем — требуется ручная проверка`,
             hint: 'сверьте механические свойства с требованиями НД вручную',
           }),

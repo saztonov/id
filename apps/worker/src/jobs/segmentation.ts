@@ -1630,7 +1630,7 @@ export function createMatchRegistryHandler(
     const issuedAt = new Map<string, string | null>();
     for (const document of documents) {
       const values = await deps.listFieldValues(document.id);
-      numbers.set(document.id, documentNumbersOf(values));
+      numbers.set(document.id, documentNumbersOf(values, document.docTypeCode));
       issuedAt.set(
         document.id,
         values.find((value) => value.fieldCode === 'issued_at')?.valueDate ?? null,

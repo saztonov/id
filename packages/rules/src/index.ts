@@ -26,7 +26,7 @@ export {
   EXTERNAL_RULES,
   TRANSFER_REGISTRY_RULES,
 } from './aosr.js';
-export { EVIDENCE_RULES } from './evidence.js';
+export { EVIDENCE_FIELDS, EVIDENCE_RULES } from './evidence.js';
 export {
   isLlmReviewCode,
   LLM_REVIEW_CODES,

@@ -107,12 +107,42 @@ export const DOCUMENT_NUMBER_FIELD_CODES = [
   'plan_number',
 ] as const;
 
+/**
+ * Виды, у которых документ называет себя НОМЕРОМ ПАРТИИ.
+ *
+ * Общее правило обратное: `batch_number` называет партию, а не документ, и
+ * потому в список номеров не входит. У документа о качестве смеси и у паспорта
+ * качества другое устройство бланка — своего номера у них часто нет вовсе, а
+ * идентифицирует их партия: «Документ о качестве № 99-32», «Паспорт качества
+ * № 7» в описи — это и есть номера партий, напечатанные как номер документа.
+ *
+ * Пока список был общим, шесть строк описи и шесть строк реестров приложений
+ * папки «ИД Мастер апрель 2026» оставались «номер не совпал; сверьте вручную»
+ * при том, что документ лежит в комплекте и партия в нём напечатана.
+ *
+ * Партия идёт ПОСЛЕ собственных номеров: когда у документа есть свой номер, он
+ * и решает, а партия остаётся запасным именем.
+ */
+const BATCH_AS_NUMBER_TYPES: ReadonlySet<string> = new Set([
+  'quality_doc',
+  'mix_quality_doc',
+  'quality_passport',
+]);
+
+const BATCH_FIELD_CODES = ['batch_no', 'batch_number'] as const;
+
 /** Номера документа из его реквизитов, в порядке значимости кодов выше. */
 export function documentNumbersOf(
   values: readonly { readonly fieldCode: string; readonly valueText: string | null }[],
+  docTypeCode: string | null = null,
 ): readonly string[] {
+  const codes: readonly string[] =
+    docTypeCode !== null && BATCH_AS_NUMBER_TYPES.has(docTypeCode)
+      ? [...DOCUMENT_NUMBER_FIELD_CODES, ...BATCH_FIELD_CODES]
+      : DOCUMENT_NUMBER_FIELD_CODES;
+
   const numbers: string[] = [];
-  for (const code of DOCUMENT_NUMBER_FIELD_CODES) {
+  for (const code of codes) {
     for (const value of values) {
       if (value.fieldCode !== code) continue;
       const text = value.valueText?.trim() ?? '';
@@ -208,7 +238,7 @@ const EXACT_SCORE = 1;
  * должен выглядеть как проверенный факт, иначе низкая уверенность распознавания
  * молча превратится в основание для `fail`.
  */
-const FOLDED_SCORE = 0.85;
+export const FOLDED_SCORE = 0.85;
 
 /**
  * Счёт совпадения по компактной форме номера — с оговоркой (S53).

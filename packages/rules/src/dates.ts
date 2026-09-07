@@ -52,6 +52,7 @@ import {
   isAnalysisAnchor,
   isIsoDate,
   isRegistryCode,
+  listParam,
   parentsOf,
   PROTOCOL_TYPES,
   relevantDateFor,
@@ -478,12 +479,40 @@ function evaluateIssuedBeforeUse(graph: CheckGraph): RuleResult {
  * снимка набора правил (§9.2 требует порогов ИЗ ПРОФИЛЯ). Обоснование
  * приоритета — в докстринге `threshold` в `helpers.ts`.
  */
+/**
+ * Виды документов, которые выдаются без срока действия.
+ *
+ * Их возраст ни о чём не говорит: свидетельство о государственной регистрации
+ * 2012 года действует, пока не менялись продукция и изготовитель.
+ */
+const OPEN_ENDED_DOC_TYPES: readonly string[] = [
+  'state_registration_certificate',
+  'sanitary_conclusion',
+];
+
 function evaluateAbsurdlyOld(graph: CheckGraph, params: RuleParams): RuleResult {
   const maxAgeDays = threshold(graph.profile, params, 'maxAgeDays', 3650);
+  const exempt = new Set(listParam(params, 'openEndedDocTypes', OPEN_ENDED_DOC_TYPES));
   const findings: RuleFinding[] = [];
   let applicable = 0;
 
   for (const document of documentsWithValidity(graph)) {
+    /**
+     * Бессрочный документ старым не бывает.
+     *
+     * Свидетельство о государственной регистрации и санитарно-эпидемиологи­
+     * ческое заключение выдаются без срока: пока продукция и её изготовитель не
+     * менялись, документ 2012 года действует так же, как выданный вчера, и
+     * возраст о нём ничего не говорит. На папке «ИД Мастер апрель 2026»
+     * правило дало пять замечаний, и все пять — на таких свидетельствах.
+     *
+     * Список живёт значением по умолчанию, а не в `defaultParams`: снимок
+     * набора правил уже опубликован и неизменяем, и правка умолчаний
+     * переписала бы применённые миграции. Переопределить его снимком всё равно
+     * можно — параметр читается первым.
+     */
+    if (document.docTypeCode !== null && exempt.has(document.docTypeCode)) continue;
+
     const issued = dateRef(document, 'issued_at');
     if (issued.value === null) continue;
     applicable += 1;

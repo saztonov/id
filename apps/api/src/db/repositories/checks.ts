@@ -1424,6 +1424,19 @@ export interface ChecksCounts {
    * безупречным. Они видны своим разделом отчёта и своим числом здесь.
    */
   readonly extractionQuality: number;
+  /**
+   * «Не проверено», потому что источник данных не подключён (S55).
+   *
+   * Это состояние ПОРТАЛА, а не папки: членство в СРО, национальный реестр
+   * специалистов и график строительства проверяются внешними реестрами,
+   * которых в MVP нет. На боевой папке такие замечания дают пятнадцать
+   * «не проверено» из ста сорока четырёх — и, слитые с остальными, заставляют
+   * искать в комплекте то, чего портал не смотрел в принципе.
+   *
+   * Считается ВНУТРИ `undetermined`, а не вместо: общее число непроверенного
+   * остаётся честным, а сводка называет, какая его часть от портала.
+   */
+  readonly externalUnavailable: number;
 }
 
 /** Вид правила, чьи замечания говорят о качестве извлечения, а не о бумаге. */
@@ -1449,6 +1462,9 @@ export function countFindings(items: readonly FindingView[]): ChecksCounts {
     openWarnings: openOf('warning'),
     openInfo: openOf('info'),
     undetermined: aboutDocument.filter((item) => item.state === 'undetermined').length,
+    externalUnavailable: aboutDocument.filter(
+      (item) => item.state === 'undetermined' && item.origin === 'external_unavailable',
+    ).length,
     waived: aboutDocument.filter((item) => item.state === 'waived').length,
     // Здесь считаются ВСЕ состояния: и открытые, и снятые человеком. Вопрос
     // «сколько раз портал прочитал иначе» о снятии не спрашивает.

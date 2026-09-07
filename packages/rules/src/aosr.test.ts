@@ -289,6 +289,50 @@ describe('AOSR.HDR.010 — наименование объекта', () => {
   it('без актов правило неприменимо', () => {
     expect(verdictOf('AOSR.HDR.010', graphWithoutActs())).toBe('n_a');
   });
+
+  it('разночтение адреса при одном кадастровом номере замечания не даёт', () => {
+    // Папка «ИД Мастер апрель 2026»: акт печатает «Мосфильмовская, д.31А»,
+    // карточка — «Мосфильмовская ул., вл. 31А». Одиннадцать предупреждений об
+    // одном объекте, и совет «привести акты к формулировке карточки».
+    const graph = actGraph(
+      replacing(
+        healthyActFields(),
+        text(
+          AOSR_FIELDS.objectName,
+          'Жилой комплекс по адресу: г. Москва, Мосфильмовская, д.31А, ' +
+            'кадастровый № 77:07:0010004:24',
+        ),
+      ),
+      {
+        object: makeObject({
+          name: 'ЖК «Пример»',
+          fullName:
+            'Жилой комплекс, расположенный по адресу: г. Москва, Мосфильмовская ул., вл. 31А, ' +
+            'земельный участок, кадастровый №77:07:0010004:24',
+        }),
+      },
+    );
+    expect(verdictOf('AOSR.HDR.010', graph)).toBe('pass');
+  });
+
+  it('разошедшийся кадастровый номер — замечание с обеими записями', () => {
+    // Чувствительность: идентификатор решает в обе стороны.
+    const graph = actGraph(
+      replacing(
+        healthyActFields(),
+        text(AOSR_FIELDS.objectName, 'Жилой комплекс, кадастровый № 77:07:0010004:99'),
+      ),
+      {
+        object: makeObject({
+          name: 'ЖК «Пример»',
+          fullName: 'Жилой комплекс, кадастровый №77:07:0010004:24',
+        }),
+      },
+    );
+    expect(verdictOf('AOSR.HDR.010', graph)).toBe('fail');
+    expect(messagesOf('AOSR.HDR.010', graph)[0]).toContain('77:07:0010004:99');
+    expect(messagesOf('AOSR.HDR.010', graph)[0]).toContain('77:07:0010004:24');
+  });
 });
 
 describe('AOSR.HDR.020 — реквизиты сторон', () => {
@@ -358,6 +402,32 @@ describe('AOSR.HDR.021 — контрольная сумма ИНН', () => {
   it('без ИНН в шапке правило неприменимо', () => {
     const graph = actGraph(without(healthyActFields(), AOSR_FIELDS.contractorInn));
     expect(verdictOf('AOSR.HDR.021', graph)).toBe('n_a');
+  });
+
+  it('косая черта вместо нуля даёт undetermined, а не обвинение в неверном ИНН', () => {
+    // Акт № 48-ОТ/-1 этаж папки «ИД Мастер апрель 2026»: ИНН пришёл как
+    // «77/8203762», а в одиннадцати других актах той же папки прочитан верно.
+    const graph = actGraph(
+      replacing(healthyActFields(), text(AOSR_FIELDS.contractorInn, '77/8203762')),
+    );
+    expect(verdictOf('AOSR.HDR.021', graph)).toBe('undetermined');
+    expect(messagesOf('AOSR.HDR.021', graph)[0]).toContain('прочитан со знаком');
+  });
+
+  it('чистые цифры с битой суммой по-прежнему ошибка', () => {
+    // Чувствительность: поблажка держится на постороннем знаке, а не на самом
+    // факте несовпадения.
+    const graph = actGraph(
+      replacing(healthyActFields(), text(AOSR_FIELDS.contractorInn, '770820376')),
+    );
+    expect(verdictOf('AOSR.HDR.021', graph)).toBe('fail');
+  });
+
+  it('разделитель разрядов посторонним знаком не считается', () => {
+    const graph = actGraph(
+      replacing(healthyActFields(), text(AOSR_FIELDS.contractorInn, '7709 574094')),
+    );
+    expect(verdictOf('AOSR.HDR.021', graph)).toBe('fail');
   });
 });
 
@@ -1287,6 +1357,118 @@ describe('REG.112 — раздел описи не сопоставлен акт
   });
 });
 
+describe('REG.113 — номер акта в строке описи против акта раздела', () => {
+  const transfer = makeDocument({ docTypeCode: 'transfer_registry' });
+
+  function graphWithRow(docNameRaw: string, actNumber = '58-ОТ/-1 этаж'): CheckGraph {
+    const act = makeAct(replacing(healthyActFields(), text(AOSR_FIELDS.actNumber, actNumber)), {
+      complectId: 'complect-1',
+    });
+    return makeGraph({
+      object: makeObject({ name: 'Автостоянка' }),
+      documents: [act, transfer],
+      transferRows: [
+        makeRegistryRow({
+          registryDocumentId: transfer.id,
+          sectionTitle: '11. Устройство шпатлевки, поз. 11.2',
+          docNameRaw,
+          docNoRaw: '1.1',
+          complectId: 'complect-1',
+        }),
+      ],
+    });
+  }
+
+  it('строка называет акт своего раздела — pass', () => {
+    expect(verdictOf('REG.113', graphWithRow('Реестр к АОСР № 58-ОТ/-1 этаж'))).toBe('pass');
+  });
+
+  it('потерянная цифра в номере акта — замечание с обоими номерами', () => {
+    // Строка 11.2 боевой описи «ИД Мастер апрель 2026»: акт № 58-ОТ/-1 этаж,
+    // а в строке напечатано «№ 5-ОТ/-1 этаж».
+    const graph = graphWithRow('Реестр к АОСР № 5-ОТ/-1 этаж');
+    expect(verdictOf('REG.113', graph)).toBe('fail');
+    expect(messagesOf('REG.113', graph)[0]).toContain('5-ОТ/-1 этаж');
+    expect(messagesOf('REG.113', graph)[0]).toContain('58-ОТ/-1 этаж');
+  });
+
+  it('чужой номер акта в строке 12.2 находится так же', () => {
+    const graph = graphWithRow('Реестр к АОСР № 50-ОТ/-1 этаж', '59-ОТ/-1 этаж');
+    expect(verdictOf('REG.113', graph)).toBe('fail');
+  });
+
+  it('различие в гомоглифах опечаткой описи не считается', () => {
+    // «ОТ» латиницей против кириллицы — след чтения, а не расхождение бумаги.
+    expect(verdictOf('REG.113', graphWithRow('Реестр к АОСР № 58-OT/-1 этаж'))).toBe('pass');
+  });
+
+  it('строка без ссылки на акт правилом не трогается', () => {
+    expect(verdictOf('REG.113', graphWithRow('Паспорт качества'))).toBe('n_a');
+  });
+
+  it('без описи правило неприменимо', () => {
+    expect(verdictOf('REG.113', actGraph(healthyActFields()))).toBe('n_a');
+  });
+});
+
+describe('REG.114 — организация в строке описи против документа', () => {
+  const transfer = makeDocument({ docTypeCode: 'transfer_registry' });
+
+  function graphWithOrg(rowOrg: string, documentOrg: string | null): CheckGraph {
+    const scheme = makeDocument({
+      docTypeCode: 'exec_scheme',
+      title: 'Исполнительная схема № 52.1-ОТ/-1 ЭТАЖ',
+      fields: documentOrg === null ? [] : [text('issuer', documentOrg)],
+    });
+    return makeGraph({
+      documents: [scheme, transfer],
+      transferRows: [
+        makeRegistryRow({
+          registryDocumentId: transfer.id,
+          sectionTitle: '5. Устройство шпатлевки, поз. 5.16',
+          docNameRaw: 'Исполнительная схема устройства стен',
+          docNoRaw: '52.1-ОТ/-1 ЭТАЖ',
+          orgRaw: rowOrg,
+          matchState: 'matched',
+          matchedDocumentId: scheme.id,
+        }),
+      ],
+    });
+  }
+
+  it('одна и та же организация — pass', () => {
+    expect(verdictOf('REG.114', graphWithOrg('ООО "МАСТЕР"', 'ООО «МАСТЕР»'))).toBe('pass');
+  });
+
+  it('полная форма собственности в документе совпадением не мешает', () => {
+    expect(
+      verdictOf(
+        'REG.114',
+        graphWithOrg('ООО "МАСТЕР"', 'Общество с ограниченной ответственностью «МАСТЕР»'),
+      ),
+    ).toBe('pass');
+  });
+
+  it('чужое лицо в строке описи — замечание с обоими наименованиями', () => {
+    // Строки 5.16, 7.16, 9.16 и 11.16 боевой описи «ИД Мастер апрель 2026»:
+    // схемы ООО «МАСТЕР» записаны за подрядчиком другой работы.
+    const graph = graphWithOrg('ИП Михальский Андрей Владимирович', 'ООО «МАСТЕР»');
+    expect(verdictOf('REG.114', graph)).toBe('fail');
+    expect(messagesOf('REG.114', graph)[0]).toContain('Михальский');
+    expect(messagesOf('REG.114', graph)[0]).toContain('МАСТЕР');
+  });
+
+  it('организация документа не прочитана — правило молчит', () => {
+    // Граница извлечения, а не расхождение описи: о неполноте реквизитов
+    // сообщают правила заполненности.
+    expect(verdictOf('REG.114', graphWithOrg('ООО "МАСТЕР"', null))).toBe('n_a');
+  });
+
+  it('без описи правило неприменимо', () => {
+    expect(verdictOf('REG.114', actGraph(healthyActFields()))).toBe('n_a');
+  });
+});
+
 describe('MAT.110 — матрица документов раздела', () => {
   const matrixProfile = makeProfile({
     materialMatrix: { rebar: { required: ['mill_certificate', 'cert_conformity'] } },
@@ -1385,6 +1567,45 @@ describe('MAT.111 — дефект №2 корпуса: изготовитель
 
   it('без материалов правило неприменимо', () => {
     expect(verdictOf('MAT.111', makeGraph())).toBe('n_a');
+  });
+
+  it('полная форма собственности в сертификате и аббревиатура в паспорте — один изготовитель', () => {
+    // Папка «ИД Мастер апрель 2026»: паспорт партии называет изготовителя
+    // «ООО «КНАУФ ГИПС»», сертификат — «Общество с ограниченной
+    // ответственностью «КНАУФ ГИПС»». Правило дважды объявляло ошибку.
+    const passport = makeDocument({
+      docTypeCode: 'quality_passport',
+      fields: [text(AOSR_FIELDS.manufacturer, 'ООО «КНАУФ ГИПС»')],
+    });
+    const certificate = makeDocument({
+      docTypeCode: 'cert_conformity',
+      fields: [
+        text(AOSR_FIELDS.manufacturer, 'Общество с ограниченной ответственностью «КНАУФ ГИПС»'),
+      ],
+    });
+    const batch = makeBatch({
+      materialId: 'mat-primer',
+      batchNo: '58071',
+      documentIds: [passport.id],
+    });
+    const graph = makeGraph({
+      documents: [passport, certificate],
+      materials: [
+        makeMaterial({
+          id: 'mat-primer',
+          nameRaw: 'грунтовка укрепляющая «КНАУФ-Тифенгрунд»',
+          batches: [batch],
+          documentIds: [passport.id, certificate.id],
+        }),
+      ],
+    });
+    expect(verdictOf('MAT.111', graph)).toBe('pass');
+  });
+
+  it('разные формы собственности при том же наименовании остаются разными лицами', () => {
+    // Чувствительность к предыдущему: форма приводится к аббревиатуре, а не
+    // выбрасывается, иначе ООО и АО «Ромашка» склеились бы в одно лицо.
+    expect(verdictOf('MAT.111', rebarGraph('АО «ПромСорт-Тула»'))).toBe('fail');
   });
 });
 
@@ -1743,9 +1964,25 @@ describe('AOSR.P4.081 — дефект №6 корпуса: 2 слоя в п. 1 
     expect(verdictOf('AOSR.P4.081', graph)).toBe('fail');
   });
 
-  it('без количественного признака вердикт undetermined, а не pass', () => {
+  it('признака нет ни в п. 1, ни в схеме — расходиться нечему, замечания нет', () => {
+    // Шпатлёвку и окраску в слоях не нормируют, и бланк их не называет. Все
+    // двенадцать актов папки «ИД Мастер апрель 2026» получали «проверить
+    // нечем» ровно там, где проверять было нечего по существу работ.
     const graph = schemeGraph('Устройство гидроизоляции', 'Исполнительная схема гидроизоляции');
+    expect(verdictOf('AOSR.P4.081', graph)).toBe('n_a');
+    expect(messagesOf('AOSR.P4.081', graph)).toHaveLength(0);
+    expect(reasonOf('AOSR.P4.081', graph)).toContain('сверять нечего');
+  });
+
+  it('признак назван одной стороной — по-прежнему undetermined', () => {
+    // Чувствительность: вторая запись числа должна была быть, и её не
+    // прочитали — это граница проверки, а не отсутствие предмета.
+    const graph = schemeGraph(
+      'Устройство 2 слоя гидроизоляции',
+      'Исполнительная схема гидроизоляции',
+    );
     expect(verdictOf('AOSR.P4.081', graph)).toBe('undetermined');
+    expect(messagesOf('AOSR.P4.081', graph)[0]).toContain('в наименовании схемы');
   });
 
   it('без актов правило неприменимо', () => {

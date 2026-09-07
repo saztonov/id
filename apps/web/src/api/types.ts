@@ -580,6 +580,8 @@ export interface ChecksSummary {
     extractionQuality: number;
     openInfo: number;
     undetermined: number;
+    /** Часть «не проверено» от неподключённых внешних реестров (S55). */
+    externalUnavailable: number;
     waived: number;
   };
 }

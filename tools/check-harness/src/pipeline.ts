@@ -283,7 +283,7 @@ export function runPackage(dir: string, options: HarnessOptions): PackageRunResu
     complectId: document.complectId,
     // Все формы номера, а не один `number`: у исполнительной схемы он приходит
     // шифром из штампа, и сверка обязана видеть его тоже.
-    numbers: documentNumbersOf(document.fields),
+    numbers: documentNumbersOf(document.fields, document.docTypeCode),
     issuedAt: document.fields.find((field) => field.fieldCode === 'issued_at')?.valueDate ?? null,
     title: document.title,
     pageCount: document.pages.length,

@@ -405,6 +405,39 @@ describe('documentNumbersOf', () => {
 
     expect(numbers).toEqual([]);
   });
+
+  it('у документа о качестве и паспорта партия служит номером', () => {
+    // Своего номера бланк не печатает вовсе: опись называет такой документ
+    // «Документ о качестве № 99-32», и это номер партии. Шесть строк описи и
+    // шесть строк реестров приложений папки «ИД Мастер апрель 2026» из-за
+    // этого оставались «номер не совпал; сверьте вручную».
+    expect(
+      documentNumbersOf([{ fieldCode: 'batch_number', valueText: '99-32' }], 'quality_doc'),
+    ).toEqual(['99-32']);
+    expect(
+      documentNumbersOf([{ fieldCode: 'batch_no', valueText: '7' }], 'quality_passport'),
+    ).toEqual(['7']);
+  });
+
+  it('собственный номер документа сильнее партии', () => {
+    expect(
+      documentNumbersOf(
+        [
+          { fieldCode: 'batch_no', valueText: '58071' },
+          { fieldCode: 'number', valueText: '357' },
+        ],
+        'quality_passport',
+      ),
+    ).toEqual(['357', '58071']);
+  });
+
+  it('у прочих видов партия номером документа не становится', () => {
+    // Чувствительность: послабление держится на виде документа, а не на самом
+    // наличии партии. У сертификата партия называет чужой предмет.
+    expect(
+      documentNumbersOf([{ fieldCode: 'batch_number', valueText: '7' }], 'cert_conformity'),
+    ).toEqual([]);
+  });
 });
 
 /**

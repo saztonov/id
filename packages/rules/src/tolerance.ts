@@ -39,8 +39,15 @@ export type Requirement =
 
 export type ParsedRequirement =
   | { readonly status: 'parsed'; readonly requirement: Requirement }
-  /** Требование есть, но формы, которую мы умеем сравнивать, в нём нет. */
-  | { readonly status: 'unparsed'; readonly reason: string };
+  /**
+   * Требование есть, но формы, которую мы умеем сравнивать, в нём нет.
+   *
+   * `empty` различает два разных случая, и различие не косметическое: пустая
+   * графа нормы — это НЕЗАПОЛНЕННЫЙ бланк, о котором правило обязано сказать,
+   * а качественная норма («белый», «соответствует вееру») — показатель,
+   * который числами не проверяют вовсе.
+   */
+  | { readonly status: 'unparsed'; readonly reason: string; readonly empty: boolean };
 
 const NUM = String.raw`[-+]?\d+(?:[.,]\d+)?`;
 
@@ -65,7 +72,7 @@ function unitOf(rest: string): string | null {
  */
 export function parseRequirement(raw: string): ParsedRequirement {
   const text = raw.replace(/[\u00A0\u202F]/gu, ' ').trim();
-  if (text === '') return { status: 'unparsed', reason: 'ячейка нормы пуста' };
+  if (text === '') return { status: 'unparsed', reason: 'ячейка нормы пуста', empty: true };
 
   // «4 ± 0,2» и «4 +/- 0,2»
   const symmetric = new RegExp(`(${NUM})\\s*(?:±|\\+/-|\\+-)\\s*(${NUM})(.*)$`, 'u').exec(text);
@@ -115,6 +122,29 @@ export function parseRequirement(raw: string): ParsedRequirement {
       },
     };
   }
+  /**
+   * Пара чисел через дефис — диапазон, но только когда ЯЧЕЙКА состоит из неё.
+   *
+   * Паспорта печатают допуск так: «1400 -1700», «70000-100000». Разбирать
+   * такую запись первым числом нельзя: норма «1400» становилась точным
+   * требованием, и факт 1464 объявлялся нарушением — три ложные ошибки на
+   * каждый паспорт «Сен-Гобен» папки «ИД Мастер апрель 2026».
+   *
+   * Условие «вся ячейка» и запрет буквы перед дефисом отделяют диапазон от
+   * марки («М-150», «А240-С») и от номера: там дефис соединяет не два числа.
+   */
+  const dashRange = new RegExp(`^\\s*(${NUM})\\s*[-]\\s*(${NUM})\\s*(.*)$`, 'u').exec(text);
+  if (dashRange !== null && !/\p{L}\s*[-]/u.test(text)) {
+    const low = num(dashRange[1] as string);
+    const high = num(dashRange[2] as string);
+    if (low <= high) {
+      return {
+        status: 'parsed',
+        requirement: { kind: 'range', low, high, unit: unitOf(dashRange[3] ?? '') },
+      };
+    }
+  }
+
   const ellipsis = new RegExp(`(${NUM})\\s*(?:\\.\\.\\.|…|―|—)\\s*(${NUM})(.*)$`, 'u').exec(text);
   if (ellipsis !== null) {
     return {
@@ -129,9 +159,12 @@ export function parseRequirement(raw: string): ParsedRequirement {
   }
 
   // Двустороннее словесное: «не менее 3, не более 5».
-  const lower = new RegExp(`(?:не\\s+менее|не\\s+ниже|не\\s+меньше|≥|>=)\\s*(${NUM})`, 'iu').exec(
-    text,
-  );
+  // «не ранее 90» — та же нижняя граница, только о времени: так паспорт КНАУФ
+  // печатает начало схватывания смеси.
+  const lower = new RegExp(
+    `(?:не\\s+менее|не\\s+ниже|не\\s+меньше|не\\s+ранее|≥|>=)\\s*(${NUM})`,
+    'iu',
+  ).exec(text);
   const upper = new RegExp(
     `(?:не\\s+более|не\\s+выше|не\\s+больше|не\\s+превыша\\p{L}*|≤|<=)\\s*(${NUM})`,
     'iu',
@@ -182,7 +215,11 @@ export function parseRequirement(raw: string): ParsedRequirement {
     };
   }
 
-  return { status: 'unparsed', reason: `норма «${text}» не приведена к числовому требованию` };
+  return {
+    status: 'unparsed',
+    reason: `норма «${text}» не приведена к числовому требованию`,
+    empty: false,
+  };
 }
 
 /** Разбор измеренного значения. `null` — числа в ячейке нет. */

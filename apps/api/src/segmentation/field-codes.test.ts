@@ -35,7 +35,13 @@
  * правило, — на реквизитах акта.
  */
 import { DOC_TYPES, fieldsForType } from '@id/doc-types';
-import { ACT_FIELDS, ACT_FIELD_CODES, ACT_LEGACY_FIELD_CODES, actFieldCodes } from '@id/rules';
+import {
+  ACT_FIELDS,
+  ACT_FIELD_CODES,
+  ACT_LEGACY_FIELD_CODES,
+  EVIDENCE_FIELDS,
+  actFieldCodes,
+} from '@id/rules';
 import { describe, expect, it } from 'vitest';
 
 import { RULE_EXTRACTED_FIELDS } from './extract.js';
@@ -74,6 +80,44 @@ describe('коды реквизитов акта согласованы с ка�
       'реквизиты акта объявлены детерминированными, но экстрактора у них нет — ' +
         'их не выдаст никто, и читающие их правила молча не работают',
     ).toStrictEqual([]);
+  });
+});
+
+/**
+ * Табличные реквизиты доказательных документов — тот же класс расхождения.
+ *
+ * `PASS.610` и `MILL.630` читали `nd_requirements` — код, которого нет ни в
+ * схеме паспорта качества (там `indicators`), ни в схеме сертификата качества
+ * металла (там `mechanical_properties`). Оба правила исполнялись и не находили
+ * ничего: паспорт № 112 папки «ИД Мастер апрель 2026» с водоудерживающей
+ * способностью 97,7 % при норме «не менее 98» прошёл проверку шесть раз.
+ *
+ * Проверка держится на паре «вид документа — код реквизита», а не на списке
+ * всех кодов каталога: полнота здесь недостижима и не нужна (см. шапку файла),
+ * а вот таблица, которую сравнивает правило, обязана иметь и объявление, и
+ * экстрактор.
+ */
+describe('табличные реквизиты сравниваемых показателей объявлены и реализованы', () => {
+  const cases: readonly (readonly [string, string])[] = [
+    ['quality_passport', EVIDENCE_FIELDS.indicators],
+    ['mill_certificate', EVIDENCE_FIELDS.mechanicalProperties],
+  ];
+
+  it.each(cases)('%s объявляет «%s» и его извлекает', (docTypeCode, code) => {
+    const definition = DOC_TYPES.find((type) => type.code === docTypeCode);
+    if (definition === undefined) throw new Error(`в каталоге нет типа ${docTypeCode}`);
+    const codes = new Set(
+      fieldsForType(definition.fieldSchema, definition.kind).map((field) => field.code),
+    );
+
+    expect(
+      codes.has(code),
+      `правило читает «${code}», но в схеме типа ${docTypeCode} такого реквизита нет`,
+    ).toBe(true);
+    expect(
+      new Set(RULE_EXTRACTED_FIELDS).has(code),
+      `«${code}» объявлен в схеме ${docTypeCode}, но экстрактора у него нет`,
+    ).toBe(true);
   });
 });
 

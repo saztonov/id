@@ -61,8 +61,21 @@ function numField(fieldCode: string, value: number) {
   return makeField({ fieldCode, valueNum: value, valueText: String(value) });
 }
 
+/**
+ * Таблица показателей паспорта качества.
+ *
+ * Код реквизита — тот, что объявлен в схеме вида, а не общий «технические
+ * требования»: у паспорта это `indicators`, у сертификата качества металла —
+ * `mechanical_properties` (`millTableField`). Тест, кладущий в граф тот же код,
+ * который читает правило, доказывает только их взаимную согласованность —
+ * поэтому коды сверяются с каталогом отдельным тестом `field-codes.test.ts`.
+ */
 function tableField(rows: readonly { indicator: string; norm: string; fact: string }[]) {
-  return makeField({ fieldCode: EVIDENCE_FIELDS.ndRequirements, valueJson: rows });
+  return makeField({ fieldCode: EVIDENCE_FIELDS.indicators, valueJson: rows });
+}
+
+function millTableField(rows: readonly { indicator: string; norm: string; fact: string }[]) {
+  return makeField({ fieldCode: EVIDENCE_FIELDS.mechanicalProperties, valueJson: rows });
 }
 
 // ---------------------------------------------------------------------------
@@ -330,6 +343,84 @@ describe('PASS.610 — автосравнение «Норма по НД / Фа�
     expect(result.reason).toContain('сравнивать нечего');
   });
 
+  it('квалификатор из графы показателя не делает норму точным равенством', () => {
+    // Паспорт «Сен-Гобен» папки «ИД Мастер апрель 2026»: «Влажность сухой
+    // смеси, % не более | 0,2 | 0,11». Без переноса квалификатора норма
+    // читалась равенством, и значение с запасом объявлялось нарушением.
+    const result = run(
+      'PASS.610',
+      graphWith(
+        passport([
+          tableField([
+            { indicator: 'Влажность сухой смеси, % не более', norm: '0,2', fact: '0,11' },
+          ]),
+        ]),
+      ),
+    );
+    expect(result.verdict).toBe('pass');
+  });
+
+  it('норма диапазоном через дефис читается диапазоном', () => {
+    const result = run(
+      'PASS.610',
+      graphWith(
+        passport([
+          tableField([
+            { indicator: 'Удельная поверхность, см2/г', norm: '2600 -4000', fact: '3246' },
+          ]),
+        ]),
+      ),
+    );
+    expect(result.verdict).toBe('pass');
+  });
+
+  it('факт диапазоном сравнению не подлежит, но и дефектом не считается', () => {
+    const result = run(
+      'PASS.610',
+      graphWith(
+        passport([
+          tableField([{ indicator: 'Плотность, кг/м3', norm: '1400 -1700', fact: '1464 -1700' }]),
+        ]),
+      ),
+    );
+    expect(result.verdict).toBe('undetermined');
+    expect(joined(result)).toContain('дано диапазоном');
+  });
+
+  it('качественный показатель замечания не порождает', () => {
+    // «Цвет пленки краски | Должен соответствовать вееру | RAL 9003»: числа
+    // здесь нет ни с одной стороны, и требовать ручной сверки не за чем.
+    const result = run(
+      'PASS.610',
+      graphWith(
+        passport([
+          tableField([
+            {
+              indicator: 'Цвет пленки краски',
+              norm: 'Должен соответствовать цвету, выбранному по вееру',
+              fact: 'RAL 9003',
+            },
+          ]),
+        ]),
+      ),
+    );
+    expect(result.verdict).toBe('pass');
+    expect(messages(result)).toHaveLength(0);
+  });
+
+  it('пустая графа нормы остаётся замечанием: бланк не заполнен', () => {
+    // Чувствительность к предыдущему: молчать о незаполненной норме нельзя,
+    // и §8.1 требует именно «требуется ручная проверка», а не вердикт.
+    const result = run(
+      'PASS.610',
+      graphWith(
+        passport([tableField([{ indicator: 'Предел прочности', norm: '', fact: '5 МПа' }])]),
+      ),
+    );
+    expect(result.verdict).toBe('undetermined');
+    expect(joined(result)).toContain('ячейка нормы пуста');
+  });
+
   it('без паспортов качества — n_a', () => {
     expect(run('PASS.610', makeGraph()).verdict).toBe('n_a');
   });
@@ -379,7 +470,7 @@ describe('нормативы не выдумываются (§8.1)', () => {
           docTypeCode: EVIDENCE_DOC_TYPES.millCertificate,
           fields: [
             textField(EVIDENCE_FIELDS.steelClass, 'А500С'),
-            tableField([{ indicator: 'Предел текучести', norm: '', fact: '480 МПа' }]),
+            millTableField([{ indicator: 'Предел текучести', norm: '', fact: '480 МПа' }]),
           ],
         }),
         { materials: [makeMaterial({ mark: 'А500С' })] },
@@ -599,7 +690,9 @@ describe('MILL.630 — сертификат качества металла', ()
   it('марка совпадает через фолдинг гомоглифов, свойства в норме — pass', () => {
     const document = mill([
       textField(EVIDENCE_FIELDS.steelClass, 'A240C'),
-      tableField([{ indicator: 'Предел текучести', norm: 'не менее 240 МПа', fact: '265 МПа' }]),
+      millTableField([
+        { indicator: 'Предел текучести', norm: 'не менее 240 МПа', fact: '265 МПа' },
+      ]),
     ]);
     const result = run('MILL.630', {
       ...graphWith(document),
@@ -611,7 +704,9 @@ describe('MILL.630 — сертификат качества металла', ()
   it('марка не совпадает с заявленной — дефект', () => {
     const document = mill([
       textField(EVIDENCE_FIELDS.steelClass, 'А500С'),
-      tableField([{ indicator: 'Предел текучести', norm: 'не менее 240 МПа', fact: '265 МПа' }]),
+      millTableField([
+        { indicator: 'Предел текучести', norm: 'не менее 240 МПа', fact: '265 МПа' },
+      ]),
     ]);
     const result = run('MILL.630', {
       ...graphWith(document),
@@ -624,7 +719,9 @@ describe('MILL.630 — сертификат качества металла', ()
   it('фактическое свойство ниже напечатанной нормы — дефект', () => {
     const document = mill([
       textField(EVIDENCE_FIELDS.steelClass, 'А240С'),
-      tableField([{ indicator: 'Предел текучести', norm: 'не менее 240 МПа', fact: '212 МПа' }]),
+      millTableField([
+        { indicator: 'Предел текучести', norm: 'не менее 240 МПа', fact: '212 МПа' },
+      ]),
     ]);
     const result = run('MILL.630', {
       ...graphWith(document),
@@ -640,7 +737,7 @@ describe('MILL.630 — сертификат качества металла', ()
       graphWith(
         mill([
           textField(EVIDENCE_FIELDS.steelClass, 'А240С'),
-          tableField([
+          millTableField([
             { indicator: 'Предел текучести', norm: 'не менее 240 МПа', fact: '265 МПа' },
           ]),
         ]),

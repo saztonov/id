@@ -330,6 +330,31 @@ describe('DATE.311 — документ не абсурдно старый', () 
     const graph = graphWithAct([certificate([dateField('valid_to', '2027-01-01')])]);
     expect(run('DATE.311', graph).verdict).toBe('n_a');
   });
+
+  it('бессрочное свидетельство возрастом не судится', () => {
+    // Свидетельство о государственной регистрации выдаётся без срока: пока
+    // продукция и изготовитель не менялись, документ 2012 года действует так
+    // же, как выданный вчера. На папке «ИД Мастер апрель 2026» все пять
+    // замечаний правила пришлись на такие свидетельства.
+    const graph = graphWithAct([
+      certificate([dateField('issued_at', '2010-01-01')], {
+        docTypeCode: 'state_registration_certificate',
+        title: 'Свидетельство о государственной регистрации',
+      }),
+    ]);
+    expect(run('DATE.311', graph).verdict).toBe('n_a');
+  });
+
+  it('список бессрочных видов — параметр снимка, а не константа кода', () => {
+    // Чувствительность: пустой список возвращает прежнее поведение.
+    const graph = graphWithAct([
+      certificate([dateField('issued_at', '2010-01-01')], {
+        docTypeCode: 'state_registration_certificate',
+        title: 'Свидетельство о государственной регистрации',
+      }),
+    ]);
+    expect(run('DATE.311', graph, { openEndedDocTypes: [] }).verdict).toBe('fail');
+  });
 });
 
 /**
