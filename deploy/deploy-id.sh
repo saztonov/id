@@ -172,14 +172,40 @@ if [ -n "$worker_cid" ]; then
 else
   worker_health="контейнера нет"
 fi
+# Чужие исполнители на этом хосте (S58). С 6 по 8 сентября рядом с проектом
+# `id` жил его дубликат: compose, запущенный из каталога deploy без `-p id`,
+# назвал проект `deploy`, взял образ `id-api:latest` и под `restart:
+# unless-stopped` пережил три выкатки. Его воркер брал задачи из той же очереди
+# кодом двухдневной давности, и отказы выглядели дефектами текущей сборки.
+#
+# Ищутся контейнеры с командой api или worker, не принадлежащие проекту `id`.
+# Предупреждение, а не отказ: воркер на другой машине отсюда не виден, и полную
+# гарантию даёт забор сборки в самом воркере, а не эта строка.
+own_ids=" $("${COMPOSE[@]}" ps -q 2>/dev/null | tr '\n' ' ') "
+foreign_executors=""
+while IFS='|' read -r cid cname cimage ccmd; do
+  [ -n "$cid" ] || continue
+  case "$own_ids" in *" $cid "*) continue ;; esac
+  case "$ccmd" in
+    *apps/worker/dist/main.js*|*apps/api/dist/server.js*)
+      foreign_executors="${foreign_executors}${cname} (${cimage}) " ;;
+  esac
+done < <(docker ps --no-trunc --format '{{.ID}}|{{.Names}}|{{.Image}}|{{.Command}}' 2>/dev/null || true)
+
 echo
 echo "===== ОТЧЁТ О ДЕПЛОЕ (id) ====="
 echo "время:    $(date -Is)"
 echo "коммит:   $(git -C "$PORTAL_DIR" rev-parse HEAD) (тег образа $ID_TAG)"
+echo "метка выкатки: $APP_RELEASE (APP_RELEASE у api и worker; воркер сверяет себя с объявленной API)"
 echo "миграции: $MIGRATE_STATUS"
 echo "health:   $([ -n "$health_ok" ] && echo ok || echo 'НЕ готов — docker compose -p id logs id-api')"
 echo "маршруты: $([ -n "$ROUTES_OK" ] && echo ok || echo 'НЕ отвечают — портал поднялся, но /api/v1 недоступен')"
 echo "воркер:   $worker_health (служебный /metrics; starting сразу после выкатки — норма)"
+if [ -n "$foreign_executors" ]; then
+  echo "исполнители: ЧУЖОЙ ИСПОЛНИТЕЛЬ вне проекта id: ${foreign_executors}— снять: docker compose -p <проект> -f $PORTAL_DIR/deploy/docker-compose.prod.yml down" >&2
+else
+  echo "исполнители: ok (других контейнеров api/worker на хосте нет)"
+fi
 echo "env-ключи: ${missing_keys:-ok}${missing_keys:+ — нет в $ENV_FILE, см. deploy/id.env.example}"
 "${COMPOSE[@]}" ps --format 'table {{.Service}}\t{{.Status}}'
 echo "================================"

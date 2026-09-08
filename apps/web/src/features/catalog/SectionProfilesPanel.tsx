@@ -300,7 +300,7 @@ function ProfileCard({ profile }: { profile: SectionProfile }): ReactNode {
       </Descriptions.Item>
       <Descriptions.Item label="Применимые правила">
         {profile.enabledRuleCodes.length === 0 ? (
-          <Typography.Text type="secondary">правила не включены</Typography.Text>
+          <Typography.Text type="secondary">все правила действующего набора</Typography.Text>
         ) : (
           <Space size={4} wrap>
             {profile.enabledRuleCodes.map((code) => (
@@ -482,7 +482,11 @@ function NewProfileDialog({
             options={MATERIAL_CATEGORIES.map((code) => ({ value: code, label: code }))}
           />
         </Form.Item>
-        <Form.Item name="enabledRuleCodes" label="Применимые правила">
+        <Form.Item
+          name="enabledRuleCodes"
+          label="Применимые правила"
+          extra="Пусто — все правила действующего набора. Список нужен только чтобы сузить проверку раздела."
+        >
           <Select
             mode="multiple"
             allowClear

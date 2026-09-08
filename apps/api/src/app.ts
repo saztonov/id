@@ -50,6 +50,7 @@ import type { Pool } from 'pg';
 import { closePool, createPool } from '@id/db';
 import type { ProblemError } from '@id/contracts';
 import { assertRuleRegistryConsistent } from './checks/startup.js';
+import { announceRelease } from './jobs/build-fence.js';
 import { loadEnv, trustProxyOption, type Env } from './config/env.js';
 import { createAuthProvider, type AuthProvider } from './auth/oidc.js';
 import { registerAuthRoutes } from './auth/routes.js';
@@ -400,6 +401,23 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppInstan
       logger.info(details, message);
     },
   });
+
+  /**
+   * Объявление метки сборки (S58): API — источник истины для забора воркера.
+   *
+   * Здесь же, где сверка реестра, и по той же причине: объявление обязано
+   * исполняться в тестах, иначе тест доказывал бы работу забора только на
+   * заранее вписанной строке. Без метки объявлять нечего — тогда забор у
+   * воркера выключен, и об этом стоит строка в журнале, а не молчание.
+   */
+  if (env.APP_RELEASE !== undefined) {
+    await announceRelease(app.db, env.APP_RELEASE, logger);
+  } else {
+    logger.warn(
+      { event: 'release_unannounced' },
+      'APP_RELEASE не задан: метка сборки не объявлена, забор сборки воркера не сверяет',
+    );
+  }
 
   /**
    * Подготовка локального режима.

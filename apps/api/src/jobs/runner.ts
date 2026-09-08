@@ -409,6 +409,22 @@ export interface JobRunnerOptions {
    * только cgroup, убив процесс. Этот сторож нужен, чтобы до убийства не дошло.
    */
   readonly memoryPressure?: (() => boolean) | undefined;
+  /**
+   * Внешний сторож захвата: `true` — новых задач не брать (S58).
+   *
+   * Отдельно от `memoryPressure`, а не через него: событие журнала у того
+   * говорит «память на исходе», и забор сборки, надевший его личину, соврал бы
+   * в тот момент, когда по журналу ищут причину простоя. Семантика та же, что у
+   * памяти: проверка ДО захвата, текущие задачи дорабатывают.
+   */
+  readonly claimGuard?: (() => boolean) | undefined;
+  /**
+   * Метка сборки процесса — в `job_runs.release` каждой захваченной попытки.
+   *
+   * Так прогон, который исполняли воркеры двух сборок, разбирается одним
+   * запросом, а не по косвенным признакам (S58).
+   */
+  readonly release?: string | undefined;
 }
 
 interface QueueState {
@@ -456,6 +472,7 @@ export class JobRunner {
   #started = false;
   #stopping = false;
   #memoryPressureLoggedAt = 0;
+  #claimsHeldLoggedAt = 0;
 
   constructor(options: JobRunnerOptions) {
     this.#options = options;
@@ -687,6 +704,17 @@ export class JobRunner {
       return 0;
     }
 
+    /**
+     * Захват удержан внешним сторожем — забором сборки (S58).
+     *
+     * Тоже ДО захвата и по той же причине: захваченная попытка уже потрачена, и
+     * исполнить её чужой сборкой значило бы ровно то, от чего забор защищает.
+     */
+    if (this.#options.claimGuard?.() === true) {
+      this.#noteClaimsHeld(queue);
+      return 0;
+    }
+
     const types = this.#options.registry.typesOfQueue(queue);
     if (types.length === 0) return 0;
 
@@ -695,6 +723,7 @@ export class JobRunner {
       types,
       limit: free,
       leaseMs: CLAIM_LEASE_MS,
+      release: this.#options.release,
     });
 
     for (const job of claimed) {
@@ -804,6 +833,17 @@ export class JobRunner {
     this.#options.logger.warn(
       { event: 'queue_memory_pressure', queue, in_flight: this.inFlight },
       'память на исходе: новые задачи не берутся, пока текущие не освободят её',
+    );
+  }
+
+  /** Строка об удержании захвата — с тем же дросселем, что и у памяти. */
+  #noteClaimsHeld(queue: JobQueue): void {
+    const now = Date.now();
+    if (now - this.#claimsHeldLoggedAt < MEMORY_PRESSURE_LOG_INTERVAL_MS) return;
+    this.#claimsHeldLoggedAt = now;
+    this.#options.logger.warn(
+      { event: 'queue_claims_held', queue, in_flight: this.inFlight },
+      'захват удержан сторожем: новые задачи не берутся, текущие дорабатывают',
     );
   }
 

@@ -373,7 +373,19 @@ export interface ProfileNode {
   readonly expectedDocTypes: readonly string[];
   readonly materialCategories: readonly MaterialCategoryCode[];
   readonly materialMatrix: Readonly<Record<string, unknown>>;
+  /**
+   * Список правил профиля. ПУСТОЙ список — ограничений нет (S58): все папки
+   * проверяются одним набором, и профиль раздела, заведённый ради состава
+   * комплекта, правила не сужает. До S58 пустой список читался как «всё
+   * выключено», и папка раздела с таким профилем не проверялась вовсе.
+   */
   readonly enabledRuleCodes: readonly string[];
+  /**
+   * Правила, снятые наложениями объекта. Нужны отдельно от списка выше: при
+   * пустом `enabledRuleCodes` вычитать не из чего, и «на этом объекте правило
+   * не применяем» потерялось бы вместе с ограничением.
+   */
+  readonly disabledRuleCodes?: readonly string[];
   readonly thresholds: Readonly<Record<string, unknown>>;
   readonly autonomyLevel: 'assisted' | 'automatic';
   readonly relevantDateBasis: 'production' | 'delivery' | 'application';

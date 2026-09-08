@@ -67,6 +67,51 @@ export class ChecksStateError extends Error {
   }
 }
 
+/**
+ * Совет к расхождению реестра — по НАПРАВЛЕНИЮ расхождения, а не один на оба.
+ *
+ * До S58 совет был единственным: «примените миграцию сида правил». На бою он
+ * был неверен: миграции стояли, определения в базе были, а не хватало
+ * РЕАЛИЗАЦИЙ — задачу исполнял воркер сборки, собранной до появления правил.
+ * Два направления — две разные починки, и путать их значит послать человека
+ * перепроверять то, что исправно.
+ */
+function registryAdvice(error: RuleRegistryError): string {
+  const advice: string[] = [];
+  if (error.missingImplementations.length > 0) {
+    advice.push(
+      'Эту задачу исполняет воркер сборки, в которой этих правил ещё нет: ' +
+        'проверьте, что все исполнители подняты на текущем образе (deploy/README, §7).',
+    );
+  }
+  if (error.missingDefinitions.length > 0) {
+    advice.push('Примените миграцию сида правил (deploy-id --migrate).');
+  }
+  return advice.join(' ');
+}
+
+/**
+ * Список правил для движка из профиля (S58).
+ *
+ * Пустой список профиля — ограничений нет: все папки проверяются одним
+ * набором, и профиль раздела, заведённый ради состава комплекта, правила не
+ * сужает. До S58 пустой список при опубликованном профиле читался как «всё
+ * выключено», и папка раздела с таким профилем не проверялась вовсе — отказом
+ * «не исполнено ни одного правила», который выглядел как сбой.
+ *
+ * Снятые объектом правила при этом не теряются: их отдаёт резолвер отдельно,
+ * и «ограничений нет» превращается в «снимок минус снятые».
+ */
+function profileRuleCodes(
+  profile: CheckGraph['profile'],
+  snapshot: RulesetSnapshot['rules'],
+): readonly string[] | null {
+  if (profile.enabledRuleCodes.length > 0) return profile.enabledRuleCodes;
+  const disabled = new Set(profile.disabledRuleCodes ?? []);
+  if (disabled.size === 0) return null;
+  return snapshot.map((entry) => entry.ruleCode).filter((code) => !disabled.has(code));
+}
+
 export interface ChecksDeps {
   /** Граф ревизии без ответов внешних реестров. */
   loadGraph(input: {
@@ -160,8 +205,7 @@ export function createChecksRunHandler(deps: ChecksDeps): JobHandler<'checks.run
     } catch (error) {
       if (error instanceof RuleRegistryError) {
         throw new ChecksStateError(
-          `Прогон проверок невозможен: ${error.message}. ` +
-            'Примените миграцию сида правил или согласуйте каталог реализаций.',
+          `Прогон проверок невозможен: ${error.message}. ${registryAdvice(error)}`,
         );
       }
       throw error;
@@ -233,13 +277,7 @@ export function createChecksRunHandler(deps: ChecksDeps): JobHandler<'checks.run
     const result: RuleRunResult = runRulesByComplect(graph, {
       specs: RULE_CATALOG,
       snapshot: snapshot.rules,
-      // Пустой список профиля и отсутствие списка — РАЗНОЕ (§9.1, строка 4):
-      // пустой означает, что администратор выключил всё, и это законное
-      // решение; отсутствие настройки означает «ограничений нет».
-      enabledRuleCodes:
-        graph.profile.enabledRuleCodes.length === 0 && graph.profile.sectionProfileId === null
-          ? null
-          : graph.profile.enabledRuleCodes,
+      enabledRuleCodes: profileRuleCodes(graph.profile, snapshot.rules),
     });
 
     // Ни одно правило не исполнилось — это отказ, а не «замечаний нет».
@@ -247,7 +285,7 @@ export function createChecksRunHandler(deps: ChecksDeps): JobHandler<'checks.run
       throw new ChecksStateError(
         `Ревизия ${folderId}: не исполнено ни одного правила. ` +
           `Пропущено ${String(Object.keys(result.skipped).length)} кодов; ` +
-          'проверьте enabled_rule_codes профиля и состав снимка набора правил.',
+          'проверьте список правил профиля раздела и объекта и состав снимка набора правил.',
       );
     }
 

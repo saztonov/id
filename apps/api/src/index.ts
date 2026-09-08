@@ -67,6 +67,29 @@ export {
   LeaseLostError,
 } from './jobs/runner.js';
 export type { JobRunnerOptions } from './jobs/runner.js';
+export {
+  announceRelease,
+  BuildFence,
+  bundledSchemaVersion,
+  decideFence,
+  DEFAULT_FENCE_GRACE_MS,
+  DEFAULT_FENCE_INTERVAL_MS,
+} from './jobs/build-fence.js';
+export type {
+  BuildFenceOptions,
+  FenceDecision,
+  FenceInput,
+  FenceState,
+  FenceVerdict,
+  StaleReason,
+} from './jobs/build-fence.js';
+export {
+  DEPLOY_RELEASE_KEY,
+  readDeployRelease,
+  readSchemaVersion,
+  writeSystemSetting,
+} from './db/repositories/admin.js';
+export type { DeployRelease } from './db/repositories/admin.js';
 export { createMaintenanceRegistry, JobRegistry } from './jobs/registry.js';
 export type { JobContext, JobHandler } from './jobs/registry.js';
 export {

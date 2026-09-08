@@ -412,6 +412,16 @@ export interface ClaimJobsParams {
   readonly types: readonly JobType[];
   readonly limit: number;
   readonly leaseMs: number;
+  /**
+   * Метка сборки исполнителя — в `job_runs.release` каждой попытки (S58).
+   *
+   * Пишется при захвате, а не при исходе: попытка, которую воркер не довёл до
+   * исхода (SIGKILL, OOM), тоже обязана назвать сборку. Иначе прогон, который
+   * исполняли два воркера разных сборок, разбирается только по косвенным
+   * признакам — как и было: `error_samples.release` помечает лишь отказы, а
+   * `jobs.locked_by` перезаписывает следующая аренда.
+   */
+  readonly release?: string | undefined;
 }
 
 /**
@@ -466,7 +476,7 @@ export async function claimJobs(
     ),
     run as (
       insert into ${jobRuns} (
-        job_id, job_type, folder_id, request_id, attempt, payload_digest
+        job_id, job_type, folder_id, request_id, attempt, payload_digest, release
       )
       select c.id,
              c.type,
@@ -474,7 +484,8 @@ export async function claimJobs(
                   then (c.payload ->> 'folderId')::uuid end,
              c.payload ->> 'request_id',
              c.attempts,
-             encode(sha256(convert_to(c.payload::text, 'UTF8')), 'hex')
+             encode(sha256(convert_to(c.payload::text, 'UTF8')), 'hex'),
+             ${params.release ?? null}::text
         from claimed c
       returning id, job_id, request_id, folder_id
     )

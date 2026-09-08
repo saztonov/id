@@ -26,9 +26,12 @@
  */
 import { createServer, type Server } from 'node:http';
 import { hostname } from 'node:os';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import sharp from 'sharp';
 import { z } from 'zod';
 import {
+  BuildFence,
   closePool,
   createAiSpendReader,
   createDatabase,
@@ -69,6 +72,21 @@ const SERVICE_NAME = 'worker';
 
 /** Потолок ожидания текущих задач при остановке, если развёртывание молчит. */
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 8_000;
+
+/**
+ * Каталог миграций ОБРАЗА — для зонда схемы забора сборки (S58).
+ *
+ * `apps/worker/dist/main.js` → корень репозитория → `migrations/`. Dockerfile
+ * копирует репозиторий целиком, поэтому в контейнере это `/app/migrations`, тот
+ * же каталог, что читает мигратор.
+ */
+const MIGRATIONS_DIR = join(
+  dirname(fileURLToPath(import.meta.url)),
+  '..',
+  '..',
+  '..',
+  'migrations',
+);
 
 /**
  * Настройки самого воркера.
@@ -295,6 +313,29 @@ async function main(): Promise<void> {
   });
 
   /**
+   * Забор сборки (S58): воркер чужой сборки не берёт задачи.
+   *
+   * Сверка реестра выше ловит расхождение кода со схемой ТОЛЬКО при старте;
+   * процесс, поднятый до выкатки, её прошёл и дальше не проверялся — так
+   * дубликат стека две недели исполнял задачи кодом до S54. Забор сверяет метку
+   * сборки с объявленной API и версию схемы с каталогом образа при старте и
+   * каждые пятнадцать секунд; при расхождении захват удерживается, а процесс
+   * уходит через штатную остановку с кодом 1. Обработчик остановки объявлен
+   * ниже раннера, поэтому здесь держатель, а не прямая ссылка.
+   */
+  let staleHandler: () => void = () => {};
+  const fence = new BuildFence({
+    db,
+    logger,
+    ownRelease: env.APP_RELEASE,
+    production: env.NODE_ENV === 'production',
+    migrationsDir: MIGRATIONS_DIR,
+    onStale: () => {
+      staleHandler();
+    },
+  });
+
+  /**
    * Приёмник дефектов качества конвейера (§11, ADR-0010).
    *
    * Собирается здесь, потому что ряд начинается тогда, когда включён сбор:
@@ -376,6 +417,11 @@ async function main(): Promise<void> {
      * жертву.
      */
     ...(rssSoftLimitBytes !== null ? { memoryPressure: (): boolean => rssOverLimit() } : {}),
+    // Забор сборки удерживает захват тем же местом, что и сторож памяти, но
+    // своим предикатом: событие журнала обязано называть настоящую причину.
+    claimGuard: (): boolean => fence.holdsClaims(),
+    // Метка сборки — в каждую захваченную попытку (`job_runs.release`).
+    release: env.APP_RELEASE,
     // Очистка журнала живёт здесь, а не в API: у воркера уже есть часовой цикл
     // обслуживания, и одновременно работает всё равно только один процесс —
     // очистка берёт advisory-блокировку.
@@ -419,6 +465,7 @@ async function main(): Promise<void> {
 
     void (async () => {
       try {
+        fence.stop();
         await runner.stop();
         // Журнал дописывается ДО закрытия пула: после него писать некуда.
         await errorJournal.stop();
@@ -437,6 +484,13 @@ async function main(): Promise<void> {
         process.exit(1);
       }
     })();
+  };
+
+  // Устаревшая сборка уходит штатной остановкой с кодом 1: текущие задачи
+  // дорабатывают, новые не берутся, а `restart: unless-stopped` превращает это
+  // в видимый цикл перезапусков с `worker_build_stale` в журнале.
+  staleHandler = () => {
+    shutdown('build_stale', 1);
   };
 
   process.on('SIGTERM', () => {
@@ -470,11 +524,16 @@ async function main(): Promise<void> {
     );
   }
 
+  // Первая сверка — ДО первого захвата: иначе воркер чужой сборки успел бы
+  // взять пачку задач, пока таймер забора ещё не сработал.
+  await fence.start();
   runner.start();
 
   logger.info(
     {
       event: 'worker_ready',
+      release: env.APP_RELEASE ?? null,
+      build_fence: fence.verdict.state,
       handled_types: registry.types(),
       unhandled_types: registry.unhandled().length,
       pdf_toolkit: toolkit.kind,

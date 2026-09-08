@@ -1288,6 +1288,104 @@ describe('enabled_rule_codes профиля ограничивает прого�
 });
 
 // =====================================================================
+// 13а. Пустой список правил профиля — ограничений нет (S58)
+// =====================================================================
+
+describe('пустой список правил профиля не выключает проверку', () => {
+  /**
+   * На бою профиль раздела публиковался ради состава комплекта, а поле
+   * «Применимые правила» оставалось пустым — форма так и предлагает. Прогон
+   * читал пустоту как «администратор выключил всё» и отказывал «не исполнено
+   * ни одного правила»: папка раздела не проверялась вовсе, и выглядело это
+   * сбоем, а не настройкой. Все папки проверяются одним набором; профиль
+   * правила не сужает, пока список пуст.
+   */
+  const SECTION_PROFILE_V3 = id(54);
+  const OBJECT_PROFILE = id(55);
+
+  it('с опубликованным профилем и пустым списком исполняются все правила снимка', async () => {
+    // Узкий профиль V2 из предыдущего блока уводится в прошлое одним днём:
+    // удалить его нельзя (на него ссылаются прогоны), а открытый период у
+    // раздела может быть только один.
+    await testDb.query(
+      `UPDATE section_profiles
+          SET effective_from = '${TODAY}'::date - 1, effective_to = '${TODAY}'::date - 1
+        WHERE id = '${SECTION_PROFILE_V2}'`,
+    );
+    await testDb.query(
+      `INSERT INTO section_profiles (id, section_code, version, effective_from, effective_to,
+                                     expected_doc_types, material_categories, material_matrix,
+                                     enabled_rule_codes, thresholds, autonomy_level,
+                                     published_at, published_by)
+         VALUES ('${SECTION_PROFILE_V3}', 'roofing', 3, '${TODAY}'::date, NULL,
+                 ARRAY[${lit('aosr')}, ${lit('annex_registry')}]::text[],
+                 ARRAY[${lit('roll_waterproofing')}, ${lit('rebar')}, ${lit('ready_mix_concrete')}]::text[],
+                 '{}'::jsonb, '{}'::text[], '{}'::jsonb, 'assisted',
+                 now(), '${USER_ADMIN}')`,
+    );
+
+    await enqueueSystemJob(db, {
+      type: 'checks.run',
+      payload: { folderId: FOLDER },
+      dedupeKey: `checks.run:${FOLDER}:empty-profile`,
+    });
+    await drainQueue();
+
+    const job = await testDb.query<{ status: string }>(
+      `SELECT status FROM jobs WHERE dedupe_key = 'checks.run:${FOLDER}:empty-profile'`,
+    );
+    expect(job[0]?.status).toBe('done');
+
+    const runId = await latestRunId();
+    const runs = await testDb.query<{ section_profile_id: string | null }>(
+      `SELECT section_profile_id FROM validation_runs WHERE id = '${runId}'`,
+    );
+    expect(runs[0]?.section_profile_id).toBe(SECTION_PROFILE_V3);
+
+    const journal = await journalOf(runId);
+    expect(Object.values(journal.skippedCodes)).not.toContain('not_in_profile');
+    expect(journal.executions.map((entry) => entry.ruleCode).sort()).toEqual(
+      [...ALL_RULE_CODES].sort(),
+    );
+  });
+
+  it('снятые объектом правила при пустом списке всё равно не исполняются', async () => {
+    // «На этом объекте правило не применяем» — наложение объекта, и при пустом
+    // списке раздела оно обязано действовать: вычитать не из чего, значит
+    // вычитается из снимка.
+    await testDb.query(
+      `INSERT INTO object_rule_profiles (id, object_id, section_code, version, effective_from,
+                                         effective_to, overrides, published_at)
+         VALUES ('${OBJECT_PROFILE}', '${OBJECT}', NULL, 1, '${TODAY}'::date, NULL,
+                 '{"disabledRuleCodes": ["AOSR.HDR.022", "MAT.111"]}'::jsonb, now())`,
+    );
+
+    await enqueueSystemJob(db, {
+      type: 'checks.run',
+      payload: { folderId: FOLDER },
+      dedupeKey: `checks.run:${FOLDER}:empty-profile-disabled`,
+    });
+    await drainQueue();
+
+    const runId = await latestRunId();
+    const journal = await journalOf(runId);
+    expect(journal.skippedCodes['AOSR.HDR.022']).toBe('not_in_profile');
+    expect(journal.skippedCodes['MAT.111']).toBe('not_in_profile');
+    const executed = journal.executions.map((entry) => entry.ruleCode);
+    expect(executed).not.toContain('AOSR.HDR.022');
+    expect(executed).not.toContain('MAT.111');
+    expect(executed.length).toBe(ALL_RULE_CODES.length - 2);
+
+    // Наложение уводится в прошлое: на него ссылается прогон, удалить нельзя.
+    await testDb.query(
+      `UPDATE object_rule_profiles
+          SET effective_from = '${TODAY}'::date - 1, effective_to = '${TODAY}'::date - 1
+        WHERE id = '${OBJECT_PROFILE}'`,
+    );
+  });
+});
+
+// =====================================================================
 // 14–15. Отказы состояния настройки: задача обязана падать, а не молчать
 // =====================================================================
 
@@ -1356,14 +1454,26 @@ describe('задача честно отказывает вместо «заме
     });
     await drainQueue();
 
-    const runsOfJob = await testDb.query<{ outcome: string | null; error_message: string | null }>(
-      `SELECT r.outcome, r.error_message FROM job_runs r
+    const runsOfJob = await testDb.query<{
+      outcome: string | null;
+      error_message: string | null;
+      reason_text: string | null;
+    }>(
+      `SELECT r.outcome, r.error_message, r.reason_text FROM job_runs r
          JOIN jobs j ON j.id = r.job_id
         WHERE j.dedupe_key = 'checks.run:${FOLDER}:phantom'`,
     );
     expect(runsOfJob.length).toBeGreaterThan(0);
     for (const row of runsOfJob) expect(row.outcome).not.toBe('succeeded');
     expect(runsOfJob[0]?.error_message ?? '').toContain('реестр правил разошёлся с реализациями');
+    // Отпечаток вычёркивает числа — код превращается в «PHANTOM.<n>»; причина
+    // словами обязана назвать код целиком и совет по НАПРАВЛЕНИЮ расхождения:
+    // определение в базе есть, реализации нет — это сборка исполнителя, а не
+    // миграция (S58).
+    expect(runsOfJob[0]?.error_message ?? '').toContain('PHANTOM.<n>');
+    expect(runsOfJob[0]?.reason_text ?? '').toContain('PHANTOM.999');
+    expect(runsOfJob[0]?.reason_text ?? '').toContain('исполнители подняты на текущем образе');
+    expect(runsOfJob[0]?.reason_text ?? '').not.toContain('Примените миграцию');
 
     expect(
       await count(`SELECT count(*) AS count FROM validation_runs WHERE folder_id = '${FOLDER}'`),

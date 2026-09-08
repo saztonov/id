@@ -36,6 +36,7 @@
 /** Поля, которые причина читает у своих классов. Чужой объект их не имеет. */
 interface OwnErrorShape {
   readonly name?: unknown;
+  readonly message?: unknown;
   readonly timeoutMs?: unknown;
   readonly spent?: unknown;
   readonly budget?: unknown;
@@ -100,6 +101,19 @@ export function readableJobReason(error: unknown): string | null {
     }
     case 'LlmDisabledError':
       return 'Обращения к модели выключены настройкой портала.';
+    case 'ChecksStateError': {
+      /**
+       * Отказ состояния настройки проверок (S58) — единственный класс, чьё
+       * сообщение берётся целиком. Это не отступление от принципа файла, а его
+       * применение: все пять текстов `ChecksStateError` собирает сам портал из
+       * своих кодов правил, своих счётчиков и своих идентификаторов — ни один
+       * не содержит строки провайдера, Postgres или скана. Отпечаток при этом
+       * остаётся нормализованным, и до S58 человек читал на плашке «нет
+       * реализации для кодов: REG.<n>, REG.<n>» — коды, по которым только и
+       * можно понять, какой сборке их не хватает, вычёркивались как числа.
+       */
+      return typeof own.message === 'string' && own.message !== '' ? own.message : null;
+    }
     case 'LlmModelNotAllowedError': {
       // Имя модели — не ПДн: оно приходит из настройки портала, а не из скана.
       const model = typeof own.model === 'string' ? own.model : null;

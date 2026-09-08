@@ -429,7 +429,10 @@ export interface ResolvedRules {
   readonly expectedDocTypes: readonly string[];
   readonly materialCategories: readonly MaterialCategoryCode[];
   readonly materialMatrix: JsonValue;
+  /** Пустой список — ограничений нет (S58); см. `ProfileNode` в `@id/rules`. */
   readonly enabledRuleCodes: readonly string[];
+  /** Снятые наложениями объекта: при пустом списке выше вычитать не из чего. */
+  readonly disabledRuleCodes: readonly string[];
   readonly thresholds: JsonValue;
   readonly autonomyLevel: AutonomyLevel;
   readonly relevantDateBasis: RelevantDateBasis;
@@ -515,6 +518,7 @@ function baseRules(profile: SectionProfile | null): RuleValues {
       materialCategories: [],
       materialMatrix: {},
       enabledRuleCodes: [],
+      disabledRuleCodes: [],
       thresholds: {},
       // Раздел без профиля стартует в assisted (§0.5, п.5), а не «как получится».
       autonomyLevel: 'assisted',
@@ -530,6 +534,7 @@ function baseRules(profile: SectionProfile | null): RuleValues {
     materialCategories: profile.materialCategories as readonly MaterialCategoryCode[],
     materialMatrix: profile.materialMatrix,
     enabledRuleCodes: profile.enabledRuleCodes,
+    disabledRuleCodes: [],
     thresholds: profile.thresholds,
     autonomyLevel: profile.autonomyLevel,
     relevantDateBasis: DEFAULT_RELEVANT_DATE_BASIS,
@@ -555,6 +560,10 @@ function applyOverrides(base: RuleValues, overrides: RuleOverrides): RuleValues 
     materialCategories: overrides.materialCategories ?? base.materialCategories,
     materialMatrix: mergeJsonObjects(base.materialMatrix, overrides.materialMatrix),
     enabledRuleCodes: enabled.filter((code) => !disabled.has(code)),
+    // Снятые накапливаются по наложениям и отдаются отдельно: при пустом
+    // списке включённых (ограничений нет, S58) вычитание выше — из пустоты,
+    // и прогон обязан узнать о снятых правилах другим путём.
+    disabledRuleCodes: [...new Set([...base.disabledRuleCodes, ...disabled])],
     thresholds: mergeJsonObjects(base.thresholds, overrides.thresholds),
     // Понижение — единственное допустимое изменение уровня (см. заголовок файла),
     // и схема наложения других значений не принимает.

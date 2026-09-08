@@ -458,6 +458,67 @@ export async function readSettingValue(db: Database, key: string): Promise<JsonV
   return rows[0] === undefined ? undefined : (rows[0].value as JsonValue);
 }
 
+/**
+ * Ключ `app_settings`, в котором API объявляет метку своей сборки (S58).
+ *
+ * Объявляет ИМЕННО API, и только при старте: он один на портал и его
+ * пересоздаёт каждая выкатка. Воркер не объявляет ничего — устаревший сирота с
+ * `restart: unless-stopped` переобъявил бы себя и снял бы забор; два воркера
+ * разных сборок гоняли бы значение туда-сюда. Периодического переобъявления
+ * тоже нет: устаревший API-сирота — отдельный дефект, и подтверждать своё
+ * значение раз в минуту он не должен.
+ */
+export const DEPLOY_RELEASE_KEY = 'deploy.release';
+
+export interface DeployRelease {
+  readonly release: string;
+  readonly announcedAt: string | null;
+}
+
+/**
+ * Системная запись настройки: без области видимости и без аудита.
+ *
+ * Не действие оператора, а факт о процессе (`updated_by NULL`): строка аудита
+ * «кто-то изменил настройку» здесь врала бы про субъекта. Ключи закрытого
+ * перечня `SETTINGS_REGISTRY` сюда не пишутся — они остаются за `writeSetting`.
+ */
+export async function writeSystemSetting(db: Database, key: string, value: unknown): Promise<void> {
+  await db
+    .insert(appSettings)
+    .values({ key, value: jsonbValue(value), updatedBy: null, updatedAt: sql`now()` })
+    .onConflictDoUpdate({
+      target: appSettings.key,
+      set: { value: jsonbValue(value), updatedBy: null, updatedAt: sql`now()` },
+    });
+}
+
+/** Объявленная API метка сборки; `null` — объявления нет (или оно не в форме). */
+export async function readDeployRelease(db: Database): Promise<DeployRelease | null> {
+  const value = await readSettingValue(db, DEPLOY_RELEASE_KEY);
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const release = record['release'];
+  if (typeof release !== 'string' || release === '') return null;
+  const announcedAt = record['announcedAt'];
+  return { release, announcedAt: typeof announcedAt === 'string' ? announcedAt : null };
+}
+
+/**
+ * Старшая применённая миграция по журналу `schema_migrations`.
+ *
+ * Нужна забору сборки: образ несёт свой каталог миграций, и база, ушедшая
+ * дальше него, означает, что процесс собран из кода старше схемы — во время
+ * `deploy-id --migrate` это единственный признак, который виден воркеру на
+ * другой машине до того, как поднятый заново API объявит новую метку.
+ */
+export async function readSchemaVersion(db: Database): Promise<string | null> {
+  const result = await db.execute<{ version: string | null }>(
+    sql`select max(version) as version from schema_migrations`,
+  );
+  const version = result.rows[0]?.version;
+  return typeof version === 'string' && version !== '' ? version : null;
+}
+
 export async function writeSetting(
   db: Database,
   scope: AuthScope,

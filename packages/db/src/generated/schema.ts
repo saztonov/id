@@ -1193,43 +1193,6 @@ export const errorEventsLegacy = pgTable("error_events_legacy", {
 	check("error_events_status_chk", sql`status = ANY (ARRAY['new'::text, 'ack'::text, 'resolved'::text])`),
 ]);
 
-export const jobRuns = pgTable("job_runs", {
-	id: uuid().defaultRandom().primaryKey().notNull(),
-	jobId: uuid("job_id"),
-	jobType: text("job_type").notNull(),
-	folderId: uuid("folder_id"),
-	requestId: text("request_id"),
-	startedAt: timestamp("started_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
-	finishedAt: timestamp("finished_at", { withTimezone: true, mode: 'string' }),
-	durationMs: integer("duration_ms"),
-	attempt: integer().notNull(),
-	outcome: text(),
-	errorClass: text("error_class"),
-	errorMessage: text("error_message"),
-	payloadDigest: text("payload_digest"),
-	reasonText: text("reason_text"),
-}, (table) => [
-	index("ix_job_runs_folder").using("btree", table.folderId.asc().nullsLast().op("uuid_ops"), table.startedAt.desc().nullsFirst().op("timestamptz_ops")),
-	index("ix_job_runs_in_flight").using("btree", table.startedAt.asc().nullsLast().op("timestamptz_ops")).where(sql`(outcome IS NULL)`),
-	index("ix_job_runs_job").using("btree", table.jobId.asc().nullsLast().op("uuid_ops")),
-	index("ix_job_runs_request").using("btree", table.requestId.asc().nullsLast().op("text_ops")),
-	index("ix_job_runs_type").using("btree", table.jobType.asc().nullsLast().op("text_ops"), table.startedAt.desc().nullsFirst().op("timestamptz_ops")),
-	foreignKey({
-			columns: [table.jobId],
-			foreignColumns: [jobs.id],
-			name: "job_runs_job_id_fkey"
-		}).onDelete("set null"),
-	foreignKey({
-			columns: [table.folderId],
-			foreignColumns: [folders.id],
-			name: "job_runs_folder_id_fkey"
-		}),
-	check("job_runs_attempt_chk", sql`attempt > 0`),
-	check("job_runs_duration_chk", sql`(duration_ms IS NULL) OR (duration_ms >= 0)`),
-	check("job_runs_finished_chk", sql`(outcome IS NOT NULL) OR (finished_at IS NULL)`),
-	check("job_runs_outcome_chk", sql`(outcome IS NULL) OR (outcome = ANY (ARRAY['succeeded'::text, 'failed'::text, 'cancelled'::text, 'lease_expired'::text, 'deferred'::text]))`),
-]);
-
 export const promptTemplates = pgTable("prompt_templates", {
 	id: uuid().defaultRandom().primaryKey().notNull(),
 	code: text().notNull(),
@@ -1265,6 +1228,44 @@ export const promptTemplates = pgTable("prompt_templates", {
 	check("prompt_templates_state_chk", sql`state = ANY (ARRAY['draft'::text, 'test'::text, 'published'::text, 'archived'::text])`),
 	check("prompt_templates_published_chk", sql`(state <> 'published'::text) OR ((published_at IS NOT NULL) AND (published_by IS NOT NULL))`),
 	check("prompt_templates_stage_chk", sql`stage = ANY (ARRAY['page_classify'::text, 'doc_split'::text, 'extract'::text, 'check'::text, 'summary'::text, 'recognize'::text, 'orientation'::text, 'registry_match'::text])`),
+]);
+
+export const jobRuns = pgTable("job_runs", {
+	id: uuid().defaultRandom().primaryKey().notNull(),
+	jobId: uuid("job_id"),
+	jobType: text("job_type").notNull(),
+	folderId: uuid("folder_id"),
+	requestId: text("request_id"),
+	startedAt: timestamp("started_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	finishedAt: timestamp("finished_at", { withTimezone: true, mode: 'string' }),
+	durationMs: integer("duration_ms"),
+	attempt: integer().notNull(),
+	outcome: text(),
+	errorClass: text("error_class"),
+	errorMessage: text("error_message"),
+	payloadDigest: text("payload_digest"),
+	reasonText: text("reason_text"),
+	release: text(),
+}, (table) => [
+	index("ix_job_runs_folder").using("btree", table.folderId.asc().nullsLast().op("uuid_ops"), table.startedAt.desc().nullsFirst().op("timestamptz_ops")),
+	index("ix_job_runs_in_flight").using("btree", table.startedAt.asc().nullsLast().op("timestamptz_ops")).where(sql`(outcome IS NULL)`),
+	index("ix_job_runs_job").using("btree", table.jobId.asc().nullsLast().op("uuid_ops")),
+	index("ix_job_runs_request").using("btree", table.requestId.asc().nullsLast().op("text_ops")),
+	index("ix_job_runs_type").using("btree", table.jobType.asc().nullsLast().op("text_ops"), table.startedAt.desc().nullsFirst().op("timestamptz_ops")),
+	foreignKey({
+			columns: [table.jobId],
+			foreignColumns: [jobs.id],
+			name: "job_runs_job_id_fkey"
+		}).onDelete("set null"),
+	foreignKey({
+			columns: [table.folderId],
+			foreignColumns: [folders.id],
+			name: "job_runs_folder_id_fkey"
+		}),
+	check("job_runs_attempt_chk", sql`attempt > 0`),
+	check("job_runs_duration_chk", sql`(duration_ms IS NULL) OR (duration_ms >= 0)`),
+	check("job_runs_finished_chk", sql`(outcome IS NOT NULL) OR (finished_at IS NULL)`),
+	check("job_runs_outcome_chk", sql`(outcome IS NULL) OR (outcome = ANY (ARRAY['succeeded'::text, 'failed'::text, 'cancelled'::text, 'lease_expired'::text, 'deferred'::text]))`),
 ]);
 
 export const outbox = pgTable("outbox", {

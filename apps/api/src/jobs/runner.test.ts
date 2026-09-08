@@ -24,6 +24,8 @@
  * `describe.skipIf` и исполняется только при заданном `TEST_DATABASE_URL`.
  */
 import { randomUUID } from 'node:crypto';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -62,6 +64,7 @@ import {
   LlmRateLimitError,
   LlmTimeoutError,
 } from '../llm/port.js';
+import { announceRelease, BuildFence, type FenceVerdict } from './build-fence.js';
 import { JobRegistry, type JobContext } from './registry.js';
 import { classifyFailure, deferralOf, JobDeferredError, JobRunner } from './runner.js';
 import { dedupeKeyFor } from './types.js';
@@ -137,7 +140,7 @@ const FIXTURE: readonly string[] = [
      VALUES ('${FOLDER_C}', '${OBJECT}', '${ORG_CONTRACTOR_A}', '${ORG_CONTRACTOR_A}', 'roofing', DATE '2026-01-01', 'Комплект А-2', '${USER_CONTRACTOR_A}')`,
 ];
 
-const TEST_ENV = loadEnv({
+const TEST_ENV_SOURCE = {
   NODE_ENV: 'test',
   PUBLIC_URL: 'http://localhost:3000',
   DATABASE_URL: 'postgresql://pglite/id-portal-tests',
@@ -147,7 +150,8 @@ const TEST_ENV = loadEnv({
   LOCAL_STORAGE_DIR: '.tmp/runner-tests',
   AUDIT_HMAC_KEY: 'audit-hmac-key-of-runner-tests',
   RATE_LIMIT_MAX: '100000',
-});
+};
+const TEST_ENV = loadEnv(TEST_ENV_SOURCE);
 
 /**
  * Откат для тестов: разброс снят, база мала, множитель крупный.
@@ -177,9 +181,11 @@ const CONTRACTOR_A_SCOPE: AuthScope = {
 
 beforeAll(async () => {
   db = await createPgliteDatabase();
-  for (const migration of loadMigrations(MIGRATIONS_DIR)) {
-    await db.exec(migration.sql);
-  }
+  // Через мигратор, а не построчным `exec`: он заводит журнал
+  // `schema_migrations`, а забор сборки сверяет с ним каталог миграций образа
+  // (S58). Без журнала зонд схемы молчал бы, и тест доказывал бы только то, что
+  // молчание не мешает остальным проверкам.
+  await applyMigrations(db, loadMigrations(MIGRATIONS_DIR));
   for (const statement of FIXTURE) {
     await db.query(statement);
   }
@@ -1011,6 +1017,214 @@ describe('сторож памяти', () => {
 
     await guarded.stop();
     await drainQueue();
+  });
+});
+
+describe('забор сборки', () => {
+  /**
+   * С 6 по 8 сентября задачи исполняли два воркера разных сборок (S58): дубликат
+   * стека под чужим именем compose-проекта брал задачи из той же очереди кодом
+   * до S54. Здесь — настоящий захват настоящим раннером: воркер чужой сборки
+   * обязан НЕ ВЗЯТЬ задачу, а не «взять и упасть».
+   */
+  const silent = createLogger({ service: 'runner-test', level: 'silent', env: 'test' });
+
+  function fenceOf(
+    options: Partial<ConstructorParameters<typeof BuildFence>[0]> & {
+      readonly ownRelease: string | undefined;
+    },
+  ): { fence: BuildFence; stale: FenceVerdict[] } {
+    const stale: FenceVerdict[] = [];
+    const fence = new BuildFence({
+      db: app.db,
+      logger: silent,
+      production: true,
+      migrationsDir: MIGRATIONS_DIR,
+      onStale: (verdict) => {
+        stale.push(verdict);
+      },
+      ...options,
+    });
+    return { fence, stale };
+  }
+
+  function guardedRunner(fence: BuildFence, release?: string): JobRunner {
+    return new JobRunner({
+      db: app.db,
+      registry: memoryRegistry,
+      logger: silent,
+      metrics: createMetrics({ enabled: false, service: 'runner-test' }),
+      errorReporter: new NoopErrorReporter(),
+      workerId: 'worker-fence-test',
+      backoff: TEST_BACKOFF,
+      claimGuard: () => fence.holdsClaims(),
+      release,
+    });
+  }
+
+  async function enqueueFenced(): Promise<string> {
+    const job = await enqueueSystemJob(app.db, {
+      type: 'graph.build',
+      payload: { folderId: FOLDER_A },
+      dedupeKey: `fence:${randomUUID()}`,
+    });
+    return job.jobId;
+  }
+
+  it('совпавшая метка — задачи берутся и подписаны сборкой', async () => {
+    await drainQueue();
+    await announceRelease(app.db, 'aaa', silent);
+    const { fence, stale } = fenceOf({ ownRelease: 'aaa' });
+    const guarded = guardedRunner(fence, 'aaa');
+
+    expect((await fence.checkOnce()).state).toBe('current');
+    const jobId = await enqueueFenced();
+    expect(await guarded.runOnce()).toBeGreaterThan(0);
+    expect((await rawJob(jobId))['status']).toBe('done');
+    // Метка сборки — в попытке, а не только в отказах журнала ошибок: зелёная
+    // попытка чужой сборки до S58 следа не оставляла вовсе.
+    expect((await runsOf(jobId))[0]?.['release']).toBe('aaa');
+    expect(stale).toEqual([]);
+
+    await guarded.stop();
+    fence.stop();
+  });
+
+  it('чужая метка после окна старта — задача не берётся, попытка не тратится', async () => {
+    await drainQueue();
+    await announceRelease(app.db, 'bbb', silent);
+    let clock = 0;
+    const { fence, stale } = fenceOf({ ownRelease: 'aaa', graceMs: 90_000, now: () => clock });
+    const guarded = guardedRunner(fence, 'aaa');
+    const jobId = await enqueueFenced();
+
+    // Внутри окна старта: API мог ещё не объявить новую метку — ждём, не берём.
+    clock = 10_000;
+    expect((await fence.checkOnce()).state).toBe('unverified');
+    expect(await guarded.runOnce()).toBe(0);
+    expect(stale).toEqual([]);
+
+    // Окно вышло, метки так и не сошлись: процесс устарел.
+    clock = 90_000;
+    const verdict = await fence.checkOnce();
+    expect(verdict.state).toBe('stale');
+    expect(verdict.reason).toBe('release_mismatch');
+    expect(verdict.announced).toBe('bbb');
+    expect(stale).toHaveLength(1);
+    // Повторные проверки не зовут обработчик снова: остановка уже идёт.
+    await fence.checkOnce();
+    expect(stale).toHaveLength(1);
+
+    // Самое важное: захват удержан ДО того, как попытка потрачена. Именно так
+    // на бою «attempt 1» доставался старому воркеру и сгорал.
+    expect(await guarded.runOnce()).toBe(0);
+    expect((await rawJob(jobId))['attempts']).toBe(0);
+    expect((await rawJob(jobId))['status']).toBe('queued');
+
+    await guarded.stop();
+    fence.stop();
+    await drainQueue();
+  });
+
+  it('без объявления захват идёт: первая выкатка с забором не встаёт', async () => {
+    await drainQueue();
+    await db.query(`DELETE FROM app_settings WHERE key = 'deploy.release'`);
+    const { fence, stale } = fenceOf({ ownRelease: 'aaa' });
+    const guarded = guardedRunner(fence);
+
+    expect((await fence.checkOnce()).state).toBe('unannounced');
+    const jobId = await enqueueFenced();
+    expect(await guarded.runOnce()).toBeGreaterThan(0);
+    expect((await rawJob(jobId))['status']).toBe('done');
+    // Раннер без метки — попытка без подписи, а не с выдуманной.
+    expect((await runsOf(jobId))[0]?.['release']).toBeNull();
+    expect(stale).toEqual([]);
+
+    await guarded.stop();
+    fence.stop();
+  });
+
+  it('в production без своей метки — после окна старта stale/unlabeled', async () => {
+    await drainQueue();
+    await announceRelease(app.db, 'aaa', silent);
+    let clock = 0;
+    const { fence, stale } = fenceOf({ ownRelease: undefined, graceMs: 90_000, now: () => clock });
+    const guarded = guardedRunner(fence);
+    const jobId = await enqueueFenced();
+
+    expect((await fence.checkOnce()).state).toBe('unverified');
+    clock = 90_000;
+    expect(await fence.checkOnce()).toMatchObject({ state: 'stale', reason: 'unlabeled' });
+    expect(stale).toHaveLength(1);
+    expect(await guarded.runOnce()).toBe(0);
+    expect((await rawJob(jobId))['attempts']).toBe(0);
+
+    await guarded.stop();
+    fence.stop();
+    await drainQueue();
+  });
+
+  it('вне production без метки забор выключен', async () => {
+    await drainQueue();
+    const { fence } = fenceOf({ ownRelease: undefined, production: false });
+    expect((await fence.checkOnce()).state).toBe('disabled');
+    expect(fence.holdsClaims()).toBe(false);
+    fence.stop();
+  });
+
+  it('база новее каталога образа — stale/schema_newer при совпавших метках', async () => {
+    // Окно `deploy-id --migrate` глазами воркера на другой машине: объявление
+    // ещё старое и даже совпадает, а схема уже ушла вперёд его кода.
+    await drainQueue();
+    await announceRelease(app.db, 'aaa', silent);
+    const dir = mkdtempSync(join(tmpdir(), 'id-fence-old-image-'));
+    writeFileSync(join(dir, '0001_init.sql'), '');
+    try {
+      const { fence, stale } = fenceOf({ ownRelease: 'aaa', migrationsDir: dir });
+      const guarded = guardedRunner(fence, 'aaa');
+      const jobId = await enqueueFenced();
+
+      const verdict = await fence.checkOnce();
+      expect(verdict).toMatchObject({ state: 'stale', reason: 'schema_newer' });
+      expect(verdict.bundledSchema).toBe('0001');
+      expect(verdict.dbSchema).not.toBeNull();
+      expect(stale).toHaveLength(1);
+      expect(await guarded.runOnce()).toBe(0);
+      expect((await rawJob(jobId))['attempts']).toBe(0);
+
+      await guarded.stop();
+      fence.stop();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    await drainQueue();
+  });
+
+  it('API объявляет свою метку при сборке приложения, а без метки — нет', async () => {
+    // Объявляет именно `buildApp`, а не строка, вписанная тестом: иначе забор
+    // проверялся бы на данных, которых боевой API никогда не пишет.
+    await db.query(`DELETE FROM app_settings WHERE key = 'deploy.release'`);
+    const labelled = await buildApp({
+      env: loadEnv({ ...TEST_ENV_SOURCE, APP_RELEASE: 'r1' }),
+      pool: createTestPool(db) as unknown as Pool,
+    });
+    await labelled.ready();
+    await labelled.close();
+
+    const announced = await db.query<{ value: { release?: string; announcedBy?: string } }>(
+      `SELECT value FROM app_settings WHERE key = 'deploy.release'`,
+    );
+    expect(announced[0]?.value.release).toBe('r1');
+    expect(announced[0]?.value.announcedBy).toBe('api');
+
+    await db.query(`DELETE FROM app_settings WHERE key = 'deploy.release'`);
+    const unlabelled = await buildApp({
+      env: TEST_ENV,
+      pool: createTestPool(db) as unknown as Pool,
+    });
+    await unlabelled.ready();
+    await unlabelled.close();
+    expect(await db.query(`SELECT 1 FROM app_settings WHERE key = 'deploy.release'`)).toEqual([]);
   });
 });
 
