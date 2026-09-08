@@ -137,6 +137,10 @@ describe('seed реестра правил не отстаёт от катало
           generateBuiltinRulesetSql(ruleset.specs, {
             version: ruleset.version,
             bootstrap: ruleset.bootstrap,
+            // Досев определений объявлен у набора, и сверка обязана читать его
+            // оттуда же (S57): иначе тест доказывал бы совпадение с другим
+            // вызовом, а не с тем, которым файл порождён.
+            seedsDefinitions: ruleset.seedsDefinitions === true,
           }),
         ),
       );

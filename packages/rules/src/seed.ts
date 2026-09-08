@@ -95,10 +95,14 @@ export function defaultSnapshotRows(specs: readonly RuleSpec[] = RULE_CATALOG): 
   }));
 }
 
-export function generateRuleSeedStatements(
-  specs: readonly RuleSpec[] = RULE_CATALOG,
-): readonly string[] {
-  const values = [...specs]
+/**
+ * Строки `VALUES` определений правил.
+ *
+ * Общие у партии сида и у досева внутри набора (S57): второй экземпляр этого
+ * форматирования разошёлся бы с первым при первой же новой колонке.
+ */
+function ruleDefinitionValues(specs: readonly RuleSpec[]): string {
+  return [...specs]
     .sort(byCode)
     .map(
       (spec) =>
@@ -108,6 +112,12 @@ export function generateRuleSeedStatements(
         `${textArrayLiteral([...spec.waiverRoles])})`,
     )
     .join(',\n');
+}
+
+export function generateRuleSeedStatements(
+  specs: readonly RuleSpec[] = RULE_CATALOG,
+): readonly string[] {
+  const values = ruleDefinitionValues(specs);
 
   return [
     `INSERT INTO rule_definitions (
@@ -156,6 +166,25 @@ export const BUILTIN_RULESET_VERSION = 'builtin-1';
  */
 export interface BuiltinRuleset {
   readonly migration: string;
+  /**
+   * Досеять определения правил перед снимком (S57).
+   *
+   * Набор ссылается на `rule_definitions` внешним ключом, то есть реестр — его
+   * ПРЕДУСЛОВИЕ. До сих пор предусловие считалось выполненным по построению:
+   * партия сида идёт раньше набора, значит правила на месте. На боевой базе
+   * это оказалось неверно — `REG.113` и `REG.114` в реестре отсутствуют, хотя
+   * их партия (0074) числится применённой, — и следующий набор упал на бою с
+   * `ruleset_rules_rule_code_fkey`, остановив выкатку целиком.
+   *
+   * Почему набор чинит это сам, а не «партию применят заново»: применённую
+   * миграцию повторить нельзя, а состояние базы уже такое. Набор, который
+   * умеет доставить своё предусловие, применяется на любой базе — и на чистой,
+   * где партии отработали, и на той, где чего-то недостаёт.
+   *
+   * Флаг, а не поведение по умолчанию: у применённых наборов файлы заморожены
+   * контрольной суммой, и добавление секции переписало бы их.
+   */
+  readonly seedsDefinitions?: boolean;
   readonly version: string;
   /**
    * Первый набор: он же заводит колонку `origin`, снимает ограничение
@@ -209,6 +238,7 @@ export const BUILTIN_RULESETS: readonly BuiltinRuleset[] = [
     migration: '0078_builtin_ruleset_4',
     version: 'builtin-4',
     bootstrap: false,
+    seedsDefinitions: true,
     specs: RULE_CATALOG_WITH_RETIRED,
   },
 ];
@@ -286,7 +316,11 @@ const BUILTIN_UPDATE_HEADER = `-- Новая версия встроенного
 
 export function generateBuiltinRulesetSql(
   specs: readonly RuleSpec[] = RULE_CATALOG_WITH_RETIRED,
-  options?: { readonly version: string; readonly bootstrap: boolean },
+  options?: {
+    readonly version: string;
+    readonly bootstrap: boolean;
+    readonly seedsDefinitions?: boolean;
+  },
 ): string {
   const rows = defaultSnapshotRows(specs)
     .map(
@@ -334,7 +368,33 @@ ALTER TABLE ruleset_versions ADD CONSTRAINT ruleset_versions_published_chk
             AND prev.origin = $ruleset$builtin$ruleset$
        );`;
 
-  return `${bootstrap ? BUILTIN_HEADER : BUILTIN_UPDATE_HEADER}${ddl}
+  /**
+   * Досев определений — ПЕРЕД снимком и только по требованию набора.
+   *
+   * `DO NOTHING`, а не `DO UPDATE`: заголовок, уровень и тяжесть по умолчанию —
+   * дело партий сида, и переписывать их отсюда значило бы завести второе место,
+   * задающее правило. Набор гарантирует ровно одно: ссылки его снимка
+   * разрешимы.
+   */
+  const definitions =
+    options?.seedsDefinitions === true
+      ? `
+-- 0. Предусловие снимка: определения правил, на которые он ссылается.
+--
+-- Набор ссылается на rule_definitions внешним ключом. Обычно определения сеют
+-- партии, идущие раньше, — но на боевой базе двух правил не оказалось, хотя их
+-- партия числилась применённой, и набор упал с ruleset_rules_rule_code_fkey,
+-- остановив выкатку целиком. Здесь предусловие доставляет сам набор.
+INSERT INTO rule_definitions (
+  code, title, doc_type_code, level, kind, default_severity, waiver_roles
+)
+VALUES
+${ruleDefinitionValues(specs)}
+ON CONFLICT (code) DO NOTHING;
+`
+      : '';
+
+  return `${bootstrap ? BUILTIN_HEADER : BUILTIN_UPDATE_HEADER}${ddl}${definitions}
 -- 1. Версия — НЕОПУБЛИКОВАННАЯ: пока published_at пуст, снимок можно набирать.
 INSERT INTO ruleset_versions (version, origin, notes)
 SELECT ${version}, $ruleset$builtin$ruleset$,

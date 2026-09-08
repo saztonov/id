@@ -96,6 +96,7 @@ for (const ruleset of BUILTIN_RULESETS) {
   const sql = generateBuiltinRulesetSql(ruleset.specs, {
     version: ruleset.version,
     bootstrap: ruleset.bootstrap,
+    seedsDefinitions: ruleset.seedsDefinitions === true,
   });
   const shortPath = relative(ROOT, target).replaceAll('\\', '/');
 
