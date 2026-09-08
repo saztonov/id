@@ -7,22 +7,42 @@
  * S4 ровно этот класс дефекта уже случился: опечатка в `enabled_rule_codes`
  * выключала правило без единого сигнала.
  *
- * Сверка двусторонняя. Забытая строка в `rule_definitions` даёт правило,
- * которое невозможно включить в профиль; забытая реализация даёт правило,
- * которое администратор включил и которое ничего не делает. Проверять одну
- * сторону — значит закрыть половину и считать вопрос решённым.
+ * Сверка двусторонняя, но стороны НЕ равноправны, и это выяснилось на бою
+ * (S58).
+ *
+ * **Реализация есть, записи в реестре нет — портал чинит сам.** Содержимое
+ * `rule_definitions` производно от каталога кода: его строки генерируются из
+ * `RULE_CATALOG` (`ruleDefinitionRows`), и миграции-партии существуют ради
+ * воспроизводимости, а не потому, что оператор их наполняет. Отказ старта в
+ * этом случае превращал пропажу производных строк в полную остановку портала:
+ * 8 сентября пять определений и пять строк опубликованного снимка были удалены
+ * из боевой базы вне портала (кода, который их удаляет, в портале нет), и
+ * api с воркером ушли в цикл перезапусков, хотя восстановить недостающее можно
+ * из собственного каталога за один INSERT. Теперь портал досевает их сам и
+ * говорит об этом строкой журнала — пропажа перестала быть отказом и осталась
+ * видимой.
+ *
+ * **Запись есть, реализации нет — по-прежнему отказ.** Это обратное отношение:
+ * база ушла вперёд кода, то есть процесс собран старее схемы. Досевать здесь
+ * нечего (реализацию правила не выдумать), а работать нельзя: администратор
+ * видит правило включённым, а оно не исполняется. С S58 у этого состояния есть
+ * и второй сторож — забор сборки (`jobs/build-fence.ts`).
  */
-import { RuleRegistryError, assertRuleRegistryMatches } from '@id/rules';
-import { listRuleDefinitionCodes } from '../db/repositories/checks.js';
+import { RuleRegistryError, assertRuleRegistryMatches, ruleDefinitionRows } from '@id/rules';
+import {
+  insertMissingRuleDefinitions,
+  listRuleDefinitionCodes,
+} from '../db/repositories/checks.js';
 import type { Database } from '../db/repositories/users.js';
 
 export interface RuleRegistryCheckLogger {
   error(details: Record<string, unknown>, message: string): void;
+  warn(details: Record<string, unknown>, message: string): void;
   info(details: Record<string, unknown>, message: string): void;
 }
 
 /**
- * Проверка и отказ старта при расхождении.
+ * Проверка, досев недостающих определений и отказ старта при расхождении.
  *
  * Исключение, а не запись в журнал: процесс, поднявшийся с неполным набором
  * правил, выдаёт подрядчику заключение «замечаний нет» по комплекту, который
@@ -37,17 +57,42 @@ export async function assertRuleRegistryConsistent(
   try {
     assertRuleRegistryMatches(codes);
   } catch (error) {
-    if (error instanceof RuleRegistryError) {
-      logger?.error(
+    if (!(error instanceof RuleRegistryError)) throw error;
+
+    // Досев возможен ровно для одной стороны расхождения; вторая (реализации
+    // нет) остаётся отказом, и её причина печатается ниже целиком.
+    if (error.missingDefinitions.length > 0) {
+      const missing = new Set(error.missingDefinitions);
+      const restored = await insertMissingRuleDefinitions(
+        db,
+        ruleDefinitionRows().filter((row) => missing.has(row.code)),
+      );
+      logger?.warn(
         {
-          event: 'rule_registry_mismatch',
-          missingImplementations: error.missingImplementations,
-          missingDefinitions: error.missingDefinitions,
+          event: 'rule_registry_backfilled',
+          codes: [...error.missingDefinitions],
+          restored,
         },
-        'реестр правил разошёлся с реализациями: старт невозможен',
+        'в реестре правил не было записей для реализованных правил: досеяны из каталога',
       );
     }
-    throw error;
+
+    const after = await listRuleDefinitionCodes(db);
+    try {
+      assertRuleRegistryMatches(after);
+    } catch (secondError) {
+      if (secondError instanceof RuleRegistryError) {
+        logger?.error(
+          {
+            event: 'rule_registry_mismatch',
+            missingImplementations: secondError.missingImplementations,
+            missingDefinitions: secondError.missingDefinitions,
+          },
+          'реестр правил разошёлся с реализациями: старт невозможен',
+        );
+      }
+      throw secondError;
+    }
   }
 
   logger?.info({ event: 'rule_registry_ok', rules: codes.length }, 'реестр правил сверен');

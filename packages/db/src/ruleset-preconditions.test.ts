@@ -50,6 +50,18 @@ const SKIPPED = ['0074', '0075'];
 /** Набор, который обязан доставить предусловие сам. */
 const RULESET = '0078';
 
+/**
+ * Проверяется состояние базы НА МОМЕНТ этого набора, а не «все миграции разом».
+ *
+ * Следующие наборы тоже досевают определения (0081 — builtin-5), и без границы
+ * предпосылка теста ломается молча: правил «нет» ровно до тех пор, пока их не
+ * посеял кто-то более поздний, и тогда тест доказывал бы, что набор применяется
+ * там, где всё уже на месте.
+ */
+function upToRuleset(migrations: readonly Migration[]): readonly Migration[] {
+  return migrations.filter((migration) => migration.version <= RULESET);
+}
+
 /** `TestDatabase` реализует `SqlExecutor` целиком — как и в `migrations.test.ts`. */
 function executorOf(db: TestDatabase): SqlExecutor {
   return db;
@@ -72,7 +84,9 @@ async function applyUpTo(versions: readonly Migration[]): Promise<TestDatabase> 
 describe('набор правил и его предусловие', () => {
   it('применяется на базе, где определений его правил нет', async () => {
     const all = loadMigrations(MIGRATIONS_DIR);
-    const withoutSeed = all.filter((migration) => !SKIPPED.includes(migration.version));
+    const withoutSeed = upToRuleset(
+      all.filter((migration) => !SKIPPED.includes(migration.version)),
+    );
 
     // Сначала — всё, КРОМЕ самого набора: так воспроизводится боевое состояние.
     const db = await applyUpTo(withoutSeed.filter((m) => m.version !== RULESET));
@@ -103,13 +117,13 @@ describe('набор правил и его предусловие', () => {
     // а не на порядке миграций. Секция вырезается из текста — ровно то, чем
     // файл отличался до починки.
     const all = loadMigrations(MIGRATIONS_DIR);
-    const crippled = all
-      .filter((migration) => !SKIPPED.includes(migration.version))
-      .map((migration) =>
-        migration.version === RULESET
-          ? { ...migration, sql: withoutDefinitionsSection(migration.sql) }
-          : migration,
-      );
+    const crippled = upToRuleset(
+      all.filter((migration) => !SKIPPED.includes(migration.version)),
+    ).map((migration) =>
+      migration.version === RULESET
+        ? { ...migration, sql: withoutDefinitionsSection(migration.sql) }
+        : migration,
+    );
 
     const failure = await applyUpTo(crippled).then(
       () => null,

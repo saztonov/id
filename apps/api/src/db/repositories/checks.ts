@@ -169,6 +169,52 @@ export async function loadRulesetSnapshot(
   };
 }
 
+/**
+ * Досев недостающих определений правил из каталога кода (§9.6, S58).
+ *
+ * `ON CONFLICT DO NOTHING`, а не `DO UPDATE`: задача — вернуть строку, которой
+ * нет, а не переписать ту, что есть. Переписывание сделало бы старт процесса
+ * тихой правкой реестра, и сборка постарше меняла бы заголовки правил под
+ * себя. Вставка идёт без области видимости: `rule_definitions` — глобальный
+ * справочник, производный от `RULE_CATALOG`, а не данные подрядчика.
+ *
+ * Возвращает число реально вставленных строк: api и воркер поднимаются
+ * одновременно, и вторым придёт ноль — это не ошибка, а гонка, разрешённая
+ * базой.
+ */
+export async function insertMissingRuleDefinitions(
+  db: Database,
+  rows: readonly {
+    readonly code: string;
+    readonly title: string;
+    readonly docTypeCode: string | null;
+    readonly level: string;
+    readonly kind: string;
+    readonly defaultSeverity: string;
+    readonly waiverRoles: readonly string[];
+  }[],
+): Promise<number> {
+  if (rows.length === 0) return 0;
+
+  const inserted = await db
+    .insert(ruleDefinitions)
+    .values(
+      rows.map((row) => ({
+        code: row.code,
+        title: row.title,
+        docTypeCode: row.docTypeCode,
+        level: row.level,
+        kind: row.kind,
+        defaultSeverity: row.defaultSeverity,
+        waiverRoles: [...row.waiverRoles],
+      })),
+    )
+    .onConflictDoNothing({ target: ruleDefinitions.code })
+    .returning({ code: ruleDefinitions.code });
+
+  return inserted.length;
+}
+
 /** Коды реестра правил. Вход сверки при старте (§9.6). */
 export async function listRuleDefinitionCodes(db: Database): Promise<readonly string[]> {
   const rows = await db

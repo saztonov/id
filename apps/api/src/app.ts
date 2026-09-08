@@ -397,6 +397,9 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<AppInstan
     error: (details, message) => {
       logger.error(details, message);
     },
+    warn: (details, message) => {
+      logger.warn(details, message);
+    },
     info: (details, message) => {
       logger.info(details, message);
     },

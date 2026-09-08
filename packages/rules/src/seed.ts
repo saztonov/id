@@ -102,16 +102,48 @@ export function defaultSnapshotRows(specs: readonly RuleSpec[] = RULE_CATALOG): 
  * форматирования разошёлся бы с первым при первой же новой колонке.
  */
 function ruleDefinitionValues(specs: readonly RuleSpec[]): string {
-  return [...specs]
-    .sort(byCode)
+  return ruleDefinitionRows(specs)
     .map(
-      (spec) =>
-        `  (${sqlLiteral(spec.code)}, ${sqlLiteral(spec.title)}, ` +
-        `${nullableLiteral(spec.docTypeCode)}, ${sqlLiteral(spec.level)}, ` +
-        `${sqlLiteral(spec.kind)}, ${sqlLiteral(spec.defaultSeverity)}, ` +
-        `${textArrayLiteral([...spec.waiverRoles])})`,
+      (row) =>
+        `  (${sqlLiteral(row.code)}, ${sqlLiteral(row.title)}, ` +
+        `${nullableLiteral(row.docTypeCode)}, ${sqlLiteral(row.level)}, ` +
+        `${sqlLiteral(row.kind)}, ${sqlLiteral(row.defaultSeverity)}, ` +
+        `${textArrayLiteral([...row.waiverRoles])})`,
     )
     .join(',\n');
+}
+
+/** Строка реестра правил: то, что seed кладёт в `rule_definitions`. */
+export interface RuleDefinitionRow {
+  readonly code: string;
+  readonly title: string;
+  readonly docTypeCode: string | null;
+  readonly level: string;
+  readonly kind: string;
+  readonly defaultSeverity: string;
+  readonly waiverRoles: readonly string[];
+}
+
+/**
+ * Реестр правил как ДАННЫЕ, а не как SQL.
+ *
+ * Нужен там, где строки кладёт не миграция, а сам портал: досев недостающих
+ * определений при старте (§9.6, S58). Форматирование SQL строится отсюда же —
+ * иначе два описания одной строки разошлись бы при первой новой колонке, и
+ * разошлись бы молча.
+ */
+export function ruleDefinitionRows(
+  specs: readonly RuleSpec[] = RULE_CATALOG,
+): readonly RuleDefinitionRow[] {
+  return [...specs].sort(byCode).map((spec) => ({
+    code: spec.code,
+    title: spec.title,
+    docTypeCode: spec.docTypeCode,
+    level: spec.level,
+    kind: spec.kind,
+    defaultSeverity: spec.defaultSeverity,
+    waiverRoles: [...spec.waiverRoles],
+  }));
 }
 
 export function generateRuleSeedStatements(
@@ -237,6 +269,23 @@ export const BUILTIN_RULESETS: readonly BuiltinRuleset[] = [
     // своей миграции — как все до него.
     migration: '0078_builtin_ruleset_4',
     version: 'builtin-4',
+    bootstrap: false,
+    seedsDefinitions: true,
+    // Состав ЗАФИКСИРОВАН по своей миграции, как у builtin-2 и builtin-3:
+    // набор перестал быть последним, и «весь каталог» переписывал бы
+    // применённый файл при первом же новом правиле. Сегодня оба выражения дают
+    // одно и то же множество, поэтому файл 0078 не меняется.
+    specs: seededBefore('0078_builtin_ruleset_4'),
+  },
+  {
+    // Возврат набора после того, как пять определений и пять строк снимка
+    // builtin-4 были удалены из боевой базы вне портала (S58). Снимок
+    // опубликованного набора неизменяем — дописать в builtin-4 потерянные
+    // строки нельзя ни порталу, ни миграции, — поэтому состав приезжает новой
+    // версией. Досев определений включён: набор доставляет своё предусловие
+    // сам, как это заведено в S57.
+    migration: '0081_builtin_ruleset_5',
+    version: 'builtin-5',
     bootstrap: false,
     seedsDefinitions: true,
     specs: RULE_CATALOG_WITH_RETIRED,
