@@ -2,28 +2,38 @@
  * Тесты группы доказательных документов (§9.4).
  *
  * Тесты чувствительны: у каждого правила есть положительный, отрицательный и
- * неприменимый случай, а у двух дефектов корпуса — ещё и зеркальная пара,
+ * неприменимый случай, а у дефекта №5 корпуса — ещё и зеркальная пара,
  * доказывающая, что правило различает дефект и его отсутствие, а не срабатывает
  * всегда. Без такой пары зелёный тест доказывает только то, что функция
  * вызвалась, — известная болезнь проекта (S3, S5, S6, S8).
+ *
+ * Семь правил группы сняты в S59 (ADR-0029): сравнение факта с нормой, марка
+ * стали, марка смеси, прочность по возрасту образца, заключение и привязка
+ * схемы. Их поведенческие тесты — вместе с помощниками нормы/факта — удалены
+ * с телами правил; на их месте блок «снято с исполнения».
  */
 import { describe, expect, it } from 'vitest';
 
+import { RETIRED_RULES, RULE_CATALOG } from './catalog.js';
 import { runRules } from './engine.js';
 import { EVIDENCE_DOC_TYPES, EVIDENCE_FIELDS, EVIDENCE_RULES } from './evidence.js';
-import {
-  makeDocument,
-  makeField,
-  makeGraph,
-  makeMaterial,
-  makeRelation,
-  snapshotOf,
-} from './testing.js';
+import { makeDocument, makeField, makeGraph, snapshotOf } from './testing.js';
 import type { CheckGraph, DocumentNode, RuleParams, RuleResult, RuleSpec } from './types.js';
 
 // ---------------------------------------------------------------------------
 // Инструменты
 // ---------------------------------------------------------------------------
+
+/** Снятые в S59. */
+const RETIRED_CODES = [
+  'PASS.610',
+  'MILL.630',
+  'MIX.640',
+  'LAB.650',
+  'LAB.651',
+  'CONCL.660',
+  'SCH.680',
+] as const;
 
 function ruleOf(code: string): RuleSpec {
   const spec = EVIDENCE_RULES.find((candidate) => candidate.code === code);
@@ -57,27 +67,6 @@ function textField(fieldCode: string, value: string) {
   return makeField({ fieldCode, valueText: value });
 }
 
-function numField(fieldCode: string, value: number) {
-  return makeField({ fieldCode, valueNum: value, valueText: String(value) });
-}
-
-/**
- * Таблица показателей паспорта качества.
- *
- * Код реквизита — тот, что объявлен в схеме вида, а не общий «технические
- * требования»: у паспорта это `indicators`, у сертификата качества металла —
- * `mechanical_properties` (`millTableField`). Тест, кладущий в граф тот же код,
- * который читает правило, доказывает только их взаимную согласованность —
- * поэтому коды сверяются с каталогом отдельным тестом `field-codes.test.ts`.
- */
-function tableField(rows: readonly { indicator: string; norm: string; fact: string }[]) {
-  return makeField({ fieldCode: EVIDENCE_FIELDS.indicators, valueJson: rows });
-}
-
-function millTableField(rows: readonly { indicator: string; norm: string; fact: string }[]) {
-  return makeField({ fieldCode: EVIDENCE_FIELDS.mechanicalProperties, valueJson: rows });
-}
-
 // ---------------------------------------------------------------------------
 // Состав группы
 // ---------------------------------------------------------------------------
@@ -98,7 +87,9 @@ describe('состав группы EVIDENCE', () => {
     'SCH.680',
   ];
 
-  it('содержит ровно двенадцать объявленных кодов', () => {
+  it('содержит ровно двенадцать объявленных кодов — снятые в том числе', () => {
+    // Спеки снятых остаются в группе: их строки напечатаны в применённой
+    // миграции сида 0017, и тест дрейфа сверяет её с генерацией по группе.
     expect(EVIDENCE_RULES.map((spec) => spec.code).sort()).toEqual([...expected].sort());
   });
 
@@ -113,6 +104,7 @@ describe('состав группы EVIDENCE', () => {
   });
 
   it('тяжесть и блокирование соответствуют заявленным', () => {
+    // У снятых — те же значения, что напечатаны в снимках наборов 0044…0081.
     const declared: Readonly<Record<string, readonly [string, boolean]>> = {
       'CERT.600': ['error', true],
       'DECL.601': ['error', true],
@@ -129,6 +121,52 @@ describe('состав группы EVIDENCE', () => {
     };
     for (const spec of EVIDENCE_RULES) {
       expect([spec.defaultSeverity, spec.defaultBlocking], spec.code).toEqual(declared[spec.code]);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Снятые в S59
+// ---------------------------------------------------------------------------
+
+/**
+ * По образцу `AOSR.ACT.032` (S30). Ни у одного из семи у портала нет эталона
+ * для сравнения: норма паспорта, марка стали, проектная марка смеси, прочность
+ * по возрасту — материаловедение, которое заказчик из проверок вывел. Вид
+ * `technical_conclusion` снят из каталога видов, `SCH.680` заменено `SCH.681`.
+ */
+describe('PASS.610 / MILL.630 / MIX.640 / LAB.650 / LAB.651 / CONCL.660 / SCH.680 — сняты (S59)', () => {
+  it('кодов нет в каталоге правил', () => {
+    for (const code of RETIRED_CODES) {
+      expect(
+        RULE_CATALOG.some((spec) => spec.code === code),
+        code,
+      ).toBe(false);
+    }
+  });
+
+  it('спеки остались среди снятых — ради контрольных сумм применённых миграций', () => {
+    const retired = RETIRED_RULES.map((spec) => spec.code);
+    for (const code of RETIRED_CODES) expect(retired, code).toContain(code);
+  });
+
+  it('заглушка отвечает n_a «правило снято с исполнения», даже когда документ вида есть', () => {
+    // Граф с документами всех семи видов: у заглушки нет тела, и наличие
+    // документа ничего не меняет.
+    const graph = makeGraph({
+      documents: [
+        EVIDENCE_DOC_TYPES.qualityPassport,
+        EVIDENCE_DOC_TYPES.millCertificate,
+        EVIDENCE_DOC_TYPES.mixQualityDoc,
+        EVIDENCE_DOC_TYPES.labProtocolConcrete,
+        EVIDENCE_DOC_TYPES.technicalConclusion,
+        EVIDENCE_DOC_TYPES.execScheme,
+      ].map((docTypeCode) => makeDocument({ docTypeCode })),
+    });
+    for (const code of RETIRED_CODES) {
+      const result = run(code, graph);
+      expect(result.verdict, code).toBe('n_a');
+      expect(result.reason, code).toBe('правило снято с исполнения');
     }
   });
 });
@@ -271,215 +309,8 @@ describe('DECL.601 — декларация о соответствии', () => 
 });
 
 // ---------------------------------------------------------------------------
-// PASS.610 / PASS.611
+// PASS.611
 // ---------------------------------------------------------------------------
-
-describe('PASS.610 — автосравнение «Норма по НД / Фактически»', () => {
-  const passport = (fields: readonly ReturnType<typeof makeField>[]): DocumentNode =>
-    makeDocument({ docTypeCode: EVIDENCE_DOC_TYPES.qualityPassport, fields });
-
-  it('факт в пределах напечатанной нормы — pass', () => {
-    const result = run(
-      'PASS.610',
-      graphWith(
-        passport([
-          tableField([
-            { indicator: 'Прочность на сжатие', norm: 'не менее 5 МПа', fact: '6,2 МПа' },
-            { indicator: 'Толщина', norm: '4 ± 0,2 мм', fact: '4,1 мм' },
-          ]),
-        ]),
-      ),
-    );
-    expect(result.verdict).toBe('pass');
-    expect(result.findings).toHaveLength(0);
-  });
-
-  it('факт вне напечатанной нормы — дефект с объяснением парсера допусков', () => {
-    const result = run(
-      'PASS.610',
-      graphWith(
-        passport([
-          tableField([
-            { indicator: 'Прочность на сжатие', norm: 'не менее 5 МПа', fact: '4,1 МПа' },
-          ]),
-        ]),
-      ),
-    );
-    expect(result.verdict).toBe('fail');
-    expect(joined(result)).toContain('фактически 4.1 МПа при норме не менее 5 МПа');
-    expect(joined(result)).toContain('Прочность на сжатие');
-  });
-
-  it('симметричный допуск нарушен — дефект', () => {
-    const result = run(
-      'PASS.610',
-      graphWith(
-        passport([tableField([{ indicator: 'Толщина', norm: '4 ± 0,2 мм', fact: '4,9' }])]),
-      ),
-    );
-    expect(result.verdict).toBe('fail');
-    expect(joined(result)).toContain('вне допуска 3.8…4.2');
-  });
-
-  it('фактическое значение не число — undetermined, а не fail', () => {
-    const result = run(
-      'PASS.610',
-      graphWith(
-        passport([
-          tableField([{ indicator: 'Внешний вид', norm: 'не менее 5 МПа', fact: 'соответствует' }]),
-        ]),
-      ),
-    );
-    expect(result.verdict).toBe('undetermined');
-    expect(joined(result)).toContain('требуется ручная проверка');
-  });
-
-  it('таблицы нет вовсе — n_a, а не fail', () => {
-    const result = run(
-      'PASS.610',
-      graphWith(passport([textField(EVIDENCE_FIELDS.number, '230126/2/126000477.1.1')])),
-    );
-    expect(result.verdict).toBe('n_a');
-    expect(result.reason).toContain('сравнивать нечего');
-  });
-
-  it('квалификатор из графы показателя не делает норму точным равенством', () => {
-    // Паспорт «Сен-Гобен» папки «ИД Мастер апрель 2026»: «Влажность сухой
-    // смеси, % не более | 0,2 | 0,11». Без переноса квалификатора норма
-    // читалась равенством, и значение с запасом объявлялось нарушением.
-    const result = run(
-      'PASS.610',
-      graphWith(
-        passport([
-          tableField([
-            { indicator: 'Влажность сухой смеси, % не более', norm: '0,2', fact: '0,11' },
-          ]),
-        ]),
-      ),
-    );
-    expect(result.verdict).toBe('pass');
-  });
-
-  it('норма диапазоном через дефис читается диапазоном', () => {
-    const result = run(
-      'PASS.610',
-      graphWith(
-        passport([
-          tableField([
-            { indicator: 'Удельная поверхность, см2/г', norm: '2600 -4000', fact: '3246' },
-          ]),
-        ]),
-      ),
-    );
-    expect(result.verdict).toBe('pass');
-  });
-
-  it('факт диапазоном сравнению не подлежит, но и дефектом не считается', () => {
-    const result = run(
-      'PASS.610',
-      graphWith(
-        passport([
-          tableField([{ indicator: 'Плотность, кг/м3', norm: '1400 -1700', fact: '1464 -1700' }]),
-        ]),
-      ),
-    );
-    expect(result.verdict).toBe('undetermined');
-    expect(joined(result)).toContain('дано диапазоном');
-  });
-
-  it('качественный показатель замечания не порождает', () => {
-    // «Цвет пленки краски | Должен соответствовать вееру | RAL 9003»: числа
-    // здесь нет ни с одной стороны, и требовать ручной сверки не за чем.
-    const result = run(
-      'PASS.610',
-      graphWith(
-        passport([
-          tableField([
-            {
-              indicator: 'Цвет пленки краски',
-              norm: 'Должен соответствовать цвету, выбранному по вееру',
-              fact: 'RAL 9003',
-            },
-          ]),
-        ]),
-      ),
-    );
-    expect(result.verdict).toBe('pass');
-    expect(messages(result)).toHaveLength(0);
-  });
-
-  it('пустая графа нормы остаётся замечанием: бланк не заполнен', () => {
-    // Чувствительность к предыдущему: молчать о незаполненной норме нельзя,
-    // и §8.1 требует именно «требуется ручная проверка», а не вердикт.
-    const result = run(
-      'PASS.610',
-      graphWith(
-        passport([tableField([{ indicator: 'Предел прочности', norm: '', fact: '5 МПа' }])]),
-      ),
-    );
-    expect(result.verdict).toBe('undetermined');
-    expect(joined(result)).toContain('ячейка нормы пуста');
-  });
-
-  it('без паспортов качества — n_a', () => {
-    expect(run('PASS.610', makeGraph()).verdict).toBe('n_a');
-  });
-});
-
-describe('нормативы не выдумываются (§8.1)', () => {
-  it('PASS.610 без напечатанной нормы даёт undetermined и «требуется ручная проверка»', () => {
-    const result = run(
-      'PASS.610',
-      graphWith(
-        makeDocument({
-          docTypeCode: EVIDENCE_DOC_TYPES.qualityPassport,
-          fields: [tableField([{ indicator: 'Предел текучести', norm: '', fact: '512 МПа' }])],
-        }),
-      ),
-    );
-    expect(result.verdict).toBe('undetermined');
-    expect(joined(result)).toContain('требуется ручная проверка');
-    // Ни при каких условиях правило не подставляет норматив само.
-    expect(joined(result)).not.toMatch(/ГОСТ\s*\d|СП\s*\d/u);
-  });
-
-  it('MILL.630 без напечатанных норм механических свойств даёт undetermined', () => {
-    const result = run(
-      'MILL.630',
-      graphWith(
-        makeDocument({
-          docTypeCode: EVIDENCE_DOC_TYPES.millCertificate,
-          fields: [textField(EVIDENCE_FIELDS.steelClass, 'А240С')],
-        }),
-        { materials: [makeMaterial({ mark: 'A240C' })] },
-      ),
-    );
-    expect(result.verdict).toBe('undetermined');
-    expect(joined(result)).toContain('нормы механических свойств в сертификате не напечатаны');
-    expect(joined(result)).toContain('требуется ручная проверка');
-  });
-
-  it('в исходниках группы нет числовых нормативов классов проката и бетона', () => {
-    // Косвенная, но действенная проверка: любое сравнение опирается на
-    // `tolerance.ts`, а он читает норму из документа. Здесь фиксируется, что
-    // правило без напечатанной нормы НЕ выносит вердикт о качестве.
-    const result = run(
-      'MILL.630',
-      graphWith(
-        makeDocument({
-          docTypeCode: EVIDENCE_DOC_TYPES.millCertificate,
-          fields: [
-            textField(EVIDENCE_FIELDS.steelClass, 'А500С'),
-            millTableField([{ indicator: 'Предел текучести', norm: '', fact: '480 МПа' }]),
-          ],
-        }),
-        { materials: [makeMaterial({ mark: 'А500С' })] },
-      ),
-    );
-    expect(result.verdict).toBe('undetermined');
-    expect(joined(result)).not.toContain('500 МПа');
-  });
-});
 
 describe('PASS.611 — реквизиты паспорта качества', () => {
   it('заполненные реквизиты — pass', () => {
@@ -680,369 +511,8 @@ describe('TP.620 — «поле пусто» и «страница не расп
 });
 
 // ---------------------------------------------------------------------------
-// MILL.630
+// REFUS.670
 // ---------------------------------------------------------------------------
-
-describe('MILL.630 — сертификат качества металла', () => {
-  const mill = (fields: readonly ReturnType<typeof makeField>[]): DocumentNode =>
-    makeDocument({ docTypeCode: EVIDENCE_DOC_TYPES.millCertificate, fields });
-
-  it('марка совпадает через фолдинг гомоглифов, свойства в норме — pass', () => {
-    const document = mill([
-      textField(EVIDENCE_FIELDS.steelClass, 'A240C'),
-      millTableField([
-        { indicator: 'Предел текучести', norm: 'не менее 240 МПа', fact: '265 МПа' },
-      ]),
-    ]);
-    const result = run('MILL.630', {
-      ...graphWith(document),
-      materials: [makeMaterial({ mark: 'А240С', documentIds: [document.id] })],
-    });
-    expect(result.verdict).toBe('pass');
-  });
-
-  it('марка не совпадает с заявленной — дефект', () => {
-    const document = mill([
-      textField(EVIDENCE_FIELDS.steelClass, 'А500С'),
-      millTableField([
-        { indicator: 'Предел текучести', norm: 'не менее 240 МПа', fact: '265 МПа' },
-      ]),
-    ]);
-    const result = run('MILL.630', {
-      ...graphWith(document),
-      materials: [makeMaterial({ mark: 'А240С', documentIds: [document.id] })],
-    });
-    expect(result.verdict).toBe('fail');
-    expect(joined(result)).toContain('марка проката «А500С» не совпадает с заявленной');
-  });
-
-  it('фактическое свойство ниже напечатанной нормы — дефект', () => {
-    const document = mill([
-      textField(EVIDENCE_FIELDS.steelClass, 'А240С'),
-      millTableField([
-        { indicator: 'Предел текучести', norm: 'не менее 240 МПа', fact: '212 МПа' },
-      ]),
-    ]);
-    const result = run('MILL.630', {
-      ...graphWith(document),
-      materials: [makeMaterial({ mark: 'А240С', documentIds: [document.id] })],
-    });
-    expect(result.verdict).toBe('fail');
-    expect(joined(result)).toContain('фактически 212 МПа при норме не менее 240 МПа');
-  });
-
-  it('марка в комплекте не заявлена — undetermined, а не fail', () => {
-    const result = run(
-      'MILL.630',
-      graphWith(
-        mill([
-          textField(EVIDENCE_FIELDS.steelClass, 'А240С'),
-          millTableField([
-            { indicator: 'Предел текучести', norm: 'не менее 240 МПа', fact: '265 МПа' },
-          ]),
-        ]),
-      ),
-    );
-    expect(result.verdict).toBe('undetermined');
-    expect(joined(result)).toContain('не определена');
-  });
-
-  it('без сертификатов металла — n_a', () => {
-    expect(run('MILL.630', makeGraph()).verdict).toBe('n_a');
-  });
-});
-
-// ---------------------------------------------------------------------------
-// MIX.640
-// ---------------------------------------------------------------------------
-
-describe('MIX.640 — марка смеси против проектной из пункта 1 акта', () => {
-  const act = (workName: string): DocumentNode =>
-    makeDocument({ docTypeCode: 'aosr', fields: [textField(EVIDENCE_FIELDS.workName, workName)] });
-
-  const mix = (concreteClass: string | null): DocumentNode =>
-    makeDocument({
-      docTypeCode: EVIDENCE_DOC_TYPES.mixQualityDoc,
-      fields:
-        concreteClass === null
-          ? [textField(EVIDENCE_FIELDS.number, '77-1')]
-          : [textField(EVIDENCE_FIELDS.concreteClass, concreteClass)],
-    });
-
-  it('марка смеси совпадает с проектной М-150 — pass', () => {
-    const result = run(
-      'MIX.640',
-      makeGraph({ documents: [act('Устройство стяжки из раствора М-150'), mix('М150')] }),
-    );
-    expect(result.verdict).toBe('pass');
-  });
-
-  it('класс бетона совпадает с проектным В25 — pass', () => {
-    const result = run(
-      'MIX.640',
-      makeGraph({ documents: [act('Устройство монолитной плиты из бетона В25'), mix('B25')] }),
-    );
-    expect(result.verdict).toBe('pass');
-  });
-
-  it('марка смеси расходится с проектной — дефект', () => {
-    const result = run(
-      'MIX.640',
-      makeGraph({ documents: [act('Устройство стяжки из раствора М-150'), mix('М100')] }),
-    );
-    expect(result.verdict).toBe('fail');
-    expect(joined(result)).toContain('не совпадает с проектной по пункту 1 акта');
-  });
-
-  it('проектная марка в пункте 1 не найдена — undetermined', () => {
-    const result = run(
-      'MIX.640',
-      makeGraph({ documents: [act('Устройство 2 слоя гидроизоляции'), mix('М150')] }),
-    );
-    expect(result.verdict).toBe('undetermined');
-    expect(joined(result)).toContain('проектная марка (класс) в пункте 1 акта не найдена');
-  });
-
-  it('марка в документе о качестве не распознана — undetermined', () => {
-    const result = run(
-      'MIX.640',
-      makeGraph({ documents: [act('Устройство стяжки из раствора М-150'), mix(null)] }),
-    );
-    expect(result.verdict).toBe('undetermined');
-    expect(joined(result)).toContain('не распознана');
-  });
-
-  it('без документов о качестве смеси — n_a', () => {
-    expect(run('MIX.640', makeGraph({ documents: [act('раствор М-150')] })).verdict).toBe('n_a');
-  });
-});
-
-// ---------------------------------------------------------------------------
-// LAB.650 — регрессия «семисуточный протокол не брак»
-// ---------------------------------------------------------------------------
-
-function protocol(age: number | null, percent: number | null, ordinal = 1): DocumentNode {
-  const fields = [
-    ...(age === null ? [] : [numField(EVIDENCE_FIELDS.ageDays, age)]),
-    ...(percent === null ? [] : [numField(EVIDENCE_FIELDS.strengthPercent, percent)]),
-  ];
-  return makeDocument({
-    docTypeCode: EVIDENCE_DOC_TYPES.labProtocolConcrete,
-    ordinal,
-    fields,
-  });
-}
-
-describe('LAB.650 — оценка по возрасту образца', () => {
-  it('семисуточный протокол 71,78 % НЕ даёт error и НЕ даёт вердикт fail', () => {
-    const graph = graphWith(protocol(7, 71.78));
-    const direct = run('LAB.650', graph);
-
-    expect(direct.verdict).not.toBe('fail');
-    expect(direct.verdict).toBe('undetermined');
-    expect(joined(direct)).toContain('промежуточный контроль, 71,78 % от требуемой в возрасте 7');
-
-    const outcome = runRules(graph, {
-      specs: EVIDENCE_RULES,
-      snapshot: snapshotOf(EVIDENCE_RULES),
-      enabledRuleCodes: null,
-    });
-    const execution = outcome.executions.find((entry) => entry.ruleCode === 'LAB.650');
-    const findings = outcome.findings.filter((finding) => finding.ruleCode === 'LAB.650');
-
-    expect(execution?.verdict).not.toBe('fail');
-    expect(findings).toHaveLength(1);
-    expect(findings[0]?.severity).toBe('info');
-    expect(findings.some((finding) => finding.severity === 'error')).toBe(false);
-    expect(findings.some((finding) => finding.isBlocking)).toBe(false);
-  });
-
-  it('пять семисуточных протоколов образца — ни одного error', () => {
-    const graph = makeGraph({
-      documents: [1, 2, 3, 4, 5].map((index) => protocol(7, 71.78, index)),
-    });
-    const outcome = runRules(graph, {
-      specs: EVIDENCE_RULES,
-      snapshot: snapshotOf(EVIDENCE_RULES),
-      enabledRuleCodes: null,
-    });
-    const findings = outcome.findings.filter((finding) => finding.ruleCode === 'LAB.650');
-    expect(findings).toHaveLength(5);
-    expect(findings.every((finding) => finding.severity === 'info')).toBe(true);
-  });
-
-  it('28-суточный протокол с 92 % даёт error', () => {
-    const graph = graphWith(protocol(28, 92));
-    const direct = run('LAB.650', graph);
-    expect(direct.verdict).toBe('fail');
-    expect(joined(direct)).toContain('в возрасте 28 суток набрано 92 % от требуемой прочности');
-
-    const outcome = runRules(graph, {
-      specs: EVIDENCE_RULES,
-      snapshot: snapshotOf(EVIDENCE_RULES),
-      enabledRuleCodes: null,
-    });
-    const findings = outcome.findings.filter((finding) => finding.ruleCode === 'LAB.650');
-    expect(findings).toHaveLength(1);
-    expect(findings[0]?.severity).toBe('error');
-  });
-
-  it('28-суточный протокол со 105 % — pass', () => {
-    expect(run('LAB.650', graphWith(protocol(28, 105))).verdict).toBe('pass');
-  });
-
-  it('процент считается из пары «фактическая / требуемая»', () => {
-    const document = makeDocument({
-      docTypeCode: EVIDENCE_DOC_TYPES.labProtocolConcrete,
-      fields: [
-        numField(EVIDENCE_FIELDS.ageDays, 28),
-        numField(EVIDENCE_FIELDS.strengthActual, 10.57),
-        numField(EVIDENCE_FIELDS.strengthRequired, 14.72),
-      ],
-    });
-    const result = run('LAB.650', graphWith(document));
-    expect(result.verdict).toBe('fail');
-    expect(joined(result)).toContain('71,81 %');
-  });
-
-  it('возраст образца не определён — undetermined', () => {
-    const result = run('LAB.650', graphWith(protocol(null, 71.78)));
-    expect(result.verdict).toBe('undetermined');
-    expect(joined(result)).toContain('возраст образца не определён');
-  });
-
-  it('процент не определён — undetermined', () => {
-    const result = run('LAB.650', graphWith(protocol(7, null)));
-    expect(result.verdict).toBe('undetermined');
-    expect(joined(result)).toContain('процент от требуемой прочности не определён');
-  });
-
-  it('без протоколов — n_a', () => {
-    expect(run('LAB.650', makeGraph()).verdict).toBe('n_a');
-  });
-});
-
-// ---------------------------------------------------------------------------
-// LAB.651 — дефект №7 корпуса
-// ---------------------------------------------------------------------------
-
-describe('LAB.651 — дефект №7: нет 28-суточных при наличии семисуточных', () => {
-  it('пять семисуточных и ни одного 28-суточного — дефект с точным текстом', () => {
-    const graph = makeGraph({
-      documents: [1, 2, 3, 4, 5].map((index) => protocol(7, 71.78, index)),
-    });
-    const result = run('LAB.651', graph);
-    expect(result.verdict).toBe('fail');
-    expect(joined(result)).toContain(
-      'приёмочный протокол в проектном возрасте (28 суток) не приложен, приложены только промежуточные (7 суток)',
-    );
-    expect(result.findings).toHaveLength(1);
-  });
-
-  it('добавление 28-суточного протокола снимает дефект — правило не срабатывает всегда', () => {
-    const graph = makeGraph({
-      documents: [
-        ...[1, 2, 3, 4, 5].map((index) => protocol(7, 71.78, index)),
-        protocol(28, 104, 6),
-      ],
-    });
-    const result = run('LAB.651', graph);
-    expect(result.verdict).toBe('pass');
-    expect(result.findings).toHaveLength(0);
-  });
-
-  it('проектный возраст берётся из параметров снимка', () => {
-    const graph = makeGraph({ documents: [protocol(7, 71.78)] });
-    expect(run('LAB.651', graph, { designAgeDays: 7 }).verdict).toBe('pass');
-    expect(run('LAB.651', graph, { designAgeDays: 14 }).verdict).toBe('fail');
-    expect(joined(run('LAB.651', graph, { designAgeDays: 14 }))).toContain(
-      '(14 суток) не приложен',
-    );
-  });
-
-  it('дефект считается отдельно по каждому акту', () => {
-    const early = protocol(7, 71.78, 1);
-    const late = protocol(28, 104, 2);
-    const actA = makeDocument({ docTypeCode: 'aosr', ordinal: 10 });
-    const actB = makeDocument({ docTypeCode: 'aosr', ordinal: 11 });
-    const graph = makeGraph({
-      documents: [actA, actB, early, late],
-      relations: [
-        makeRelation({ parentDocumentId: actA.id, childDocumentId: early.id }),
-        makeRelation({ parentDocumentId: actB.id, childDocumentId: late.id }),
-      ],
-    });
-    const result = run('LAB.651', graph);
-    expect(result.verdict).toBe('fail');
-    expect(result.findings).toHaveLength(1);
-    expect(result.findings?.[0]?.targetId).toBe(actA.id);
-  });
-
-  it('возраст не определён ни в одном протоколе — undetermined, а не fail', () => {
-    const result = run('LAB.651', makeGraph({ documents: [protocol(null, 71.78, 1)] }));
-    expect(result.verdict).toBe('undetermined');
-    expect(joined(result)).toContain('возраст образцов не определён');
-  });
-
-  it('протоколов нет вовсе — n_a', () => {
-    expect(run('LAB.651', makeGraph()).verdict).toBe('n_a');
-  });
-
-  it('низкая уверенность возраста понижает дефект до undetermined в движке', () => {
-    const document = makeDocument({
-      docTypeCode: EVIDENCE_DOC_TYPES.labProtocolConcrete,
-      fields: [makeField({ fieldCode: EVIDENCE_FIELDS.ageDays, valueNum: 7, confidence: 0.3 })],
-    });
-    const outcome = runRules(graphWith(document), {
-      specs: EVIDENCE_RULES,
-      snapshot: snapshotOf(EVIDENCE_RULES),
-      enabledRuleCodes: null,
-    });
-    const execution = outcome.executions.find((entry) => entry.ruleCode === 'LAB.651');
-    expect(execution?.verdict).toBe('undetermined');
-    expect(outcome.findings.filter((finding) => finding.isBlocking)).toHaveLength(0);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// CONCL.660 / REFUS.670
-// ---------------------------------------------------------------------------
-
-describe('CONCL.660 — техническое заключение', () => {
-  it('заполненные реквизиты — pass', () => {
-    const result = run(
-      'CONCL.660',
-      graphWith(
-        makeDocument({
-          docTypeCode: EVIDENCE_DOC_TYPES.technicalConclusion,
-          fields: [
-            textField(EVIDENCE_FIELDS.number, '25-1156'),
-            dateField(EVIDENCE_FIELDS.issuedAt, '2025-09-01'),
-          ],
-        }),
-      ),
-    );
-    expect(result.verdict).toBe('pass');
-  });
-
-  it('нет номера — дефект', () => {
-    const result = run(
-      'CONCL.660',
-      graphWith(
-        makeDocument({
-          docTypeCode: EVIDENCE_DOC_TYPES.technicalConclusion,
-          fields: [dateField(EVIDENCE_FIELDS.issuedAt, '2025-09-01')],
-        }),
-      ),
-    );
-    expect(result.verdict).toBe('fail');
-    expect(joined(result)).toContain('поле „Номер документа“ не заполнено');
-  });
-
-  it('без заключений — n_a', () => {
-    expect(run('CONCL.660', makeGraph()).verdict).toBe('n_a');
-  });
-});
 
 describe('REFUS.670 — отказное письмо', () => {
   it('заполненные реквизиты — pass', () => {
@@ -1086,74 +556,6 @@ describe('REFUS.670 — отказное письмо', () => {
 });
 
 // ---------------------------------------------------------------------------
-// SCH.680
-// ---------------------------------------------------------------------------
-
-describe('SCH.680 — исполнительная схема', () => {
-  it('есть привязка и штамп — pass', () => {
-    const result = run(
-      'SCH.680',
-      graphWith(
-        makeDocument({
-          docTypeCode: EVIDENCE_DOC_TYPES.execScheme,
-          fields: [
-            textField(EVIDENCE_FIELDS.workName, 'Устройство 2 слоёв гидроизоляции'),
-            makeField({ fieldCode: 'issuer', valueText: 'ООО «СТРОЙПРОФИЛЬ»', blockType: 'stamp' }),
-          ],
-        }),
-      ),
-    );
-    expect(result.verdict).toBe('pass');
-    expect(result.findings).toHaveLength(0);
-  });
-
-  it('нет привязки при размеченных блоках — дефект', () => {
-    const result = run(
-      'SCH.680',
-      graphWith(
-        makeDocument({
-          docTypeCode: EVIDENCE_DOC_TYPES.execScheme,
-          fields: [
-            makeField({ fieldCode: 'issuer', valueText: 'ООО «СТРОЙПРОФИЛЬ»', blockType: 'stamp' }),
-          ],
-        }),
-      ),
-    );
-    expect(result.verdict).toBe('fail');
-    expect(joined(result)).toContain('привязка схемы к освидетельствованным работам не указана');
-  });
-
-  it('штампа среди блоков нет — undetermined, а не fail', () => {
-    const result = run(
-      'SCH.680',
-      graphWith(
-        makeDocument({
-          docTypeCode: EVIDENCE_DOC_TYPES.execScheme,
-          title: 'Схема раскладки',
-          fields: [textField('issuer', 'ООО «СТРОЙПРОФИЛЬ»')],
-        }),
-      ),
-    );
-    expect(result.verdict).toBe('undetermined');
-    expect(joined(result)).toContain('штамп с подписями на схеме не обнаружен');
-  });
-
-  it('данных нет вовсе — undetermined, а не fail', () => {
-    const result = run(
-      'SCH.680',
-      graphWith(makeDocument({ docTypeCode: EVIDENCE_DOC_TYPES.execScheme, fields: [] })),
-    );
-    expect(result.verdict).toBe('undetermined');
-    expect(joined(result)).toContain('требуется ручная проверка');
-    expect(joined(result)).not.toContain('не указана');
-  });
-
-  it('без исполнительных схем — n_a', () => {
-    expect(run('SCH.680', makeGraph()).verdict).toBe('n_a');
-  });
-});
-
-// ---------------------------------------------------------------------------
 // Прогон через движок
 // ---------------------------------------------------------------------------
 
@@ -1171,7 +573,15 @@ describe('прогон группы через движок', () => {
         docTypeCode: EVIDENCE_DOC_TYPES.technicalPassport,
         fields: [textField(EVIDENCE_FIELDS.number, 'ТП-114')],
       }),
-      protocol(7, 71.78, 3),
+      // Паспорт качества есть — движок доходит до заглушки PASS.610, а не
+      // отвечает «нет документов вида» раньше неё.
+      makeDocument({
+        docTypeCode: EVIDENCE_DOC_TYPES.qualityPassport,
+        fields: [
+          textField(EVIDENCE_FIELDS.number, '16005'),
+          dateField(EVIDENCE_FIELDS.issuedAt, '2026-01-09'),
+        ],
+      }),
     ],
   });
 
@@ -1181,12 +591,22 @@ describe('прогон группы через движок', () => {
     enabledRuleCodes: null,
   });
 
-  it('все двенадцать кодов попали в журнал исполнения', () => {
+  it('все двенадцать кодов попали в журнал исполнения — n_a тоже исполнение', () => {
+    // Снятое правило исполняется: движок вызывает заглушку и записывает её
+    // ответ. «Не исполнялось» и «неприменимо» — разные состояния, и второе не
+    // покрывает первое.
     expect(outcome.executions.map((entry) => entry.ruleCode).sort()).toEqual(
       EVIDENCE_RULES.map((spec) => spec.code).sort(),
     );
     expect(outcome.skipped).toEqual({});
     expect(outcome.counts.executed).toBe(EVIDENCE_RULES.length);
+  });
+
+  it('снятое правило при документе своего вида отвечает причиной снятия', () => {
+    const execution = outcome.executions.find((entry) => entry.ruleCode === 'PASS.610');
+    expect(execution?.verdict).toBe('n_a');
+    expect(execution?.reason).toBe('правило снято с исполнения');
+    expect(outcome.findings.some((finding) => finding.ruleCode === 'PASS.610')).toBe(false);
   });
 
   it('каждое неприменимое правило объясняет причину', () => {
@@ -1196,21 +616,11 @@ describe('прогон группы через движок', () => {
     }
   });
 
-  it('дефект №5 и дефект №7 найдены в одном прогоне', () => {
+  it('дефект №5 найден в общем прогоне', () => {
     const byRule = (code: string): string[] =>
       outcome.findings.filter((finding) => finding.ruleCode === code).map((f) => f.message);
 
     expect(byRule('TP.620').join(' | ')).toContain('поле „Дата выдачи“ не заполнено');
-    expect(byRule('LAB.651').join(' | ')).toContain(
-      'приёмочный протокол в проектном возрасте (28 суток) не приложен',
-    );
-  });
-
-  it('семисуточный протокол в том же прогоне остаётся info и не блокирует', () => {
-    const lab650 = outcome.findings.filter((finding) => finding.ruleCode === 'LAB.650');
-    expect(lab650).toHaveLength(1);
-    expect(lab650[0]?.severity).toBe('info');
-    expect(lab650[0]?.isBlocking).toBe(false);
   });
 
   it('у каждого замечания есть адрес и подсказка', () => {

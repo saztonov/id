@@ -33,8 +33,16 @@
  * документе, справочнике, профиле раздела или параметрах снимка, считается
  * неизвестным, а неизвестное даёт `undetermined`, а не `fail`.
  */
-import type { FindingTargetType, IdentifierCheck } from '@id/contracts';
-import { checkInn, checkOgrn, normalizeDocNo } from '@id/contracts';
+import type { FindingTargetType, IdentifierCheck, NormalizedDocNo } from '@id/contracts';
+import {
+  actItemNumbers,
+  checkInn,
+  checkOgrn,
+  normalizeDocNo,
+  ownDocNoOf,
+  parseActItem3,
+  registryRefNumber,
+} from '@id/contracts';
 
 import {
   ACT_FIELDS,
@@ -43,29 +51,27 @@ import {
   actField,
   actListOf,
   actTextOf,
-  categoryInProfile,
   digitsOf,
-  documentById,
   effectiveConfidence,
   evidenceOf,
   field,
+  foldHomoglyphs,
   formatDate,
   isIsoDate,
+  isQualityDocCode,
+  isRegistryCode,
   listOf,
   listParam,
   matchCounterparty,
-  matrixFor,
   normalizeOrgName,
   parentsOf,
-  standardWithoutYear,
-  standardYear,
   textOf,
   threshold,
 } from './helpers.js';
-import { defect, externalUnavailable, fromFindings, notApplicable, unknown } from './result.js';
+import { DEFAULT_NAME_SIMILARITY_THRESHOLD, nameSimilarity } from './material-cover.js';
+import { defect, fromFindings, notApplicable, retiredRule, unknown } from './result.js';
 import type {
   CheckGraph,
-  CounterpartyNode,
   DocumentNode,
   FieldNode,
   FindingSeverity,
@@ -146,16 +152,6 @@ type SignerRole = (typeof AOSR_SIGNER_ROLES)[number];
 
 /** Код типа акта освидетельствования скрытых работ. */
 const AOSR_TYPE = 'aosr';
-
-/** Сертификаты соответствия и декларации: ими подтверждается изготовитель. */
-const CERTIFICATE_TYPES: readonly string[] = ['cert_conformity', 'declaration'];
-
-/** Паспорта и сертификаты качества: источник НД со стороны партии. */
-const PASSPORT_TYPES: readonly string[] = [
-  'quality_passport',
-  'technical_passport',
-  'mill_certificate',
-];
 
 /** Исполнительные схемы. */
 const SCHEME_TYPE = /^exec_/u;
@@ -253,59 +249,6 @@ function trimmedText(value: FieldNode | null): string | null {
   return text === null || text.trim() === '' ? null : text.trim();
 }
 
-/** Сравнение фраз: регистр, «ё» и пунктуация значения не меняют. */
-function normalizePhrase(value: string): string {
-  return value
-    .toUpperCase()
-    .replace(/Ё/gu, 'Е')
-    .replace(/[^\p{L}\p{N}]+/gu, '');
-}
-
-/** Фамилия плюс инициалы: «Иванов И.И.» и «Иванов Иван Иванович» дают одно. */
-function personKey(value: string): string {
-  const tokens = value
-    .toUpperCase()
-    .replace(/Ё/gu, 'Е')
-    .split(/[^\p{L}]+/u)
-    .filter((token) => token.length > 0);
-  const surname = tokens[0];
-  if (surname === undefined) return '';
-  return (
-    surname +
-    tokens
-      .slice(1)
-      .map((token) => token.slice(0, 1))
-      .join('')
-  );
-}
-
-function stringList(value: unknown): readonly string[] {
-  return Array.isArray(value)
-    ? value.filter((item): item is string => typeof item === 'string')
-    : [];
-}
-
-function stringMatrix(value: unknown): readonly (readonly string[])[] {
-  return Array.isArray(value)
-    ? value.map((group) => stringList(group)).filter((group) => group.length > 0)
-    : [];
-}
-
-function documentsOf(graph: CheckGraph, ids: readonly string[]): DocumentNode[] {
-  return ids
-    .map((id) => documentById(graph, id))
-    .filter((document): document is DocumentNode => document !== null);
-}
-
-function isTypeOf(document: DocumentNode, codes: readonly string[]): boolean {
-  return (
-    document.isKnownType &&
-    !document.isFallbackType &&
-    document.docTypeCode !== null &&
-    codes.includes(document.docTypeCode)
-  );
-}
-
 function signerRolesFrom(params: RuleParams): readonly SignerRole[] {
   const codes = listParam(
     params,
@@ -318,25 +261,13 @@ function signerRolesFrom(params: RuleParams): readonly SignerRole[] {
 /**
  * Номер документа, названный внутри строки перечня приложений.
  *
- * Границей служит то, что за номером ИДЁТ: предлог «от» перед датой, запятая,
- * точка с запятой, скобка или конец строки. Пробелом граница быть не может —
- * он встречается внутри номера («№ РОСС RU BY.HE06.H22245»), а в акте так
- * записан и номер схемы: «№ 48.1-от/-1 этаж от 10.04.2026г.». Пока номер
- * обрывался на первом пробеле, из него уходило «этаж», и схема, лежащая в
- * комплекте, не находилась.
- *
- * «Не» и «No» — то, во что OCR превращает «№»: в папке так прочитано больше
- * четверти номеров, и без них строка молча становилась «названной без номера».
+ * Разбор общий со сверкой комплекта (`@id/contracts`, `act-items.ts`): до S59
+ * здесь жила своя копия регулярного выражения, и она разошлась с копией в
+ * `apps/api` опечаткой `N(?![p{L}])`. Общий разбор к тому же знает про ссылку
+ * на родителя: в «Реестр 2 к АОСР № ПБ-1» номер после «к» принадлежит акту, а
+ * не строке, — и правило п. 4 больше не ищет документ с номером акта.
  */
-const DOC_NO_IN_TEXT =
-  /(?:№|Не(?=\s*[0-9A-ZА-Я])|No|N(?![p{L}]))\s*([^,;()]+?)(?=\s+от\s|\s*[,;()]|$)/u;
-
-function docNoOf(text: string): string | null {
-  const raw = DOC_NO_IN_TEXT.exec(text)?.[1];
-  if (raw === undefined) return null;
-  const trimmed = raw.replace(/[.,;:]+$/u, '').trim();
-  return trimmed === '' ? null : trimmed;
-}
+const docNoOf = ownDocNoOf;
 
 /**
  * Есть ли в комплекте документ с таким номером.
@@ -418,55 +349,6 @@ function hasDocumentNumbered(graph: CheckGraph, docNo: string, entry: string): N
   }
 
   return 'undetermined';
-}
-
-// ---------------------------------------------------------------------------
-// Количественные признаки (дефект №6 корпуса)
-// ---------------------------------------------------------------------------
-
-/**
- * Пары «число + существительное» в наименовании работ и схемы.
- *
- * Длинные формы стоят раньше коротких, а хвостовой `(?!\p{L})` не даёт «ряд»
- * совпасть внутри «ряда». Именно лукахед, а не `\b`: граница слова определена
- * через `\w`, то есть через ASCII, и после кириллической буквы её не бывает —
- * `\b` молча не совпал бы ни разу на русском тексте.
- */
-const QUANTITY = /(\d+)\s*(слоёв|слоев|слоя|слой|рядов|ряда|ряд|мм|шт)(?!\p{L})/giu;
-
-/** Словоформа → основа: сравниваются числа при ОДНОЙ основе. */
-const QUANTITY_STEMS: Readonly<Record<string, string>> = {
-  СЛОЙ: 'слой',
-  СЛОЯ: 'слой',
-  СЛОЁВ: 'слой',
-  СЛОЕВ: 'слой',
-  РЯД: 'ряд',
-  РЯДА: 'ряд',
-  РЯДОВ: 'ряд',
-  ММ: 'мм',
-  ШТ: 'шт',
-};
-
-/** Основа → множество названных при ней чисел. */
-function quantitiesOf(texts: readonly string[]): Map<string, Set<number>> {
-  const result = new Map<string, Set<number>>();
-  for (const text of texts) {
-    for (const match of text.matchAll(QUANTITY)) {
-      const rawNumber = match[1];
-      const rawWord = match[2];
-      if (rawNumber === undefined || rawWord === undefined) continue;
-      const stem = QUANTITY_STEMS[rawWord.toUpperCase()];
-      if (stem === undefined) continue;
-      const bucket = result.get(stem) ?? new Set<number>();
-      bucket.add(Number(rawNumber));
-      result.set(stem, bucket);
-    }
-  }
-  return result;
-}
-
-function formatNumbers(values: Set<number>): string {
-  return [...values].sort((a, b) => a - b).join(', ');
 }
 
 // ---------------------------------------------------------------------------
@@ -763,36 +645,79 @@ function evaluateIdentifier(
   return summarize(findings, checked, `ни в одном акте не распознан ${label}`);
 }
 
-function evaluateCounterpartyTriple(graph: CheckGraph): RuleResult {
+/**
+ * AOSR.HDR.023 — лицо, выполнившее работы, есть в справочнике по ИНН (ORG.REF).
+ *
+ * Заголовок правила в сиде заморожен и по-прежнему говорит о «тройке», а
+ * поведение с S59 другое: сопоставление идёт по ИНН, затем по ОГРН, и
+ * наименование не сверяется вовсе. Одно и то же ИНН в боевой базе встречается
+ * в трёх написаниях («ОЛИМПРОЕКТ», «Олимпроект», «ОЛИМППРОЕКТ»), и сверять
+ * название значило бы обвинять акт в орфографии. Расхождение ИНН при
+ * совпавшем ОГРН (и наоборот) остаётся замечанием: это тот же реквизит, что и
+ * искали, только с другой стороны.
+ */
+function evaluateCounterpartyByInn(graph: CheckGraph): RuleResult {
   const actList = aosrActs(graph);
   if (actList.length === 0) return notApplicable(NO_ACTS);
   if (graph.counterparties.length === 0) {
-    return notApplicable('справочник контрагентов пуст — сверять тройку не с чем');
+    return notApplicable('справочник контрагентов пуст — искать лицо по ИНН не в чем');
   }
 
   const findings: RuleFinding[] = [];
   let checked = 0;
 
   for (const act of actList) {
-    const nameValue = actField(act, AOSR_FIELDS.contractorName);
     const innValue = actField(act, AOSR_FIELDS.contractorInn);
     const ogrnValue = actField(act, AOSR_FIELDS.contractorOgrn);
-    const name = trimmedText(nameValue);
     const inn = trimmedText(innValue);
     const ogrn = trimmedText(ogrnValue);
-    if (name === null && inn === null && ogrn === null) continue;
-
-    // Сопоставление — общее с конвейером, который заполняет исполнителя
-    // комплекта той же тройкой (S37): два экземпляра разошлись бы молча.
-    const party = matchCounterparty(graph.counterparties, { name, inn, ogrn }) ?? undefined;
-    if (party === undefined) {
+    if (inn === null && ogrn === null) {
       findings.push(
         unknown({
-          ...anchorOfField(act, innValue ?? ogrnValue ?? nameValue),
+          ...anchorOfDocument(act),
           origin: 'deterministic',
-          message: `Контрагент из шапки акта ${actLabel(act)} (${[name, inn, ogrn].filter((part) => part !== null).join(', ')}) не найден в справочнике — сверить тройку ОГРН↔ИНН↔наименование не с чем.`,
-          hint: 'Заведите контрагента в справочнике либо исправьте реквизиты в шапке акта.',
+          message: `В шапке акта ${actLabel(act)} не распознаны ни ИНН, ни ОГРН лица, выполнившего работы — найти его в справочнике нечем.`,
+          hint: 'Введите ИНН лица, выполнившего работы, из шапки акта вручную.',
         }),
+      );
+      continue;
+    }
+
+    // Знак, которого в ИНН быть не может, поставил распознаватель: искать по
+    // такому значению нечего. Признак общий с HDR.021/HDR.022.
+    const unreadableInn = inn !== null && UNREADABLE_IDENTIFIER.test(inn);
+    const unreadableOgrn = ogrn !== null && UNREADABLE_IDENTIFIER.test(ogrn);
+
+    // Сопоставление — общее с конвейером, который заполняет исполнителя
+    // комплекта теми же реквизитами (S37): два экземпляра разошлись бы молча.
+    // Наименование не передаётся намеренно — см. докстринг.
+    const party =
+      matchCounterparty(graph.counterparties, {
+        name: null,
+        inn: unreadableInn ? null : inn,
+        ogrn: unreadableOgrn ? null : ogrn,
+      }) ?? undefined;
+    if (party === undefined) {
+      const identifiers = [
+        inn === null ? null : `ИНН ${inn}`,
+        ogrn === null ? null : `ОГРН ${ogrn}`,
+      ]
+        .filter((part): part is string => part !== null)
+        .join(', ');
+      findings.push(
+        unreadableInn || unreadableOgrn
+          ? unknown({
+              ...anchorOfField(act, innValue ?? ogrnValue),
+              origin: 'deterministic',
+              message: `Реквизиты лица, выполнившего работы, в шапке акта ${actLabel(act)} (${identifiers}) прочитаны со знаком, которого в них быть не может — искать в справочнике нечем.`,
+              hint: 'Сверьте ИНН и ОГРН со сканом акта и введите значения вручную.',
+            })
+          : defect({
+              ...anchorOfField(act, innValue ?? ogrnValue),
+              origin: 'deterministic',
+              message: `Лицо, выполнившее работы, из шапки акта ${actLabel(act)} (${identifiers}) не найдено в справочнике контрагентов.`,
+              hint: 'Заведите контрагента с этим ИНН в справочнике либо исправьте ИНН в шапке акта.',
+            }),
       );
       continue;
     }
@@ -842,17 +767,6 @@ function evaluateCounterpartyTriple(graph: CheckGraph): RuleResult {
             }),
       );
     }
-
-    if (name !== null && normalizeOrgName(party.name) !== normalizeOrgName(name)) {
-      findings.push(
-        defect({
-          ...anchorOfField(act, nameValue),
-          origin: 'deterministic',
-          message: `Наименование в шапке акта ${actLabel(act)} — «${name}» — расходится со справочником: контрагент с этими реквизитами назван «${party.name}».`,
-          hint: 'Приведите наименование организации в шапке акта к записи справочника контрагентов.',
-        }),
-      );
-    }
   }
 
   return summarize(findings, checked, 'ни в одном акте не распознаны реквизиты стороны');
@@ -861,58 +775,6 @@ function evaluateCounterpartyTriple(graph: CheckGraph): RuleResult {
 // ---------------------------------------------------------------------------
 // AOSR.ACT — номер и даты акта
 // ---------------------------------------------------------------------------
-
-function evaluateActNumberPattern(graph: CheckGraph): RuleResult {
-  const actList = aosrActs(graph);
-  if (actList.length === 0) return notApplicable(NO_ACTS);
-
-  const pattern = graph.object.actNumberPattern;
-  if (pattern === null || pattern.trim() === '') {
-    return notApplicable('для объекта не задан шаблон номера акта');
-  }
-
-  let expected: RegExp;
-  try {
-    expected = new RegExp(pattern);
-  } catch {
-    return notApplicable(
-      `шаблон номера акта «${pattern}» не является корректным регулярным выражением`,
-    );
-  }
-
-  const findings: RuleFinding[] = [];
-  let checked = 0;
-
-  for (const act of actList) {
-    const value = actField(act, AOSR_FIELDS.actNumber) ?? field(act, AOSR_FIELDS.number);
-    const number = trimmedText(value);
-    if (number === null) {
-      findings.push(
-        unknown({
-          ...anchorOfField(act, value),
-          origin: 'deterministic',
-          message: `Номер акта (документ ${String(act.ordinal)}) не распознан — сверить с шаблоном объекта «${pattern}» нечем.`,
-          hint: 'Введите номер акта вручную и подтвердите реквизит.',
-        }),
-      );
-      continue;
-    }
-
-    checked += 1;
-    if (expected.test(number)) continue;
-
-    findings.push(
-      defect({
-        ...anchorOfField(act, value),
-        origin: 'deterministic',
-        message: `Номер акта «${number}» не соответствует шаблону номера, заданному для объекта: «${pattern}».`,
-        hint: `Приведите номер акта к принятой на объекте форме либо уточните шаблон в карточке объекта.`,
-      }),
-    );
-  }
-
-  return summarize(findings, checked, 'ни в одном акте не распознан номер');
-}
 
 function evaluateActDates(graph: CheckGraph): RuleResult {
   const actList = aosrActs(graph);
@@ -1163,159 +1025,307 @@ function evaluateItem1(graph: CheckGraph): RuleResult {
   return summarize(findings, checked, 'ни в одном акте не извлечён п. 1');
 }
 
-function evaluateRdFolder(graph: CheckGraph, params: RuleParams): RuleResult {
-  const actList = aosrActs(graph);
-  if (actList.length === 0) return notApplicable(NO_ACTS);
-
-  const raw = params['revisionPattern'];
-  const source = typeof raw === 'string' && raw.trim() !== '' ? raw : DEFAULT_REVISION_PATTERN;
-  let folder: RegExp;
-  try {
-    folder = new RegExp(source, 'iu');
-  } catch {
-    return notApplicable(`параметр revisionPattern «${source}» не является регулярным выражением`);
-  }
-
-  const findings: RuleFinding[] = [];
-  let checked = 0;
-
-  for (const act of actList) {
-    const value = actField(act, AOSR_FIELDS.rdCipher);
-    // П. 2 — СПИСОК: бланк допускает несколько шифров, и номер изменения
-    // обязан стоять у каждого. Чтение одним текстом брало у списка либо
-    // склейку через «; » (детерминированный экстрактор), либо `null` (модель
-    // кладёт элементы только в `value_json`), — во втором случае правило
-    // объявляло реквизит нераспознанным на каждом акте.
-    const ciphers = actListOf(act, AOSR_FIELDS.rdCipher);
-    if (ciphers.length === 0) {
-      findings.push(
-        unknown({
-          ...anchorOfField(act, value),
-          origin: 'deterministic',
-          message: `В акте ${actLabel(act)} не распознан шифр рабочей документации п. 2 — наличие номера изменения проверить нечем.`,
-          hint: 'Введите шифр рабочей документации из п. 2 акта вместе с номером изменения.',
-        }),
-      );
-      continue;
-    }
-
-    checked += 1;
-    for (const cipher of ciphers) {
-      if (folder.test(cipher)) continue;
-
-      findings.push(
-        defect({
-          ...anchorOfField(act, value),
-          origin: 'deterministic',
-          message: `Шифр рабочей документации «${cipher}» в п. 2 акта ${actLabel(act)} указан без номера изменения.`,
-          hint: 'Допишите к шифру номер изменения (например, «изм. 2») — без него нельзя установить, по какой редакции выполнены работы.',
-        }),
-      );
-    }
-  }
-
-  return summarize(findings, checked, 'ни в одном акте не распознан шифр рабочей документации');
-}
-
-const DEFAULT_REVISION_PATTERN = 'изм(?:енени[ея])?\\.?\\s*№?\\s*\\d+';
-
 /** Шифр без хвоста с номером изменения: справочник хранит их отдельно. */
 function cipherWithoutRevision(cipher: string): string {
   return cipher.replace(/[,;]?\s*изм(?:енени[ея])?\.?\s*№?\s*\d+\s*$/iu, '').trim();
 }
 
-function evaluateRdInCatalog(graph: CheckGraph): RuleResult {
+// ---------------------------------------------------------------------------
+// AOSR.P3, AOSR.P4 — перечни материалов и приложений (S59)
+// ---------------------------------------------------------------------------
+
+/**
+ * Номер реестра приложений: реквизит `registry_number`, за ним — заголовок.
+ *
+ * Запасной путь по заголовку не временный. До S59 реквизит извлекался шаблоном
+ * ОГРН (`extract.ts`), и в боевой базе у каждого реестра там лежат тринадцать
+ * цифр; перераспознавание папок — дело эксплуатации, а правило обязано работать
+ * на том, что есть. Заголовок «Реестр № 2 к АОСР № ПБ-1 …» читается тем же
+ * разбором, что и ссылка в п. 3 акта, — второй регулярки здесь нет. Значение
+ * реквизита пропускается через тот же разбор: тринадцать цифр номером реестра
+ * не считаются.
+ */
+function annexRegistryNumberOf(document: DocumentNode): string | null {
+  const stored = textOf(document, 'registry_number');
+  const fromField = stored === null ? null : registryRefNumber(`реестр № ${stored}`);
+  if (fromField !== null) return fromField;
+  return document.title === null ? null : registryRefNumber(document.title);
+}
+
+interface AnnexRegistry {
+  readonly document: DocumentNode;
+  readonly number: string | null;
+}
+
+/** Реестры приложений среза с их номерами. */
+function annexRegistriesOf(graph: CheckGraph): readonly AnnexRegistry[] {
+  return graph.documents
+    .filter(
+      (document) =>
+        document.docTypeCode === REGISTRY_TYPE && document.isKnownType && !document.isFallbackType,
+    )
+    .map((document) => ({ document, number: annexRegistryNumberOf(document) }));
+}
+
+type RegistryLookup =
+  | { readonly status: 'found'; readonly document: DocumentNode }
+  /** Реестр в срезе один, а номера у него нет: тот ли это реестр — не установить. */
+  | { readonly status: 'unnumbered'; readonly document: DocumentNode }
+  | { readonly status: 'missing' };
+
+/**
+ * Реестр приложений № N в срезе комплекта.
+ *
+ * Номер акта из ссылки («к АОСР № ПВ-1») не сравнивается: реестр к акту
+ * привязала сегментация (комплект), а номер акта в ссылке OCR читает хуже
+ * всего — на скриншоте заказчика «ПБ-1» пришёл как «ПВ-1», и правило искало
+ * документ с номером акта вместо реестра.
+ */
+function findAnnexRegistry(graph: CheckGraph, number: string): RegistryLookup {
+  const registries = annexRegistriesOf(graph);
+  const wanted = normalizeDocNo(number).normalized;
+  const found = registries.find(
+    (entry) => entry.number !== null && normalizeDocNo(entry.number).normalized === wanted,
+  );
+  if (found !== undefined) return { status: 'found', document: found.document };
+
+  const single = registries[0];
+  if (registries.length === 1 && single !== undefined && single.number === null) {
+    return { status: 'unnumbered', document: single.document };
+  }
+  return { status: 'missing' };
+}
+
+/** Замечание о реестре, названном в пункте акта, но не найденном в срезе. */
+function registryLookupFinding(
+  graph: CheckGraph,
+  act: DocumentNode,
+  anchor: Anchor,
+  item: string,
+  number: string,
+  lookup: Exclude<RegistryLookup, { status: 'found' }>,
+): RuleFinding {
+  if (lookup.status === 'unnumbered') {
+    return unknown({
+      ...anchor,
+      origin: 'deterministic',
+      message: `${item} акта ${actLabel(act)} ссылается на реестр приложений № ${number}; в комплекте есть реестр, но его номер не прочитан — тот ли это реестр, установить нечем.`,
+      hint: 'Сверьте номер реестра приложений с ссылкой в акте вручную.',
+    });
+  }
+  const gaps = graph.coverageGaps;
+  if (gaps > 0) {
+    return unknown({
+      ...anchor,
+      origin: 'deterministic',
+      severityOverride: 'warning',
+      message: `Реестр приложений № ${number}, названный в ${item.toLowerCase()} акта ${actLabel(act)}, в разобранной части комплекта не найден.${coverageNote(gaps)}`,
+      hint: 'Разберите непривязанные листы комплекта либо приложите реестр приложений.',
+    });
+  }
+  return defect({
+    ...anchor,
+    origin: 'deterministic',
+    message: `Реестр приложений № ${number}, названный в ${item.toLowerCase()} акта ${actLabel(act)}, в комплекте отсутствует.`,
+    hint: 'Приложите реестр приложений к комплекту либо исправьте ссылку в акте.',
+  });
+}
+
+/** Документ среза с номерами и наименованиями, которыми его можно найти. */
+interface CoverCandidate {
+  readonly document: DocumentNode;
+  readonly numbers: readonly NormalizedDocNo[];
+  readonly names: readonly string[];
+}
+
+/**
+ * Чем материал п. 3 может быть подтверждён: любой документ среза, кроме актов и
+ * перечней. Незнакомый вид тоже годится — по номеру: сертификат незнакомой
+ * формы остаётся сертификатом (§0.5).
+ */
+function coverCandidates(graph: CheckGraph): readonly CoverCandidate[] {
+  return graph.documents
+    .filter((document) => {
+      const code = document.docTypeCode;
+      return code === null || (!ACT_TYPES.test(code) && !isRegistryCode(code));
+    })
+    .map((document) => ({
+      document,
+      numbers: [textOf(document, AOSR_FIELDS.number), textOf(document, 'blank_number')]
+        .filter((value): value is string => value !== null)
+        .map((value) => normalizeDocNo(value)),
+      names: [
+        textOf(document, 'product_name'),
+        ...listOf(document, 'product_marks'),
+        document.title,
+      ].filter((value): value is string => value !== null && value.trim() !== ''),
+    }));
+}
+
+/** Равенство номеров — те же две ступени, что у сверки реестра: точная и свёрнутая. */
+function sameNumber(wanted: NormalizedDocNo, own: NormalizedDocNo): boolean {
+  if (wanted.normalized === '' || own.normalized === '') return false;
+  return wanted.normalized === own.normalized || wanted.folded === own.folded;
+}
+
+/**
+ * AOSR.P3.070 — у материала из п. 3 есть документ о качестве (MAT.COVER, S59).
+ *
+ * ## Почему правило переписано
+ *
+ * Прежняя реализация читала `graph.materials`, а материалы выводятся из
+ * документов качества (`materials.ts`): у каждого «материала» документ был по
+ * построению, и правило не могло дать ошибку. Пункт 3 акта оно не читало вовсе.
+ *
+ * ## Как считается покрытие
+ *
+ * Запись п. 3 — либо ссылка на реестр приложений, либо перечисление позиций
+ * «материал (документ № …, документ № …)». Ссылка проверяется наличием реестра
+ * с таким номером; его строки покрывают `REG.100`/`REG.102`, и второе
+ * замечание о той же строке здесь не выносится (ADR-0018). Позиция считается
+ * подтверждённой по НОМЕРУ (точное или свёрнутое равенство, как в сверке) ИЛИ
+ * по НАЗВАНИЮ (сходство токенов марки, `material-cover.ts`) — любое совпадение
+ * хорошее. Номер совпал, а марка расходится — предупреждение: документ в
+ * комплекте есть, вопрос лишь к его предмету. Ни того ни другого — ошибка.
+ *
+ * Ступень числового ядра из сверки здесь не повторяется намеренно: номер,
+ * прочитанный иначе, идёт по пути названия, а вторая лестница разошлась бы с
+ * первой (ADR-0028).
+ */
+function evaluateMaterialCover(graph: CheckGraph, params: RuleParams): RuleResult {
   const actList = aosrActs(graph);
   if (actList.length === 0) return notApplicable(NO_ACTS);
-  if (graph.rdDocuments.length === 0) {
-    return notApplicable('справочник рабочей документации пуст — сверять шифр не с чем');
-  }
 
+  const minSimilarity = threshold(
+    graph.profile,
+    params,
+    'nameSimilarityThreshold',
+    DEFAULT_NAME_SIMILARITY_THRESHOLD,
+  );
+  const candidates = coverCandidates(graph);
+  const gaps = graph.coverageGaps;
   const findings: RuleFinding[] = [];
   let checked = 0;
 
   for (const act of actList) {
-    const value = actField(act, AOSR_FIELDS.rdCipher);
-    const ciphers = actListOf(act, AOSR_FIELDS.rdCipher);
-    if (ciphers.length === 0) {
+    const value = actField(act, AOSR_FIELDS.materials);
+    const entries = actListOf(act, AOSR_FIELDS.materials);
+    const registryRef = actTextOf(act, AOSR_FIELDS.registryRef);
+    const anchor = anchorOfField(act, value);
+
+    if (entries.length === 0 && registryRef === null) {
       findings.push(
         unknown({
-          ...anchorOfField(act, value),
+          ...anchor,
           origin: 'deterministic',
-          message: `В акте ${actLabel(act)} не распознан шифр рабочей документации п. 2 — сверить со справочником нечем.`,
-          hint: 'Введите шифр рабочей документации из п. 2 акта вручную.',
+          message: `В акте ${actLabel(act)} не распознан п. 3 — подтверждение материалов документами проверить нечем.`,
+          hint: 'Проверьте распознавание п. 3 акта либо введите перечень материалов вручную.',
         }),
       );
       continue;
     }
 
-    checked += 1;
-    for (const cipher of ciphers) {
-      const wanted = normalizeDocNo(cipherWithoutRevision(cipher));
-      const found = graph.rdDocuments.some((rd) => {
-        const actual = normalizeDocNo(rd.cipher);
-        return actual.normalized === wanted.normalized || actual.folded === wanted.folded;
-      });
-      if (found) continue;
+    const parsed = parseActItem3(entries);
+    const registryNumbers = new Set<string>();
+    for (const entry of parsed) {
+      if (entry.kind === 'registry_ref') registryNumbers.add(entry.number);
+    }
+    const refFromField = registryRef === null ? null : registryRefNumber(registryRef);
+    if (refFromField !== null) registryNumbers.add(refFromField);
 
-      findings.push(
-        defect({
-          ...anchorOfField(act, value),
-          origin: 'deterministic',
-          message: `Шифр рабочей документации «${cipher}» из п. 2 акта ${actLabel(act)} отсутствует в справочнике рабочей документации объекта.`,
-          hint: 'Заведите шифр в справочнике рабочей документации либо исправьте его в п. 2 акта.',
-        }),
-      );
+    for (const number of registryNumbers) {
+      checked += 1;
+      const lookup = findAnnexRegistry(graph, number);
+      if (lookup.status === 'found') continue;
+      findings.push(registryLookupFinding(graph, act, anchor, 'П. 3', number, lookup));
+    }
+
+    for (const entry of parsed) {
+      if (entry.kind === 'registry_ref') continue;
+      if (entry.kind === 'unparsed') {
+        findings.push(
+          unknown({
+            ...anchor,
+            origin: 'deterministic',
+            message: `Запись п. 3 акта ${actLabel(act)} «${entry.raw}» не разобрана на материалы и документы — подтверждение проверить нечем.`,
+            hint: 'Уточните запись п. 3: материал и реквизиты документа о качестве в скобках.',
+          }),
+        );
+        continue;
+      }
+
+      for (const position of entry.positions) {
+        checked += 1;
+        const wanted = position.numbers.map((number) => normalizeDocNo(number));
+        const similarityOf = (candidate: CoverCandidate): number =>
+          Math.max(0, ...candidate.names.map((name) => nameSimilarity(position.name, name)));
+
+        const byNumber = candidates.filter((candidate) =>
+          candidate.numbers.some((own) => wanted.some((number) => sameNumber(number, own))),
+        );
+        if (byNumber.length > 0) {
+          const best = Math.max(...byNumber.map(similarityOf));
+          if (position.name === '' || best >= minSimilarity) continue;
+          const named = byNumber
+            .map((candidate) => candidate.names[0] ?? null)
+            .filter((name): name is string => name !== null);
+          findings.push(
+            defect({
+              ...anchor,
+              origin: 'deterministic',
+              severityOverride: 'warning',
+              message: `Материал «${position.name}» из п. 3 акта ${actLabel(act)}: документ № ${position.numbers.join(', ')} в комплекте есть, но выдан на «${named.join('», «')}» — марка расходится.`,
+              hint: 'Сверьте марку материала в п. 3 с документом о качестве: возможно, приложен документ на другую марку.',
+            }),
+          );
+          continue;
+        }
+
+        const byName =
+          position.name === ''
+            ? []
+            : candidates.filter(
+                (candidate) =>
+                  isQualityDocCode(candidate.document.docTypeCode) &&
+                  similarityOf(candidate) >= minSimilarity,
+              );
+        if (byName.length > 0) continue;
+
+        const numbersText =
+          position.numbers.length === 0
+            ? 'документ без номера'
+            : `документов № ${position.numbers.join(', ')}`;
+        findings.push(
+          gaps > 0
+            ? unknown({
+                ...anchor,
+                origin: 'deterministic',
+                severityOverride: 'warning',
+                message: `Материал «${position.name}» из п. 3 акта ${actLabel(act)} в разобранной части комплекта не подтверждён: ${numbersText} не найдено, документа о качестве с такой маркой тоже.${coverageNote(gaps)}`,
+                hint: 'Разберите непривязанные листы комплекта либо приложите документ о качестве на материал.',
+              })
+            : defect({
+                ...anchor,
+                origin: 'deterministic',
+                message: `Материал «${position.name}» из п. 3 акта ${actLabel(act)} не подтверждён: ${numbersText} в комплекте нет, документа о качестве с такой маркой тоже.`,
+                hint: 'Приложите сертификат, декларацию или паспорт на материал и укажите его в реестре приложений.',
+              }),
+        );
+      }
     }
   }
 
-  return summarize(findings, checked, 'ни в одном акте не распознан шифр рабочей документации');
+  return summarize(findings, checked, 'ни в одном акте не разобран п. 3');
 }
 
 /**
- * П. 3: материалы подтверждены документами.
+ * AOSR.P3.071 — длинный перечень заменяется ссылкой на реестр.
  *
- * Материал вне перечня категорий профиля пропускается с названной причиной, а
- * не объявляется неподтверждённым (§9.1, строка 3): одна ложная ошибка на новом
- * разделе разрушает доверие быстрее пропуска.
+ * С S59 правило смотрит и на п. 4: по практике заказчика при трёх–пяти и более
+ * материалах в акте появляется реестр № 1, при стольких же исполнительных или
+ * геодезических схемах — реестр № 2. Заголовок правила в сиде заморожен и
+ * говорит о п. 3; текст замечания называет пункт сам.
  */
-function evaluateMaterialsBacked(graph: CheckGraph): RuleResult {
-  if (graph.materials.length === 0) {
-    return notApplicable('в комплекте не выделено ни одного материала');
-  }
-
-  const findings: RuleFinding[] = [];
-  const skipped: string[] = [];
-  let checked = 0;
-
-  for (const material of graph.materials) {
-    if (!categoryInProfile(graph.profile, material)) {
-      skipped.push(`${material.nameRaw} (${material.categoryCode ?? 'категория не определена'})`);
-      continue;
-    }
-
-    checked += 1;
-    const documents = documentsOf(graph, material.documentIds);
-    if (documents.length > 0) continue;
-
-    findings.push(
-      defect({
-        ...anchorOf('material', material.id),
-        origin: 'deterministic',
-        message: `Материал «${material.nameRaw}» из п. 3 акта не подтверждён ни одним документом о качестве.`,
-        hint: 'Приложите документ о качестве на материал и укажите его в реестре приложений.',
-      }),
-    );
-  }
-
-  if (checked === 0) {
-    return notApplicable(
-      `все материалы комплекта вне перечня категорий профиля раздела: ${skipped.join('; ')}`,
-    );
-  }
-  return fromFindings(findings);
-}
-
 function evaluateRegistryReference(graph: CheckGraph, params: RuleParams): RuleResult {
   const actList = aosrActs(graph);
   if (actList.length === 0) return notApplicable(NO_ACTS);
@@ -1325,26 +1335,52 @@ function evaluateRegistryReference(graph: CheckGraph, params: RuleParams): RuleR
   let checked = 0;
 
   for (const act of actList) {
-    const listed = actListOf(act, AOSR_FIELDS.materials);
-    if (listed.length === 0) continue;
+    const items: readonly (readonly [string, string, string | null])[] = [
+      [AOSR_FIELDS.materials, 'п. 3', actTextOf(act, AOSR_FIELDS.registryRef)],
+      [AOSR_FIELDS.documents, 'п. 4', null],
+    ];
 
-    checked += 1;
-    if (listed.length <= limit) continue;
-    if (actTextOf(act, AOSR_FIELDS.registryRef) !== null) continue;
+    for (const [fieldCode, item, refField] of items) {
+      const entries = actListOf(act, fieldCode);
+      if (entries.length === 0) continue;
 
-    findings.push(
-      defect({
-        ...anchorOfField(act, actField(act, AOSR_FIELDS.materials)),
-        origin: 'deterministic',
-        message: `В п. 3 акта ${actLabel(act)} перечислено ${String(listed.length)} документов (больше ${String(limit)}), но ссылки на реестр приложений нет.`,
-        hint: 'Замените перечисление в п. 3 ссылкой на реестр приложений либо добавьте её к перечню.',
-      }),
-    );
+      checked += 1;
+      const parsed = parseActItem3(entries);
+      const hasReference =
+        parsed.some((entry) => entry.kind === 'registry_ref') ||
+        (refField !== null && registryRefNumber(refField) !== null);
+      if (hasReference) continue;
+
+      // Позиция перечня — материал с документами (п. 3) либо названный
+      // документ (п. 4): у второго нет скобок, и позиции считаются по номерам.
+      const listed = parsed.reduce((sum, entry) => {
+        if (entry.kind === 'materials') return sum + entry.positions.length;
+        return sum + Math.max(1, actItemNumbers(entry.raw).length);
+      }, 0);
+      if (listed <= limit) continue;
+
+      findings.push(
+        defect({
+          ...anchorOfField(act, actField(act, fieldCode)),
+          origin: 'deterministic',
+          message: `В ${item} акта ${actLabel(act)} перечислено ${String(listed)} документов (больше ${String(limit)}), но ссылки на реестр приложений нет.`,
+          hint: `Замените перечисление в ${item} ссылкой на реестр приложений либо добавьте её к перечню.`,
+        }),
+      );
+    }
   }
 
-  return summarize(findings, checked, 'ни в одном акте не распознан перечень документов п. 3');
+  return summarize(findings, checked, 'ни в одном акте не распознаны перечни п. 3 и п. 4');
 }
 
+/**
+ * AOSR.P4.080 — приложения из п. 4 присутствуют в комплекте.
+ *
+ * Запись п. 4 — либо ссылка на реестр приложений (обычно № 2, со схемами),
+ * либо документ с номером. Ссылка проверяется наличием реестра; его строки
+ * дальше покрывает `REG.100`. Документ ищется по СОБСТВЕННОМУ номеру записи:
+ * номер после «к АОСР» принадлежит акту и строкой не является.
+ */
 function evaluateAnnexesPresent(graph: CheckGraph): RuleResult {
   const actList = aosrActs(graph);
   if (actList.length === 0) return notApplicable(NO_ACTS);
@@ -1355,14 +1391,21 @@ function evaluateAnnexesPresent(graph: CheckGraph): RuleResult {
   for (const act of actList) {
     // Правило про ПУНКТ 4 — «предъявлены документы, подтверждающие
     // соответствие работ». Блок «Приложения» в подвале бланка перечисляет
-    // другое (исполнительные схемы, протоколы) и живёт под своим кодом
-    // `annexes`; смешивать их значило бы требовать наличия схемы по номеру,
-    // которого у схемы не бывает.
+    // другое и живёт под своим кодом `annexes`.
     const documents = actListOf(act, AOSR_FIELDS.documents);
     if (documents.length === 0) continue;
 
     const anchor = anchorOfField(act, actField(act, AOSR_FIELDS.documents));
     for (const entry of documents) {
+      const [parsed] = parseActItem3([entry]);
+      if (parsed !== undefined && parsed.kind === 'registry_ref') {
+        checked += 1;
+        const lookup = findAnnexRegistry(graph, parsed.number);
+        if (lookup.status === 'found') continue;
+        findings.push(registryLookupFinding(graph, act, anchor, 'П. 4', parsed.number, lookup));
+        continue;
+      }
+
       const docNo = docNoOf(entry);
       if (docNo === null) {
         findings.push(
@@ -1406,141 +1449,276 @@ function evaluateAnnexesPresent(graph: CheckGraph): RuleResult {
   return summarize(findings, checked, 'ни в одном акте не распознан перечень приложений п. 4');
 }
 
-/**
- * П. 4: наименование схемы согласовано с п. 1 (дефект №6 корпуса).
- *
- * В АОСР №10 п. 1 говорит «Устройство 2 слоя гидроизоляции», а п. 4 и перечень
- * приложений ссылаются на схему «1 слой». Сравниваются числовые
- * количественные признаки при ОДНОЙ основе слова: расхождение чисел означает,
- * что акт и схема описывают разный объём работ. Если количественного признака
- * нет ни в п. 1, ни в наименовании схемы, вердикт — `undetermined`, а не
- * `pass`: сверять было нечего, и «проверено» тут было бы ложью.
- */
-function evaluateSchemeConsistency(graph: CheckGraph): RuleResult {
-  const actList = aosrActs(graph);
-  if (actList.length === 0) return notApplicable(NO_ACTS);
+// ---------------------------------------------------------------------------
+// SCH.681 — у акта есть исполнительная схема (SCHEME.REF, S59)
+// ---------------------------------------------------------------------------
 
-  const findings: RuleFinding[] = [];
-  let checked = 0;
-
-  const schemeTitles = graph.documents
-    .filter(
-      (document) =>
-        document.isKnownType &&
-        !document.isFallbackType &&
-        document.docTypeCode !== null &&
-        SCHEME_TYPE.test(document.docTypeCode) &&
-        document.title !== null,
-    )
-    .map((document) => document.title as string);
-
-  for (const act of actList) {
-    const workValue = workNameField(act);
-    const workText = trimmedText(workValue);
-    // Схема называется и в п. 4, и в блоке «Приложения» — объединение, а не
-    // выбор: бланки заполняют по-разному, и количественный признак может
-    // оказаться в любом из двух.
-    const schemeTexts = [
-      ...actListOf(act, AOSR_FIELDS.documents),
-      ...actListOf(act, AOSR_FIELDS.attachments),
-      ...schemeTitles,
-    ];
-
-    const inWork = quantitiesOf(workText === null ? [] : [workText]);
-    const inScheme = quantitiesOf(schemeTexts);
-
-    const common = [...inWork.keys()].filter((stem) => inScheme.has(stem));
-    if (common.length === 0) {
-      /**
-       * Признака нет НИГДЕ — сверять нечего, и это не «не проверено».
-       *
-       * Правило сверяет ДВЕ записи одного числа. Когда числа нет ни в п. 1, ни
-       * в наименовании схемы, расходиться нечему: шпатлёвку и окраску в слоях
-       * не нормируют, и бланк их не называет. Прежде такой акт получал
-       * «проверить нечем», и на папке «ИД Мастер апрель 2026» это дало
-       * двенадцать замечаний «не проверено» из двенадцати актов — ровно там,
-       * где проверять было нечего по существу работ.
-       *
-       * Признак, названный ОДНОЙ из сторон, остаётся «проверить нечем»: там
-       * вторая запись должна была быть и её не прочитали.
-       */
-      if (inWork.size === 0 && inScheme.size === 0) continue;
-
-      findings.push(
-        unknown({
-          ...anchorOfField(act, workValue),
-          origin: 'deterministic',
-          message: `В акте ${actLabel(act)} количественный признак (число слоёв, рядов) не распознан ${inWork.size === 0 ? 'в п. 1' : 'в наименовании схемы'} — согласованность п. 1 и схемы проверить нечем.`,
-          hint: 'Сверьте наименование исполнительной схемы с п. 1 акта вручную: число слоёв (рядов) должно совпадать.',
-        }),
-      );
-      continue;
-    }
-
-    checked += 1;
-    for (const stem of common) {
-      const workNumbers = inWork.get(stem) as Set<number>;
-      const schemeNumbers = inScheme.get(stem) as Set<number>;
-      const agreed = [...workNumbers].some((value) => schemeNumbers.has(value));
-      if (agreed) continue;
-
-      findings.push(
-        defect({
-          ...anchorOfField(act, workValue),
-          origin: 'deterministic',
-          message: `В акте ${actLabel(act)} количественный признак «${stem}» расходится: в п. 1 указано ${formatNumbers(workNumbers)}, а в наименовании схемы — ${formatNumbers(schemeNumbers)}.`,
-          hint: 'Приведите наименование исполнительной схемы и п. 1 акта к одному объёму работ либо приложите схему на фактически выполненный объём.',
-        }),
-      );
-    }
-  }
-
-  return summarize(
-    findings,
-    checked,
-    'ни в одном акте количественный признак не назван ни в п. 1, ни в наименовании схемы — сверять нечего',
-  );
+/** Ведущее целое номера: «48» из «48-ОТ/-1 этаж» и из «48.1-ОТ/1-1 ЭТАЖ». */
+function leadingInteger(value: string): string | null {
+  return /^\d+/u.exec(normalizeDocNo(value).folded)?.[0] ?? null;
 }
 
-function evaluateNextWorks(graph: CheckGraph): RuleResult {
+/**
+ * Основной сигнал — схема есть в срезе комплекта; принадлежность схемы акту
+ * уже установила сегментация. Сверка номера — второй план и только в одну
+ * сторону, акт → схема: у схемы нет реквизита с номером акта, а новых полей до
+ * «паспорта страницы» RD WEB не заводится (ADR-0029). Номер схемы подписан
+ * номером акта с индексом («48.1-ОТ/1-1 ЭТАЖ» к акту «48-ОТ/-1 этаж»), поэтому
+ * сравниваются ведущие целые: `sheetNumberHead` здесь не годится — он требует
+ * точку в номере и на номере акта даёт `null`. Несовпадение — «не проверено»,
+ * а не ошибка: номер листа читается хуже прочего текста (см. `hasDocumentNumbered`).
+ */
+function evaluateSchemePresence(graph: CheckGraph): RuleResult {
   const actList = aosrActs(graph);
   if (actList.length === 0) return notApplicable(NO_ACTS);
 
+  const schemes = graph.documents.filter(
+    (document) =>
+      document.isKnownType &&
+      !document.isFallbackType &&
+      document.docTypeCode !== null &&
+      SCHEME_TYPE.test(document.docTypeCode),
+  );
+  const gaps = graph.coverageGaps;
   const findings: RuleFinding[] = [];
-  let checked = 0;
 
   for (const act of actList) {
-    const workValue = workNameField(act);
-    const nextValue = actField(act, AOSR_FIELDS.nextWorks);
-    const work = trimmedText(workValue);
-    const next = trimmedText(nextValue);
-
-    if (work === null || next === null) {
+    if (schemes.length === 0) {
       findings.push(
-        unknown({
-          ...anchorOfField(act, nextValue ?? workValue),
-          origin: 'deterministic',
-          message: `В акте ${actLabel(act)} не распознан ${work === null ? 'п. 1' : 'п. 7'} — сверить последующие работы с освидетельствованными нечем.`,
-          hint: 'Введите наименование работ п. 1 и перечень последующих работ п. 7 вручную.',
-        }),
+        gaps > 0
+          ? unknown({
+              ...anchorOfDocument(act),
+              origin: 'deterministic',
+              message: `К акту ${actLabel(act)} в разобранной части комплекта не найдена исполнительная схема.${coverageNote(gaps)}`,
+              hint: 'Разберите непривязанные листы комплекта либо приложите исполнительную схему.',
+            })
+          : defect({
+              ...anchorOfDocument(act),
+              origin: 'deterministic',
+              message: `К акту ${actLabel(act)} не приложена исполнительная схема.`,
+              hint: 'Приложите исполнительную схему освидетельствованных работ к комплекту акта.',
+            }),
       );
       continue;
     }
 
-    checked += 1;
-    if (normalizePhrase(work) !== normalizePhrase(next)) continue;
+    const actNumber = actTextOf(act, AOSR_FIELDS.actNumber) ?? textOf(act, AOSR_FIELDS.number);
+    const head = actNumber === null ? null : leadingInteger(actNumber);
+    // У акта нет ведущего числа («ПБ-1») — ссылку номером не выразить, схема есть.
+    if (head === null) continue;
+
+    const schemeNumbers = schemes.flatMap((scheme) =>
+      [textOf(scheme, 'scheme_number'), textOf(scheme, AOSR_FIELDS.number)].filter(
+        (value): value is string => value !== null,
+      ),
+    );
+    if (schemeNumbers.length === 0) {
+      findings.push(
+        unknown({
+          ...anchorOfDocument(act),
+          origin: 'deterministic',
+          message: `Исполнительная схема к акту ${actLabel(act)} есть, но её номер не распознан — ссылку схемы на номер акта сверить нечем.`,
+          hint: 'Сверьте номер на листе схемы с номером акта вручную.',
+        }),
+      );
+      continue;
+    }
+    if (schemeNumbers.some((number) => leadingInteger(number) === head)) continue;
 
     findings.push(
-      defect({
-        ...anchorOfField(act, nextValue),
+      unknown({
+        ...anchorOfDocument(act),
         origin: 'deterministic',
-        message: `В акте ${actLabel(act)} последующие работы п. 7 дословно повторяют освидетельствованные работы п. 1: «${next}».`,
-        hint: 'Укажите в п. 7 работы, производство которых разрешается после освидетельствования, а не сами освидетельствованные работы.',
+        message: `Исполнительная схема к акту ${actLabel(act)} есть, но её номер (${schemeNumbers.join(', ')}) не ссылается на номер акта: ведущее число ${head} не найдено.`,
+        hint: 'Сверьте номер схемы с номером акта вручную: по бланку схема подписывается номером акта с индексом.',
       }),
     );
   }
 
-  return summarize(findings, checked, 'ни в одном акте не распознаны пп. 1 и 7');
+  return fromFindings(findings);
+}
+
+// ---------------------------------------------------------------------------
+// XS.131 — объект и шифр проекта одинаковы по всей папке (FOLDER.CONSIST, S59)
+// ---------------------------------------------------------------------------
+
+/** Текст для нестрогого сравнения: фолдинг, «ё» → «е», только буквы и цифры. */
+function normalizeLooseText(value: string): string {
+  return foldHomoglyphs(value)
+    .replace(/Ё/gu, 'Е')
+    .replace(/[^\p{L}\p{N}]+/gu, '');
+}
+
+/**
+ * Корень шифра проекта: «133/23-ГК-ПБ» из «ООО "ГК" ОЛИМППРОЕКТ шифр 133/23-ГК-ПБ
+ * "Система пожарной сигнализации"», «02-200223-ГПЗ.1» из записи п. 2.
+ *
+ * `\p{L}`, а не `\w`: под флагом `u` класс `\w` — это ASCII, и кириллица внутри
+ * шифра рвала бы совпадение. Хвост «изм. N» и номер листа срезаются до разбора.
+ */
+const CIPHER_ROOT =
+  /(\d[\d.]*(?:[/-][\p{L}\p{N}.\-/]*?)?-[А-ЯЁA-Z]{2,}\d{0,2}(?:\.\d{1,2})?)(?=[\s,;(»"]|$)/gu;
+
+/** Корни шифра в исходном написании; сравниваются они после фолдинга (`sameRoot`). */
+function cipherRootsOf(text: string): readonly string[] {
+  const cleaned = cipherWithoutRevision(text).replace(/\s*(?:лист|л\.)\s*\d+.*$/iu, '');
+  const roots: string[] = [];
+  for (const match of cleaned.matchAll(CIPHER_ROOT)) {
+    const root = match[1];
+    if (root === undefined) continue;
+    if (!roots.some((known) => sameRoot(known, root))) roots.push(root);
+  }
+  return roots;
+}
+
+/** «133/23-ГК-ПБ» и «133/23-ГK-ПБ» (латинская K) — один шифр в двух алфавитах. */
+function sameRoot(left: string, right: string): boolean {
+  return foldHomoglyphs(left) === foldHomoglyphs(right);
+}
+
+/**
+ * Папка — один объект и один проект: расхождение между актами означает либо
+ * чужой акт в папке, либо ошибку чтения шапки, и в обоих случаях инженеру
+ * стоит посмотреть.
+ *
+ * Объект сравнивается по кадастровому номеру, когда он напечатан в наименовании
+ * хотя бы у двух актов (на бою так и печатают), иначе — по наименованию с
+ * допуском «одно — начало другого»: то же наименование встречается с
+ * кадастровой припиской и без неё. Шифр сравнивается по корням из п. 2:
+ * расхождение — когда у актов нет ни одного общего корня.
+ */
+function evaluateFolderConsistency(graph: CheckGraph): RuleResult {
+  const actList = aosrActs(graph);
+  if (actList.length < 2) {
+    return notApplicable('в папке меньше двух актов — сверять объект и шифр не между чем');
+  }
+
+  const findings: RuleFinding[] = [];
+  const folderAnchor = anchorOf('folder', graph.folder.id);
+
+  // --- объект ---
+  const objects = actList.map((act) => ({
+    act,
+    name: trimmedText(actField(act, AOSR_FIELDS.objectName)),
+  }));
+  const withName = objects.filter(
+    (entry): entry is typeof entry & { name: string } => entry.name !== null,
+  );
+  const unnamed = objects.filter((entry) => entry.name === null);
+  if (unnamed.length > 0) {
+    findings.push(
+      unknown({
+        ...folderAnchor,
+        origin: 'deterministic',
+        message: `У актов ${unnamed.map((entry) => actLabel(entry.act)).join(', ')} не распознано наименование объекта — сверить объект по папке нечем.`,
+        hint: 'Проверьте распознавание шапки этих актов.',
+      }),
+    );
+  }
+
+  const cadastral = withName
+    .map((entry) => ({ act: entry.act, value: CADASTRAL_NUMBER.exec(entry.name)?.[0] ?? null }))
+    .filter((entry): entry is { act: DocumentNode; value: string } => entry.value !== null);
+  if (cadastral.length >= 2) {
+    const variants = [...new Set(cadastral.map((entry) => entry.value))];
+    if (variants.length > 1) {
+      findings.push(
+        defect({
+          ...folderAnchor,
+          origin: 'deterministic',
+          message: `Кадастровый номер объекта расходится между актами папки: ${variants
+            .map(
+              (value) =>
+                `${value} (${cadastral
+                  .filter((entry) => entry.value === value)
+                  .map((entry) => actLabel(entry.act))
+                  .join(', ')})`,
+            )
+            .join('; ')}.`,
+          hint: 'Проверьте, все ли акты относятся к одному объекту, либо исправьте кадастровый номер в шапке акта.',
+        }),
+      );
+    }
+  } else if (withName.length >= 2) {
+    const normalized = withName.map((entry) => ({ ...entry, key: normalizeLooseText(entry.name) }));
+    const groups: { key: string; names: string[]; acts: DocumentNode[] }[] = [];
+    for (const entry of normalized) {
+      const group = groups.find(
+        (candidate) =>
+          candidate.key === entry.key ||
+          candidate.key.startsWith(entry.key) ||
+          entry.key.startsWith(candidate.key),
+      );
+      if (group === undefined) {
+        groups.push({ key: entry.key, names: [entry.name], acts: [entry.act] });
+      } else {
+        group.acts.push(entry.act);
+        if (!group.names.includes(entry.name)) group.names.push(entry.name);
+        if (entry.key.length > group.key.length) group.key = entry.key;
+      }
+    }
+    if (groups.length > 1) {
+      findings.push(
+        defect({
+          ...folderAnchor,
+          origin: 'deterministic',
+          message: `Наименование объекта расходится между актами папки: ${groups.map((group) => `«${group.names[0] ?? ''}» (${group.acts.map((act) => actLabel(act)).join(', ')})`).join('; ')}.`,
+          hint: 'Проверьте, все ли акты относятся к одному объекту, либо приведите наименование объекта к одной формулировке.',
+        }),
+      );
+    }
+  }
+
+  // --- шифр проекта ---
+  const ciphers = actList.map((act) => ({
+    act,
+    roots: actListOf(act, AOSR_FIELDS.rdCipher).flatMap((entry) => cipherRootsOf(entry)),
+  }));
+  const withRoots = ciphers.filter((entry) => entry.roots.length > 0);
+  const withoutRoots = ciphers.filter((entry) => entry.roots.length === 0);
+  if (withoutRoots.length > 0) {
+    findings.push(
+      unknown({
+        ...folderAnchor,
+        origin: 'deterministic',
+        message: `У актов ${withoutRoots.map((entry) => actLabel(entry.act)).join(', ')} не распознан шифр проекта в п. 2 — сверить шифр по папке нечем.`,
+        hint: 'Проверьте распознавание п. 2 этих актов.',
+      }),
+    );
+  }
+  if (withRoots.length >= 2) {
+    const first = withRoots[0];
+    const hasRoot = (roots: readonly string[], root: string): boolean =>
+      roots.some((known) => sameRoot(known, root));
+    const common =
+      first === undefined
+        ? []
+        : first.roots.filter((root) => withRoots.every((entry) => hasRoot(entry.roots, root)));
+    if (common.length === 0) {
+      const variants: string[] = [];
+      for (const root of withRoots.flatMap((entry) => entry.roots)) {
+        if (!hasRoot(variants, root)) variants.push(root);
+      }
+      findings.push(
+        defect({
+          ...folderAnchor,
+          origin: 'deterministic',
+          message: `Шифр проекта расходится между актами папки: ${variants
+            .map(
+              (root) =>
+                `${root} (${withRoots
+                  .filter((entry) => hasRoot(entry.roots, root))
+                  .map((entry) => actLabel(entry.act))
+                  .join(', ')})`,
+            )
+            .join('; ')}.`,
+          hint: 'Проверьте, к одному ли проекту относятся акты папки, либо исправьте шифр в п. 2 акта.',
+        }),
+      );
+    }
+  }
+
+  return fromFindings(findings);
 }
 
 // ---------------------------------------------------------------------------
@@ -1725,608 +1903,6 @@ function evaluateRegistryAmbiguous(graph: CheckGraph): RuleResult {
 }
 
 // ---------------------------------------------------------------------------
-// MAT — материалы
-// ---------------------------------------------------------------------------
-
-const NO_MATERIALS = 'в комплекте не выделено ни одного материала';
-
-function evaluateMaterialMatrix(graph: CheckGraph): RuleResult {
-  if (graph.materials.length === 0) return notApplicable(NO_MATERIALS);
-
-  const findings: RuleFinding[] = [];
-  const skipped: string[] = [];
-  let checked = 0;
-
-  for (const material of graph.materials) {
-    if (!categoryInProfile(graph.profile, material)) {
-      skipped.push(`${material.nameRaw} (${material.categoryCode ?? 'категория не определена'})`);
-      continue;
-    }
-    const category = material.categoryCode as string;
-    const entry = matrixFor(graph.profile, category);
-    if (entry === null) {
-      skipped.push(`${material.nameRaw}: категория «${category}» не описана в матрице раздела`);
-      continue;
-    }
-
-    const required = stringList(entry['required']);
-    const anyOf = stringMatrix(entry['anyOf']);
-    if (required.length === 0 && anyOf.length === 0) {
-      skipped.push(`${material.nameRaw}: матрица не требует ни одного документа для «${category}»`);
-      continue;
-    }
-
-    checked += 1;
-    const documents = documentsOf(graph, material.documentIds);
-    const known = new Set(
-      documents
-        .filter((document) => document.isKnownType && !document.isFallbackType)
-        .map((document) => document.docTypeCode),
-    );
-    // Незнакомый документ в пакете означает «не знаем», а не «нет»: §9.1 запрещает
-    // делать вывод об ошибке по документу, вид которого не определён.
-    const hasUnclassified = documents.some(
-      (document) => !document.isKnownType || document.isFallbackType,
-    );
-
-    const missing = required.filter((code) => !known.has(code));
-    const missingGroups = anyOf.filter((group) => !group.some((code) => known.has(code)));
-    if (missing.length === 0 && missingGroups.length === 0) continue;
-
-    const parts = [...missing, ...missingGroups.map((group) => `один из: ${group.join(' | ')}`)];
-    const message = `Пакет подтверждения материала «${material.nameRaw}» (категория «${category}») не соответствует матрице раздела: не хватает документов — ${parts.join(', ')}.`;
-    const anchor = anchorOf('material', material.id);
-
-    findings.push(
-      hasUnclassified
-        ? unknown({
-            ...anchor,
-            origin: 'deterministic',
-            message: `${message} В пакете есть документы с неопределённым видом — вывод о полноте сделать нельзя.`,
-            hint: 'Уточните вид неопознанных документов материала, после чего повторите проверку полноты пакета.',
-          })
-        : defect({
-            ...anchor,
-            origin: 'deterministic',
-            message,
-            hint: 'Приложите недостающие документы о качестве материала согласно матрице раздела.',
-          }),
-    );
-  }
-
-  if (checked === 0) {
-    return notApplicable(
-      `матрица раздела не применима ни к одному материалу комплекта: ${skipped.join('; ')}`,
-    );
-  }
-  return fromFindings(findings);
-}
-
-/**
- * Изготовитель партии покрыт приложенным сертификатом (дефект №2 корпуса).
- *
- * Здесь проверяется ТОЛЬКО покрытие изготовителя. Полнота пакета — предмет
- * `MAT.110`, и отсутствие сертификатов вовсе даёт `undetermined` с пояснением,
- * а не второе замечание о неполноте: два правила, сообщающие об одном факте,
- * удваивают список замечаний и обесценивают оба.
- */
-function evaluateManufacturerCoverage(graph: CheckGraph): RuleResult {
-  if (graph.materials.length === 0) return notApplicable(NO_MATERIALS);
-
-  const findings: RuleFinding[] = [];
-  let checked = 0;
-
-  for (const material of graph.materials) {
-    if (material.batches.length === 0) continue;
-
-    const certificates = documentsOf(graph, material.documentIds).filter((document) =>
-      isTypeOf(document, CERTIFICATE_TYPES),
-    );
-    const covered = certificates
-      .map((document) => trimmedText(field(document, AOSR_FIELDS.manufacturer)))
-      .filter((name): name is string => name !== null);
-
-    for (const batch of material.batches) {
-      const batchDocuments = documentsOf(graph, batch.documentIds);
-      const manufacturerField = batchDocuments
-        .map((document) => field(document, AOSR_FIELDS.manufacturer))
-        .find((value) => trimmedText(value) !== null);
-      const manufacturerDocument = batchDocuments.find(
-        (document) => trimmedText(field(document, AOSR_FIELDS.manufacturer)) !== null,
-      );
-      const manufacturer = trimmedText(manufacturerField ?? null);
-
-      if (manufacturer === null) {
-        findings.push(
-          unknown({
-            ...anchorOf('batch', batch.id),
-            origin: 'deterministic',
-            message: `Изготовитель партии ${batch.batchNo ?? batch.heatNo ?? batch.id} материала «${material.nameRaw}» не распознан — покрытие сертификатом проверить нечем.`,
-            hint: 'Введите изготовителя партии из документа о качестве вручную.',
-          }),
-        );
-        continue;
-      }
-
-      const anchor =
-        manufacturerDocument === undefined
-          ? anchorOf('batch', batch.id)
-          : {
-              ...anchorOfField(manufacturerDocument, manufacturerField ?? null),
-              targetType: 'batch' as const,
-              targetId: batch.id,
-            };
-
-      if (covered.length === 0) {
-        findings.push(
-          unknown({
-            ...anchor,
-            origin: 'deterministic',
-            message: `У материала «${material.nameRaw}» нет ни одного сертификата соответствия или декларации с указанным изготовителем — покрытие изготовителя «${manufacturer}» проверить нечем.`,
-            hint: 'Приложите сертификат соответствия (декларацию) на материал с указанием изготовителя.',
-          }),
-        );
-        continue;
-      }
-
-      checked += 1;
-      const wanted = normalizeOrgName(manufacturer);
-      if (covered.some((name) => normalizeOrgName(name) === wanted)) continue;
-
-      findings.push(
-        defect({
-          ...anchor,
-          origin: 'deterministic',
-          message: `Изготовитель партии ${batch.batchNo ?? batch.heatNo ?? batch.id} материала «${material.nameRaw}» — «${manufacturer}» — не покрыт ни одним приложенным сертификатом: сертификаты выданы на изготовителей «${covered.join('», «')}».`,
-          hint: 'Приложите сертификат соответствия (декларацию) на продукцию именно этого изготовителя либо замените партию.',
-        }),
-      );
-    }
-  }
-
-  return summarize(
-    findings,
-    checked,
-    'ни у одной партии материалов нет одновременно изготовителя и сертификата для сверки',
-  );
-}
-
-interface StandardMention {
-  readonly value: string;
-  readonly source: FieldNode | null;
-  readonly document: DocumentNode;
-}
-
-function standardsOf(document: DocumentNode): StandardMention[] {
-  const mentions: StandardMention[] = [];
-  const listField = field(document, AOSR_FIELDS.gostTu);
-  for (const value of listOf(document, AOSR_FIELDS.gostTu)) {
-    mentions.push({ value, source: listField, document });
-  }
-  const reference = field(document, AOSR_FIELDS.ndReference);
-  const referenceText = trimmedText(reference);
-  if (referenceText !== null) {
-    mentions.push({ value: referenceText, source: reference, document });
-  }
-  return mentions;
-}
-
-/**
- * НД в паспорте совпадает с НД в сертификате (дефект №3 корпуса).
- *
- * Год редакции — не косметика: «СТО …-2015» в паспорте против «…-2011» в
- * сертификате означает, что сертификат покрывает другую редакцию требований.
- * Поэтому `standardWithoutYear` даёт основу для сопоставления, а `standardYear`
- * — предмет сравнения; выбросив год ради «мягкого сравнения», правило перестало
- * бы находить ровно то, ради чего написано.
- */
-function evaluateStandardYears(graph: CheckGraph): RuleResult {
-  if (graph.materials.length === 0) return notApplicable(NO_MATERIALS);
-
-  const findings: RuleFinding[] = [];
-  let checked = 0;
-
-  for (const material of graph.materials) {
-    const documents = documentsOf(graph, material.documentIds);
-    const passportMentions = documents
-      .filter((document) => isTypeOf(document, PASSPORT_TYPES))
-      .flatMap((document) => standardsOf(document));
-    const certificateMentions = documents
-      .filter((document) => isTypeOf(document, CERTIFICATE_TYPES))
-      .flatMap((document) => standardsOf(document));
-    if (passportMentions.length === 0 || certificateMentions.length === 0) continue;
-
-    for (const passport of passportMentions) {
-      const base = standardWithoutYear(passport.value);
-      const matching = certificateMentions.filter(
-        (certificate) => standardWithoutYear(certificate.value) === base,
-      );
-      if (matching.length === 0) continue;
-
-      const passportYear = standardYear(passport.value);
-      const anchor = anchorOfField(passport.document, passport.source);
-
-      const withYear = matching.filter((certificate) => standardYear(certificate.value) !== null);
-      if (passportYear === null || withYear.length === 0) {
-        findings.push(
-          unknown({
-            ...anchor,
-            origin: 'deterministic',
-            message: `Нормативный документ «${passport.value}» материала «${material.nameRaw}» указан без года редакции ${passportYear === null ? 'в паспорте' : 'в сертификате'} — сверить редакции нечем.`,
-            hint: 'Уточните год редакции нормативного документа в паспорте и в сертификате.',
-          }),
-        );
-        continue;
-      }
-
-      checked += 1;
-      if (withYear.some((certificate) => standardYear(certificate.value) === passportYear))
-        continue;
-
-      // Показывается ИСХОДНОЕ обозначение: `normalizeStandard` сворачивает
-      // гомоглифы («СТО» → «CTO»), и в тексте замечания это выглядело бы как
-      // ещё одна ошибка распознавания.
-      const shown = withYear.map((certificate) => certificate.value);
-      findings.push(
-        defect({
-          ...anchor,
-          origin: 'deterministic',
-          message: `Нормативный документ в паспорте материала «${material.nameRaw}» — «${passport.value}» — не совпадает по году редакции с нормативным документом в сертификате: «${shown.join('», «')}».`,
-          hint: 'Приложите сертификат на действующую редакцию нормативного документа либо паспорт, выданный по покрытой сертификатом редакции.',
-        }),
-      );
-    }
-  }
-
-  return summarize(
-    findings,
-    checked,
-    'ни у одного материала нет пары «паспорт — сертификат» с сопоставимыми обозначениями НД',
-  );
-}
-
-// ---------------------------------------------------------------------------
-// REF, XS — справочники и контекст
-// ---------------------------------------------------------------------------
-
-function evaluateObjectActive(graph: CheckGraph): RuleResult {
-  if (graph.object.id !== graph.folder.objectId) {
-    return notApplicable('карточка объекта ревизии не загружена в граф проверки');
-  }
-  if (graph.object.isActive) return fromFindings([]);
-
-  return fromFindings([
-    defect({
-      ...anchorOf('folder', graph.folder.id),
-      origin: 'deterministic',
-      message: `Объект строительства «${graph.object.name}» (${graph.object.code}) помечен в справочнике как неактивный.`,
-      hint: 'Проверьте карточку объекта: комплект подан по объекту, снятому с сопровождения.',
-    }),
-  ]);
-}
-
-/**
- * Контрагенты, названные ЭТОЙ папкой.
- *
- * `graph.counterparties` — весь справочник портала: он загружается целиком,
- * потому что `AOSR.HDR.023` ищет в нём совпадение по тройке реквизитов из
- * шапки акта. Правило про активность спрашивает обратное — «действует ли тот,
- * кто участвует в этой папке», — и на полном справочнике отвечало о чужих:
- * любая снятая с учёта организация портала становилась замечанием комплекта,
- * к которому она не имеет отношения.
- *
- * Участниками считаются исполнитель папки и те, кого назвали шапки её актов.
- * Сопоставление — то же `matchCounterparty`, что у HDR.023: вторая мерка
- * разошлась бы с первой молча.
- */
-function folderCounterparties(graph: CheckGraph): readonly CounterpartyNode[] {
-  const involved = new Map<string, CounterpartyNode>();
-
-  const contractor = graph.counterparties.find((party) => party.id === graph.folder.contractorId);
-  if (contractor !== undefined) involved.set(contractor.id, contractor);
-
-  for (const act of aosrActs(graph)) {
-    const name = trimmedText(actField(act, AOSR_FIELDS.contractorName));
-    const inn = trimmedText(actField(act, AOSR_FIELDS.contractorInn));
-    const ogrn = trimmedText(actField(act, AOSR_FIELDS.contractorOgrn));
-    if (name === null && inn === null && ogrn === null) continue;
-
-    const party = matchCounterparty(graph.counterparties, { name, inn, ogrn });
-    if (party !== null) involved.set(party.id, party);
-  }
-
-  return [...involved.values()];
-}
-
-function evaluateCounterpartiesActive(graph: CheckGraph): RuleResult {
-  const parties = folderCounterparties(graph);
-  if (parties.length === 0) {
-    return notApplicable('контрагенты папки не опознаны в справочнике');
-  }
-
-  const findings = parties
-    .filter((party) => !party.isActive)
-    .map((party) =>
-      defect({
-        ...anchorOf('folder', graph.folder.id),
-        origin: 'deterministic',
-        message: `Контрагент комплекта «${party.name}»${party.inn === null ? '' : ` (ИНН ${party.inn})`} помечен в справочнике как неактивный.`,
-        hint: 'Проверьте карточку контрагента: организация снята с учёта или исключена из списка участников строительства.',
-      }),
-    );
-
-  return fromFindings(findings);
-}
-
-function evaluateDuplicateActs(graph: CheckGraph): RuleResult {
-  const actList = aosrActs(graph);
-  if (actList.length < 2) {
-    return notApplicable('в комплекте меньше двух актов — дубль невозможен');
-  }
-
-  const groups = new Map<string, DocumentNode[]>();
-  let checked = 0;
-
-  for (const act of actList) {
-    const value = actField(act, AOSR_FIELDS.actNumber) ?? field(act, AOSR_FIELDS.number);
-    const number = trimmedText(value);
-    if (number === null) continue;
-    checked += 1;
-    const key = normalizeDocNo(number).folded;
-    groups.set(key, [...(groups.get(key) ?? []), act]);
-  }
-
-  const findings: RuleFinding[] = [];
-  for (const group of groups.values()) {
-    if (group.length < 2) continue;
-    const first = group[0] as DocumentNode;
-    for (const duplicate of group.slice(1)) {
-      findings.push(
-        defect({
-          ...anchorOfDocument(duplicate),
-          origin: 'deterministic',
-          message: `В комплекте больше одного акта ${actLabel(duplicate)}: документы ${group.map((act) => String(act.ordinal)).join(', ')} при одном объекте «${graph.object.code}», подрядчике и разделе ${graph.folder.sectionCode}.`,
-          hint: `Оставьте в комплекте один акт с этим номером; при исправлении ранее поданного акта подайте новую ревизию, а не второй экземпляр (сравните с документом ${String(first.ordinal)}).`,
-        }),
-      );
-    }
-  }
-
-  return summarize(findings, checked, 'ни у одного акта комплекта не распознан номер');
-}
-
-// ---------------------------------------------------------------------------
-// EXT — внешние реестры (§9.5)
-// ---------------------------------------------------------------------------
-
-/**
- * Единственное замечание при недоступном источнике.
- *
- * Текст обязан содержать «требуется ручная проверка» и названную причину:
- * вывод «подрядчик не состоит в СРО» без источника данных — юридическое
- * утверждение, которого система сделать не может.
- */
-function unavailableFinding(graph: CheckGraph, subject: string, reason: string): RuleFinding {
-  return externalUnavailable({
-    ...anchorOf('folder', graph.folder.id),
-    message: `${subject} автоматически не проверено: требуется ручная проверка — ${reason}.`,
-    hint: 'Проверьте сведения по официальному реестру вручную и приложите подтверждение к комплекту.',
-  });
-}
-
-function validOn(from: string | null, to: string | null, day: string): boolean {
-  if (isIsoDate(from) && day < from) return false;
-  if (isIsoDate(to) && day > to) return false;
-  return true;
-}
-
-function evaluateSro(graph: CheckGraph): RuleResult {
-  const lookup = graph.external.sro;
-  if (lookup.status === 'unavailable') {
-    return fromFindings([unavailableFinding(graph, 'Членство подрядчика в СРО', lookup.reason)]);
-  }
-
-  const seen = new Map<string, Anchor>();
-  const contractor = graph.counterparties.find((party) => party.id === graph.folder.contractorId);
-  if (contractor?.inn != null && digitsOf(contractor.inn) !== '') {
-    seen.set(digitsOf(contractor.inn), anchorOf('folder', graph.folder.id));
-  }
-
-  const findings: RuleFinding[] = [];
-  const unreadable = new Set<string>();
-
-  for (const act of aosrActs(graph)) {
-    const value = actField(act, AOSR_FIELDS.contractorInn);
-    const text = trimmedText(value);
-    if (text === null) continue;
-
-    /**
-     * Реквизит с посторонним знаком в реестр не идёт.
-     *
-     * `digitsOf` выбрасывает всё, кроме цифр, и «77/8203762» превращается в
-     * девятизначное «778203762» — значение, которого в акте не напечатано.
-     * Реестр СРО его, разумеется, не знает, и правило сообщало бы «подрядчик не
-     * найден в реестре саморегулируемых организаций» — обвинение по знаку,
-     * который поставил распознаватель. Признак общий с `AOSR.HDR.021`–`023`
-     * (`UNREADABLE_IDENTIFIER`): у одного и того же значения не бывает разных
-     * приговоров у соседних правил.
-     *
-     * На боевой папке «ИД Мастер апрель 2026» реестр недоступен, и ветка молчит;
-     * подключение источника без этой проверки дало бы ошибку на ровном месте.
-     */
-    if (UNREADABLE_IDENTIFIER.test(text)) {
-      if (unreadable.has(text)) continue;
-      unreadable.add(text);
-      findings.push(
-        unknown({
-          ...anchorOfField(act, value),
-          origin: 'deterministic',
-          message:
-            `ИНН «${text}» в шапке акта ${actLabel(act)} прочитан со знаком, которого в ИНН ` +
-            'быть не может — сверить членство в СРО нечем.',
-          hint: 'Сверьте ИНН со сканом акта и введите значение вручную.',
-        }),
-      );
-      continue;
-    }
-
-    const digits = digitsOf(text);
-    if (digits === '') continue;
-    if (!seen.has(digits)) seen.set(digits, anchorOfField(act, value));
-  }
-
-  if (seen.size === 0) {
-    // Нечитаемые значения уже названы своими замечаниями: сказать вдобавок
-    // «ИНН не известен» значило бы сообщить об одной беде дважды.
-    if (findings.length > 0) return fromFindings(findings);
-    return fromFindings([
-      unknown({
-        ...anchorOf('folder', graph.folder.id),
-        origin: 'deterministic',
-        message: 'ИНН подрядчика не известен — сверить членство в СРО не с чем.',
-        hint: 'Заполните ИНН подрядчика в шапке акта или в карточке контрагента.',
-      }),
-    ]);
-  }
-
-  for (const [inn, anchor] of seen) {
-    const records = lookup.records.filter((record) => digitsOf(record.memberInn) === inn);
-    if (records.length === 0) {
-      findings.push(
-        defect({
-          ...anchor,
-          origin: 'deterministic',
-          message: `Подрядчик с ИНН ${inn} не найден в реестре саморегулируемых организаций.`,
-          hint: 'Приложите выписку из реестра СРО либо уточните ИНН лица, выполнившего работы.',
-        }),
-      );
-      continue;
-    }
-    if (records.some((record) => validOn(record.validFrom, record.validTo, graph.today))) continue;
-
-    findings.push(
-      defect({
-        ...anchor,
-        origin: 'deterministic',
-        message: `Членство подрядчика с ИНН ${inn} в «${records.map((record) => record.sroName).join('», «')}» не действует на дату проверки ${formatDate(graph.today)}.`,
-        hint: 'Приложите действующую выписку из реестра СРО на дату выполнения работ.',
-      }),
-    );
-  }
-
-  return fromFindings(findings);
-}
-
-function evaluateNrs(graph: CheckGraph, params: RuleParams): RuleResult {
-  const lookup = graph.external.nrs;
-  if (lookup.status === 'unavailable') {
-    return fromFindings([
-      unavailableFinding(
-        graph,
-        'Наличие подписантов акта в национальном реестре специалистов',
-        lookup.reason,
-      ),
-    ]);
-  }
-
-  const roles = signerRolesFrom(params);
-  const signers = new Map<string, { readonly name: string; readonly anchor: Anchor }>();
-  for (const act of aosrActs(graph)) {
-    for (const role of roles) {
-      const value = field(act, role.field);
-      const name = trimmedText(value);
-      if (name === null) continue;
-      const key = personKey(name);
-      if (key !== '' && !signers.has(key)) {
-        signers.set(key, { name, anchor: anchorOfField(act, value) });
-      }
-    }
-  }
-
-  if (signers.size === 0) {
-    return fromFindings([
-      unknown({
-        ...anchorOf('folder', graph.folder.id),
-        origin: 'deterministic',
-        message:
-          'Подписанты акта не распознаны — сверить их с национальным реестром специалистов нечем.',
-        hint: 'Заполните представителей сторон в блоке подписей акта.',
-      }),
-    ]);
-  }
-
-  const registry = new Set(lookup.records.map((record) => personKey(record.fullName)));
-  const findings: RuleFinding[] = [];
-  for (const [key, signer] of signers) {
-    if (registry.has(key)) continue;
-    findings.push(
-      defect({
-        ...signer.anchor,
-        origin: 'deterministic',
-        message: `Подписант акта «${signer.name}» не найден в национальном реестре специалистов.`,
-        hint: 'Проверьте фамилию и инициалы подписанта либо приложите выписку из НРС.',
-      }),
-    );
-  }
-
-  return fromFindings(findings);
-}
-
-function evaluateSchedule(graph: CheckGraph): RuleResult {
-  const lookup = graph.external.schedule;
-  if (lookup.status === 'unavailable') {
-    return fromFindings([
-      unavailableFinding(
-        graph,
-        'Наличие освидетельствованных работ в графике строительства',
-        lookup.reason,
-      ),
-    ]);
-  }
-
-  const findings: RuleFinding[] = [];
-  let checked = 0;
-
-  for (const act of aosrActs(graph)) {
-    const value = workNameField(act);
-    const work = trimmedText(value);
-    if (work === null) {
-      findings.push(
-        unknown({
-          ...anchorOfDocument(act),
-          origin: 'deterministic',
-          message: `В акте ${actLabel(act)} не распознано наименование работ — сверить с графиком строительства нечем.`,
-          hint: 'Введите наименование работ п. 1 вручную.',
-        }),
-      );
-      continue;
-    }
-
-    checked += 1;
-    const wanted = normalizePhrase(work);
-    const found = lookup.records.some((record) => {
-      const planned = normalizePhrase(record.workName);
-      return (
-        planned !== '' &&
-        (planned === wanted || planned.includes(wanted) || wanted.includes(planned))
-      );
-    });
-    if (found) continue;
-
-    findings.push(
-      defect({
-        ...anchorOfField(act, value),
-        origin: 'deterministic',
-        message: `Работы «${work}» из акта ${actLabel(act)} не найдены в графике строительства.`,
-        hint: 'Сверьте наименование работ с графиком строительства либо внесите работы в график.',
-      }),
-    );
-  }
-
-  return summarize(findings, checked, 'ни в одном акте не распознано наименование работ');
-}
-
-// ---------------------------------------------------------------------------
 // Реестр правил
 // ---------------------------------------------------------------------------
 
@@ -2497,92 +2073,6 @@ function evaluateTransferSections(graph: CheckGraph): RuleResult {
   return fromFindings(findings);
 }
 
-/**
- * Расхождения строки перечня, найденные стадией сверки (S57).
- *
- * ## Почему правило РЕТРАНСЛИРУЕТ, а не судит само
- *
- * Прежде REG.113 и REG.114 сравнивали сами: первое вынимало номер акта из
- * наименования строки регулярным выражением, второе сверяло графу
- * «Организация» со списком реквизитов, который приходилось помнить наизусть.
- * Оба списка отставали от каталога — `executor` и `designer_org` в него не
- * попали, и четыре строки описи, ради которых правило написано, ни разу не
- * сравнивались, — а регулярное выражение спотыкалось о минус подземного этажа.
- *
- * Сравнение вернулось туда, где оно и есть, — к смыслу: его делает модель,
- * видя строку и документ целиком. Правило отвечает за другое: что с найденным
- * расхождением делать. Тяжесть берётся из снимка набора, порог уверенности —
- * из его параметров, а «портал не уверен» остаётся «не проверено», а не
- * превращается в обвинение.
- *
- * ## Почему кодов пять, а не один
- *
- * Тяжесть и порог живут в снимке (§3.7), и один код на все расхождения означал
- * бы одну тяжесть на все: несовпадение организации и иная запись того же номера
- * получили бы одинаковый вес. Ошибка в лице — дефект комплекта; иная запись
- * номера — почти всегда чтение, и её место в отчёте «к сведению».
- *
- * ## Что делает эта функция
- *
- * Замечания ОДНОГО вида расхождений по всем строкам описи; вид ей называет
- * спецификация правила, и потому пять кодов делят одну реализацию.
- *
- * `open` только у строки с НАЙДЕННЫМ документом: расхождение с документом,
- * который сам под вопросом, — это два предположения подряд, и портал обязан
- * сказать об этом вслух (`undetermined`), а не сложить их в утверждение.
- *
- * Происхождение замечания — `llm`: судила модель, и прятать это значило бы
- * выдать вероятностный вывод за детерминированный. Прецедент —
- * `externalUnavailable`, который так же несёт своё происхождение.
- */
-function relayRowChecks(graph: CheckGraph, kind: string): RuleResult {
-  if (graph.transferRows.length === 0) return notApplicable(NO_TRANSFER);
-
-  const findings: RuleFinding[] = [];
-  let checked = 0;
-
-  for (const row of graph.transferRows) {
-    for (const check of row.checks) {
-      if (check.kind !== kind) continue;
-      if (check.status === 'ok') {
-        checked += 1;
-        continue;
-      }
-      if (check.status === 'unsure') continue;
-
-      checked += 1;
-      const where = transferRowLabel(row);
-      const anchor = anchorOf('registry_row', row.id);
-      const confirmed = row.matchState === 'matched' && row.matchedDocumentId !== null;
-
-      findings.push(
-        confirmed
-          ? defect({
-              ...anchor,
-              origin: 'llm',
-              confidence: check.confidence,
-              message: `В строке описи передачи (${where}) ${check.message}.`,
-              hint: 'Сверьте строку описи с документом и исправьте расходящуюся сторону.',
-            })
-          : unknown({
-              ...anchor,
-              origin: 'llm',
-              confidence: check.confidence,
-              message:
-                `В строке описи передачи (${where}) ${check.message}, ` +
-                'но сам документ строке ещё не сопоставлен — расхождение не подтверждено.',
-              hint: 'Сначала определите документ строки, затем сверьте расхождение.',
-            }),
-      );
-    }
-  }
-
-  if (checked === 0) {
-    return notApplicable('ни одна строка описи передачи не сверена по этому признаку');
-  }
-  return fromFindings(findings);
-}
-
 interface SpecInput {
   readonly code: string;
   readonly title: string;
@@ -2620,6 +2110,14 @@ function actRule(input: SpecInput): RuleSpec {
     evaluate: input.evaluate,
   };
 }
+
+/**
+ * Параметр снятого `AOSR.P2.060` — значение по умолчанию из снимков 0044…0081.
+ *
+ * Правило снято, а параметр остаётся: `defaultParams` печатаются в применённые
+ * миграции наборов, и тест дрейфа сверяет их с каталогом байт в байт.
+ */
+const RETIRED_REVISION_PATTERN = 'изм(?:енени[ея])?\\.?\\s*№?\\s*\\d+';
 
 /** Чек-лист акта освидетельствования скрытых работ (§9.3). */
 export const AOSR_RULES: readonly RuleSpec[] = [
@@ -2663,15 +2161,17 @@ export const AOSR_RULES: readonly RuleSpec[] = [
     kind: 'header',
     severity: 'warning',
     blocking: false,
-    evaluate: (graph) => evaluateCounterpartyTriple(graph),
+    evaluate: (graph) => evaluateCounterpartyByInn(graph),
   }),
   actRule({
+    // Снято (S59): у объектов шаблон номера не задан ни разу — правило
+    // отвечало «неприменимо» на каждом прогоне.
     code: 'AOSR.ACT.030',
     title: 'Номер акта соответствует шаблону объекта',
     kind: 'act',
     severity: 'warning',
     blocking: false,
-    evaluate: (graph) => evaluateActNumberPattern(graph),
+    evaluate: retiredRule,
   }),
   actRule({
     code: 'AOSR.ACT.031',
@@ -2716,30 +2216,35 @@ export const AOSR_RULES: readonly RuleSpec[] = [
     evaluate: (graph) => evaluateItem1(graph),
   }),
   actRule({
+    // Снято (S59): номер изменения шифра и справочник рабочей документации
+    // не входят в минимальный набор проверок. Параметр остаётся: он напечатан
+    // в снимках наборов 0044…0081.
     code: 'AOSR.P2.060',
     title: 'Пункт 2: шифр рабочей документации указан с номером изменения',
     kind: 'items',
     severity: 'warning',
     blocking: false,
-    params: { revisionPattern: DEFAULT_REVISION_PATTERN },
-    evaluate: (graph, params) => evaluateRdFolder(graph, params),
+    params: { revisionPattern: RETIRED_REVISION_PATTERN },
+    evaluate: retiredRule,
   }),
   actRule({
+    // Снято (S59): справочник рабочей документации на бою пуст.
     code: 'AOSR.P2.061',
     title: 'Пункт 2: шифр рабочей документации есть в справочнике',
     kind: 'items',
     severity: 'error',
     blocking: false,
-    evaluate: (graph) => evaluateRdInCatalog(graph),
+    evaluate: retiredRule,
   }),
   actRule({
+    // MAT.COVER (S59): профиль раздела больше не требуется — вопрос «есть ли
+    // у материала документ» от раздела не зависит.
     code: 'AOSR.P3.070',
     title: 'Пункт 3: применённые материалы подтверждены документами',
     kind: 'items',
     severity: 'error',
     blocking: false,
-    requiresSectionProfile: true,
-    evaluate: (graph) => evaluateMaterialsBacked(graph),
+    evaluate: (graph, params) => evaluateMaterialCover(graph, params),
   }),
   actRule({
     code: 'AOSR.P3.071',
@@ -2759,21 +2264,55 @@ export const AOSR_RULES: readonly RuleSpec[] = [
     evaluate: (graph) => evaluateAnnexesPresent(graph),
   }),
   actRule({
+    // Снято (S59): число слоёв в наименовании схемы против п. 1 — не из
+    // восьми смыслов минимального набора; на бою давало только «не проверено».
     code: 'AOSR.P4.081',
     title: 'Пункт 4: наименование схемы согласовано с пунктом 1',
     kind: 'items',
     severity: 'error',
     blocking: true,
-    evaluate: (graph) => evaluateSchemeConsistency(graph),
+    evaluate: retiredRule,
   }),
   actRule({
+    // Снято (S59): сравнение п. 7 с п. 1 не входит в минимальный набор.
     code: 'AOSR.P7.090',
     title: 'Пункт 7: последующие работы не совпадают с освидетельствованными',
     kind: 'items',
     severity: 'error',
     blocking: false,
-    evaluate: (graph) => evaluateNextWorks(graph),
+    evaluate: retiredRule,
   }),
+];
+
+/**
+ * Правила минимального набора, заведённые в S59 (партия 0082).
+ *
+ * Отдельный массив, а не дописывание в `AOSR_RULES`/`CROSSCHECK_RULES`: те
+ * застыли сид-миграцией 0017 и сверяются с ней тестом дрейфа.
+ */
+export const MINIMAL_RULES: readonly RuleSpec[] = [
+  actRule({
+    code: 'SCH.681',
+    title: 'К акту приложена исполнительная схема, ссылающаяся на его номер',
+    kind: 'items',
+    severity: 'warning',
+    blocking: false,
+    evaluate: (graph) => evaluateSchemePresence(graph),
+  }),
+  {
+    code: 'XS.131',
+    title: 'Объект и шифр проекта одинаковы по всей папке',
+    docTypeCode: null,
+    level: 'folder',
+    kind: 'crosscheck',
+    defaultSeverity: 'warning',
+    defaultBlocking: false,
+    waiverRoles: waiversFor(false),
+    requiresSectionProfile: false,
+    requiresExternalRegistry: null,
+    defaultParams: {},
+    evaluate: (graph) => evaluateFolderConsistency(graph),
+  },
 ];
 
 /**
@@ -2803,8 +2342,10 @@ export const AOSR_RULES: readonly RuleSpec[] = [
  * Поэтому спек живёт в `RETIRED_RULES` (`catalog.ts`) и участвует только в
  * генерации уже применённых файлов.
  *
- * Из БД строки удаляет миграция `0047`: код без реализации в
- * `rule_definitions` не даёт порталу стартовать.
+ * Строка в `rule_definitions` остаётся навсегда: на неё ссылаются замечания
+ * прошлых прогонов и снимки опубликованных наборов, а сверка при старте терпит
+ * снятые коды через `RETIRED_RULES` (ADR-0019). Прежний комментарий про
+ * «миграцию 0047, удаляющую строки» был неверен: 0047 — про период работ.
  */
 export const WORK_PERIOD_RULES: readonly RuleSpec[] = [
   actRule({
@@ -2814,7 +2355,7 @@ export const WORK_PERIOD_RULES: readonly RuleSpec[] = [
     severity: 'warning',
     blocking: false,
     // Никогда не вызывается: правила вне каталога движок не исполняет.
-    evaluate: () => notApplicable('правило снято с исполнения'),
+    evaluate: retiredRule,
   }),
 ];
 
@@ -2862,7 +2403,15 @@ export const CROSSCHECK_RULES: readonly RuleSpec[] = [
     defaultParams: {},
     evaluate: (graph) => evaluateRegistryAmbiguous(graph),
   },
+  /**
+   * Снятые в S59 (ADR-0029). Спеки остаются ради применённых миграций сида и
+   * снимков; `requiresSectionProfile` у снятого правила снят вместе с ним —
+   * поле в сид не попадает, а требовать профиль тому, что не исполняется,
+   * незачем.
+   */
   {
+    // Матрица раздела: эталона показателей у портала нет, категории материалов
+    // из профиля убраны.
     code: 'MAT.110',
     title: 'Пакет подтверждения материала соответствует матрице раздела',
     docTypeCode: null,
@@ -2871,12 +2420,14 @@ export const CROSSCHECK_RULES: readonly RuleSpec[] = [
     defaultSeverity: 'error',
     defaultBlocking: false,
     waiverRoles: waiversFor(false),
-    requiresSectionProfile: true,
+    requiresSectionProfile: false,
     requiresExternalRegistry: null,
     defaultParams: {},
-    evaluate: (graph) => evaluateMaterialMatrix(graph),
+    evaluate: retiredRule,
   },
   {
+    // Изготовитель партии против сертификата: материаловедческая сверка вне
+    // минимального набора; на бою только «не проверено».
     code: 'MAT.111',
     title: 'Изготовитель партии покрыт приложенным сертификатом',
     docTypeCode: null,
@@ -2888,9 +2439,10 @@ export const CROSSCHECK_RULES: readonly RuleSpec[] = [
     requiresSectionProfile: false,
     requiresExternalRegistry: null,
     defaultParams: {},
-    evaluate: (graph) => evaluateManufacturerCoverage(graph),
+    evaluate: retiredRule,
   },
   {
+    // Год редакции НД в паспорте против сертификата: вне минимального набора.
     code: 'MAT.112',
     title: 'Нормативный документ в паспорте совпадает с сертификатом',
     docTypeCode: null,
@@ -2902,9 +2454,10 @@ export const CROSSCHECK_RULES: readonly RuleSpec[] = [
     requiresSectionProfile: false,
     requiresExternalRegistry: null,
     defaultParams: {},
-    evaluate: (graph) => evaluateStandardYears(graph),
+    evaluate: retiredRule,
   },
   {
+    // Активность карточки объекта: справочная отметка, не свойство комплекта.
     code: 'REF.120',
     title: 'Объект строительства активен в справочнике',
     docTypeCode: null,
@@ -2916,9 +2469,10 @@ export const CROSSCHECK_RULES: readonly RuleSpec[] = [
     requiresSectionProfile: false,
     requiresExternalRegistry: null,
     defaultParams: {},
-    evaluate: (graph) => evaluateObjectActive(graph),
+    evaluate: retiredRule,
   },
   {
+    // Активность контрагентов: то же.
     code: 'REF.121',
     title: 'Контрагенты комплекта активны в справочнике',
     docTypeCode: null,
@@ -2930,9 +2484,10 @@ export const CROSSCHECK_RULES: readonly RuleSpec[] = [
     requiresSectionProfile: false,
     requiresExternalRegistry: null,
     defaultParams: {},
-    evaluate: (graph) => evaluateCounterpartiesActive(graph),
+    evaluate: retiredRule,
   },
   {
+    // Дубль акта: вне восьми смыслов; на бою ни разу не сработало.
     code: 'XS.130',
     title: 'В комплекте нет дубля акта',
     docTypeCode: null,
@@ -2944,7 +2499,7 @@ export const CROSSCHECK_RULES: readonly RuleSpec[] = [
     requiresSectionProfile: false,
     requiresExternalRegistry: null,
     defaultParams: {},
-    evaluate: (graph) => evaluateDuplicateActs(graph),
+    evaluate: retiredRule,
   },
 ];
 
@@ -3001,6 +2556,18 @@ export const TRANSFER_REGISTRY_RULES: readonly RuleSpec[] = [
     defaultParams: {},
     evaluate: (graph) => evaluateTransferSections(graph),
   },
+  /**
+   * REG.113–117 сняты в S59 (ADR-0029, частичная отмена ADR-0028).
+   *
+   * Ретрансляторы расхождений граф строки описи (номер акта, организация,
+   * написание номера, дата, число листов) — суждение модели о СОДЕРЖАНИИ
+   * строки. По решению заказчика сопоставление строки — только «есть ли
+   * документ»; графа «организация» в перечне называет поставщика, а документ —
+   * изготовителя, и предупреждение на верно названном сертификате было ложным.
+   * Суждение модели о том, КАКОЙ документ отвечает строке, остаётся
+   * (`doc.match_partition`); проверки содержания в данных строки сохраняются
+   * как сведения, замечаний не порождают.
+   */
   {
     code: 'REG.113',
     title: 'Номер акта в строке описи передачи расходится с актом раздела',
@@ -3013,7 +2580,7 @@ export const TRANSFER_REGISTRY_RULES: readonly RuleSpec[] = [
     requiresSectionProfile: false,
     requiresExternalRegistry: null,
     defaultParams: {},
-    evaluate: (graph) => relayRowChecks(graph, 'act_reference'),
+    evaluate: retiredRule,
   },
   {
     code: 'REG.114',
@@ -3027,7 +2594,7 @@ export const TRANSFER_REGISTRY_RULES: readonly RuleSpec[] = [
     requiresSectionProfile: false,
     requiresExternalRegistry: null,
     defaultParams: {},
-    evaluate: (graph) => relayRowChecks(graph, 'org'),
+    evaluate: retiredRule,
   },
   {
     code: 'REG.115',
@@ -3041,7 +2608,7 @@ export const TRANSFER_REGISTRY_RULES: readonly RuleSpec[] = [
     requiresSectionProfile: false,
     requiresExternalRegistry: null,
     defaultParams: {},
-    evaluate: (graph) => relayRowChecks(graph, 'number_form'),
+    evaluate: retiredRule,
   },
   {
     code: 'REG.116',
@@ -3055,7 +2622,7 @@ export const TRANSFER_REGISTRY_RULES: readonly RuleSpec[] = [
     requiresSectionProfile: false,
     requiresExternalRegistry: null,
     defaultParams: {},
-    evaluate: (graph) => relayRowChecks(graph, 'date'),
+    evaluate: retiredRule,
   },
   {
     code: 'REG.117',
@@ -3069,11 +2636,19 @@ export const TRANSFER_REGISTRY_RULES: readonly RuleSpec[] = [
     requiresSectionProfile: false,
     requiresExternalRegistry: null,
     defaultParams: {},
-    evaluate: (graph) => relayRowChecks(graph, 'sheets'),
+    evaluate: retiredRule,
   },
 ];
 
-/** Внешние реестры (§9.5): без источника данных — «требуется ручная проверка». */
+/**
+ * Внешние реестры (§9.5) — сняты в S59.
+ *
+ * Источников данных (СРО, НРС, график строительства) у портала нет, и все три
+ * правила на каждом прогоне отвечали «требуется ручная проверка» —
+ * четыре замечания на папку, ни одного открытого. `requiresExternalRegistry`
+ * снят вместе с правилом: поле в сид не попадает, а требовать реестр тому, что
+ * не исполняется, незачем.
+ */
 export const EXTERNAL_RULES: readonly RuleSpec[] = [
   {
     code: 'EXT.SRO.140',
@@ -3085,9 +2660,9 @@ export const EXTERNAL_RULES: readonly RuleSpec[] = [
     defaultBlocking: false,
     waiverRoles: waiversFor(false),
     requiresSectionProfile: false,
-    requiresExternalRegistry: 'sro',
+    requiresExternalRegistry: null,
     defaultParams: {},
-    evaluate: (graph) => evaluateSro(graph),
+    evaluate: retiredRule,
   },
   {
     code: 'EXT.NRS.141',
@@ -3099,9 +2674,9 @@ export const EXTERNAL_RULES: readonly RuleSpec[] = [
     defaultBlocking: false,
     waiverRoles: waiversFor(false),
     requiresSectionProfile: false,
-    requiresExternalRegistry: 'nrs',
+    requiresExternalRegistry: null,
     defaultParams: { requiredSignerFields: AOSR_SIGNER_ROLES.map((role) => role.field) },
-    evaluate: (graph, params) => evaluateNrs(graph, params),
+    evaluate: retiredRule,
   },
   {
     code: 'EXT.SCHED.142',
@@ -3113,8 +2688,8 @@ export const EXTERNAL_RULES: readonly RuleSpec[] = [
     defaultBlocking: false,
     waiverRoles: waiversFor(false),
     requiresSectionProfile: false,
-    requiresExternalRegistry: 'schedule',
+    requiresExternalRegistry: null,
     defaultParams: {},
-    evaluate: (graph) => evaluateSchedule(graph),
+    evaluate: retiredRule,
   },
 ];

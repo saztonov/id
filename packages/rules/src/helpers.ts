@@ -11,7 +11,6 @@ import type {
   DocumentNode,
   FieldNode,
   FindingEvidence,
-  MaterialNode,
   ProfileNode,
   RelationNode,
 } from './types.js';
@@ -620,30 +619,8 @@ export function digitsOf(value: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Материалы и профиль
+// Параметры правил
 // ---------------------------------------------------------------------------
-
-/**
- * Категория материала уместна в разделе (§9.1, строка 3).
- *
- * Материал вне перечня профиля даёт `n_a`, а НЕ «пакет подтверждения неполон»:
- * ложная ошибка на незнакомом разделе разрушает доверие быстрее пропуска.
- */
-export function categoryInProfile(profile: ProfileNode, material: MaterialNode): boolean {
-  if (material.categoryCode === null) return false;
-  return profile.materialCategories.includes(material.categoryCode);
-}
-
-/** Требования матрицы к категории; `null` — категория в матрице не описана. */
-export function matrixFor(
-  profile: ProfileNode,
-  category: string,
-): Readonly<Record<string, unknown>> | null {
-  const entry = profile.materialMatrix[category];
-  return entry !== null && typeof entry === 'object' && !Array.isArray(entry)
-    ? (entry as Readonly<Record<string, unknown>>)
-    : null;
-}
 
 /** Числовой параметр снимка ruleset либо значение по умолчанию. */
 export function numberParam(

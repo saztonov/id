@@ -158,15 +158,18 @@ describe('незнакомый раздел без опубликованног�
     expect(noProfile.counts.blocking).toBe(0);
   });
 
-  it('правила полноты комплекта дают n_a с пометкой о ненастроенном профиле', () => {
+  it('ни одно правило каталога больше не зависит от профиля раздела (S59)', () => {
+    // До S59 профиль требовали `AOSR.P3.070` и `MAT.110`, и тест проверял,
+    // что без профиля они отвечают «профиль раздела не настроен». Категории
+    // материалов и матрица из профиля убраны, `MAT.110` снято: строка 2
+    // матрицы §9.1 осталась в движке (её проверяет `engine.test.ts`), но в
+    // каталоге ей не на чем срабатывать — и это обязано быть видно, а не
+    // выглядеть как «проверка прошла на пустом множестве».
     const profileBound = RULE_CATALOG.filter((spec) => spec.requiresSectionProfile);
-    expect(profileBound.length).toBeGreaterThan(0);
-
-    for (const spec of profileBound) {
-      const execution = noProfile.executions.find((item) => item.ruleCode === spec.code);
-      expect(execution?.verdict, spec.code).toBe('n_a');
-      expect(execution?.reason ?? '', spec.code).toContain('профиль раздела не настроен');
-    }
+    expect(profileBound.map((spec) => spec.code)).toEqual([]);
+    expect(
+      noProfile.executions.filter((item) => item.reason === 'профиль раздела не настроен'),
+    ).toEqual([]);
   });
 
   it('типо-специфичные правила молчат: n_a либо «не проверено», но не ошибка', () => {

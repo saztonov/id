@@ -625,8 +625,6 @@ export async function loadCheckGraph(
       sectionProfileVersion: rules.sectionProfileVersion,
       objectProfileIds: rules.objectProfileIds,
       expectedDocTypes: rules.expectedDocTypes,
-      materialCategories: rules.materialCategories,
-      materialMatrix: (rules.materialMatrix ?? {}) as Readonly<Record<string, unknown>>,
       enabledRuleCodes: rules.enabledRuleCodes,
       disabledRuleCodes: rules.disabledRuleCodes,
       thresholds: (rules.thresholds ?? {}) as Readonly<Record<string, unknown>>,

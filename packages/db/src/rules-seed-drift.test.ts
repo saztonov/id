@@ -24,6 +24,7 @@ import { applyMigrations, checksumOf, loadMigrations } from '@id/migrator';
 import type { SqlExecutor } from '@id/migrator';
 import {
   BUILTIN_RULESETS,
+  RETIRED_RULES,
   RETIRED_SEED_BATCHES,
   RULE_CATALOG,
   RULE_CATALOG_WITH_RETIRED,
@@ -33,6 +34,7 @@ import {
   duplicateRuleCodes,
   generateBuiltinRulesetSql,
   generateRuleSeedSql,
+  unknownRetiredCodes,
 } from '@id/rules';
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
@@ -111,12 +113,38 @@ describe('seed реестра правил не отстаёт от катало
 
   it('снятые правила не пересекаются с действующим каталогом', () => {
     // Код, вернувшийся в каталог, дал бы зелёную галочку в чек-листе за
-    // проверку, которая не может не пройти.
+    // проверку, которая не может не пройти. С S59 снятые — это и целые
+    // партии, и коды `retired` действующих партий: `RETIRED_RULES` знает обе.
     const active = new Set(RULE_CATALOG.map((spec) => spec.code));
-    const returned = RETIRED_SEED_BATCHES.flatMap((batch) => batch.rules)
-      .map((spec) => spec.code)
-      .filter((code) => active.has(code));
+    const returned = RETIRED_RULES.map((spec) => spec.code).filter((code) => active.has(code));
     expect(returned).toEqual([]);
+  });
+
+  /**
+   * Снятый код действующей партии (S59) сторожится с двух сторон.
+   *
+   * Файл миграции его по-прежнему печатает — иначе контрольная сумма
+   * применённого файла разошлась бы, — а каталог его больше не содержит.
+   * Проверка обеих сторон вместе: одна без другой означала бы либо
+   * переписанную миграцию, либо правило, вернувшееся через чёрный ход.
+   */
+  it('код `retired` напечатан в файле своей партии и отсутствует в каталоге', () => {
+    expect(unknownRetiredCodes()).toEqual([]);
+    const active = new Set(RULE_CATALOG.map((spec) => spec.code));
+    let retiredSeen = 0;
+    for (const batch of RULE_SEED_BATCHES) {
+      const committed = committedSeedOf(batch.migration);
+      for (const code of batch.retired ?? []) {
+        retiredSeen += 1;
+        expect(committed, `${code} не напечатан в ${batch.migration}.sql`).toContain(
+          `$rules$${code}$rules$`,
+        );
+        expect(active.has(code), `${code} вернулся в RULE_CATALOG`).toBe(false);
+      }
+    }
+    // Мутация «убрать код из retired» краснеет в `packages/rules` (список
+    // кодов каталога); здесь — что снятых действительно снимали.
+    expect(retiredSeen).toBeGreaterThan(0);
   });
 
   it('в каталоге нет дублирующихся кодов', () => {
@@ -224,12 +252,17 @@ describe('встроенный набор правил применяется и
         ORDER BY r.rule_code`,
     );
 
-    // Снятое правило из снимка НЕ удаляется: снимок описывает, что проверял
+    // Прежние версии наборов не трогаются: снимок описывает, что проверял
     // прогон месячной давности, и переписывать его задним числом нельзя —
     // именно это и запрещает триггер `ruleset_rules_published_immutable`.
-    expect(rows).toHaveLength(RULE_CATALOG_WITH_RETIRED.length);
+    // Активная же версия — последний набор поставки, и его состав объявлен в
+    // `BUILTIN_RULESETS`: с S59 это действующий каталог без снятых правил.
+    const latest = BUILTIN_RULESETS[BUILTIN_RULESETS.length - 1];
+    const expected = latest?.specs ?? [];
+    expect(expected.length).toBeGreaterThan(0);
+    expect(rows).toHaveLength(expected.length);
     const byCode = new Map(rows.map((row) => [row.rule_code, row]));
-    for (const spec of RULE_CATALOG_WITH_RETIRED) {
+    for (const spec of expected) {
       const row = byCode.get(spec.code);
       expect(row, `правила ${spec.code} нет в снимке встроенного набора`).toBeDefined();
       expect(row?.severity).toBe(spec.defaultSeverity);

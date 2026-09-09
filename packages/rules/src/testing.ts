@@ -198,8 +198,6 @@ export function makeProfile(patch: Partial<ProfileNode> = {}): ProfileNode {
     sectionProfileVersion: 1,
     objectProfileIds: [],
     expectedDocTypes: ['aosr', 'annex_registry'],
-    materialCategories: ['roll_waterproofing', 'rebar', 'ready_mix_concrete'],
-    materialMatrix: {},
     enabledRuleCodes: [],
     thresholds: {},
     autonomyLevel: 'assisted',
@@ -215,7 +213,6 @@ export function makeUnconfiguredProfile(): ProfileNode {
     sectionProfileId: null,
     sectionProfileVersion: null,
     expectedDocTypes: [],
-    materialCategories: [],
     completenessConfigured: false,
   });
 }

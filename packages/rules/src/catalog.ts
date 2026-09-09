@@ -28,6 +28,7 @@ import {
   AOSR_RULES,
   CROSSCHECK_RULES,
   EXTERNAL_RULES,
+  MINIMAL_RULES,
   TRANSFER_REGISTRY_RULES,
   WORK_PERIOD_RULES,
 } from './aosr.js';
@@ -74,6 +75,20 @@ export interface RuleSeedBatch {
    * добавленное правило, изменённый заголовок, съехавшую тяжесть.
    */
   readonly seededAs?: readonly (readonly [string, string])[];
+  /**
+   * Коды из `rules`, СНЯТЫЕ с исполнения (S59).
+   *
+   * Снятие — вывод из `RULE_CATALOG`, а не удаление из БД (ADR-0019): строка
+   * `rule_definitions` остаётся навсегда, потому что на неё ссылаются
+   * замечания прошлых прогонов и снимки опубликованных наборов. Прецедент
+   * S30 снимал ЦЕЛУЮ партию (`RETIRED_SEED_BATCHES`); здесь снимается часть —
+   * файл миграции по-прежнему содержит все коды партии, генератор по-прежнему
+   * их печатает, а движок и сверка при старте читают только действующие.
+   *
+   * Перечисляется явными кодами, как и состав партий: код, названный здесь и
+   * отсутствующий в `rules`, — ошибка каталога, её ловит `unknownRetiredCodes`.
+   */
+  readonly retired?: readonly string[];
 }
 
 export const RULE_SEED_BATCHES: readonly RuleSeedBatch[] = [
@@ -88,6 +103,44 @@ export const RULE_SEED_BATCHES: readonly RuleSeedBatch[] = [
       ...CROSSCHECK_RULES,
       ...EXTERNAL_RULES,
       ...EVIDENCE_RULES,
+    ],
+    /**
+     * Минимальный набор проверок (S59, ADR-0029): заказчик оставил восемь
+     * смыслов и вывел материаловедение, внешние реестры, подписи и
+     * справочные отметки. Обоснование по каждому коду — в ADR и в
+     * комментарии у спека.
+     */
+    retired: [
+      'AOSR.ACT.030',
+      'AOSR.P2.060',
+      'AOSR.P2.061',
+      'AOSR.P4.081',
+      'AOSR.P7.090',
+      'DATE.304',
+      'DATE.311',
+      'DATE.320',
+      'DATE.330',
+      'DATE.331',
+      'DATE.332',
+      'DATE.372',
+      'SIG.STAMP.370',
+      'SIG.PDF.371',
+      'MAT.110',
+      'MAT.111',
+      'MAT.112',
+      'REF.120',
+      'REF.121',
+      'XS.130',
+      'EXT.SRO.140',
+      'EXT.NRS.141',
+      'EXT.SCHED.142',
+      'PASS.610',
+      'MILL.630',
+      'MIX.640',
+      'LAB.650',
+      'LAB.651',
+      'CONCL.660',
+      'SCH.680',
     ],
   },
   {
@@ -129,6 +182,9 @@ export const RULE_SEED_BATCHES: readonly RuleSeedBatch[] = [
     // хотя обе стороны сравнения у движка на руках.
     migration: '0074_seed_transfer_act_reference_rule',
     rules: TRANSFER_REGISTRY_RULES.filter((spec) => ['REG.113', 'REG.114'].includes(spec.code)),
+    // Сняты в S59: расхождения граф строки описи по суждению модели не входят в
+    // минимальный набор (частичная отмена ADR-0028, см. ADR-0029).
+    retired: ['REG.113', 'REG.114'],
   },
   {
     /**
@@ -143,22 +199,38 @@ export const RULE_SEED_BATCHES: readonly RuleSeedBatch[] = [
     rules: TRANSFER_REGISTRY_RULES.filter((spec) =>
       ['REG.115', 'REG.116', 'REG.117'].includes(spec.code),
     ),
+    // Сняты в S59 вместе с REG.113/114 — см. партию 0074.
+    retired: ['REG.115', 'REG.116', 'REG.117'],
+  },
+  {
+    /**
+     * Минимальный набор проверок (S59): два правила, которых не было ни в одной
+     * партии. `SCH.681` — у акта есть исполнительная схема, ссылающаяся на его
+     * номер; `XS.131` — объект и шифр проекта одинаковы по всей папке.
+     */
+    migration: '0082_seed_minimal_rules',
+    rules: MINIMAL_RULES.filter((spec) => ['SCH.681', 'XS.131'].includes(spec.code)),
   },
 ];
 
 /**
- * Правила, СНЯТЫЕ с исполнения (S30).
+ * Правила, СНЯТЫЕ с исполнения целой партией (S30).
  *
  * Их нет в `RULE_CATALOG`: движок их не исполняет, а сверка реестра при старте
- * их не ждёт — в `rule_definitions` их тоже больше нет, строки удаляет
- * миграция 0047.
+ * терпит их через `RETIRED_RULES` — строки `rule_definitions` остаются в БД
+ * навсегда (на них ссылаются замечания прошлых прогонов и снимки опубликованных
+ * наборов). Прежний комментарий про «миграцию 0047, удаляющую строки» был
+ * неверен: 0047 — про период работ, и строк она не трогает.
  *
- * Но спеки обязаны сохраниться, и причина механическая. Миграции `0034` и
+ * Спеки обязаны сохраниться, и причина механическая. Миграции `0034` и
  * `0044` уже применены и содержат эти строки, а тест дрейфа сверяет их
  * контрольные суммы с выводом генераторов. Убери спек — и выбор был бы между
  * красным тестом и перегенерацией применённой миграции, которую раннер объявит
  * `modified`. Ровно этот выбор в своё время снял механизм партий; здесь он снят
  * тем же приёмом с другой стороны.
+ *
+ * Снятие ЧАСТИ партии выражается полем `retired` у самой партии (S59): файл
+ * миграции неделим, а снимать по одному правилу нужно.
  *
  * Порядок не важен: оба генератора сортируют правила по коду, поэтому
  * возвращённый в список код встаёт на прежнее место байт в байт.
@@ -173,31 +245,65 @@ export const RETIRED_SEED_BATCHES: readonly RuleSeedBatch[] = [
   },
 ];
 
-export const RETIRED_RULES: readonly RuleSpec[] = RETIRED_SEED_BATCHES.flatMap(
-  (batch) => batch.rules,
-);
+function activeOf(batch: RuleSeedBatch): readonly RuleSpec[] {
+  const retired = new Set(batch.retired ?? []);
+  return batch.rules.filter((spec) => !retired.has(spec.code));
+}
 
-/**
- * Каталог вместе со снятыми — вход генераторов уже применённых миграций.
- *
- * Только для них: всё, что решает, ЧТО портал проверяет, обязано читать
- * `RULE_CATALOG`, иначе снятое правило вернулось бы в работу через чёрный ход.
- */
-export const RULE_CATALOG_WITH_RETIRED: readonly RuleSpec[] = [
-  ...RULE_SEED_BATCHES.flatMap((batch) => batch.rules),
-  ...RETIRED_RULES,
+function retiredOf(batch: RuleSeedBatch): readonly RuleSpec[] {
+  const retired = new Set(batch.retired ?? []);
+  return batch.rules.filter((spec) => retired.has(spec.code));
+}
+
+/** Снятые правила: целые снятые партии и снятые коды действующих партий. */
+export const RETIRED_RULES: readonly RuleSpec[] = [
+  ...RETIRED_SEED_BATCHES.flatMap((batch) => batch.rules),
+  ...RULE_SEED_BATCHES.flatMap(retiredOf),
 ];
 
 /**
- * Полный каталог — объединение партий.
+ * Каталог вместе со снятыми — вход генераторов уже применённых миграций и счёт
+ * строк `rule_definitions`.
+ *
+ * Собирается из партий целиком, а не сложением активных и снятых: код, снятый
+ * внутри партии, попал бы в сумму дважды. Только для генераторов и тестов: всё,
+ * что решает, ЧТО портал проверяет, обязано читать `RULE_CATALOG`, иначе снятое
+ * правило вернулось бы в работу через чёрный ход.
+ */
+export const RULE_CATALOG_WITH_RETIRED: readonly RuleSpec[] = [
+  ...RULE_SEED_BATCHES.flatMap((batch) => batch.rules),
+  ...RETIRED_SEED_BATCHES.flatMap((batch) => batch.rules),
+];
+
+/**
+ * Действующий каталог — объединение партий без снятых кодов.
  *
  * Собирается, а не выписывается вторым списком: два списка разъезжаются молча,
  * и разъехавшись, дали бы правило, которое движок исполняет, а БД по внешнему
  * ключу не знает.
  */
-export const RULE_CATALOG: readonly RuleSpec[] = RULE_SEED_BATCHES.flatMap((batch) => batch.rules);
+export const RULE_CATALOG: readonly RuleSpec[] = RULE_SEED_BATCHES.flatMap(activeOf);
 
 export const RULE_CODES: readonly string[] = RULE_CATALOG.map((spec) => spec.code);
+
+/**
+ * Коды `retired`, которых нет в `rules` своей партии.
+ *
+ * Такой код ничего не снимает: спека с ним не существует, а запись выглядит
+ * как сделанное решение. Тест каталога требует пустого списка.
+ */
+export function unknownRetiredCodes(
+  batches: readonly RuleSeedBatch[] = RULE_SEED_BATCHES,
+): readonly string[] {
+  const unknown: string[] = [];
+  for (const batch of batches) {
+    const codes = new Set(batch.rules.map((spec) => spec.code));
+    for (const code of batch.retired ?? []) {
+      if (!codes.has(code)) unknown.push(code);
+    }
+  }
+  return unknown.sort();
+}
 
 /**
  * Дубли кодов внутри каталога.

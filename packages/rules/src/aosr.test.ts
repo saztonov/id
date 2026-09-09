@@ -1,5 +1,5 @@
 /**
- * Тесты правил АОСР, перекрёстных сверок и внешних реестров.
+ * Тесты правил АОСР, перекрёстных сверок и правил минимального набора (S59).
  *
  * Три вещи проверяются здесь ЧЕРЕЗ ДВИЖОК, а не вызовом правила напрямую, и это
  * не педантизм:
@@ -10,12 +10,20 @@
  * - гейт открытого мира требует НОЛЬ вердиктов `fail` на комплекте из
  *   документов резервного и неизвестного типа — это утверждение о прогоне
  *   целиком, а не об одном правиле;
- * - блокирующая находка появляется только после наложения снимка ruleset.
+ * - понижение тяжести (`severityOverride`) применяет движок: «марка расходится»
+ *   и «срок истекает» обязаны доезжать до замечания предупреждением, а не
+ *   ошибкой, и видно это только после наложения снимка ruleset.
  *
  * Остальные правила проверяются прямым вызовом с `defaultParams`: так падение
  * указывает на правило, а не на движок. Каждый прямой вызов проходит через
  * `inconsistencyOf` — правило, объявившее `pass` при открытом замечании,
  * роняет тест на месте.
+ *
+ * Правила, снятые в S59 (ADR-0029), проверяются одним блоком на семейство:
+ * кода нет в `RULE_CATALOG`, спек остался среди снятых ради контрольных сумм
+ * применённых миграций, заглушка отвечает `n_a` «правило снято с исполнения».
+ * Поведенческие тесты снятых правил удалены вместе с телами правил: тест на
+ * поведение, которого нет, доказывал бы только то, что автор помнит, что снял.
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 
@@ -25,6 +33,7 @@ import {
   AOSR_SIGNER_ROLES,
   CROSSCHECK_RULES,
   EXTERNAL_RULES,
+  MINIMAL_RULES,
   TRANSFER_REGISTRY_RULES,
 } from './aosr.js';
 import { RETIRED_RULES, RULE_CATALOG } from './catalog.js';
@@ -32,36 +41,27 @@ import { periodOfEarliestAct } from './helpers.js';
 import { runRules } from './engine.js';
 import { inconsistencyOf } from './result.js';
 import {
-  makeBatch,
   makeCounterparty,
   makeDocument,
   makeField,
-  makeFolder,
   makeGraph,
-  makeMaterial,
   makeObject,
   makeProfile,
-  makeRdDocument,
   makeRegistryRow,
-  makeUnavailableRegistries,
   makeUnconfiguredProfile,
   resetTestIds,
   snapshotOf,
 } from './testing.js';
 import type {
-  RegistryRowNode,
-  RowCheckNode,
   CheckGraph,
   DocumentNode,
-  ExternalRegistriesSnapshot,
   FieldNode,
-  NrsRecord,
+  PreparedFinding,
+  RegistryRowNode,
   RuleExecution,
   RuleResult,
   RuleRunResult,
   RuleSpec,
-  ScheduleRecord,
-  SroRecord,
 } from './types.js';
 
 const ALL_RULES: readonly RuleSpec[] = [
@@ -69,6 +69,7 @@ const ALL_RULES: readonly RuleSpec[] = [
   ...CROSSCHECK_RULES,
   ...TRANSFER_REGISTRY_RULES,
   ...EXTERNAL_RULES,
+  ...MINIMAL_RULES,
 ];
 
 // ---------------------------------------------------------------------------
@@ -112,10 +113,58 @@ function runAll(graph: CheckGraph): RuleRunResult {
   });
 }
 
+/** Прогон одного правила через движок: тяжесть и блокировка приезжают из снимка. */
+function runOne(
+  code: string,
+  graph: CheckGraph,
+): { execution: RuleExecution; findings: readonly PreparedFinding[] } {
+  const spec = specOf(code);
+  const run = runRules(graph, {
+    specs: [spec],
+    snapshot: snapshotOf([spec]),
+    enabledRuleCodes: null,
+  });
+  return { execution: executionOf(run, code), findings: run.findings };
+}
+
 function executionOf(run: RuleRunResult, code: string): RuleExecution {
   const execution = run.executions.find((entry) => entry.ruleCode === code);
   if (execution === undefined) throw new Error(`правило ${code} не исполнялось`);
   return execution;
+}
+
+/**
+ * Блок «снято с исполнения» — один на семейство, по образцу `AOSR.ACT.032` (S30).
+ *
+ * Проверяется ровно три вещи, и каждая ловит свой способ вернуть правило
+ * через чёрный ход: код в `RULE_CATALOG` (движок стал бы его исполнять), спек
+ * вне `RETIRED_RULES` (сверка при старте объявила бы строку БД сиротой),
+ * живое тело вместо заглушки (реализация разошлась бы с движком молча).
+ */
+function describeRetired(family: string, codes: readonly string[]): void {
+  describe(`${family} — снято с исполнения (S59, ADR-0029)`, () => {
+    it('кодов нет в каталоге правил', () => {
+      for (const code of codes) {
+        expect(
+          RULE_CATALOG.some((spec) => spec.code === code),
+          code,
+        ).toBe(false);
+      }
+    });
+
+    it('спеки остались только среди снятых — ради контрольных сумм применённых миграций', () => {
+      const retired = RETIRED_RULES.map((spec) => spec.code);
+      for (const code of codes) expect(retired, code).toContain(code);
+    });
+
+    it('заглушка отвечает n_a «правило снято с исполнения» на любом графе', () => {
+      for (const code of codes) {
+        const result = evaluate(code, actGraph(healthyActFields()));
+        expect(result.verdict, code).toBe('n_a');
+        expect(result.reason, code).toBe('правило снято с исполнения');
+      }
+    });
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -152,6 +201,9 @@ function signerFields(): FieldNode[] {
  *
  * Иначе «правило нашло дефект» перестаёт быть доказательством: находка могла бы
  * прийти от соседнего пустого поля, а не от того, что проверяет тест.
+ *
+ * Пункта 3 здесь нет намеренно: `AOSR.P3.070` на таком акте отвечает «п. 3 не
+ * распознан», и каждый его тест добавляет перечень сам.
  */
 function healthyActFields(): FieldNode[] {
   return [
@@ -197,10 +249,6 @@ function graphWithoutActs(): CheckGraph {
   return makeGraph({ documents: [makeDocument({ docTypeCode: 'cert_conformity' })] });
 }
 
-function externalWith(patch: Partial<ExternalRegistriesSnapshot>): ExternalRegistriesSnapshot {
-  return { ...makeUnavailableRegistries(), ...patch };
-}
-
 beforeEach(() => {
   resetTestIds();
 });
@@ -211,6 +259,9 @@ beforeEach(() => {
 
 describe('каталог правил S9.3/S9.5', () => {
   it('содержит ровно согласованные коды', () => {
+    // Списки включают СНЯТЫЕ коды: спеки остаются в своих массивах ради
+    // применённых миграций сида (0017), а действующий состав задаёт
+    // `catalog.ts` полем `retired` — его проверяет `catalog.test.ts`.
     expect(AOSR_RULES.map((spec) => spec.code)).toEqual([
       'AOSR.HDR.010',
       'AOSR.HDR.020',
@@ -247,25 +298,45 @@ describe('каталог правил S9.3/S9.5', () => {
       'EXT.NRS.141',
       'EXT.SCHED.142',
     ]);
+    expect(MINIMAL_RULES.map((spec) => spec.code)).toEqual(['SCH.681', 'XS.131']);
   });
 
-  it('привязывает правила АОСР к типу документа, а сверки — к ревизии', () => {
+  it('привязывает правила АОСР к типу документа, а сверки — к папке', () => {
     expect(AOSR_RULES.every((spec) => spec.docTypeCode === 'aosr')).toBe(true);
     expect(AOSR_RULES.every((spec) => spec.level === 'document')).toBe(true);
     expect(AOSR_RULES.every((spec) => spec.requiresExternalRegistry === null)).toBe(true);
     expect([...CROSSCHECK_RULES, ...EXTERNAL_RULES].every((s) => s.docTypeCode === null)).toBe(
       true,
     );
-    expect(EXTERNAL_RULES.map((spec) => spec.requiresExternalRegistry)).toEqual([
-      'sro',
-      'nrs',
-      'schedule',
-    ]);
+    // До S59 здесь ожидалось `['sro', 'nrs', 'schedule']`. Правила сняты, и
+    // требование реестра снято вместе с ними: поле в сид не попадает, а
+    // объявлять «правилу нужен реестр» тому, что не исполняется, значило бы
+    // печатать в отчёте прогона проверку, которой нет.
+    expect(EXTERNAL_RULES.map((spec) => spec.requiresExternalRegistry)).toEqual([null, null, null]);
   });
 
-  it('требует профиль раздела ровно у правил полноты и матрицы', () => {
+  it('правила минимального набора: схема — на акте, согласованность — на папке', () => {
+    const scheme = specOf('SCH.681');
+    expect([scheme.level, scheme.docTypeCode, scheme.defaultSeverity]).toEqual([
+      'document',
+      'aosr',
+      'warning',
+    ]);
+    const folder = specOf('XS.131');
+    expect([folder.level, folder.docTypeCode, folder.defaultSeverity]).toEqual([
+      'folder',
+      null,
+      'warning',
+    ]);
+    expect(MINIMAL_RULES.every((spec) => !spec.defaultBlocking)).toBe(true);
+  });
+
+  it('ни одно правило файла не требует профиля раздела', () => {
+    // До S59 профиль требовали `AOSR.P3.070` (категории материалов) и `MAT.110`
+    // (матрица раздела). Обе настройки убраны из профиля: вопрос «есть ли у
+    // материала документ» от раздела не зависит, а матрицы больше нет.
     const withProfile = ALL_RULES.filter((spec) => spec.requiresSectionProfile).map((s) => s.code);
-    expect(withProfile).toEqual(['AOSR.P3.070', 'MAT.110']);
+    expect(withProfile).toEqual([]);
   });
 });
 
@@ -451,7 +522,12 @@ describe('AOSR.HDR.022 — контрольная сумма ОГРН', () => {
   });
 });
 
-describe('AOSR.HDR.023 — тройка ОГРН, ИНН и наименования', () => {
+/**
+ * С S59 правило ищет лицо по ИНН, затем по ОГРН, и НЕ сверяет наименование:
+ * одно и то же ИНН в боевой базе встречается в трёх написаниях. Заголовок
+ * правила в сиде заморожен и по-прежнему говорит о «тройке».
+ */
+describe('AOSR.HDR.023 — лицо, выполнившее работы, есть в справочнике по ИНН', () => {
   const directory = [
     makeCounterparty({
       name: 'ООО «СТРОЙПРОФИЛЬ»',
@@ -460,39 +536,64 @@ describe('AOSR.HDR.023 — тройка ОГРН, ИНН и наименован
     }),
   ];
 
-  it('сходящаяся тройка даёт pass', () => {
+  it('ИНН найден в справочнике — pass', () => {
     expect(
       verdictOf('AOSR.HDR.023', actGraph(healthyActFields(), { counterparties: directory })),
     ).toBe('pass');
   });
 
-  it('расхождение ОГРН при совпавшем ИНН даёт fail', () => {
+  it('наименование не сверяется: другое написание при том же ИНН — pass', () => {
+    // «ОЛИМПРОЕКТ», «Олимпроект», «ОЛИМППРОЕКТ» на одном ИНН боевой базы:
+    // сверять название значило бы обвинять акт в орфографии. Здесь написание
+    // расходится с карточкой вовсе, и это не замечание.
     const graph = actGraph(
-      replacing(healthyActFields(), text(AOSR_FIELDS.contractorOgrn, '1157744002217')),
+      replacing(healthyActFields(), text(AOSR_FIELDS.contractorName, 'ООО «Олимппроект»')),
       { counterparties: directory },
     );
-    expect(verdictOf('AOSR.HDR.023', graph)).toBe('fail');
-    expect(messagesOf('AOSR.HDR.023', graph)[0]).toContain('1037700056789');
+    expect(verdictOf('AOSR.HDR.023', graph)).toBe('pass');
+    expect(messagesOf('AOSR.HDR.023', graph)).toEqual([]);
   });
 
-  it('контрагент вне справочника не порождает ошибку, а даёт undetermined', () => {
+  it('ни ИНН, ни ОГРН не распознаны — undetermined, искать нечем', () => {
     const graph = actGraph(
-      replacing(healthyActFields(), text(AOSR_FIELDS.contractorInn, '7711223342')),
-      { counterparties: [makeCounterparty({ name: 'ООО «Другое»', inn: '5600998870' })] },
+      without(healthyActFields(), AOSR_FIELDS.contractorInn, AOSR_FIELDS.contractorOgrn),
+      { counterparties: directory },
     );
     expect(verdictOf('AOSR.HDR.023', graph)).toBe('undetermined');
+    expect(messagesOf('AOSR.HDR.023', graph)[0]).toContain('ни ИНН, ни ОГРН');
   });
 
-  it('пустой справочник делает правило неприменимым', () => {
-    expect(verdictOf('AOSR.HDR.023', actGraph(healthyActFields()))).toBe('n_a');
+  it('ИНН не распознан, но ОГРН нашёл лицо — pass', () => {
+    // Второй ключ, а не второе замечание: ОГРН — тот же реквизит, что и
+    // искали, только с другой стороны.
+    const graph = actGraph(without(healthyActFields(), AOSR_FIELDS.contractorInn), {
+      counterparties: directory,
+    });
+    expect(verdictOf('AOSR.HDR.023', graph)).toBe('pass');
   });
 
-  it('реквизит с посторонним знаком не выдаётся за расхождение со справочником', () => {
+  it('лицо не найдено ни по ИНН, ни по ОГРН — fail «не найдено в справочнике»', () => {
+    // До S59 это было `undetermined`. Заказчик просил ровно этот вопрос —
+    // «есть ли исполнитель в справочнике», — и «нет» здесь ответ, а не незнание:
+    // оба идентификатора прочитаны чисто, справочник не пуст.
+    const graph = actGraph(
+      replacing(
+        replacing(healthyActFields(), text(AOSR_FIELDS.contractorInn, '7711223342')),
+        text(AOSR_FIELDS.contractorOgrn, '1157744002217'),
+      ),
+      { counterparties: [makeCounterparty({ name: 'ООО «Другое»', inn: '5600998870' })] },
+    );
+    expect(verdictOf('AOSR.HDR.023', graph)).toBe('fail');
+    const message = messagesOf('AOSR.HDR.023', graph)[0] ?? '';
+    expect(message).toContain('не найдено в справочнике');
+    expect(message).toContain('7711223342');
+  });
+
+  it('нечитаемый знак в ИНН при совпавшем ОГРН — undetermined, а не расхождение', () => {
     // Акт № 48-ОТ/-1 этаж папки «ИД Мастер апрель 2026»: ноль прочитан косой
     // чертой («77/8203762»). AOSR.HDR.021 на это отвечает «не проверено», и
     // HDR.023 обязано отвечать так же: иначе одна и та же цифра даёт разом и
-    // «проверить нечем», и обвинение в неверном реквизите — а комплект при
-    // этом верен, и в одиннадцати других актах той же папки ИНН прочитан точно.
+    // «проверить нечем», и обвинение в неверном реквизите.
     const graph = actGraph(
       replacing(healthyActFields(), text(AOSR_FIELDS.contractorInn, '77/0123459')),
       { counterparties: directory },
@@ -501,7 +602,24 @@ describe('AOSR.HDR.023 — тройка ОГРН, ИНН и наименован
     expect(messagesOf('AOSR.HDR.023', graph)[0]).toContain('прочитан со знаком');
   });
 
-  it('чистые цифры, разошедшиеся со справочником, по-прежнему ошибка', () => {
+  it('нечитаемый ИНН без ОГРН — undetermined, а не «не найдено»', () => {
+    // Искать по «77/0123459» нечего, а объявить лицо отсутствующим по
+    // собственному чтению нельзя.
+    const graph = actGraph(
+      without(
+        replacing(healthyActFields(), text(AOSR_FIELDS.contractorInn, '77/0123459')),
+        AOSR_FIELDS.contractorOgrn,
+      ),
+      { counterparties: directory },
+    );
+    expect(verdictOf('AOSR.HDR.023', graph)).toBe('undetermined');
+    expect(messagesOf('AOSR.HDR.023', graph)[0]).toContain(
+      'со знаком, которого в них быть не может',
+    );
+    expect(messagesOf('AOSR.HDR.023', graph)[0]).not.toContain('не найдено');
+  });
+
+  it('расхождение ИНН при совпавшем ОГРН — по-прежнему fail', () => {
     // Чувствительность: поблажка держится на постороннем знаке, а не на самом
     // факте расхождения — иначе правило перестало бы проверять.
     const graph = actGraph(
@@ -509,6 +627,23 @@ describe('AOSR.HDR.023 — тройка ОГРН, ИНН и наименован
       { counterparties: directory },
     );
     expect(verdictOf('AOSR.HDR.023', graph)).toBe('fail');
+    expect(messagesOf('AOSR.HDR.023', graph)[0]).toContain('расходится со справочником');
+  });
+
+  it('расхождение ОГРН при совпавшем ИНН даёт fail и называет ОГРН справочника', () => {
+    const graph = actGraph(
+      replacing(healthyActFields(), text(AOSR_FIELDS.contractorOgrn, '1157744002217')),
+      { counterparties: directory },
+    );
+    expect(verdictOf('AOSR.HDR.023', graph)).toBe('fail');
+    expect(messagesOf('AOSR.HDR.023', graph)[0]).toContain('1037700056789');
+  });
+
+  it('пустой справочник делает правило неприменимым, без актов — тоже', () => {
+    expect(verdictOf('AOSR.HDR.023', actGraph(healthyActFields()))).toBe('n_a');
+    expect(
+      verdictOf('AOSR.HDR.023', makeGraph({ ...graphWithoutActs(), counterparties: directory })),
+    ).toBe('n_a');
   });
 });
 
@@ -516,25 +651,9 @@ describe('AOSR.HDR.023 — тройка ОГРН, ИНН и наименован
 // AOSR.ACT
 // ---------------------------------------------------------------------------
 
-describe('AOSR.ACT.030 — номер акта по шаблону объекта', () => {
-  const object = makeObject({ actNumberPattern: '^\\d+$' });
-
-  it('номер по шаблону даёт pass', () => {
-    expect(verdictOf('AOSR.ACT.030', actGraph(healthyActFields(), { object }))).toBe('pass');
-  });
-
-  it('номер вне шаблона даёт fail', () => {
-    const graph = actGraph(healthyActFields(), {
-      object: makeObject({ actNumberPattern: '^АОСР-\\d+$' }),
-    });
-    expect(verdictOf('AOSR.ACT.030', graph)).toBe('fail');
-    expect(messagesOf('AOSR.ACT.030', graph)[0]).toContain('^АОСР-\\d+$');
-  });
-
-  it('без шаблона в карточке объекта правило неприменимо', () => {
-    expect(verdictOf('AOSR.ACT.030', actGraph(healthyActFields()))).toBe('n_a');
-  });
-});
+// У объектов шаблон номера не задан ни разу — правило отвечало «неприменимо»
+// на каждом прогоне.
+describeRetired('AOSR.ACT.030 — номер акта по шаблону объекта', ['AOSR.ACT.030']);
 
 describe('AOSR.ACT.031 — порядок дат акта', () => {
   it('верный порядок дат даёт pass', () => {
@@ -701,77 +820,238 @@ describe('AOSR.P1.050 — наименование работ и привязк�
   });
 });
 
-describe('AOSR.P2.060 — номер изменения в шифре РД', () => {
-  it('шифр с номером изменения даёт pass', () => {
-    expect(verdictOf('AOSR.P2.060', actGraph(healthyActFields()))).toBe('pass');
-  });
+// Номер изменения шифра и справочник РД не входят в минимальный набор;
+// справочник РД на бою пуст.
+describeRetired('AOSR.P2.060 / AOSR.P2.061 — шифр РД', ['AOSR.P2.060', 'AOSR.P2.061']);
 
-  it('шифр без номера изменения даёт fail', () => {
-    const graph = actGraph(replacing(healthyActFields(), text(AOSR_FIELDS.rdCipher, '2.5.1-АР')));
-    expect(verdictOf('AOSR.P2.060', graph)).toBe('fail');
-    expect(messagesOf('AOSR.P2.060', graph)[0]).toContain('без номера изменения');
-  });
+/**
+ * MAT.COVER (S59): пункт 3 читается по-настоящему.
+ *
+ * Прежняя реализация читала `graph.materials`, а материалы выводятся из
+ * документов качества: документ у каждого «материала» был по построению, и
+ * правило не могло дать ошибку. Здесь — записи п. 3: ссылка на реестр либо
+ * перечисление «материал (документ № …)», и подтверждение номером ИЛИ
+ * названием.
+ */
+describe('AOSR.P3.070 — материалы п. 3 подтверждены документами (MAT.COVER)', () => {
+  const REGISTRY_REF = 'Реестр 1 к АОСР №ПБ-1 от 31.03.2026г';
+  /** Запись п. 3 из боевого акта: две позиции, у второй — «Сертификат №275». */
+  const CORPUS_ENTRY =
+    '1.Песок для строительных работ (Паспорт №0297 от 26.09.2024г., ' +
+    'Сертификат соответствия №RU.MCC.234 (с 01.01.2024)). ' +
+    '2.Смесь сухая шпатлевочная КНАУФ-Тифенгрунд (Сертификат №275 от 10.01.2025)';
+  const KNAUF_ENTRY =
+    '1. Смесь сухая шпатлевочная КНАУФ-Тифенгрунд (Сертификат №275 от 10.01.2025)';
 
-  it('без шифра РД правило даёт undetermined, а без актов — n_a', () => {
-    const graph = actGraph(without(healthyActFields(), AOSR_FIELDS.rdCipher));
-    expect(verdictOf('AOSR.P2.060', graph)).toBe('undetermined');
-    expect(verdictOf('AOSR.P2.060', graphWithoutActs())).toBe('n_a');
-  });
-});
-
-describe('AOSR.P2.061 — шифр РД в справочнике', () => {
-  it('известный шифр даёт pass, номер изменения сравнению не мешает', () => {
-    const graph = actGraph(healthyActFields(), {
-      rdDocuments: [makeRdDocument({ cipher: '2.5.1-АР', revision: '1' })],
+  function registry(number: string | null, title: string | null = null): DocumentNode {
+    return makeDocument({
+      docTypeCode: 'annex_registry',
+      title,
+      fields: number === null ? [] : [text('registry_number', number)],
     });
-    expect(verdictOf('AOSR.P2.061', graph)).toBe('pass');
-  });
+  }
 
-  it('неизвестный шифр даёт fail', () => {
-    const graph = actGraph(healthyActFields(), {
-      rdDocuments: [makeRdDocument({ cipher: '2.5.2-КЖ' })],
+  function qualityDoc(
+    docTypeCode: string | null,
+    number: string | null,
+    productName: string | null,
+    patch: Partial<DocumentNode> = {},
+  ): DocumentNode {
+    return makeDocument({
+      docTypeCode,
+      fields: [
+        ...(number === null ? [] : [text(AOSR_FIELDS.number, number)]),
+        ...(productName === null ? [] : [text('product_name', productName)]),
+      ],
+      ...patch,
     });
-    expect(verdictOf('AOSR.P2.061', graph)).toBe('fail');
-    expect(messagesOf('AOSR.P2.061', graph)[0]).toContain('2.5.1-АР');
+  }
+
+  function coverGraph(
+    entries: readonly string[],
+    documents: readonly DocumentNode[],
+    patch: Partial<CheckGraph> = {},
+  ): CheckGraph {
+    return makeGraph({
+      object: makeObject({ name: 'Автостоянка' }),
+      documents: [
+        makeAct([...healthyActFields(), listField(AOSR_FIELDS.materials, entries)]),
+        ...documents,
+      ],
+      ...patch,
+    });
+  }
+
+  it('ссылка на реестр найдена по реквизиту registry_number — pass', () => {
+    expect(verdictOf('AOSR.P3.070', coverGraph([REGISTRY_REF], [registry('1')]))).toBe('pass');
   });
 
-  it('пустой справочник РД делает правило неприменимым', () => {
-    expect(verdictOf('AOSR.P2.061', actGraph(healthyActFields()))).toBe('n_a');
-  });
-});
-
-describe('AOSR.P3.070 — материалы подтверждены документами', () => {
-  const passport = makeDocument({ docTypeCode: 'quality_passport' });
-
-  it('материал с документом качества даёт pass', () => {
-    const graph = actGraph(healthyActFields(), {
-      documents: [makeAct(healthyActFields()), passport],
-      materials: [
-        makeMaterial({ nameRaw: 'Арматура', categoryCode: 'rebar', documentIds: [passport.id] }),
+  it('ссылка в отдельном реквизите p3_registry_ref читается так же', () => {
+    const graph = makeGraph({
+      object: makeObject({ name: 'Автостоянка' }),
+      documents: [
+        makeAct([
+          ...healthyActFields(),
+          text(AOSR_FIELDS.registryRef, 'Перечислено в реестре приложений №1'),
+        ]),
+        registry('1'),
       ],
     });
     expect(verdictOf('AOSR.P3.070', graph)).toBe('pass');
   });
 
-  it('материал без документов даёт fail', () => {
-    const graph = makeGraph({
-      materials: [makeMaterial({ nameRaw: 'Арматура А500С', categoryCode: 'rebar' })],
-    });
-    expect(verdictOf('AOSR.P3.070', graph)).toBe('fail');
-    expect(messagesOf('AOSR.P3.070', graph)[0]).toContain('Арматура А500С');
+  it('реестр найден по заголовку, когда в реквизите лежат 13 цифр ОГРН — pass', () => {
+    // До S59 реквизит извлекался шаблоном ОГРН, и в боевой базе у каждого
+    // реестра там тринадцать цифр. Правило обязано работать на том, что есть:
+    // тринадцать цифр номером реестра не считаются, заголовок — считается.
+    const graph = coverGraph(
+      [REGISTRY_REF],
+      [registry('1037700056789', 'Реестр № 1 к АОСР № ПБ-1 от 31.03.2026 г.')],
+    );
+    expect(verdictOf('AOSR.P3.070', graph)).toBe('pass');
   });
 
-  it('материал категории вне профиля даёт n_a с перечислением категорий', () => {
-    const graph = makeGraph({
-      materials: [makeMaterial({ nameRaw: 'Труба', categoryCode: 'pipes' })],
+  it('ссылка на реестр № 2 при единственном реестре № 1 — fail', () => {
+    const graph = coverGraph(['Реестр 2 к АОСР №ПБ-1 от 31.03.2026г'], [registry('1')]);
+    expect(verdictOf('AOSR.P3.070', graph)).toBe('fail');
+    expect(messagesOf('AOSR.P3.070', graph)[0]).toContain('Реестр приложений № 2');
+    expect(messagesOf('AOSR.P3.070', graph)[0]).toContain('отсутствует');
+  });
+
+  it('единственный реестр без номера — undetermined: тот ли это реестр, установить нечем', () => {
+    const graph = coverGraph([REGISTRY_REF], [registry(null)]);
+    expect(verdictOf('AOSR.P3.070', graph)).toBe('undetermined');
+    expect(messagesOf('AOSR.P3.070', graph)[0]).toContain('номер не прочитан');
+  });
+
+  it('реестра нет, но есть неразобранные листы — undetermined', () => {
+    const graph = coverGraph([REGISTRY_REF], [], { coverageGaps: 1 });
+    expect(verdictOf('AOSR.P3.070', graph)).toBe('undetermined');
+    expect(messagesOf('AOSR.P3.070', graph)[0]).toContain('не разобрал');
+  });
+
+  it('перечисление из двух позиций: обе подтверждены номерами — pass', () => {
+    const graph = coverGraph(
+      [CORPUS_ENTRY],
+      [
+        qualityDoc('quality_passport', '0297', 'Песок для строительных работ'),
+        qualityDoc('cert_conformity', 'RU.MCC.234', 'Песок для строительных работ'),
+        qualityDoc('cert_conformity', '275', 'Смесь сухая шпатлевочная КНАУФ-Тифенгрунд'),
+      ],
+    );
+    expect(verdictOf('AOSR.P3.070', graph)).toBe('pass');
+  });
+
+  it('«Сертификат №275» и документ с number «275» — pass', () => {
+    const graph = coverGraph(
+      [KNAUF_ENTRY],
+      [qualityDoc('cert_conformity', '275', 'Смесь сухая шпатлевочная КНАУФ-Тифенгрунд')],
+    );
+    expect(verdictOf('AOSR.P3.070', graph)).toBe('pass');
+  });
+
+  it('номер совпал на документе незнакомого вида — тоже pass (§0.5)', () => {
+    // Сертификат незнакомой формы остаётся сертификатом: по номеру годится
+    // любой документ среза, кроме актов и перечней; название берётся из
+    // заголовка.
+    const graph = coverGraph(
+      [KNAUF_ENTRY],
+      [qualityDoc(null, '275', null, { title: 'Смесь сухая шпатлевочная КНАУФ-Тифенгрунд' })],
+    );
+    expect(verdictOf('AOSR.P3.070', graph)).toBe('pass');
+  });
+
+  it('номер совпал, а марка расходится — открытое замечание с понижением до warning', () => {
+    const graph = coverGraph([KNAUF_ENTRY], [qualityDoc('cert_conformity', '275', 'КНАУФ-Фуген')]);
+    const result = evaluate('AOSR.P3.070', graph);
+    expect(result.verdict).toBe('fail');
+    expect(result.findings?.[0]?.state).toBe('open');
+    expect(result.findings?.[0]?.severityOverride).toBe('warning');
+    expect(result.findings?.[0]?.message).toContain('марка расходится');
+    expect(result.findings?.[0]?.message).toContain('КНАУФ-Фуген');
+
+    // Через движок: снимок говорит `error`, правило понижает до `warning`, и
+    // блокировки у такого замечания нет.
+    const { execution, findings } = runOne('AOSR.P3.070', graph);
+    expect(execution.verdict).toBe('fail');
+    expect(findings).toHaveLength(1);
+    expect(findings[0]?.severity).toBe('warning');
+    expect(findings[0]?.isBlocking).toBe(false);
+  });
+
+  it('порог сходства — из профиля раздела: 0.5 делает пару КНАУФ проходящей', () => {
+    // Мутация порога. У «КНАУФ-Тифенгрунд» против «КНАУФ-Фуген» сходство ровно
+    // 0.5: при умолчании 0.75 это предупреждение, при пороге профиля 0.5 —
+    // совпадение. Сними чтение `nameSimilarityThreshold` — тест покраснеет.
+    const graph = coverGraph([KNAUF_ENTRY], [qualityDoc('cert_conformity', '275', 'КНАУФ-Фуген')], {
+      profile: makeProfile({ thresholds: { nameSimilarityThreshold: 0.5 } }),
     });
-    expect(verdictOf('AOSR.P3.070', graph)).toBe('n_a');
-    expect(reasonOf('AOSR.P3.070', graph)).toContain('pipes');
+    expect(verdictOf('AOSR.P3.070', graph)).toBe('pass');
+  });
+
+  it('номера нет, но паспорт с похожим наименованием — pass', () => {
+    const graph = coverGraph(
+      ['1. Техноэласт ЭПП (Паспорт качества от 01.02.2026)'],
+      [qualityDoc('quality_passport', null, 'Материал рулонный Техноэласт П ЭПП')],
+    );
+    expect(verdictOf('AOSR.P3.070', graph)).toBe('pass');
+  });
+
+  it('по названию подтверждает только документ о качестве', () => {
+    // Чувствительность к предыдущему: исполнительная схема с тем же названием
+    // материал не подтверждает — по названию годятся только документы качества.
+    const graph = coverGraph(
+      ['1. Техноэласт ЭПП (Паспорт качества от 01.02.2026)'],
+      [makeDocument({ docTypeCode: 'exec_scheme', title: 'Техноэласт ЭПП' })],
+    );
+    expect(verdictOf('AOSR.P3.070', graph)).toBe('fail');
+  });
+
+  it('«ветонит ЛР+» без документов — fail с названием материала и номером', () => {
+    const graph = coverGraph(['1. ветонит ЛР+ (Паспорт № 12345 от 01.02.2026)'], []);
+    expect(verdictOf('AOSR.P3.070', graph)).toBe('fail');
+    const message = messagesOf('AOSR.P3.070', graph)[0] ?? '';
+    expect(message).toContain('ветонит ЛР+');
+    expect(message).toContain('12345');
+  });
+
+  it('документов нет, но есть неразобранные листы — undetermined', () => {
+    const graph = coverGraph(['1. ветонит ЛР+ (Паспорт № 12345 от 01.02.2026)'], [], {
+      coverageGaps: 1,
+    });
+    expect(verdictOf('AOSR.P3.070', graph)).toBe('undetermined');
+  });
+
+  it('п. 3 не распознан — undetermined, а не «материалы подтверждены»', () => {
+    const graph = actGraph(healthyActFields());
+    expect(verdictOf('AOSR.P3.070', graph)).toBe('undetermined');
+    expect(messagesOf('AOSR.P3.070', graph)[0]).toContain('не распознан п. 3');
+  });
+
+  it('запись, не разобранная на позиции, — undetermined с текстом записи', () => {
+    const graph = coverGraph(['см. приложения'], []);
+    expect(verdictOf('AOSR.P3.070', graph)).toBe('undetermined');
+    expect(messagesOf('AOSR.P3.070', graph)[0]).toContain('см. приложения');
+  });
+
+  it('без актов правило неприменимо', () => {
+    expect(verdictOf('AOSR.P3.070', graphWithoutActs())).toBe('n_a');
+  });
+
+  it('профиль раздела не требуется: без профиля правило исполняется, а не молчит', () => {
+    // До S59 правило требовало профиль ради категорий материалов. Раздел без
+    // профиля теперь получает тот же ответ, что и настроенный.
+    expect(specOf('AOSR.P3.070').requiresSectionProfile).toBe(false);
+    const graph = coverGraph(['1. ветонит ЛР+ (Паспорт № 12345 от 01.02.2026)'], [], {
+      profile: makeUnconfiguredProfile(),
+    });
+    expect(runOne('AOSR.P3.070', graph).execution.verdict).toBe('fail');
   });
 });
 
 describe('AOSR.P3.071 — ссылка на реестр при длинном перечне', () => {
   const many = ['д1', 'д2', 'д3', 'д4', 'д5', 'д6'];
+  const manyDocuments = [1001, 1002, 1003, 1004, 1005, 1006].map((n) => `Паспорт № ${String(n)}`);
 
   it('короткий перечень даёт pass', () => {
     const graph = actGraph([
@@ -785,6 +1065,7 @@ describe('AOSR.P3.071 — ссылка на реестр при длинном �
     const graph = actGraph([...healthyActFields(), listField(AOSR_FIELDS.materials, many)]);
     expect(verdictOf('AOSR.P3.071', graph)).toBe('fail');
     expect(messagesOf('AOSR.P3.071', graph)[0]).toContain('6 документов');
+    expect(messagesOf('AOSR.P3.071', graph)[0]).toContain('п. 3');
   });
 
   it('длинный перечень со ссылкой на реестр даёт pass', () => {
@@ -796,7 +1077,45 @@ describe('AOSR.P3.071 — ссылка на реестр при длинном �
     expect(verdictOf('AOSR.P3.071', graph)).toBe('pass');
   });
 
-  it('без перечня п. 3 правило неприменимо', () => {
+  it('ссылка на реестр внутри самой записи п. 3 тоже считается', () => {
+    const graph = actGraph([
+      ...healthyActFields(),
+      listField(AOSR_FIELDS.materials, [...many, 'Реестр 1 к АОСР №ПБ-1 от 31.03.2026г']),
+    ]);
+    expect(verdictOf('AOSR.P3.071', graph)).toBe('pass');
+  });
+
+  it('шесть документов в п. 4 без ссылки — fail с указанием «п. 4» (S59)', () => {
+    // По практике заказчика при стольких же схемах в акте появляется реестр № 2.
+    const graph = actGraph([
+      ...healthyActFields(),
+      listField(AOSR_FIELDS.documents, manyDocuments),
+    ]);
+    expect(verdictOf('AOSR.P3.071', graph)).toBe('fail');
+    expect(messagesOf('AOSR.P3.071', graph)[0]).toContain('п. 4');
+    expect(messagesOf('AOSR.P3.071', graph)[0]).toContain('6 документов');
+  });
+
+  it('ссылка «Реестр 2 к АОСР…» среди записей п. 4 — pass', () => {
+    const graph = actGraph([
+      ...healthyActFields(),
+      listField(AOSR_FIELDS.documents, [...manyDocuments, 'Реестр 2 к АОСР №ПВ-1 от 31.03.2026г']),
+    ]);
+    expect(verdictOf('AOSR.P3.071', graph)).toBe('pass');
+  });
+
+  it('порог берётся из профиля раздела поверх снимка', () => {
+    const graph = actGraph(
+      [...healthyActFields(), listField(AOSR_FIELDS.materials, ['д1', 'д2', 'д3'])],
+      {
+        profile: makeProfile({ thresholds: { maxDocumentsWithoutRegistry: 2 } }),
+      },
+    );
+    expect(verdictOf('AOSR.P3.071', graph)).toBe('fail');
+    expect(messagesOf('AOSR.P3.071', graph)[0]).toContain('больше 2');
+  });
+
+  it('без перечней п. 3 и п. 4 правило неприменимо', () => {
     expect(verdictOf('AOSR.P3.071', actGraph(healthyActFields()))).toBe('n_a');
   });
 });
@@ -942,26 +1261,59 @@ describe('AOSR.P4.080 — приложения присутствуют в ко�
     expect(verdictOf('AOSR.P4.080', graph)).toBe('undetermined');
     expect(verdictOf('AOSR.P4.080', actGraph(healthyActFields()))).toBe('n_a');
   });
-});
 
-describe('AOSR.P7.090 — последующие работы', () => {
-  it('отличающиеся последующие работы дают pass', () => {
-    expect(verdictOf('AOSR.P7.090', actGraph(healthyActFields()))).toBe('pass');
-  });
+  /**
+   * S59: запись «Реестр 2 к АОСР № …» — ссылка на реестр, а не документ.
+   *
+   * До S59 номер после «к АОСР» читался номером строки, и правило искало
+   * документ «ПВ-1» — то есть акт, к которому реестр приложен, — и не находило.
+   * На скриншоте заказчика «ПБ-1» к тому же прочитан как «ПВ-1»: номер акта в
+   * ссылке не сравнивается, реестр к акту привязала сегментация.
+   */
+  const P4_REGISTRY_REF = 'Реестр 2 к АОСР №ПВ-1 от 31.03.2026г';
 
-  it('дословный повтор п. 1 в п. 7 даёт fail', () => {
-    const graph = actGraph(
-      replacing(healthyActFields(), text(AOSR_FIELDS.nextWorks, 'Устройство 2 слоя гидроизоляции')),
+  function p4Graph(registryTitle: string | null): CheckGraph {
+    return makeGraph({
+      documents: [
+        makeAct([...healthyActFields(), listField(AOSR_FIELDS.documents, [P4_REGISTRY_REF])]),
+        ...(registryTitle === null
+          ? []
+          : [makeDocument({ docTypeCode: 'annex_registry', title: registryTitle })]),
+      ],
+    });
+  }
+
+  it('«Реестр 2 к АОСР №ПВ-1» — ссылка на реестр № 2 по заголовку, а не документ «ПВ-1»', () => {
+    expect(verdictOf('AOSR.P4.080', p4Graph('Реестр № 2 к АОСР № ПБ-1 от 31.03.2026 г.'))).toBe(
+      'pass',
     );
-    expect(verdictOf('AOSR.P7.090', graph)).toBe('fail');
   });
 
-  it('без п. 7 правило даёт undetermined, без актов — n_a', () => {
-    const graph = actGraph(without(healthyActFields(), AOSR_FIELDS.nextWorks));
-    expect(verdictOf('AOSR.P7.090', graph)).toBe('undetermined');
-    expect(verdictOf('AOSR.P7.090', graphWithoutActs())).toBe('n_a');
+  it('заголовок реестра с опечаткой OCR «Рестр № 2 …» из боевой базы тоже узнаётся', () => {
+    // Заголовок в боевой базе прочитан как «Рестр № 2 к АОСР № ПБ-1 от
+    // 31.03.2026 г.»: без второй «е» слово теряется целиком, реестр остаётся
+    // безномерным, и правило отвечало бы «тот ли это реестр, установить нечем».
+    // Разбор в `@id/contracts` (`registryRefNumber`) допускает эту опечатку.
+    expect(verdictOf('AOSR.P4.080', p4Graph('Рестр № 2 к АОСР № ПБ-1 от 31.03.2026 г.'))).toBe(
+      'pass',
+    );
+  });
+
+  it('реестра № 2 в комплекте нет — fail с номером реестра', () => {
+    const graph = p4Graph(null);
+    expect(verdictOf('AOSR.P4.080', graph)).toBe('fail');
+    const message = messagesOf('AOSR.P4.080', graph)[0] ?? '';
+    expect(message).toContain('Реестр приложений № 2');
+    expect(message).not.toContain('ПВ-1');
   });
 });
+
+// Число слоёв в наименовании схемы против п. 1 и сравнение п. 7 с п. 1 — не из
+// восьми смыслов минимального набора; на бою давали только «не проверено».
+describeRetired('AOSR.P4.081 / AOSR.P7.090 — схема против п. 1, п. 7 против п. 1', [
+  'AOSR.P4.081',
+  'AOSR.P7.090',
+]);
 
 // ---------------------------------------------------------------------------
 // REG
@@ -1208,10 +1560,6 @@ describe('REG.100 / REG.101 / REG.102 — сверка с реестром пр�
 });
 
 // ---------------------------------------------------------------------------
-// MAT
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
 // REG.110 / REG.111 / REG.112 — опись передачи
 // ---------------------------------------------------------------------------
 
@@ -1382,662 +1730,273 @@ describe('REG.112 — раздел описи не сопоставлен акт
   });
 });
 
-describe('REG.113–117 — расхождения строки описи, найденные сверкой', () => {
-  const transfer = makeDocument({ docTypeCode: 'transfer_registry', title: 'Опись передачи' });
-  const scheme = makeDocument({ docTypeCode: 'exec_scheme', title: 'Исполнительная схема' });
+// Расхождения граф строки описи по суждению модели — частичная отмена
+// ADR-0028: сопоставление строки — только «есть ли документ»; графа
+// «организация» называет поставщика, а документ — изготовителя.
+describeRetired('REG.113–117 — расхождения граф строки описи', [
+  'REG.113',
+  'REG.114',
+  'REG.115',
+  'REG.116',
+  'REG.117',
+]);
 
-  function graphWithCheck(
-    check: Partial<RowCheckNode> & { readonly kind: string },
-    row: Partial<Parameters<typeof makeRegistryRow>[0]> = {},
+// ---------------------------------------------------------------------------
+// MAT, REF, XS.130, EXT — сняты
+// ---------------------------------------------------------------------------
+
+// Матрица раздела, изготовитель партии и год редакции НД — материаловедение,
+// которого в минимальном наборе нет; матрицы в профиле больше нет вовсе.
+describeRetired('MAT.110 / MAT.111 / MAT.112 — матрица и материаловедение', [
+  'MAT.110',
+  'MAT.111',
+  'MAT.112',
+]);
+
+// Активность карточек — справочная отметка, не свойство комплекта; дубль акта
+// на бою не встретился ни разу.
+describeRetired('REF.120 / REF.121 / XS.130 — справочные отметки и дубль акта', [
+  'REF.120',
+  'REF.121',
+  'XS.130',
+]);
+
+// Источников данных (СРО, НРС, график) у портала нет: четыре замечания
+// «требуется ручная проверка» на папку, ни одного открытого.
+describeRetired('EXT.SRO.140 / EXT.NRS.141 / EXT.SCHED.142 — внешние реестры', [
+  'EXT.SRO.140',
+  'EXT.NRS.141',
+  'EXT.SCHED.142',
+]);
+
+// ---------------------------------------------------------------------------
+// SCH.681 — к акту приложена исполнительная схема (S59)
+// ---------------------------------------------------------------------------
+
+describe('SCH.681 — к акту приложена исполнительная схема, ссылающаяся на его номер', () => {
+  function scheme(number: string | null, fieldCode = 'scheme_number'): DocumentNode {
+    return makeDocument({
+      docTypeCode: 'exec_scheme',
+      title: 'Исполнительная схема',
+      fields: number === null ? [] : [text(fieldCode, number)],
+    });
+  }
+
+  function actNumbered(number: string): DocumentNode {
+    return makeAct(replacing(healthyActFields(), text(AOSR_FIELDS.actNumber, number)));
+  }
+
+  function schemeGraph(
+    actNumber: string,
+    documents: readonly DocumentNode[],
+    patch: Partial<CheckGraph> = {},
   ): CheckGraph {
-    return makeGraph({
-      documents: [scheme, transfer],
-      transferRows: [
-        makeRegistryRow({
-          registryDocumentId: transfer.id,
-          sectionTitle: '5. Устройство шпатлевки, поз. 5.16',
-          docNameRaw: 'Исполнительная схема устройства стен',
-          docNoRaw: '52.1-ОТ/-1 ЭТАЖ',
-          matchState: 'matched',
-          matchedDocumentId: scheme.id,
-          matchedBy: 'llm',
-          checks: [
-            {
-              rowCell: 'org_raw',
-              documentFieldCode: 'executor',
-              status: 'mismatch',
-              confidence: 0.9,
-              message: 'организация указана как «ИП Михальский», а схему составило ООО «МАСТЕР»',
-              rowQuote: 'ИП Михальский Андрей Владимирович',
-              docQuote: 'ООО «МАСТЕР»',
-              ...check,
-            },
-          ],
-          ...row,
-        }),
-      ],
-    });
+    return makeGraph({ documents: [actNumbered(actNumber), ...documents], ...patch });
   }
 
-  it('расхождение организации у найденного документа — замечание с текстом модели', () => {
-    // Строки 5.16, 7.16, 9.16 и 11.16 боевой описи «ИД Мастер апрель 2026»:
-    // схемы ООО «МАСТЕР» записаны за подрядчиком другой работы. Прежнее правило
-    // их не сравнивало — реквизит `executor` не попал в список, который оно
-    // читало.
-    const graph = graphWithCheck({ kind: 'org' });
-    expect(verdictOf('REG.114', graph)).toBe('fail');
-    expect(messagesOf('REG.114', graph)[0]).toContain('Михальский');
-    expect(messagesOf('REG.114', graph)[0]).toContain('МАСТЕР');
+  it('схемы в срезе нет — fail', () => {
+    const graph = schemeGraph('48-ОТ/-1 этаж', []);
+    expect(verdictOf('SCH.681', graph)).toBe('fail');
+    expect(messagesOf('SCH.681', graph)[0]).toContain('не приложена исполнительная схема');
+    expect(messagesOf('SCH.681', graph)[0]).toContain('48-ОТ/-1 этаж');
   });
 
-  it('замечание сверки несёт происхождение «llm», а не выдаётся за детерминированное', () => {
-    // Судила модель, и прятать это значило бы выдать вероятностный вывод за
-    // вывод формы. Прецедент — `externalUnavailable`, который так же несёт своё
-    // происхождение.
-    const result = evaluate('REG.114', graphWithCheck({ kind: 'org' }));
-    expect(result.findings?.[0]?.origin).toBe('llm');
+  it('схема есть, у номера акта нет ведущего числа («ПБ-1») — pass', () => {
+    // Ссылку номером здесь не выразить, и основной сигнал — схема в срезе —
+    // выполнен.
+    expect(verdictOf('SCH.681', schemeGraph('ПБ-1', [scheme('2.1-ОТ')]))).toBe('pass');
   });
 
-  it('расхождение у НЕ сопоставленной строки — «не проверено», а не обвинение', () => {
-    // Расхождение с документом, который сам под вопросом, — два предположения
-    // подряд. Сложить их в утверждение значило бы обвинить комплект дважды за
-    // одну неуверенность.
-    const graph = graphWithCheck(
-      { kind: 'org' },
-      { matchState: 'candidate', matchedDocumentId: null },
-    );
-    expect(verdictOf('REG.114', graph)).toBe('undetermined');
-    expect(messagesOf('REG.114', graph)[0]).toContain('не подтверждено');
-  });
-
-  it('«сверить не удалось» замечания не даёт вовсе', () => {
-    // `unsure` — не «расхождения нет», а «сверить нечем»: реквизит не прочитан
-    // либо модель не уверена. Выдать это за находку — то же, что за отсутствие.
-    const graph = graphWithCheck({ kind: 'org', status: 'unsure' });
-    expect(verdictOf('REG.114', graph)).toBe('n_a');
-  });
-
-  it('согласие граф даёт «pass», а не «неприменимо»', () => {
-    // Разница существенна: «портал сверил и согласен» и «портал не смотрел» —
-    // разные ответы, и второй не должен маскироваться первым.
-    const graph = graphWithCheck({ kind: 'org', status: 'ok' });
-    expect(verdictOf('REG.114', graph)).toBe('pass');
-  });
-
-  it('ссылка на чужой акт — код REG.113', () => {
-    // Строки 11.2 и 12.2 боевой описи: раздел относится к акту № 58-ОТ, а в
-    // наименовании строки назван № 5-ОТ.
-    const graph = graphWithCheck({
-      kind: 'act_reference',
-      message: 'назван акт № 5-ОТ/-1 этаж, тогда как раздел относится к акту № 58-ОТ/-1 этаж',
-    });
-    expect(verdictOf('REG.113', graph)).toBe('fail');
-    expect(verdictOf('REG.114', graph)).toBe('n_a');
-  });
-
-  it('иная запись того же номера — отдельный код с тяжестью «к сведению»', () => {
-    // Минус подземного этажа читается неустойчиво: два прогона одного скана
-    // дали «-1 этаж» и «1 этаж». Это след чтения, а не дефект бумаги, и место
-    // ему рядом с истёкшим сертификатом, а не среди расхождений комплекта.
-    const graph = graphWithCheck({
-      kind: 'number_form',
-      message: 'номер записан как «51-ОТ/1 этаж», а в документе — «51-ОТ/-1 этаж»',
-    });
-    const result = evaluate('REG.115', graph);
-    expect(result.verdict).toBe('fail');
-    expect(specOf('REG.115').defaultSeverity).toBe('info');
-  });
-
-  it('без описи правила неприменимы', () => {
-    for (const code of ['REG.113', 'REG.114', 'REG.115', 'REG.116', 'REG.117']) {
-      expect(verdictOf(code, actGraph(healthyActFields()))).toBe('n_a');
-    }
-  });
-});
-
-describe('MAT.110 — матрица документов раздела', () => {
-  const matrixProfile = makeProfile({
-    materialMatrix: { rebar: { required: ['mill_certificate', 'cert_conformity'] } },
-  });
-
-  function matrixGraph(documents: readonly DocumentNode[], profile = matrixProfile): CheckGraph {
-    return makeGraph({
-      profile,
-      documents: [...documents],
-      materials: [
-        makeMaterial({
-          nameRaw: 'Арматура А500С',
-          categoryCode: 'rebar',
-          documentIds: documents.map((document) => document.id),
-        }),
-      ],
-    });
-  }
-
-  it('полный пакет даёт pass', () => {
-    const graph = matrixGraph([
-      makeDocument({ docTypeCode: 'mill_certificate' }),
-      makeDocument({ docTypeCode: 'cert_conformity' }),
-    ]);
-    expect(verdictOf('MAT.110', graph)).toBe('pass');
-  });
-
-  it('нехватка документа даёт fail с названием вида', () => {
-    const graph = matrixGraph([makeDocument({ docTypeCode: 'mill_certificate' })]);
-    expect(verdictOf('MAT.110', graph)).toBe('fail');
-    expect(messagesOf('MAT.110', graph)[0]).toContain('cert_conformity');
-  });
-
-  it('документ резервного типа в пакете даёт undetermined, а не fail', () => {
-    const graph = matrixGraph([
-      makeDocument({ docTypeCode: 'mill_certificate' }),
-      makeDocument({ docTypeCode: 'other_quality_document', isFallbackType: true }),
-    ]);
-    expect(verdictOf('MAT.110', graph)).toBe('undetermined');
-  });
-
-  it('категория вне матрицы делает правило неприменимым', () => {
-    const graph = matrixGraph([makeDocument({ docTypeCode: 'mill_certificate' })], makeProfile());
-    expect(verdictOf('MAT.110', graph)).toBe('n_a');
-    expect(reasonOf('MAT.110', graph)).toContain('не описана в матрице');
-  });
-});
-
-describe('MAT.111 — дефект №2 корпуса: изготовитель партии не покрыт сертификатом', () => {
-  function rebarGraph(certificateManufacturer: string | null): CheckGraph {
-    const mill = makeDocument({
-      docTypeCode: 'mill_certificate',
-      fields: [
-        text(AOSR_FIELDS.manufacturer, 'ООО «ПромСорт-Тула»'),
-        text(AOSR_FIELDS.number, '16005'),
-      ],
-    });
-    const certificate = makeDocument({
-      docTypeCode: 'cert_conformity',
-      fields:
-        certificateManufacturer === null
-          ? []
-          : [text(AOSR_FIELDS.manufacturer, certificateManufacturer)],
-    });
-    const batch = makeBatch({ materialId: 'mat-rebar', batchNo: '16005', documentIds: [mill.id] });
-    return makeGraph({
-      documents: [mill, certificate],
-      materials: [
-        makeMaterial({
-          id: 'mat-rebar',
-          nameRaw: 'Арматура А500С',
-          categoryCode: 'rebar',
-          batches: [batch],
-          documentIds: [mill.id, certificate.id],
-        }),
-      ],
-    });
-  }
-
-  it('изготовитель партии не назван ни одним сертификатом — fail с именем изготовителя', () => {
-    const graph = rebarGraph('АО «Северсталь»');
-    expect(verdictOf('MAT.111', graph)).toBe('fail');
-    const message = messagesOf('MAT.111', graph)[0] ?? '';
-    expect(message).toContain('ПромСорт-Тула');
-    expect(message).toContain('Северсталь');
-  });
-
-  it('тот же комплект с сертификатом на этого изготовителя даёт pass', () => {
-    // Чувствительность: меняется РОВНО изготовитель в сертификате.
-    expect(verdictOf('MAT.111', rebarGraph('ООО «ПромСорт-Тула»'))).toBe('pass');
-  });
-
-  it('сертификат без изготовителя даёт undetermined: полнота пакета — дело MAT.110', () => {
-    expect(verdictOf('MAT.111', rebarGraph(null))).toBe('undetermined');
-  });
-
-  it('без материалов правило неприменимо', () => {
-    expect(verdictOf('MAT.111', makeGraph())).toBe('n_a');
-  });
-
-  it('полная форма собственности в сертификате и аббревиатура в паспорте — один изготовитель', () => {
-    // Папка «ИД Мастер апрель 2026»: паспорт партии называет изготовителя
-    // «ООО «КНАУФ ГИПС»», сертификат — «Общество с ограниченной
-    // ответственностью «КНАУФ ГИПС»». Правило дважды объявляло ошибку.
-    const passport = makeDocument({
-      docTypeCode: 'quality_passport',
-      fields: [text(AOSR_FIELDS.manufacturer, 'ООО «КНАУФ ГИПС»')],
-    });
-    const certificate = makeDocument({
-      docTypeCode: 'cert_conformity',
-      fields: [
-        text(AOSR_FIELDS.manufacturer, 'Общество с ограниченной ответственностью «КНАУФ ГИПС»'),
-      ],
-    });
-    const batch = makeBatch({
-      materialId: 'mat-primer',
-      batchNo: '58071',
-      documentIds: [passport.id],
-    });
-    const graph = makeGraph({
-      documents: [passport, certificate],
-      materials: [
-        makeMaterial({
-          id: 'mat-primer',
-          nameRaw: 'грунтовка укрепляющая «КНАУФ-Тифенгрунд»',
-          batches: [batch],
-          documentIds: [passport.id, certificate.id],
-        }),
-      ],
-    });
-    expect(verdictOf('MAT.111', graph)).toBe('pass');
-  });
-
-  it('разные формы собственности при том же наименовании остаются разными лицами', () => {
-    // Чувствительность к предыдущему: форма приводится к аббревиатуре, а не
-    // выбрасывается, иначе ООО и АО «Ромашка» склеились бы в одно лицо.
-    expect(verdictOf('MAT.111', rebarGraph('АО «ПромСорт-Тула»'))).toBe('fail');
-  });
-});
-
-describe('MAT.112 — дефект №3 корпуса: год редакции НД в паспорте и сертификате', () => {
-  function standardsGraph(passportNd: string, certificateNd: string): CheckGraph {
-    const passport = makeDocument({
-      docTypeCode: 'quality_passport',
-      fields: [listField(AOSR_FIELDS.gostTu, [passportNd])],
-    });
-    const certificate = makeDocument({
-      docTypeCode: 'cert_conformity',
-      fields: [listField(AOSR_FIELDS.gostTu, [certificateNd])],
-    });
-    return makeGraph({
-      documents: [passport, certificate],
-      materials: [
-        makeMaterial({
-          nameRaw: 'Гидроизоляция рулонная',
-          categoryCode: 'roll_waterproofing',
-          documentIds: [passport.id, certificate.id],
-        }),
-      ],
-    });
-  }
-
-  it('разные годы редакции дают fail с обоими обозначениями', () => {
-    const graph = standardsGraph('СТО 00287852-005-2015', 'СТО 00287852-005-2011');
-    expect(verdictOf('MAT.112', graph)).toBe('fail');
-    const message = messagesOf('MAT.112', graph)[0] ?? '';
-    expect(message).toContain('СТО 00287852-005-2015');
-    expect(message).toContain('СТО 00287852-005-2011');
-  });
-
-  it('совпадающий год редакции даёт pass', () => {
-    // Чувствительность: меняется РОВНО год в сертификате.
-    expect(
-      verdictOf('MAT.112', standardsGraph('СТО 00287852-005-2015', 'СТО 00287852-005-2015')),
-    ).toBe('pass');
-  });
-
-  it('обозначение без года даёт undetermined', () => {
-    expect(verdictOf('MAT.112', standardsGraph('СТО 00287852-005', 'СТО 00287852-005-2011'))).toBe(
-      'undetermined',
-    );
-  });
-
-  it('без материалов правило неприменимо', () => {
-    expect(verdictOf('MAT.112', makeGraph())).toBe('n_a');
-  });
-});
-
-// ---------------------------------------------------------------------------
-// REF, XS
-// ---------------------------------------------------------------------------
-
-describe('REF.120 — объект активен', () => {
-  it('активный объект даёт pass', () => {
-    expect(verdictOf('REF.120', makeGraph())).toBe('pass');
-  });
-
-  it('неактивный объект даёт fail', () => {
-    const graph = makeGraph({ object: makeObject({ isActive: false, name: 'Автостоянка' }) });
-    expect(verdictOf('REF.120', graph)).toBe('fail');
-    expect(messagesOf('REF.120', graph)[0]).toContain('Автостоянка');
-  });
-
-  it('карточка чужого объекта делает правило неприменимым', () => {
-    expect(verdictOf('REF.120', makeGraph({ object: makeObject({ id: 'obj-other' }) }))).toBe(
-      'n_a',
-    );
-  });
-});
-
-describe('REF.121 — контрагенты активны', () => {
-  /** Исполнитель папки — контрагент, названный её карточкой. */
-  const folderContractor = (patch = {}) => {
-    const party = makeCounterparty({ name: 'ООО «СТРОЙПРОФИЛЬ»', ...patch });
-    return { party, folder: makeFolder({ contractorId: party.id }) };
-  };
-
-  it('активные контрагенты дают pass', () => {
-    const { party, folder } = folderContractor();
-    expect(verdictOf('REF.121', makeGraph({ counterparties: [party], folder }))).toBe('pass');
-  });
-
-  it('неактивный контрагент даёт fail', () => {
-    const { party, folder } = folderContractor({ name: 'ООО «МСЕТ»', isActive: false });
-    const graph = makeGraph({ counterparties: [party], folder });
-
-    expect(verdictOf('REF.121', graph)).toBe('fail');
-    expect(messagesOf('REF.121', graph)[0]).toContain('МСЕТ');
-  });
-
-  it('неактивный контрагент, к папке не относящийся, замечанием не становится', () => {
-    // Справочник грузится целиком ради сверки тройки реквизитов (HDR.023).
-    // Пока правило смотрело на него весь, любая снятая с учёта организация
-    // портала становилась замечанием чужого комплекта.
-    const { party, folder } = folderContractor();
-    const stranger = makeCounterparty({ name: 'ООО «ПОСТОРОННИЙ»', isActive: false });
-
-    expect(verdictOf('REF.121', makeGraph({ counterparties: [party, stranger], folder }))).toBe(
+  it('ведущие целые совпали: акт «48-ОТ/-1 этаж», схема «48.1-ОТ/1-1 ЭТАЖ» — pass', () => {
+    // Схема подписана номером акта с индексом; хвост захватки подрядчик пишет
+    // как придётся, а распознавание довершает разночтение.
+    expect(verdictOf('SCH.681', schemeGraph('48-ОТ/-1 этаж', [scheme('48.1-ОТ/1-1 ЭТАЖ')]))).toBe(
       'pass',
     );
   });
 
-  it('контрагент из шапки акта в папку входит, даже если он не исполнитель', () => {
-    const stranger = makeCounterparty({
-      name: 'ООО «СУБПОДРЯД»',
-      inn: '7708203762',
-      isActive: false,
-    });
-    const graph = makeGraph({
-      counterparties: [stranger],
-      documents: [
-        makeAct(
-          replacing(
-            replacing(healthyActFields(), text(AOSR_FIELDS.contractorName, 'ООО «СУБПОДРЯД»')),
-            text(AOSR_FIELDS.contractorInn, '7708203762'),
-          ),
-        ),
-      ],
-    });
-
-    expect(verdictOf('REF.121', graph)).toBe('fail');
+  it('номер схемы в реквизите number читается наравне со scheme_number', () => {
+    expect(
+      verdictOf('SCH.681', schemeGraph('48-ОТ/-1 этаж', [scheme('48.1-ОТ/1-1 ЭТАЖ', 'number')])),
+    ).toBe('pass');
   });
 
-  it('пустой справочник делает правило неприменимым', () => {
-    expect(verdictOf('REF.121', makeGraph())).toBe('n_a');
-  });
-});
-
-describe('XS.130 — дубль акта в комплекте', () => {
-  it('акты с разными номерами дают pass', () => {
-    const graph = makeGraph({
-      documents: [
-        makeAct(healthyActFields(), { ordinal: 1 }),
-        makeAct(replacing(healthyActFields(), text(AOSR_FIELDS.actNumber, '11')), { ordinal: 2 }),
-      ],
-    });
-    expect(verdictOf('XS.130', graph)).toBe('pass');
+  it('ведущие целые не совпали — undetermined, а не fail', () => {
+    // Мутация «убрать проверку ведущего числа» даёт здесь `pass` вместо
+    // `undetermined`. Номер листа читается хуже прочего текста, поэтому
+    // расхождение — «не проверено», а не обвинение.
+    const graph = schemeGraph('48-ОТ/-1 этаж', [scheme('52.1-ОТ/-1 ЭТАЖ')]);
+    expect(verdictOf('SCH.681', graph)).toBe('undetermined');
+    const message = messagesOf('SCH.681', graph)[0] ?? '';
+    expect(message).toContain('не ссылается на номер акта');
+    expect(message).toContain('52.1-ОТ/-1 ЭТАЖ');
+    expect(message).toContain('48');
   });
 
-  it('два акта с одним номером дают fail', () => {
-    const graph = makeGraph({
-      documents: [
-        makeAct(healthyActFields(), { ordinal: 1 }),
-        makeAct(healthyActFields(), { ordinal: 4 }),
-      ],
-    });
-    expect(verdictOf('XS.130', graph)).toBe('fail');
-    expect(messagesOf('XS.130', graph)[0]).toContain('1, 4');
+  it('номер схемы не распознан — undetermined', () => {
+    const graph = schemeGraph('48-ОТ/-1 этаж', [scheme(null)]);
+    expect(verdictOf('SCH.681', graph)).toBe('undetermined');
+    expect(messagesOf('SCH.681', graph)[0]).toContain('номер не распознан');
   });
 
-  it('один акт делает правило неприменимым', () => {
-    expect(verdictOf('XS.130', actGraph(healthyActFields()))).toBe('n_a');
-  });
-});
-
-// ---------------------------------------------------------------------------
-// EXT (§9.5)
-// ---------------------------------------------------------------------------
-
-describe('EXT.SRO.140 — членство подрядчика в СРО', () => {
-  const record: SroRecord = {
-    memberInn: '7700123459',
-    sroName: 'СРО «Ассоциация строителей»',
-    validFrom: '2020-01-01',
-    validTo: '2027-01-01',
-  };
-
-  it('недоступный реестр даёт ровно одно замечание «требуется ручная проверка»', () => {
-    const graph = actGraph(healthyActFields());
-    const result = evaluate('EXT.SRO.140', graph);
-    expect(result.verdict).toBe('undetermined');
-    expect(result.findings).toHaveLength(1);
-    const finding = result.findings?.[0];
-    expect(finding?.origin).toBe('external_unavailable');
-    expect(finding?.message).toContain('требуется ручная проверка');
-    expect(finding?.message).toContain('источник данных не подключён');
-  });
-
-  it('доступный реестр с записью подрядчика даёт pass', () => {
-    const graph = actGraph(healthyActFields(), {
-      external: externalWith({ sro: { status: 'available', records: [record] } }),
-    });
-    expect(verdictOf('EXT.SRO.140', graph)).toBe('pass');
-  });
-
-  it('доступный реестр без записи подрядчика даёт fail', () => {
-    const graph = actGraph(healthyActFields(), {
-      external: externalWith({
-        sro: { status: 'available', records: [{ ...record, memberInn: '7711223342' }] },
-      }),
-    });
-    expect(verdictOf('EXT.SRO.140', graph)).toBe('fail');
-    expect(messagesOf('EXT.SRO.140', graph)[0]).toContain('7700123459');
-  });
-
-  it('ИНН с посторонним знаком не выдаётся за отсутствие в реестре', () => {
-    // Акт № 48-ОТ/-1 этаж папки «ИД Мастер апрель 2026»: ноль прочитан косой
-    // чертой («77/8203762»). `digitsOf` дало бы девятизначное «778203762»,
-    // которого в акте не напечатано, реестр его не знает — и правило обвинило бы
-    // подрядчика в том, что он не состоит в СРО. Признак общий с AOSR.HDR.021.
-    const graph = actGraph(
-      replacing(healthyActFields(), text(AOSR_FIELDS.contractorInn, '77/0123459')),
-      { external: externalWith({ sro: { status: 'available', records: [record] } }) },
-    );
-    expect(verdictOf('EXT.SRO.140', graph)).toBe('undetermined');
-    expect(messagesOf('EXT.SRO.140', graph)[0]).toContain('прочитан со знаком');
-    expect(messagesOf('EXT.SRO.140', graph)[0]).not.toContain('не найден в реестре');
-  });
-
-  it('чистый ИНН, которого нет в реестре, по-прежнему ошибка', () => {
-    // Чувствительность к предыдущему: поблажка держится на постороннем знаке, а
-    // не на самом факте отсутствия записи.
-    const graph = actGraph(
-      replacing(healthyActFields(), text(AOSR_FIELDS.contractorInn, '7700123458')),
-      { external: externalWith({ sro: { status: 'available', records: [record] } }) },
-    );
-    expect(verdictOf('EXT.SRO.140', graph)).toBe('fail');
-    expect(messagesOf('EXT.SRO.140', graph)[0]).toContain('не найден в реестре');
-  });
-
-  it('истёкшее членство даёт fail с датой проверки', () => {
-    const graph = actGraph(healthyActFields(), {
-      external: externalWith({
-        sro: { status: 'available', records: [{ ...record, validTo: '2025-12-31' }] },
-      }),
-    });
-    expect(verdictOf('EXT.SRO.140', graph)).toBe('fail');
-    expect(messagesOf('EXT.SRO.140', graph)[0]).toContain('18.08.2026');
-  });
-
-  it('неизвестный ИНН подрядчика даёт undetermined, а не fail', () => {
-    const graph = actGraph(without(healthyActFields(), AOSR_FIELDS.contractorInn), {
-      external: externalWith({ sro: { status: 'available', records: [record] } }),
-    });
-    expect(verdictOf('EXT.SRO.140', graph)).toBe('undetermined');
-  });
-});
-
-describe('EXT.NRS.141 — подписанты в национальном реестре специалистов', () => {
-  const registry: readonly NrsRecord[] = [
-    { fullName: 'Петров Пётр Петрович', registryNumber: 'С-1', validFrom: null, validTo: null },
-    { fullName: 'Сидоров Сергей Сергеевич', registryNumber: 'С-2', validFrom: null, validTo: null },
-    { fullName: 'Иванов Иван Иванович', registryNumber: 'С-3', validFrom: null, validTo: null },
-    {
-      fullName: 'Кузнецов Кирилл Кириллович',
-      registryNumber: 'С-4',
-      validFrom: null,
-      validTo: null,
-    },
-  ];
-
-  it('недоступный реестр даёт одно замечание «требуется ручная проверка»', () => {
-    const result = evaluate('EXT.NRS.141', actGraph(healthyActFields()));
-    expect(result.verdict).toBe('undetermined');
-    expect(result.findings).toHaveLength(1);
-    expect(result.findings?.[0]?.message).toContain('требуется ручная проверка');
-  });
-
-  it('все подписанты найдены в реестре — pass', () => {
-    const graph = actGraph(healthyActFields(), {
-      external: externalWith({ nrs: { status: 'available', records: registry } }),
-    });
-    expect(verdictOf('EXT.NRS.141', graph)).toBe('pass');
-  });
-
-  it('подписант вне реестра даёт fail и называется поимённо', () => {
-    const graph = actGraph(healthyActFields(), {
-      external: externalWith({
-        nrs: { status: 'available', records: registry.slice(0, 3) },
-      }),
-    });
-    expect(verdictOf('EXT.NRS.141', graph)).toBe('fail');
-    expect(messagesOf('EXT.NRS.141', graph)[0]).toContain('Кузнецов К.К.');
-  });
-
-  it('нераспознанные подписанты дают undetermined', () => {
-    const graph = actGraph(
-      without(healthyActFields(), ...AOSR_SIGNER_ROLES.map((role) => role.field)),
-      { external: externalWith({ nrs: { status: 'available', records: registry } }) },
-    );
-    expect(verdictOf('EXT.NRS.141', graph)).toBe('undetermined');
-  });
-});
-
-describe('EXT.SCHED.142 — работы в графике строительства', () => {
-  const planned: readonly ScheduleRecord[] = [
-    {
-      workName: 'Устройство 2 слоя гидроизоляции кровли',
-      plannedFrom: '2026-02-20',
-      plannedTo: '2026-03-15',
-    },
-  ];
-
-  it('недоступный график даёт одно замечание «требуется ручная проверка»', () => {
-    const result = evaluate('EXT.SCHED.142', actGraph(healthyActFields()));
-    expect(result.verdict).toBe('undetermined');
-    expect(result.findings).toHaveLength(1);
-    expect(result.findings?.[0]?.message).toContain('требуется ручная проверка');
-  });
-
-  it('работы найдены в графике — pass', () => {
-    const graph = actGraph(healthyActFields(), {
-      external: externalWith({ schedule: { status: 'available', records: planned } }),
-    });
-    expect(verdictOf('EXT.SCHED.142', graph)).toBe('pass');
-  });
-
-  it('работ нет в графике — fail', () => {
-    const graph = actGraph(healthyActFields(), {
-      external: externalWith({
-        schedule: {
-          status: 'available',
-          records: [{ workName: 'Монтаж металлоконструкций', plannedFrom: null, plannedTo: null }],
-        },
-      }),
-    });
-    expect(verdictOf('EXT.SCHED.142', graph)).toBe('fail');
-    expect(messagesOf('EXT.SCHED.142', graph)[0]).toContain('Устройство 2 слоя гидроизоляции');
-  });
-
-  it('без наименования работ правило даёт undetermined', () => {
-    const graph = actGraph(without(healthyActFields(), AOSR_FIELDS.workName), {
-      external: externalWith({ schedule: { status: 'available', records: planned } }),
-    });
-    expect(verdictOf('EXT.SCHED.142', graph)).toBe('undetermined');
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Дефект №6 корпуса: п. 1 против наименования схемы
-// ---------------------------------------------------------------------------
-
-describe('AOSR.P4.081 — дефект №6 корпуса: 2 слоя в п. 1 против 1 слоя в схеме', () => {
-  function schemeGraph(workName: string, schemeName: string | null): CheckGraph {
-    const fields = [
-      ...replacing(healthyActFields(), text(AOSR_FIELDS.workName, workName)),
-      ...(schemeName === null ? [] : [listField(AOSR_FIELDS.documents, [schemeName])]),
-    ];
-    return actGraph(fields);
-  }
-
-  it('расхождение числа слоёв даёт fail и называет ОБА числа', () => {
-    const graph = schemeGraph(
-      'Устройство 2 слоя гидроизоляции',
-      'Исполнительная схема устройства 1 слоя гидроизоляции',
-    );
-    expect(verdictOf('AOSR.P4.081', graph)).toBe('fail');
-    const message = messagesOf('AOSR.P4.081', graph)[0] ?? '';
-    expect(message).toContain('слой');
-    expect(message).toContain('в п. 1 указано 2');
-    expect(message).toContain('в наименовании схемы — 1');
-  });
-
-  it('совпадение числа слоёв даёт pass', () => {
-    // Чувствительность: меняется РОВНО число в наименовании схемы.
-    const graph = schemeGraph(
-      'Устройство 2 слоя гидроизоляции',
-      'Исполнительная схема устройства 2 слоёв гидроизоляции',
-    );
-    expect(verdictOf('AOSR.P4.081', graph)).toBe('pass');
-  });
-
-  it('расхождение ловится и по заголовку исполнительной схемы', () => {
-    const graph = makeGraph({
-      documents: [
-        makeAct(
-          replacing(
-            healthyActFields(),
-            text(AOSR_FIELDS.workName, 'Устройство 2 слоя гидроизоляции'),
-          ),
-        ),
-        makeDocument({
-          docTypeCode: 'exec_scheme',
-          title: 'Схема устройства 1 слоя гидроизоляции',
-        }),
-      ],
-    });
-    expect(verdictOf('AOSR.P4.081', graph)).toBe('fail');
-  });
-
-  it('признака нет ни в п. 1, ни в схеме — расходиться нечему, замечания нет', () => {
-    // Шпатлёвку и окраску в слоях не нормируют, и бланк их не называет. Все
-    // двенадцать актов папки «ИД Мастер апрель 2026» получали «проверить
-    // нечем» ровно там, где проверять было нечего по существу работ.
-    const graph = schemeGraph('Устройство гидроизоляции', 'Исполнительная схема гидроизоляции');
-    expect(verdictOf('AOSR.P4.081', graph)).toBe('n_a');
-    expect(messagesOf('AOSR.P4.081', graph)).toHaveLength(0);
-    expect(reasonOf('AOSR.P4.081', graph)).toContain('сверять нечего');
-  });
-
-  it('признак назван одной стороной — по-прежнему undetermined', () => {
-    // Чувствительность: вторая запись числа должна была быть, и её не
-    // прочитали — это граница проверки, а не отсутствие предмета.
-    const graph = schemeGraph(
-      'Устройство 2 слоя гидроизоляции',
-      'Исполнительная схема гидроизоляции',
-    );
-    expect(verdictOf('AOSR.P4.081', graph)).toBe('undetermined');
-    expect(messagesOf('AOSR.P4.081', graph)[0]).toContain('в наименовании схемы');
+  it('схемы нет, но есть неразобранные листы — undetermined', () => {
+    const graph = schemeGraph('48-ОТ/-1 этаж', [], { coverageGaps: 1 });
+    expect(verdictOf('SCH.681', graph)).toBe('undetermined');
+    expect(messagesOf('SCH.681', graph)[0]).toContain('не разобрал');
   });
 
   it('без актов правило неприменимо', () => {
-    expect(verdictOf('AOSR.P4.081', graphWithoutActs())).toBe('n_a');
+    expect(verdictOf('SCH.681', graphWithoutActs())).toBe('n_a');
+    expect(reasonOf('SCH.681', graphWithoutActs())).toContain('нет акта');
+  });
+
+  it('через движок: отсутствие схемы — предупреждение без блокировки', () => {
+    const { execution, findings } = runOne('SCH.681', schemeGraph('48-ОТ/-1 этаж', []));
+    expect(execution.verdict).toBe('fail');
+    expect(findings).toHaveLength(1);
+    expect(findings[0]?.severity).toBe('warning');
+    expect(findings[0]?.isBlocking).toBe(false);
+    expect(findings[0]?.targetType).toBe('document');
+    expect(findings[0]?.hint).toBeTruthy();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// XS.131 — объект и шифр проекта одинаковы по всей папке (S59)
+// ---------------------------------------------------------------------------
+
+describe('XS.131 — объект и шифр проекта одинаковы по всей папке', () => {
+  const OBJECT = 'Жилой комплекс, кадастровый № 77:07:0010004:24';
+  const CIPHER = 'ООО "ГК" ОЛИМППРОЕКТ шифр 133/23-ГК-ПБ "Система пожарной сигнализации"';
+
+  function act(
+    number: string,
+    objectName: string | null,
+    ciphers: readonly string[],
+    ordinal: number,
+  ): DocumentNode {
+    let fields = replacing(healthyActFields(), text(AOSR_FIELDS.actNumber, number));
+    fields =
+      objectName === null
+        ? without(fields, AOSR_FIELDS.objectName)
+        : replacing(fields, text(AOSR_FIELDS.objectName, objectName));
+    fields = replacing(fields, listField(AOSR_FIELDS.rdCipher, ciphers));
+    return makeAct(fields, { ordinal });
+  }
+
+  function folderGraph(acts: readonly DocumentNode[]): CheckGraph {
+    return makeGraph({ documents: [...acts] });
+  }
+
+  it('один акт — сверять не между чем, n_a', () => {
+    expect(verdictOf('XS.131', folderGraph([act('1', OBJECT, [CIPHER], 1)]))).toBe('n_a');
+  });
+
+  it('одинаковый кадастровый номер и общий корень шифра — pass', () => {
+    const graph = folderGraph([
+      act('1', OBJECT, [CIPHER], 1),
+      act('2', OBJECT, ['133/23-ГК-ПБ лист 5'], 2),
+    ]);
+    expect(verdictOf('XS.131', graph)).toBe('pass');
+  });
+
+  it('разные кадастровые номера — fail, одно замечание на папку со списком актов', () => {
+    const graph = folderGraph([
+      act('1', OBJECT, [CIPHER], 1),
+      act('2', 'Жилой комплекс, кадастровый № 77:07:0010004:99', [CIPHER], 2),
+    ]);
+    const result = evaluate('XS.131', graph);
+    expect(result.verdict).toBe('fail');
+    expect(result.findings).toHaveLength(1);
+    const finding = result.findings?.[0];
+    expect(finding?.targetType).toBe('folder');
+    expect(finding?.message).toContain('Кадастровый номер объекта расходится');
+    expect(finding?.message).toContain('77:07:0010004:24 (№ 1)');
+    expect(finding?.message).toContain('77:07:0010004:99 (№ 2)');
+  });
+
+  it('кадастровый номер решает раньше формулировки: разные адреса при одном номере — pass', () => {
+    // Мутация «убрать сужение по кадастровому номеру» даёт здесь `fail`:
+    // формулировки адреса не начало друг друга, а идентификатор один.
+    const graph = folderGraph([
+      act('1', 'г. Москва, Мосфильмовская, д.31А, кадастровый № 77:07:0010004:24', [CIPHER], 1),
+      act(
+        '2',
+        'г. Москва, Мосфильмовская ул., вл. 31А, кадастровый № 77:07:0010004:24',
+        [CIPHER],
+        2,
+      ),
+    ]);
+    expect(verdictOf('XS.131', graph)).toBe('pass');
+  });
+
+  it('без кадастровых номеров: одно наименование — начало другого, pass', () => {
+    const graph = folderGraph([
+      act('1', 'Жилой комплекс', [CIPHER], 1),
+      act('2', 'Жилой комплекс по адресу: г. Москва', [CIPHER], 2),
+    ]);
+    expect(verdictOf('XS.131', graph)).toBe('pass');
+  });
+
+  it('без кадастровых номеров: разные наименования — fail', () => {
+    const graph = folderGraph([
+      act('1', 'Жилой комплекс', [CIPHER], 1),
+      act('2', 'Автостоянка', [CIPHER], 2),
+    ]);
+    expect(verdictOf('XS.131', graph)).toBe('fail');
+    expect(messagesOf('XS.131', graph)[0]).toContain('Наименование объекта расходится');
+  });
+
+  it('шифры без общего корня — fail с обоими корнями', () => {
+    const graph = folderGraph([
+      act('1', OBJECT, [CIPHER], 1),
+      act('2', OBJECT, ['02-200223-ГПЗ.1'], 2),
+    ]);
+    expect(verdictOf('XS.131', graph)).toBe('fail');
+    const message = messagesOf('XS.131', graph)[0] ?? '';
+    expect(message).toContain('Шифр проекта расходится');
+    // Корень печатается после фолдинга гомоглифов: кириллическая «К» в
+    // «ГК» становится латинской «K». Глазами разницы нет, сравнение строкой
+    // её видит — отсюда класс символов.
+    expect(message).toMatch(/133\/23-Г[КK]-ПБ \(№ 1\)/u);
+    expect(message).toContain('02-200223-ГПЗ.1 (№ 2)');
+  });
+
+  it('хвост «изм. N» корню не мешает', () => {
+    const graph = folderGraph([
+      act('1', OBJECT, ['12/2024-АР изм. 1'], 1),
+      act('2', OBJECT, ['12/2024-АР изм. 2'], 2),
+    ]);
+    expect(verdictOf('XS.131', graph)).toBe('pass');
+  });
+
+  it('акт без наименования объекта — undetermined, а не расхождение', () => {
+    const graph = folderGraph([act('1', OBJECT, [CIPHER], 1), act('2', null, [CIPHER], 2)]);
+    expect(verdictOf('XS.131', graph)).toBe('undetermined');
+    expect(messagesOf('XS.131', graph)[0]).toContain('не распознано наименование объекта');
+  });
+
+  it('акт без распознанного шифра — undetermined', () => {
+    // В п. 2 записано название раздела без шифра: корня нет, сверить акт
+    // нечем, а обвинять его в расхождении нельзя.
+    const graph = folderGraph([
+      act('1', OBJECT, [CIPHER], 1),
+      act('2', OBJECT, ['Рабочая документация, раздел АР'], 2),
+    ]);
+    expect(verdictOf('XS.131', graph)).toBe('undetermined');
+    expect(messagesOf('XS.131', graph)[0]).toContain('не распознан шифр проекта');
+  });
+
+  it('через движок: замечание уровня папки, предупреждение без блокировки', () => {
+    const graph = folderGraph([
+      act('1', OBJECT, [CIPHER], 1),
+      act('2', OBJECT, ['02-200223-ГПЗ.1'], 2),
+    ]);
+    const { execution, findings } = runOne('XS.131', graph);
+    expect(execution.verdict).toBe('fail');
+    expect(findings[0]?.targetType).toBe('folder');
+    expect(findings[0]?.severity).toBe('warning');
+    expect(findings[0]?.isBlocking).toBe(false);
   });
 });
 
@@ -2154,12 +2113,11 @@ describe('открытый мир: незнакомое не порождает 
     expect(run.counts.blocking).toBe(0);
   });
 
-  it('правила АОСР объявлены неприменимыми, а не пройденными', () => {
+  it('правила АОСР и минимального набора объявлены неприменимыми, а не пройденными', () => {
     const run = runAll(openWorldGraph());
-    for (const spec of AOSR_RULES) {
-      expect(executionOf(run, spec.code).verdict).toBe('n_a');
+    for (const spec of [...AOSR_RULES, ...MINIMAL_RULES]) {
+      expect(executionOf(run, spec.code).verdict, spec.code).toBe('n_a');
     }
-    expect(executionOf(run, 'MAT.110').reason).toBe('профиль раздела не настроен');
   });
 
   it('тест чувствителен: тот же прогон на комплекте с уверенным типом даёт fail', () => {
@@ -2188,7 +2146,7 @@ describe('открытый мир: незнакомое не порождает 
       documents: [makeAct(broken, { isFallbackType: true })],
     });
 
-    for (const spec of AOSR_RULES) {
+    for (const spec of [...AOSR_RULES, ...MINIMAL_RULES]) {
       expect([spec.code, verdictOf(spec.code, uncertain)]).toEqual([spec.code, 'n_a']);
       expect([spec.code, verdictOf(spec.code, fallback)]).toEqual([spec.code, 'n_a']);
     }
@@ -2198,5 +2156,15 @@ describe('открытый мир: незнакомое не порождает 
     const run = runAll(makeGraph());
     expect(run.executions).toHaveLength(ALL_RULES.length);
     expect(run.counts.failed).toBe(0);
+  });
+
+  it('снятое правило через движок отвечает n_a с причиной «снято», а не молчит', () => {
+    // Движок доходит до заглушки: у `MAT.110` нет ни привязки к виду, ни
+    // требования профиля, и единственное, что оно может ответить, — причина
+    // снятия. Прежде здесь ожидалось «профиль раздела не настроен».
+    const run = runAll(openWorldGraph());
+    const execution = executionOf(run, 'MAT.110');
+    expect(execution.verdict).toBe('n_a');
+    expect(execution.reason).toBe('правило снято с исполнения');
   });
 });

@@ -7,6 +7,7 @@
  */
 import { describe, expect, it } from 'vitest';
 
+import { MINIMAL_RULES } from './aosr.js';
 import { groupByComplect, runRulesByComplect, subgraphOfDocuments } from './complect-run.js';
 import { makeDocument, makeGraph } from './testing.js';
 import { defect, fromFindings } from './result.js';
@@ -232,6 +233,35 @@ describe('runRulesByComplect', () => {
     );
     expect(new Set(keys).size).toBe(keys.length);
     expect(result.counts.findings).toBe(result.findings.length);
+  });
+
+  it('правила минимального набора: XS.131 — один раз на папку, SCH.681 — по срезу (S59)', () => {
+    // Уровень объявлен в каталоге, и разрез идёт по нему: согласованность
+    // объекта и шифра сравнивает акты МЕЖДУ комплектами, и на срезе одного
+    // комплекта ей не с чем работать; наличие схемы — свойство комплекта, и
+    // схема соседнего акта своим не считается.
+    const result = runRulesByComplect(graphOf(), {
+      specs: MINIMAL_RULES,
+      snapshot: snapshotOf(['SCH.681', 'XS.131']),
+      enabledRuleCodes: null,
+    });
+
+    const executionsOf = (code: string) =>
+      result.executions
+        .filter((execution) => execution.ruleCode === code)
+        .map((execution) => [execution.complectId, execution.verdict]);
+
+    expect(executionsOf('XS.131')).toEqual([[null, 'undetermined']]);
+    expect(result.slices.find((slice) => slice.scope === 'folder')?.result.executions).toHaveLength(
+      1,
+    );
+    // Комплекты A и B — без схемы, ошибка в каждом; вне комплектов актов нет —
+    // неприменимо. Три исполнения, а не одно на папку.
+    expect(executionsOf('SCH.681')).toEqual([
+      [COMPLECT_A, 'fail'],
+      [COMPLECT_B, 'fail'],
+      [null, 'n_a'],
+    ]);
   });
 
   it('правило, не прошедшее ни в один комплект, остаётся неисполненным', () => {

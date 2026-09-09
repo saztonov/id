@@ -43,23 +43,19 @@ import {
   actField,
   daysBetween,
   documentById,
-  documentsOfType,
   effectiveConfidence,
   evidenceOf,
   field,
-  foldHomoglyphs,
   formatDate,
   isAnalysisAnchor,
   isIsoDate,
   isRegistryCode,
-  listParam,
   parentsOf,
-  PROTOCOL_TYPES,
   relevantDateFor,
   textOf,
   threshold,
 } from './helpers.js';
-import { defect, externalUnavailable, fromFindings, notApplicable, unknown } from './result.js';
+import { defect, fromFindings, notApplicable, retiredRule, unknown } from './result.js';
 import type { RelevantDate } from './helpers.js';
 import type {
   BatchNode,
@@ -258,14 +254,32 @@ function documentsWithValidity(graph: CheckGraph): readonly DocumentNode[] {
 // ---------------------------------------------------------------------------
 
 /**
+ * Порог предупреждения «срок истекает»: сколько дней до конца действия ещё
+ * считается запасом. Параметр снимка/профиля, а не норматив; значение по
+ * умолчанию — месяц, как просил заказчик (S59).
+ */
+const DEFAULT_EXPIRY_WARNING_DAYS = 30;
+
+/**
  * Работает и на документах НЕИЗВЕСТНОГО типа.
  *
  * §9.1, строка 1: «базовые правила дат и сверки с реестром работают» даже
  * тогда, когда типо-специфичные дают `n_a`. Отсечь здесь `isKnownType === false`
  * значило бы, что незнакомый раздел вообще не проверяется на сроки, — а именно
  * ради этого §8.4 применяет базовую схему реквизитов ко всем документам.
+ *
+ * Документ, действующий на релевантную дату, но истекающий ближе
+ * `expiryWarningDays` (S59), получает предупреждение с понижением тяжести:
+ * дефекта нет, а инженеру стоит знать, что следующая поставка пойдёт уже по
+ * просроченному документу.
  */
-function evaluateInterval(graph: CheckGraph): RuleResult {
+function evaluateInterval(graph: CheckGraph, params: RuleParams): RuleResult {
+  const warningDays = threshold(
+    graph.profile,
+    params,
+    'expiryWarningDays',
+    DEFAULT_EXPIRY_WARNING_DAYS,
+  );
   const findings: RuleFinding[] = [];
   let applicable = 0;
 
@@ -290,6 +304,19 @@ function evaluateInterval(graph: CheckGraph): RuleResult {
           ...at(document, relevant.date.date > to.value ? to.source : from.source),
           message: `${documentLabel(document)} действует ${period}, а релевантная дата (${relevant.date.basis}) — ${formatDate(relevant.date.date)}: документ не действовал в этот момент`,
           hint: 'приложите документ, действующий на релевантную дату, либо отметку о подтверждении действия',
+        }),
+      );
+      continue;
+    }
+
+    const left = daysBetween(relevant.date.date, to.value);
+    if (left < warningDays) {
+      findings.push(
+        defect({
+          ...at(document, to.source),
+          severityOverride: 'warning',
+          message: `${documentLabel(document)} действует ${period}: на релевантную дату (${relevant.date.basis}) ${formatDate(relevant.date.date)} до конца срока оставалось ${String(left)} дн. — меньше ${String(warningDays)}`,
+          hint: 'запросите у поставщика действующую версию документа для следующих поставок',
         }),
       );
     }
@@ -376,53 +403,6 @@ function evaluateNotYetValid(graph: CheckGraph): RuleResult {
 }
 
 // ---------------------------------------------------------------------------
-// DATE.304 — отметка о подтверждении действия покрывает период
-// ---------------------------------------------------------------------------
-
-/**
- * Применимо только к документу, у которого есть И исходный интервал, И отметка.
- *
- * Требование `valid_to` здесь не формальность: поле `valid_until` без исходного
- * интервала означает не продление, а срок поверки прибора, и его проверяет
- * `DATE.331`. Без этого разделения два правила молча спорили бы об одном поле.
- */
-function evaluateProlongation(graph: CheckGraph): RuleResult {
-  const findings: RuleFinding[] = [];
-  let applicable = 0;
-
-  for (const document of documentsWithValidity(graph)) {
-    const to = dateRef(document, 'valid_to');
-    const until = dateRef(document, 'valid_until');
-    if (to.value === null || until.value === null) continue;
-    applicable += 1;
-
-    const relevant = relevantOf(graph, document);
-    if (relevant.date === null) {
-      findings.push(
-        unknownRelevant(graph, document, relevant, 'покрытии периода отметкой о продлении'),
-      );
-      continue;
-    }
-    if (until.value < relevant.date.date) {
-      findings.push(
-        defect({
-          ...at(document, until.source),
-          message: `${documentLabel(document)}: отметка о подтверждении действия продлевает документ до ${formatDate(until.value)}, а релевантная дата (${relevant.date.basis}) — ${formatDate(relevant.date.date)}: период не покрыт`,
-          hint: 'приложите отметку о подтверждении действия, покрывающую релевантную дату',
-        }),
-      );
-    }
-  }
-
-  if (applicable === 0) {
-    return notApplicable(
-      'в комплекте нет документов с отметкой о подтверждении действия при известном сроке окончания',
-    );
-  }
-  return fromFindings(findings);
-}
-
-// ---------------------------------------------------------------------------
 // DATE.310 — разовый документ выдан не позже применения
 // ---------------------------------------------------------------------------
 
@@ -459,83 +439,6 @@ function evaluateIssuedBeforeUse(graph: CheckGraph): RuleResult {
 
   if (applicable === 0) {
     return notApplicable('в комплекте нет разовых документов с распознанной датой выдачи');
-  }
-  return fromFindings(findings);
-}
-
-// ---------------------------------------------------------------------------
-// DATE.311 — документ не абсурдно старый
-// ---------------------------------------------------------------------------
-
-/**
- * Порог — ПАРАМЕТР, а не норматив.
- *
- * Никакого «сертификат действует три года» в коде нет и быть не может (§9.2,
- * §0.5): срок задаёт документ, а не движок. `maxAgeDays` отвечает на другой
- * вопрос — насколько давняя дата выдачи выглядит как ошибка распознавания или
- * подмена документа. Отсюда `warning` и отсутствие блокировки.
- *
- * Порог берётся `threshold()`: `thresholds` профиля раздела поверх параметров
- * снимка набора правил (§9.2 требует порогов ИЗ ПРОФИЛЯ). Обоснование
- * приоритета — в докстринге `threshold` в `helpers.ts`.
- */
-/**
- * Виды документов, которые выдаются без срока действия.
- *
- * Их возраст ни о чём не говорит: свидетельство о государственной регистрации
- * 2012 года действует, пока не менялись продукция и изготовитель.
- */
-const OPEN_ENDED_DOC_TYPES: readonly string[] = [
-  'state_registration_certificate',
-  'sanitary_conclusion',
-];
-
-function evaluateAbsurdlyOld(graph: CheckGraph, params: RuleParams): RuleResult {
-  const maxAgeDays = threshold(graph.profile, params, 'maxAgeDays', 3650);
-  const exempt = new Set(listParam(params, 'openEndedDocTypes', OPEN_ENDED_DOC_TYPES));
-  const findings: RuleFinding[] = [];
-  let applicable = 0;
-
-  for (const document of documentsWithValidity(graph)) {
-    /**
-     * Бессрочный документ старым не бывает.
-     *
-     * Свидетельство о государственной регистрации и санитарно-эпидемиологи­
-     * ческое заключение выдаются без срока: пока продукция и её изготовитель не
-     * менялись, документ 2012 года действует так же, как выданный вчера, и
-     * возраст о нём ничего не говорит. На папке «ИД Мастер апрель 2026»
-     * правило дало пять замечаний, и все пять — на таких свидетельствах.
-     *
-     * Список живёт значением по умолчанию, а не в `defaultParams`: снимок
-     * набора правил уже опубликован и неизменяем, и правка умолчаний
-     * переписала бы применённые миграции. Переопределить его снимком всё равно
-     * можно — параметр читается первым.
-     */
-    if (document.docTypeCode !== null && exempt.has(document.docTypeCode)) continue;
-
-    const issued = dateRef(document, 'issued_at');
-    if (issued.value === null) continue;
-    applicable += 1;
-
-    const relevant = relevantOf(graph, document);
-    if (relevant.date === null) {
-      findings.push(unknownRelevant(graph, document, relevant, 'возрасте документа'));
-      continue;
-    }
-    const age = daysBetween(issued.value, relevant.date.date);
-    if (age > maxAgeDays) {
-      findings.push(
-        defect({
-          ...at(document, issued.source),
-          message: `${documentLabel(document)} выдан ${formatDate(issued.value)} — за ${age} дн. до релевантной даты (${relevant.date.basis}) ${formatDate(relevant.date.date)}, что превышает порог ${maxAgeDays} дн.`,
-          hint: 'проверьте, тот ли документ приложен и верно ли распознана дата выдачи',
-        }),
-      );
-    }
-  }
-
-  if (applicable === 0) {
-    return notApplicable('в комплекте нет документов с распознанной датой выдачи');
   }
   return fromFindings(findings);
 }
@@ -619,483 +522,6 @@ function evaluateBatchManufactured(graph: CheckGraph): RuleResult {
 }
 
 // ---------------------------------------------------------------------------
-// DATE.320 — отгрузка смеси и сохраняемость
-// ---------------------------------------------------------------------------
-
-/**
- * Сохраняемость смеси нормативом здесь не задаётся.
- *
- * `workabilityHours` попадает только в ТЕКСТ замечания как ориентир из
- * конфигурации (профиль поверх снимка); сравнение идёт по дням (`maxDaysBetweenShipmentAndUse`), потому что в
- * реквизитах корпуса время суток не распознаётся — есть только дата отгрузки.
- * Сравнивать часы, которых нет, значило бы выдумывать точность.
- */
-function evaluateMixShipment(graph: CheckGraph, params: RuleParams): RuleResult {
-  const maxDays = threshold(graph.profile, params, 'maxDaysBetweenShipmentAndUse', 0);
-  const workabilityHours = threshold(graph.profile, params, 'workabilityHours', 4);
-
-  const targets = documentsOfType(graph, 'mix_quality_doc').filter(
-    (document) => document.isKnownType && !document.isFallbackType,
-  );
-  if (targets.length === 0) {
-    return notApplicable(
-      'в комплекте нет документов о качестве смеси с уверенно определённым типом',
-    );
-  }
-
-  const findings: RuleFinding[] = [];
-  for (const document of targets) {
-    const shipped = dateRef(document, 'shipped_at');
-    if (shipped.value === null) {
-      findings.push(
-        unknown({
-          ...at(document, shipped.source),
-          message: `${documentLabel(document)}: дата отгрузки смеси не распознана, сохраняемость не проверена`,
-          hint: 'проверьте распознавание даты отгрузки в документе о качестве смеси',
-        }),
-      );
-      continue;
-    }
-
-    const act = actOf(graph, document);
-    const works = worksDateOf(act);
-    if (works.value === null) {
-      findings.push(unknownRelevant(graph, document, { act, date: null }, 'сохраняемости смеси'));
-      continue;
-    }
-
-    const gap = Math.abs(daysBetween(shipped.value, works.value));
-    if (gap > maxDays) {
-      findings.push(
-        defect({
-          ...at(document, shipped.source),
-          message: `${documentLabel(document)}: смесь отгружена ${formatDate(shipped.value)}, а работы по акту датированы ${formatDate(works.value)} — расхождение ${gap} дн. при сохраняемости порядка ${workabilityHours} ч`,
-          hint: 'сверьте дату отгрузки смеси с датой укладки; при переносе укладки требуется документ на соответствующую партию',
-        }),
-      );
-    }
-  }
-
-  return fromFindings(findings);
-}
-
-// ---------------------------------------------------------------------------
-// DATE.330 — аккредитация лаборатории действует на дату испытания
-// ---------------------------------------------------------------------------
-
-/** Протоколы с уверенно определённым типом: логика типо-специфична (§9.1). */
-function protocolsOf(graph: CheckGraph): DocumentNode[] {
-  return documentsOfType(graph, PROTOCOL_TYPES).filter(
-    (document) => document.isKnownType && !document.isFallbackType,
-  );
-}
-
-/** Дата испытания: испытание, затем отбор проб, затем дата выдачи протокола. */
-function testDateOf(document: DocumentNode): DateRef {
-  const tested = dateRef(document, 'tested_at');
-  if (tested.value !== null) return tested;
-  const sampled = dateRef(document, 'sampled_at');
-  if (sampled.value !== null) return sampled;
-  return dateRef(document, 'issued_at');
-}
-
-function evaluateAccreditationDate(graph: CheckGraph): RuleResult {
-  const targets = protocolsOf(graph).filter(
-    (document) => dateRef(document, 'issuer_accreditation_valid_to').value !== null,
-  );
-  if (targets.length === 0) {
-    return notApplicable(
-      'в комплекте нет протоколов с распознанным сроком действия аккредитации лаборатории',
-    );
-  }
-
-  const findings: RuleFinding[] = [];
-  for (const document of targets) {
-    const accreditation = dateRef(document, 'issuer_accreditation_valid_to');
-    if (accreditation.value === null) continue;
-    const tested = testDateOf(document);
-
-    if (tested.value === null) {
-      findings.push(
-        unknown({
-          ...at(document, accreditation.source),
-          message: `${documentLabel(document)}: дата испытания не распознана, действие аккредитации лаборатории на неё не проверено`,
-          hint: 'проверьте распознавание даты испытания и даты отбора проб в протоколе',
-        }),
-      );
-      continue;
-    }
-
-    if (accreditation.value < tested.value) {
-      findings.push(
-        defect({
-          ...at(document, accreditation.source),
-          message: `${documentLabel(document)}: аккредитация лаборатории действует по ${formatDate(accreditation.value)}, а испытание проведено ${formatDate(tested.value)} — на дату испытания аккредитация не действовала`,
-          hint: 'запросите протокол лаборатории с действующей на дату испытания аккредитацией',
-        }),
-      );
-    }
-  }
-
-  return fromFindings(findings);
-}
-
-// ---------------------------------------------------------------------------
-// DATE.331 — поверка прибора действует на дату измерения
-// ---------------------------------------------------------------------------
-
-function evaluateInstrumentCalibration(graph: CheckGraph): RuleResult {
-  const targets = graph.documents.filter((document) => field(document, 'measured_at') !== null);
-  if (targets.length === 0) {
-    return notApplicable('в комплекте нет документов с реквизитом даты измерения');
-  }
-
-  const findings: RuleFinding[] = [];
-  for (const document of targets) {
-    const measured = dateRef(document, 'measured_at');
-    const calibration = dateRef(document, 'valid_until');
-
-    if (measured.value === null) {
-      findings.push(
-        unknown({
-          ...at(document, measured.source),
-          message: `${documentLabel(document)}: дата измерения не распознана как дата, действие поверки прибора на неё не проверено`,
-          hint: 'проверьте распознавание даты измерения в протоколе',
-        }),
-      );
-      continue;
-    }
-    if (calibration.value === null) {
-      findings.push(
-        unknown({
-          ...at(document, measured.source),
-          message: `${documentLabel(document)}: срок действия поверки прибора не распознан, сопоставление с датой измерения ${formatDate(measured.value)} не выполнено`,
-          hint: 'проверьте распознавание сведений о поверке средств измерений',
-        }),
-      );
-      continue;
-    }
-    if (calibration.value < measured.value) {
-      findings.push(
-        defect({
-          ...at(document, calibration.source),
-          message: `${documentLabel(document)}: поверка прибора действует по ${formatDate(calibration.value)}, а измерение выполнено ${formatDate(measured.value)} — на дату измерения поверка истекла`,
-          hint: 'запросите протокол с прибором, поверенным на дату измерения',
-        }),
-      );
-    }
-  }
-
-  return fromFindings(findings);
-}
-
-// ---------------------------------------------------------------------------
-// DATE.332 — аккредитация подтверждена внешним реестром
-// ---------------------------------------------------------------------------
-
-/** Аттестат сравнивается по буквам и цифрам: OCR даёт разные разделители. */
-function normalizeAttestat(value: string): string {
-  return foldHomoglyphs(value).replace(/[^\p{L}\p{N}]+/gu, '');
-}
-
-function evaluateAccreditationRegistry(graph: CheckGraph): RuleResult {
-  const targets = graph.documents.filter(
-    (document) => textOf(document, 'issuer_accreditation') !== null,
-  );
-  if (targets.length === 0) {
-    return notApplicable(
-      'в комплекте нет документов с распознанным номером аттестата аккредитации',
-    );
-  }
-
-  const lookup = graph.external.accreditation;
-
-  if (lookup.status === 'unavailable') {
-    // §9.5: без источника данных вывод об аккредитации — юридическое
-    // утверждение, которого система сделать не может. Одно замечание на
-    // ревизию, а не по одному на каждый протокол: инженер всё равно пойдёт в
-    // реестр один раз.
-    const numbers = targets
-      .map((document) => textOf(document, 'issuer_accreditation'))
-      .filter((value): value is string => value !== null);
-    return fromFindings([
-      externalUnavailable({
-        targetType: 'folder',
-        targetId: graph.folder.id,
-        sourcePageId: null,
-        blockId: null,
-        evidence: [],
-        confidence: null,
-        message: `Аккредитация лабораторий по внешнему реестру не подтверждена: ${lookup.reason}. Аттестаты в комплекте: ${numbers.join(', ')}. Требуется ручная проверка в реестре аккредитованных лиц.`,
-        hint: 'проверьте аттестаты в реестре аккредитованных лиц вручную и зафиксируйте результат',
-      }),
-    ]);
-  }
-
-  const findings: RuleFinding[] = [];
-  for (const document of targets) {
-    const source = field(document, 'issuer_accreditation');
-    const number = textOf(document, 'issuer_accreditation');
-    if (number === null) continue;
-    const normalized = normalizeAttestat(number);
-    const record = lookup.records.find(
-      (item) => normalizeAttestat(item.registryNumber) === normalized,
-    );
-
-    if (record === undefined) {
-      findings.push(
-        defect({
-          ...at(document, source),
-          message: `${documentLabel(document)}: аттестат аккредитации ${number} не найден в реестре аккредитованных лиц`,
-          hint: 'сверьте номер аттестата с реестром; при опечатке исправьте реквизит, иначе запросите протокол аккредитованной лаборатории',
-        }),
-      );
-      continue;
-    }
-
-    const tested = testDateOf(document);
-    if (tested.value === null) {
-      findings.push(
-        unknown({
-          ...at(document, source),
-          message: `${documentLabel(document)}: аттестат ${number} найден в реестре, но дата испытания не распознана — действие аккредитации на неё не проверено`,
-          hint: 'проверьте распознавание даты испытания в протоколе',
-        }),
-      );
-      continue;
-    }
-    if (isIsoDate(record.validTo) && record.validTo < tested.value) {
-      findings.push(
-        defect({
-          ...at(document, source),
-          message: `${documentLabel(document)}: по реестру аккредитация ${number} действует по ${formatDate(record.validTo)}, а испытание проведено ${formatDate(tested.value)}`,
-          hint: 'запросите протокол лаборатории с действующей на дату испытания аккредитацией',
-        }),
-      );
-    }
-  }
-
-  return fromFindings(findings);
-}
-
-// ---------------------------------------------------------------------------
-// DATE.372 — протокол испытаний относится к применённым партиям
-// ---------------------------------------------------------------------------
-
-/** Дата протокола: выдача, затем испытание, затем отбор проб. */
-function protocolDateOf(document: DocumentNode): DateRef {
-  const issued = dateRef(document, 'issued_at');
-  if (issued.value !== null) return issued;
-  const tested = dateRef(document, 'tested_at');
-  if (tested.value !== null) return tested;
-  return dateRef(document, 'sampled_at');
-}
-
-/**
- * Дефект №4 корпуса.
- *
- * В АОСР №336 (работы 28.02–09.03.2026) приложен протокол №10353.А/06.25 от
- * 20.06.2025, а партии арматуры — от 09.01.2026 и позже. Протокол физически не
- * может относиться к материалу, которого на дату испытаний ещё не существовало,
- * и никакая проверка сроков действия этого не ловит: сам протокол «свежий»
- * относительно работ, а каждая партия изготовлена до работ. Ошибка видна только
- * в сопоставлении протокола с партиями ТОГО ЖЕ акта.
- *
- * Тяжесть — `warning`, а не `error`: связь протокола с партией восстанавливается
- * не только датой (бывает входной контроль по ранее отобранным пробам), и §9.1
- * запрещает превращать неполноту модели в блокирующий вывод.
- */
-function evaluateProtocolCoversBatches(graph: CheckGraph, params: RuleParams): RuleResult {
-  const graceDays = threshold(graph.profile, params, 'graceDays', 0);
-  const targets = protocolsOf(graph);
-  if (targets.length === 0) {
-    return notApplicable('в комплекте нет протоколов испытаний с уверенно определённым типом');
-  }
-
-  const findings: RuleFinding[] = [];
-  for (const document of targets) {
-    const protocolDate = protocolDateOf(document);
-    if (protocolDate.value === null) {
-      findings.push(
-        unknown({
-          ...at(document, protocolDate.source),
-          message: `${documentLabel(document)}: ни дата выдачи, ни дата испытания, ни дата отбора проб не распознаны — отнесение протокола к партиям не проверено`,
-          hint: 'проверьте распознавание дат протокола',
-        }),
-      );
-      continue;
-    }
-
-    const act = actOf(graph, document);
-    if (act === null) {
-      findings.push(
-        unknown({
-          ...at(document, protocolDate.source),
-          message: `${documentLabel(document)}: протокол не связан ребром графа ни с одним актом освидетельствования — состав применённых партий неизвестен`,
-          hint: 'привяжите протокол к акту освидетельствования',
-        }),
-      );
-      continue;
-    }
-
-    // Партии «того же акта» — те, чьи документы качества принадлежат этому акту.
-    const actDocumentIds = new Set(
-      graph.relations
-        .filter((edge) => edge.parentDocumentId === act.id)
-        .map((edge) => edge.childDocumentId),
-    );
-    actDocumentIds.add(act.id);
-
-    const dated = graph.materials.flatMap((material) =>
-      material.batches
-        .filter(
-          (batch) =>
-            isIsoDate(batch.manufacturedAt) &&
-            batch.documentIds.some((id) => actDocumentIds.has(id)),
-        )
-        .map((batch) => ({ material, batch })),
-    );
-
-    if (dated.length === 0) {
-      findings.push(
-        unknown({
-          ...at(document, protocolDate.source),
-          message: `${documentLabel(document)}: у акта ${documentLabel(act)} нет партий с распознанной датой изготовления — отнесение протокола к партиям не проверено`,
-          hint: 'проверьте распознавание дат изготовления партий в документах о качестве',
-        }),
-      );
-      continue;
-    }
-
-    for (const { material, batch } of dated) {
-      const manufacturedAt = batch.manufacturedAt;
-      if (!isIsoDate(manufacturedAt)) continue;
-      if (daysBetween(protocolDate.value, manufacturedAt) > graceDays) {
-        findings.push(
-          defect({
-            ...at(document, protocolDate.source),
-            message: `${documentLabel(document)} датирован ${formatDate(protocolDate.value)}, а партия «${material.nameRaw}» (${batchLabel(batch)}) изготовлена ${formatDate(manufacturedAt)}: протокол не может относиться к материалу, которого на дату испытаний ещё не существовало`,
-            hint: 'приложите протокол испытаний, относящийся к применённым партиям, либо уточните состав приложений акта',
-          }),
-        );
-      }
-    }
-  }
-
-  return fromFindings(findings);
-}
-
-// ---------------------------------------------------------------------------
-// SIG.STAMP.370 — срок сертификата ЭП по визуальному штампу
-// ---------------------------------------------------------------------------
-
-/**
- * Источник — OCR, а не криптография.
- *
- * `docs/CORPUS_FINDINGS.md`: во всех трёх PDF корпуса нет ни `ByteRange`, ни
- * `SubFilter`, ни `/Type/Sig` — штамп «ДОКУМЕНТ ПОДПИСАН ЭЛЕКТРОННОЙ ПОДПИСЬЮ»
- * впечатан в растр страницы системой ЭДО. Поэтому правило НИКОГДА не `error`:
- * вывод о недействительности подписи по распознанной картинке — утверждение,
- * которого система сделать не вправе.
- */
-function evaluateSignatureStamp(graph: CheckGraph): RuleResult {
-  const targets = graph.documents.filter(
-    (document) => field(document, 'signature_stamp_valid_to') !== null,
-  );
-  if (targets.length === 0) {
-    return notApplicable('в комплекте нет документов с распознанным штампом электронной подписи');
-  }
-
-  const findings: RuleFinding[] = [];
-  for (const document of targets) {
-    const stamp = dateRef(document, 'signature_stamp_valid_to');
-    if (stamp.value === null) {
-      findings.push(
-        unknown({
-          ...at(document, stamp.source),
-          message: `${documentLabel(document)}: срок действия сертификата в штампе ЭП не распознан как дата, проверка не выполнена`,
-          hint: 'проверьте распознавание штампа электронной подписи на странице документа',
-        }),
-      );
-      continue;
-    }
-
-    // §9.2: у визуального штампа релевантна напечатанная дата подписания, и
-    // только если её нет — дата события, к которому документ привязан.
-    const signed = dateRef(document, 'signed_at');
-    const relevant = relevantOf(graph, document);
-    const against =
-      signed.value !== null
-        ? { date: signed.value, basis: 'дата подписания из штампа', source: signed.source }
-        : relevant.date === null
-          ? null
-          : { date: relevant.date.date, basis: relevant.date.basis, source: relevant.date.source };
-
-    if (against === null) {
-      findings.push(unknownRelevant(graph, document, relevant, 'сроке сертификата ЭП'));
-      continue;
-    }
-
-    if (stamp.value < against.date) {
-      findings.push(
-        defect({
-          ...at(document, stamp.source),
-          message: `${documentLabel(document)}: по штампу ЭП сертификат действует по ${formatDate(stamp.value)}, а ${against.basis} — ${formatDate(against.date)}; сведения сняты с изображения штампа, криптографическая проверка не выполнялась`,
-          hint: 'проверьте штамп подписи глазами и при подтверждении запросите документ, подписанный действующим сертификатом',
-        }),
-      );
-    }
-  }
-
-  return fromFindings(findings);
-}
-
-// ---------------------------------------------------------------------------
-// SIG.PDF.371 — структурный зонд встроенной подписи
-// ---------------------------------------------------------------------------
-
-/**
- * Зонд отвечает на вопрос «есть ли в файле словарь подписи», а не «действительна
- * ли подпись». `detected_unverified` — это `info`, а не дефект: найдена не
- * значит действительна, и обратное утверждение в MVP недоказуемо.
- */
-function evaluateSignatureProbe(graph: CheckGraph): RuleResult {
-  const targets = graph.documents.filter((document) => field(document, 'signature_probe') !== null);
-  if (targets.length === 0) {
-    return notApplicable('в комплекте нет документов с результатом структурного зонда подписи');
-  }
-
-  const findings: RuleFinding[] = [];
-  for (const document of targets) {
-    const probe = field(document, 'signature_probe');
-    const value = probe?.valueText ?? null;
-
-    if (value === 'none_detected') continue;
-
-    if (value === 'detected_unverified') {
-      findings.push(
-        defect({
-          ...at(document, probe),
-          message: `${documentLabel(document)}: в файле обнаружена встроенная электронная подпись, криптографическая проверка в MVP не выполняется`,
-          hint: 'при необходимости проверьте подпись штатным средством проверки ЭП',
-        }),
-      );
-      continue;
-    }
-
-    findings.push(
-      unknown({
-        ...at(document, probe),
-        message: `${documentLabel(document)}: результат структурного зонда подписи неизвестен (${value ?? 'значение не задано'}), вывод о встроенной подписи не сделан`,
-        hint: 'перезапустите задачу структурного зондирования подписи для исходного файла',
-      }),
-    );
-  }
-
-  return fromFindings(findings);
-}
-
-// ---------------------------------------------------------------------------
 // Каталог группы
 // ---------------------------------------------------------------------------
 
@@ -1111,8 +537,10 @@ export const DATE_RULES: readonly RuleSpec[] = [
     waiverRoles: BLOCKING_WAIVERS,
     requiresSectionProfile: false,
     requiresExternalRegistry: null,
+    // `expiryWarningDays` читается через `threshold()` с умолчанием в коде:
+    // `defaultParams` напечатаны в снимках 0044…0081 и меняться не могут.
     defaultParams: {},
-    evaluate: (graph) => evaluateInterval(graph),
+    evaluate: (graph, params) => evaluateInterval(graph, params),
   },
   {
     code: 'DATE.302',
@@ -1154,7 +582,8 @@ export const DATE_RULES: readonly RuleSpec[] = [
     requiresSectionProfile: false,
     requiresExternalRegistry: null,
     defaultParams: {},
-    evaluate: (graph) => evaluateProlongation(graph),
+    // Снято (S59): отметка о продлении — вне минимального набора.
+    evaluate: retiredRule,
   },
   {
     code: 'DATE.310',
@@ -1182,7 +611,9 @@ export const DATE_RULES: readonly RuleSpec[] = [
     requiresSectionProfile: false,
     requiresExternalRegistry: null,
     defaultParams: { maxAgeDays: 3650 },
-    evaluate: evaluateAbsurdlyOld,
+    // Снято (S59): «абсурдно старый» — не дефект комплекта; на бою только
+    // «не проверено» (шесть замечаний, все на бессрочных свидетельствах).
+    evaluate: retiredRule,
   },
   {
     code: 'DATE.312',
@@ -1210,7 +641,8 @@ export const DATE_RULES: readonly RuleSpec[] = [
     requiresSectionProfile: false,
     requiresExternalRegistry: null,
     defaultParams: { workabilityHours: 4, maxDaysBetweenShipmentAndUse: 0 },
-    evaluate: evaluateMixShipment,
+    // Снято (S59): сохраняемость смеси — материаловедение, вне минимального набора.
+    evaluate: retiredRule,
   },
   {
     code: 'DATE.330',
@@ -1224,7 +656,8 @@ export const DATE_RULES: readonly RuleSpec[] = [
     requiresSectionProfile: false,
     requiresExternalRegistry: null,
     defaultParams: {},
-    evaluate: (graph) => evaluateAccreditationDate(graph),
+    // Снято (S59): аккредитация лаборатории — вне минимального набора.
+    evaluate: retiredRule,
   },
   {
     code: 'DATE.331',
@@ -1238,7 +671,8 @@ export const DATE_RULES: readonly RuleSpec[] = [
     requiresSectionProfile: false,
     requiresExternalRegistry: null,
     defaultParams: {},
-    evaluate: (graph) => evaluateInstrumentCalibration(graph),
+    // Снято (S59): поверка прибора — вне минимального набора.
+    evaluate: retiredRule,
   },
   {
     code: 'DATE.332',
@@ -1250,9 +684,11 @@ export const DATE_RULES: readonly RuleSpec[] = [
     defaultBlocking: false,
     waiverRoles: SOFT_WAIVERS,
     requiresSectionProfile: false,
-    requiresExternalRegistry: 'accreditation',
+    // Снято (S59): внешнего реестра аккредитации у портала нет; требование
+    // реестра снято вместе с правилом (в сид поле не попадает).
+    requiresExternalRegistry: null,
     defaultParams: {},
-    evaluate: (graph) => evaluateAccreditationRegistry(graph),
+    evaluate: retiredRule,
   },
   {
     code: 'DATE.372',
@@ -1266,7 +702,8 @@ export const DATE_RULES: readonly RuleSpec[] = [
     requiresSectionProfile: false,
     requiresExternalRegistry: null,
     defaultParams: { graceDays: 0 },
-    evaluate: evaluateProtocolCoversBatches,
+    // Снято (S59): протокол против партий — вне минимального набора.
+    evaluate: retiredRule,
   },
 ];
 
@@ -1283,7 +720,8 @@ export const SIGNATURE_RULES: readonly RuleSpec[] = [
     requiresSectionProfile: false,
     requiresExternalRegistry: null,
     defaultParams: {},
-    evaluate: (graph) => evaluateSignatureStamp(graph),
+    // Снято (S59): портал подписей не ставит и не проверяет.
+    evaluate: retiredRule,
   },
   {
     code: 'SIG.PDF.371',
@@ -1297,6 +735,7 @@ export const SIGNATURE_RULES: readonly RuleSpec[] = [
     requiresSectionProfile: false,
     requiresExternalRegistry: null,
     defaultParams: {},
-    evaluate: (graph) => evaluateSignatureProbe(graph),
+    // Снято (S59): то же.
+    evaluate: retiredRule,
   },
 ];

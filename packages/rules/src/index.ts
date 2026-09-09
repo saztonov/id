@@ -10,8 +10,8 @@
 export * from './types.js';
 export * from './result.js';
 export * from './helpers.js';
-export * from './tolerance.js';
 export * from './materials.js';
+export * from './material-cover.js';
 export * from './external.js';
 export * from './engine.js';
 export * from './complect-run.js';
@@ -24,6 +24,7 @@ export {
   AOSR_RULES,
   CROSSCHECK_RULES,
   EXTERNAL_RULES,
+  MINIMAL_RULES,
   TRANSFER_REGISTRY_RULES,
 } from './aosr.js';
 export { EVIDENCE_FIELDS, EVIDENCE_RULES } from './evidence.js';

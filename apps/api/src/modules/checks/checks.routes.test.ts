@@ -138,7 +138,9 @@ const DOC_E = id(112);
 const SHA = (letter: string): string => letter.repeat(64);
 
 /** Код из реестра правил (seed 0017): `findings.rule_code` — внешний ключ. */
-const RULE_CODE = 'AOSR.ACT.030';
+// Действующее правило: `/admin/rule-catalog` отдаёт `RULE_CATALOG`, а
+// `AOSR.ACT.030` снято в S59 (строка в БД осталась, замечания на неё ссылаются).
+const RULE_CODE = 'AOSR.ACT.031';
 
 /**
  * Маркер чужих данных.

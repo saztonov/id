@@ -303,16 +303,17 @@ const DOCUMENTS: readonly DocSpec[] = [
   },
 ];
 
-/** Семь известных дефектов корпуса. Порядок — как в §0.1 плана. */
-const DEFECT_RULES = [
-  'AOSR.HDR.022',
-  'MAT.111',
-  'MAT.112',
-  'DATE.372',
-  'TP.620',
-  'AOSR.P4.081',
-  'LAB.651',
-] as const;
+/**
+ * Известные дефекты корпуса, которые ловит МИНИМАЛЬНЫЙ набор правил (S59).
+ *
+ * До S59 здесь стояли семь правил; пять из них (`MAT.111`, `MAT.112`,
+ * `DATE.372`, `AOSR.P4.081`, `LAB.651`) сняты решением заказчика (ADR-0029):
+ * у портала нет эталона, чтобы судить изготовителя, редакцию НД, протокол по
+ * возрасту образца и число слоёв в схеме. Фикстура сохранена целиком — она
+ * воспроизводит боевой комплект, и сквозной прогон на ней по-прежнему
+ * доказывает, что оставшиеся дефекты доезжают до `findings` через очередь.
+ */
+const DEFECT_RULES = ['AOSR.HDR.022', 'TP.620'] as const;
 
 const ALL_RULE_CODES: readonly string[] = RULE_CATALOG.map((spec) => spec.code);
 
@@ -529,13 +530,12 @@ function configurationStatements(): readonly string[] {
   const codes = ALL_RULE_CODES.map((code) => lit(code)).join(', ');
   const statements: string[] = [
     `INSERT INTO section_profiles (id, section_code, version, effective_from, effective_to,
-                                   expected_doc_types, material_categories, material_matrix,
+                                   expected_doc_types,
                                    enabled_rule_codes, thresholds, autonomy_level,
                                    published_at, published_by)
        VALUES ('${SECTION_PROFILE_V1}', 'roofing', 1, '2020-01-01'::date, NULL,
                ARRAY[${lit('aosr')}, ${lit('annex_registry')}]::text[],
-               ARRAY[${lit('roll_waterproofing')}, ${lit('rebar')}, ${lit('ready_mix_concrete')}]::text[],
-               '{}'::jsonb, ARRAY[${codes}]::text[], '{}'::jsonb, 'assisted',
+               ARRAY[${codes}]::text[], '{}'::jsonb, 'assisted',
                now(), '${USER_ADMIN}')`,
     // Версия заводится ЧЕРНОВИКОМ и публикуется после наполнения: снимок
     // опубликованного набора неизменяем (0008), и вставка правила в уже
@@ -830,7 +830,7 @@ describe('задачи 20–21 действительно исполняются
 // 4–5. Замечания в базе и non-degradable гейт S9
 // =====================================================================
 
-describe('замечания записаны, семь известных дефектов найдены', () => {
+describe('замечания записаны, известные дефекты минимального набора найдены', () => {
   it('замечания читаются прямым SQL из findings', async () => {
     const rows = await findingsOf(firstRunId);
     expect(rows.length).toBeGreaterThan(0);
@@ -838,7 +838,7 @@ describe('замечания записаны, семь известных де�
     expect((await runCounts(firstRunId)).findings).toBe(rows.length);
   });
 
-  it('каждый из семи дефектов корпуса даёт открытое замечание', async () => {
+  it('каждый из дефектов корпуса даёт открытое замечание', async () => {
     const rows = await findingsOf(firstRunId);
     for (const code of DEFECT_RULES) {
       const open = rows.filter((row) => row.rule_code === code && row.state === 'open');
@@ -848,12 +848,16 @@ describe('замечания записаны, семь известных де�
     }
   });
 
-  it('семь правил исполнялись и дали вердикт fail', async () => {
+  it('правила дефектов исполнялись и дали вердикт fail', async () => {
     // Без этой проверки предыдущая могла бы быть зелёной по чужому замечанию.
+    // Прогон идёт по комплектам: у кода несколько записей журнала, и `fail`
+    // ищется среди всех, а не у последней.
     const journal = await journalOf(firstRunId);
-    const byCode = new Map(journal.executions.map((entry) => [entry.ruleCode, entry]));
     for (const code of DEFECT_RULES) {
-      expect(byCode.get(code)?.verdict, `${code} в журнале прогона`).toBe('fail');
+      const verdicts = journal.executions
+        .filter((entry) => entry.ruleCode === code)
+        .map((entry) => entry.verdict);
+      expect(verdicts, `${code} в журнале прогона`).toContain('fail');
     }
   });
 
@@ -863,13 +867,22 @@ describe('замечания записаны, семь известных де�
       rows.find((row) => row.rule_code === code && row.state === 'open')?.message ?? '';
 
     expect(messageOf('AOSR.HDR.022')).toContain(OGRN_SHORT);
-    expect(messageOf('MAT.111')).toContain('ПромСорт-Тула');
-    expect(messageOf('MAT.112')).toContain('2015');
-    expect(messageOf('MAT.112')).toContain('2011');
-    expect(messageOf('DATE.372')).toContain('20.06.2025');
-    expect(messageOf('DATE.372')).toContain('09.01.2026');
     expect(messageOf('TP.620')).toContain('Дата выдачи');
-    expect(messageOf('LAB.651')).toMatch(/28/u);
+  });
+
+  it('снятые правила не исполняются и замечаний не оставляют', async () => {
+    // Снятие — вывод из каталога, а не строка в списке пропусков: в журнале
+    // снятого кода нет вовсе, и в `findings` ему взяться неоткуда.
+    const journal = await journalOf(firstRunId);
+    const executed = new Set(journal.executions.map((entry) => entry.ruleCode));
+    const rows = await findingsOf(firstRunId);
+    for (const code of ['MAT.111', 'MAT.112', 'DATE.372', 'AOSR.P4.081', 'LAB.651']) {
+      expect(executed.has(code), `${code} исполнялось`).toBe(false);
+      expect(
+        rows.some((row) => row.rule_code === code),
+        `${code} оставило замечание`,
+      ).toBe(false);
+    }
   });
 });
 
@@ -1110,18 +1123,16 @@ describe('троичная логика на сквозном прогоне', (
     });
   });
 
-  it('отсутствие внешнего реестра даёт external_unavailable и ручную проверку', async () => {
+  it('внешние реестры без источника замечаний не порождают, но в журнале названы', async () => {
+    // До S59 каждый недоступный реестр давал замечание `external_unavailable`
+    // «требуется ручная проверка» — по четыре на папку, ни одного открытого.
+    // Правила `EXT.*` и `DATE.332` сняты (ADR-0029): замечаний такого
+    // происхождения в прогоне быть не должно вовсе, а факт недоступности
+    // источников по-прежнему записан в журнал — это сведения о среде, не дефект.
     const rows = (await findingsOf(firstRunId)).filter(
       (row) => row.origin === 'external_unavailable',
     );
-    expect(rows.length).toBeGreaterThan(0);
-    for (const row of rows) {
-      // Вывод о членстве в СРО без источника — юридическое утверждение,
-      // которого система сделать не может (§9.5).
-      expect(row.state, row.rule_code).toBe('undetermined');
-      expect(row.is_blocking, row.rule_code).toBe(false);
-      expect(row.message, row.rule_code).toContain('требуется ручная проверка');
-    }
+    expect(rows).toEqual([]);
 
     const journal = await journalOf(firstRunId);
     expect(journal.externalRegistriesUnavailable.length).toBeGreaterThan(0);
@@ -1167,14 +1178,13 @@ describe('материалы и партии выведены и записан�
     );
     expect(danglingBatches).toBe(0);
 
-    // Дефект №2 адресуется именно партии, а не документу: иначе проверка выше
-    // была бы истинна по построению (целей такого типа просто не было бы).
-    const batchTargets = await count(
-      `SELECT count(*) AS count FROM findings
-        WHERE validation_run_id = '${firstRunId}'
-          AND rule_code = 'MAT.111' AND target_type = 'batch'`,
-    );
-    expect(batchTargets).toBeGreaterThan(0);
+    // До S59 здесь требовалось хотя бы одно замечание с целью «партия»: его
+    // давало `MAT.111` (дефект №2). Правило снято (ADR-0029), и из действующих
+    // партию адресует только `DATE.312`, которому на этом комплекте возразить
+    // нечего. Проверка внешнего ключа выше остаётся: партии в базе есть, и
+    // замечание с несуществующей партией по-прежнему было бы дефектом.
+    const batches = await count(`SELECT count(*) AS count FROM batches`);
+    expect(batches).toBeGreaterThan(0);
   });
 
   it('доказательства замечаний ссылаются на настоящие версии текста', async () => {
@@ -1244,13 +1254,12 @@ describe('enabled_rule_codes профиля ограничивает прого�
     );
     await testDb.query(
       `INSERT INTO section_profiles (id, section_code, version, effective_from, effective_to,
-                                     expected_doc_types, material_categories, material_matrix,
+                                     expected_doc_types,
                                      enabled_rule_codes, thresholds, autonomy_level,
                                      published_at, published_by)
          VALUES ('${SECTION_PROFILE_V2}', 'roofing', 2, '${TODAY}'::date, NULL,
                  ARRAY[${lit('aosr')}, ${lit('annex_registry')}]::text[],
-                 ARRAY[${lit('roll_waterproofing')}, ${lit('rebar')}, ${lit('ready_mix_concrete')}]::text[],
-                 '{}'::jsonb, ARRAY[${enabled}]::text[], '{}'::jsonb, 'assisted',
+                 ARRAY[${enabled}]::text[], '{}'::jsonb, 'assisted',
                  now(), '${USER_ADMIN}')`,
     );
 
@@ -1314,13 +1323,12 @@ describe('пустой список правил профиля не выклю�
     );
     await testDb.query(
       `INSERT INTO section_profiles (id, section_code, version, effective_from, effective_to,
-                                     expected_doc_types, material_categories, material_matrix,
+                                     expected_doc_types,
                                      enabled_rule_codes, thresholds, autonomy_level,
                                      published_at, published_by)
          VALUES ('${SECTION_PROFILE_V3}', 'roofing', 3, '${TODAY}'::date, NULL,
                  ARRAY[${lit('aosr')}, ${lit('annex_registry')}]::text[],
-                 ARRAY[${lit('roll_waterproofing')}, ${lit('rebar')}, ${lit('ready_mix_concrete')}]::text[],
-                 '{}'::jsonb, '{}'::text[], '{}'::jsonb, 'assisted',
+                 '{}'::text[], '{}'::jsonb, 'assisted',
                  now(), '${USER_ADMIN}')`,
     );
 
@@ -1357,7 +1365,7 @@ describe('пустой список правил профиля не выклю�
       `INSERT INTO object_rule_profiles (id, object_id, section_code, version, effective_from,
                                          effective_to, overrides, published_at)
          VALUES ('${OBJECT_PROFILE}', '${OBJECT}', NULL, 1, '${TODAY}'::date, NULL,
-                 '{"disabledRuleCodes": ["AOSR.HDR.022", "MAT.111"]}'::jsonb, now())`,
+                 '{"disabledRuleCodes": ["AOSR.HDR.022", "AOSR.HDR.021"]}'::jsonb, now())`,
     );
 
     await enqueueSystemJob(db, {
@@ -1370,11 +1378,13 @@ describe('пустой список правил профиля не выклю�
     const runId = await latestRunId();
     const journal = await journalOf(runId);
     expect(journal.skippedCodes['AOSR.HDR.022']).toBe('not_in_profile');
-    expect(journal.skippedCodes['MAT.111']).toBe('not_in_profile');
-    const executed = journal.executions.map((entry) => entry.ruleCode);
-    expect(executed).not.toContain('AOSR.HDR.022');
-    expect(executed).not.toContain('MAT.111');
-    expect(executed.length).toBe(ALL_RULE_CODES.length - 2);
+    expect(journal.skippedCodes['AOSR.HDR.021']).toBe('not_in_profile');
+    const executed = new Set(journal.executions.map((entry) => entry.ruleCode));
+    expect(executed.has('AOSR.HDR.022')).toBe(false);
+    expect(executed.has('AOSR.HDR.021')).toBe(false);
+    // Прогон идёт по комплектам (ADR-0024): один код даёт запись на каждый
+    // срез, поэтому сравнивается множество кодов, а не число записей.
+    expect(executed.size).toBe(ALL_RULE_CODES.length - 2);
 
     // Наложение уводится в прошлое: на него ссылается прогон, удалить нельзя.
     await testDb.query(

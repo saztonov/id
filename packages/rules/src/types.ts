@@ -371,8 +371,16 @@ export interface ProfileNode {
   readonly sectionProfileVersion: number | null;
   readonly objectProfileIds: readonly string[];
   readonly expectedDocTypes: readonly string[];
-  readonly materialCategories: readonly MaterialCategoryCode[];
-  readonly materialMatrix: Readonly<Record<string, unknown>>;
+  /**
+   * Категорий материалов и матрицы раздела здесь больше нет (S59).
+   *
+   * Обе настройки читали только `AOSR.P3.070` и `MAT.110`: первое сверяло
+   * материал с перечнем категорий профиля, второе — пакет подтверждения с
+   * матрицей. Заказчик решил, что порталу достаточно одного вопроса — «есть ли
+   * у материала сертификат, декларация или паспорт», — и вопрос этот от раздела
+   * не зависит. Колонки в БД остаются: у них нет внешних ключей, и исторические
+   * профили читаются как есть.
+   */
   /**
    * Список правил профиля. ПУСТОЙ список — ограничений нет (S58): все папки
    * проверяются одним набором, и профиль раздела, заведённый ради состава
