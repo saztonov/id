@@ -25,7 +25,7 @@
  * «страница учтена и ждёт человека» обязаны различаться.
  */
 import { normalizeDocNo } from '@id/contracts';
-import { DOC_TYPES, normalizeLines, PAGE_ROLES } from '@id/doc-types';
+import { DOC_TYPES, normalizeLines, PAGE_ROLES, RETIRED_DOC_TYPE_CODES } from '@id/doc-types';
 import { continuesTable } from './table-flow.js';
 import type {
   ClassificationSource,
@@ -53,6 +53,9 @@ const FALLBACK_BY_GROUP: ReadonlyMap<string, string> = new Map(
 
 /** Группа типа каталога: `code → group`. */
 const GROUP_BY_CODE: ReadonlyMap<string, string> = new Map(DOC_TYPES.map((t) => [t.code, t.group]));
+
+/** Снятые виды (S59): документ с таким кодом получает резерв своей группы. */
+const RETIRED_CODES: ReadonlySet<string> = new Set(RETIRED_DOC_TYPE_CODES);
 
 /** Автоприсоединение роли: `code → autoAttach`. */
 const AUTO_ATTACH: ReadonlyMap<string, boolean> = new Map(
@@ -348,8 +351,27 @@ interface OpenDocument {
   readonly pages: DecodedPage[];
 }
 
+/**
+ * Код документа по классификации: резерв — для `other` и для снятого вида.
+ *
+ * Снятый вид (S59) якорями не распознаётся и модели не предлагается, но
+ * классификация с его кодом всё же может прийти: из `page_classifications`
+ * прошлых прогонов при повторной сборке или от кэшированного ответа модели.
+ * Открывать документ снятым видом значило бы вернуть его в проверку через
+ * чёрный ход, поэтому он опускается до резерва СВОЕЙ группы — как `other` с
+ * гипотезой: «иное заключение» полезнее «неизвестного документа». Решение
+ * человека (`manual`) не трогается: это его вид, а не догадка системы.
+ */
+function documentCodeFor(c: PageClassification): string | null {
+  if (c.typeOutcome === 'other') return fallbackCodeFor(c);
+  if (c.docTypeCode !== null && c.source !== 'manual' && RETIRED_CODES.has(c.docTypeCode)) {
+    return fallbackCodeFor(c);
+  }
+  return c.docTypeCode;
+}
+
 function openDocument(ordinal: number, page: PageInput, c: PageClassification): OpenDocument {
-  const code = c.typeOutcome === 'other' ? fallbackCodeFor(c) : c.docTypeCode;
+  const code = documentCodeFor(c);
   return {
     ordinal,
     docTypeCode: code,

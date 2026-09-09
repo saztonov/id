@@ -15,7 +15,7 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { DOC_TYPES } from './catalog.js';
+import { ACTIVE_DOC_TYPES, DOC_TYPES, RETIRED_DOC_TYPE_CODES } from './catalog.js';
 import { matchDocTypes, matchPageRoles, normalizeLine, resolveDocType } from './matching.js';
 import { PAGE_ROLES } from './page-roles.js';
 import { compileAnchors } from './types.js';
@@ -223,10 +223,7 @@ describe('реальный заголовок даёт ровно один ож�
       text: H.mixQualityShort,
       code: 'mix_quality_doc',
     },
-    { name: 'документ о качестве изделия', text: H.productQualityDoc, code: 'product_quality_doc' },
     { name: 'экспертное заключение', text: H.sanitaryConclusion, code: 'sanitary_conclusion' },
-    { name: 'техническое заключение', text: H.technicalConclusion, code: 'technical_conclusion' },
-    { name: 'разрешение на знак', text: H.permitConformityMark, code: 'permit_conformity_mark' },
   ] as const;
 
   for (const { name, text, code } of cases) {
@@ -264,9 +261,110 @@ describe('реальный заголовок даёт ровно один ож�
     expect(typeCodes(H.qualityPassport)).not.toContain('mill_certificate');
     expect(typeCodes(H.technicalPassport)).not.toContain('quality_passport');
     expect(typeCodes(H.millCertificate)).not.toContain('cert_conformity');
-    expect(typeCodes(H.sanitaryConclusion)).not.toContain('technical_conclusion');
+    // Смесь и штучные изделия: вид изделий снят (S59), но отрицательный якорь
+    // смеси по-прежнему обязан отдавать титул изделий не ей.
     expect(typeCodes(H.productQualityDoc)).not.toContain('mix_quality_doc');
-    expect(typeCodes(H.mixQuality)).not.toContain('product_quality_doc');
+  });
+});
+
+/**
+ * Снятые виды (S59): таблица заказчика не содержит техзаключения, документа о
+ * качестве изделий и разрешения на знак соответствия.
+ *
+ * Запись остаётся в `DOC_TYPES` ради внешних ключей и сида, но титул вида не
+ * даёт его кода — ни победителем, ни альтернативой. Проверяется через тот же
+ * `matchDocTypes` с ПОЛНЫМ каталогом, которым пользуется классификатор:
+ * фильтр в самом матчере — единственное место, где снятие действует на все
+ * восемь вызовов сразу, и мутация «убрать `retired: true`» красит эти тесты.
+ */
+describe('снятые виды (S59)', () => {
+  const retiredTitles = [
+    { name: 'техническое заключение', text: H.technicalConclusion, code: 'technical_conclusion' },
+    { name: 'документ о качестве изделий', text: H.productQualityDoc, code: 'product_quality_doc' },
+    { name: 'разрешение на знак', text: H.permitConformityMark, code: 'permit_conformity_mark' },
+  ] as const;
+
+  it('снятыми объявлены ровно три вида таблицы заказчика', () => {
+    expect([...RETIRED_DOC_TYPE_CODES].sort()).toEqual(
+      ['permit_conformity_mark', 'product_quality_doc', 'technical_conclusion'].sort(),
+    );
+  });
+
+  it('снятый вид есть в DOC_TYPES, нет в ACTIVE_DOC_TYPES, и у его группы есть резерв', () => {
+    // Три требования одного инварианта: сид и внешние ключи видят вид, новые
+    // страницы и списки — нет, а документ с таким титулом декодер обязан уметь
+    // отдать резерву ТОЙ ЖЕ группы, а не общему «неизвестному документу».
+    expect(RETIRED_DOC_TYPE_CODES.length).toBeGreaterThan(0);
+    for (const code of RETIRED_DOC_TYPE_CODES) {
+      const type = docTypes.find((t) => t.code === code);
+      expect(type?.retired, code).toBe(true);
+      expect(
+        ACTIVE_DOC_TYPES.map((t) => t.code),
+        code,
+      ).not.toContain(code);
+      expect(
+        docTypes.some((t) => t.isFallback && t.group === type?.group),
+        `у группы ${type?.group ?? '?'} нет резервного вида`,
+      ).toBe(true);
+    }
+    expect(ACTIVE_DOC_TYPES.length + RETIRED_DOC_TYPE_CODES.length).toBe(docTypes.length);
+  });
+
+  for (const { name, text, code } of retiredTitles) {
+    it(`${name}: титул кода ${code} не даёт`, () => {
+      expect(typeCodes(text), text).not.toContain(code);
+      const resolved = resolveDocType(matchDocTypes(text, docTypes), docTypes);
+      expect(resolved.code).not.toBe(code);
+      expect(resolved.alternatives).not.toContain(code);
+    });
+  }
+
+  it('титулы снятых видов остаются без кода вовсе: резерв назначает декодер', () => {
+    // Ни один соседний вид не подхватывает освободившийся титул — иначе
+    // снятие вида превратилось бы в его молчаливое переименование.
+    expect(typeCodes(H.technicalConclusion)).toEqual([]);
+    expect(typeCodes(H.productQualityDoc)).toEqual([]);
+    expect(typeCodes(H.permitConformityMark)).toEqual([]);
+  });
+});
+
+/**
+ * Виды из таблицы заказчика (S59), которых в каталоге не было.
+ */
+describe('новые виды таблицы заказчика (S59)', () => {
+  it('исполнительный чертёж — свой вид, а не схема', () => {
+    expect(typeCodes('ИСПОЛНИТЕЛЬНЫЙ ЧЕРТЁЖ\nШифр 01-КЖ-ИЧ, лист 3')).toEqual(['exec_drawing']);
+    // Написание через «е» на бланках встречается наравне с «ё».
+    expect(typeCodes('Исполнительный чертеж № 7')).toEqual(['exec_drawing']);
+    expect(typeCodes('ИСПОЛНИТЕЛЬНАЯ СХЕМА')).toEqual(['exec_scheme']);
+  });
+
+  it('подсказка бланка АОСР «схемы и чертежи» чертежом не становится', () => {
+    expect(typeCodes(FP.aosrFormHint)).not.toContain('exec_drawing');
+  });
+
+  it('журнал входного контроля отличается от акта входного контроля', () => {
+    // Оба рендера титула: склеенный (VLM) и в две строки (RD WEB). Во втором
+    // строка «входного контроля» у журнала и акта одинакова, и разводят их
+    // только зеркальные отрицательные якоря на первое слово.
+    expect(typeCodes('ЖУРНАЛ ВХОДНОГО КОНТРОЛЯ')).toEqual(['incoming_control_log']);
+    expect(typeCodes('ЖУРНАЛ\nвходного контроля материалов и изделий')).toEqual([
+      'incoming_control_log',
+    ]);
+    expect(typeCodes('АКТ входного контроля материалов и изделий № 3')).toEqual([
+      'act_incoming_control',
+    ]);
+    expect(typeCodes('АКТ\nвходного контроля')).toEqual(['act_incoming_control']);
+  });
+
+  it('АООК и АОСК — один вид: форма переименована, код остался', () => {
+    for (const title of [
+      'АКТ\nосвидетельствования ответственных конструкций',
+      'АКТ\nосвидетельствования строительных конструкций',
+      'АКТ освидетельствования строительных конструкций № 12-АОСК',
+    ]) {
+      expect(typeCodes(title), title).toEqual(['aosr_responsible_structures']);
+    }
   });
 });
 
@@ -374,20 +472,18 @@ describe('формы temp/MD/new (значения синтетические)',
     ]);
   });
 
-  it('второй лист санзаключения техническим заключением не становится', () => {
-    // На нём «ЗАКЛЮЧЕНИЕ» — подзаголовок вывода. Отличает лист его начало:
-    // гигиеническая таблица, с которой он открывается.
+  it('второй лист санзаключения самостоятельным документом не становится', () => {
+    // На нём «ЗАКЛЮЧЕНИЕ» — подзаголовок вывода. До S59 лист уводило
+    // техническое заключение, и отличало его начало — гигиеническая таблица;
+    // теперь вид снят, а лист по-прежнему обязан остаться без типа: якорь
+    // санзаключения на «ЗАКЛЮЧЕНИЕ» без «ЭКСПЕРТНОЕ» не срабатывает.
     const secondSheet =
       'Гигиеническая характеристика продукции:\n' +
       'Запах воздушной среды, балл | 1 | до 2\n' +
       'ЗАКЛЮЧЕНИЕ\n' +
       'Санитарно-эпидемиологическая экспертиза проведена в соответствии';
 
-    expect(typeCodes(secondSheet)).not.toContain('technical_conclusion');
-  });
-
-  it('техническое заключение с собственным титулом типом остаётся', () => {
-    expect(typeCodes('ЗАКЛЮЧЕНИЕ\n№ 02(а)-2020')).toEqual(['technical_conclusion']);
+    expect(typeCodes(secondSheet)).toEqual([]);
   });
 
   it('учётный лист журнала авторского надзора — журнал АН', () => {
@@ -563,8 +659,11 @@ describe('общий документ о качестве (S53)', () => {
     expect(typeCodes('Документ о качестве\n\nРезультаты испытаний')).toEqual(['quality_doc']);
   });
 
-  it('смесь и штучные изделия остаются при своих видах', () => {
+  it('смесь остаётся при своём виде, а общая форма её не перехватывает', () => {
     expect(typeCodes(H.mixQualityShort)).toEqual(['mix_quality_doc']);
-    expect(typeCodes(H.productQualityDoc)).toEqual(['product_quality_doc']);
+    // Титул штучных изделий с S59 своего вида не имеет, но и общей формой
+    // «Документ о качестве» не становится: её отрицательный якорь на «№»
+    // держится независимо от снятого вида.
+    expect(typeCodes(H.productQualityDoc)).not.toContain('quality_doc');
   });
 });

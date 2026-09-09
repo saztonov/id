@@ -38,7 +38,9 @@ import type { Pool } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { createPgliteDatabase, type TestDatabase, createTestPool } from '@id/db-harness';
+import { RETIRED_DOC_TYPE_CODES } from '@id/doc-types';
 import { loadMigrations } from '@id/migrator';
+import { RETIRED_RULES } from '@id/rules';
 
 import { buildApp, type AppInstance } from '../../app.js';
 import { CSRF_COOKIE, CSRF_HEADER, LOGIN_COOKIE, SESSION_COOKIE } from '../../auth/session.js';
@@ -281,6 +283,11 @@ function messagesOf(response: LightMyRequestResponse): string {
   return (response.json<{ errors?: { message: string }[] }>().errors ?? [])
     .map((e) => e.message)
     .join(' | ');
+}
+
+/** Коды причин из конверта problem+json: ими различаются «не заведён» и «снят». */
+function errorCodesOf(response: LightMyRequestResponse): readonly string[] {
+  return (response.json<{ errors?: { code?: string }[] }>().errors ?? []).map((e) => e.code ?? '');
 }
 
 const P = '/api/v1/catalog';
@@ -940,6 +947,86 @@ describe('профиль раздела: новый раздел стартуе�
       effectiveTo: '2026-04-01',
     });
     expect(response.statusCode).toBe(422);
+  });
+
+  it('категории и матрица материалов в теле профиля игнорируются, а не отвергаются', async () => {
+    // Клиент прежней сборки всё ещё шлёт поля, которых портал с S59 не читает.
+    // Профиль создаётся без них, а в ответе их нет: обещать клиенту настройку,
+    // которая ни на что не влияет, нельзя.
+    const response = await asAdmin('POST', `${P}/section-profiles`, {
+      sectionCode: SECTION_RC,
+      effectiveFrom: '2026-07-01',
+      expectedDocTypes: [DOC_TYPE_SYSTEM],
+      materialCategories: ['roll_waterproofing'],
+      materialMatrix: { roll_waterproofing: { documents: ['cert_conformity'] } },
+    });
+    expect(response.statusCode).toBe(201);
+    const created = response.json<ProfileResponse & Record<string, unknown>>();
+    expect(created).not.toHaveProperty('materialCategories');
+    expect(created).not.toHaveProperty('materialMatrix');
+
+    const stored = await db.query<{ material_categories: string[]; material_matrix: unknown }>(
+      `SELECT material_categories, material_matrix FROM section_profiles WHERE id = '${created.id}'`,
+    );
+    expect(stored[0]).toEqual({ material_categories: [], material_matrix: {} });
+  });
+});
+
+/**
+ * Снятые виды и правила (S59, S30) в профиле раздела.
+ *
+ * Их строки в `doc_types` и `rule_definitions` остаются ради внешних ключей, и
+ * сверка с таблицей их пропустила бы: профиль ждал бы документ, который портал
+ * больше не распознаёт, и давал бы вечное «комплект неполон».
+ */
+describe('профиль раздела: снятые виды и правила отвергаются', () => {
+  it('снятый вид ИД — 422 со своей причиной, а не «не заведён»', async () => {
+    expect(RETIRED_DOC_TYPE_CODES).toContain('technical_conclusion');
+    const response = await asAdmin('POST', `${P}/section-profiles`, {
+      sectionCode: SECTION_RC,
+      effectiveFrom: '2026-08-01',
+      expectedDocTypes: [DOC_TYPE_SYSTEM, 'technical_conclusion'],
+    });
+    expect(response.statusCode).toBe(422);
+    expect(pointersOf(response)).toEqual(['/expectedDocTypes']);
+    expect(errorCodesOf(response)).toEqual(['retired-doc-type']);
+    expect(messagesOf(response)).toContain('technical_conclusion снят с использования');
+  });
+
+  it('снятое правило — 422 со своей причиной', async () => {
+    const retiredRule = RETIRED_RULES[0]?.code;
+    expect(retiredRule).toBeDefined();
+    const response = await asAdmin('POST', `${P}/section-profiles`, {
+      sectionCode: SECTION_RC,
+      effectiveFrom: '2026-08-01',
+      enabledRuleCodes: ['AOSR.HDR.022', retiredRule],
+    });
+    expect(response.statusCode).toBe(422);
+    expect(pointersOf(response)).toEqual(['/enabledRuleCodes']);
+    expect(errorCodesOf(response)).toEqual(['retired-rule']);
+  });
+
+  it('незаведённый код по-прежнему отвергается как незаведённый', async () => {
+    const response = await asAdmin('POST', `${P}/section-profiles`, {
+      sectionCode: SECTION_RC,
+      effectiveFrom: '2026-08-01',
+      expectedDocTypes: ['no_such_type'],
+      enabledRuleCodes: ['NO.SUCH.001'],
+    });
+    expect(response.statusCode).toBe(422);
+    expect([...errorCodesOf(response)].sort()).toEqual(['unknown-doc-type', 'unknown-rule']);
+  });
+
+  it('снятые виды не попадают в список видов ни с каким фильтром', async () => {
+    // Точечное чтение остаётся: документы прошлых прогонов с таким кодом
+    // показываются своим названием, а не голым кодом.
+    for (const url of [`${P}/doc-types`, `${P}/doc-types?includeInactive=true`]) {
+      const listed = await asAdmin('GET', url);
+      expect(listed.statusCode).toBe(200);
+      const codes = listed.json<DocTypeResponse[]>().map((t) => t.code);
+      for (const retired of RETIRED_DOC_TYPE_CODES) expect(codes, url).not.toContain(retired);
+    }
+    expect((await asAdmin('GET', `${P}/doc-types/technical_conclusion`)).statusCode).toBe(200);
   });
 });
 

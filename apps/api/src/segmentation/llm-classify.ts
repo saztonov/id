@@ -30,7 +30,7 @@
  * единственный дешёвый способ отличить чтение страницы от пересказа
  * ожиданий. Поэтому цитата обязательна даже у ответа `U`.
  */
-import { DOC_TYPES } from '@id/doc-types';
+import { ACTIVE_DOC_TYPES } from '@id/doc-types';
 import { z } from 'zod';
 import { LlmError } from '../llm/port.js';
 import type { PageClassification, PageInput, TextEvidence, TypeOutcome } from './types.js';
@@ -51,10 +51,12 @@ const OPEN_WORLD_OUTCOMES = ['other', 'uncertain'] as const;
  * Коды, которые модель имеет право назвать.
  *
  * Резервные типы исключены: их присваивает декодер по исходу `other`
- * (см. `prompts.ts`). Ответ резервным кодом — не по схеме.
+ * (см. `prompts.ts`). Ответ резервным кодом — не по схеме. Снятые виды (S59)
+ * исключены так же: модели их не предлагают, и ответ снятым кодом — это ответ
+ * не из переданного списка, ровно как выдуманный код.
  */
 const KNOWN_CODES: ReadonlySet<string> = new Set(
-  DOC_TYPES.filter((t) => !t.isFallback).map((t) => t.code),
+  ACTIVE_DOC_TYPES.filter((t) => !t.isFallback).map((t) => t.code),
 );
 
 const responseSchema = z

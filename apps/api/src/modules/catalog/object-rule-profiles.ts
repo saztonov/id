@@ -28,7 +28,6 @@ import type { AppInstance } from '../../app.js';
 import type { AuthScope } from '../../auth/scope.js';
 import { notFound } from '../../lib/problem.js';
 import { sectionCodeSchema } from '@id/contracts';
-import { materialCategoryCodeSchema } from './schemas.js';
 import { currentAuth, requireAuth } from '../../middleware/require-auth.js';
 import { requirePermission } from '../../middleware/require-permission.js';
 import { auditEmailHmac } from '../../db/repositories/admin.js';
@@ -106,10 +105,10 @@ const createBodySchema = z
     path: ['effectiveTo'],
   });
 
+// Ключи `materialCategories`/`materialMatrix` из хранимых наложений сюда не
+// доходят: их отбрасывает уже чтение (`storedOverridesSchema`, S59).
 const overridesResponseSchema = z.object({
   expectedDocTypes: z.array(docTypeCodeSchema).optional(),
-  materialCategories: z.array(materialCategoryCodeSchema).optional(),
-  materialMatrix: z.record(z.string(), jsonValueSchema).optional(),
   thresholds: z.record(z.string(), jsonValueSchema).optional(),
   enabledRuleCodes: z.array(ruleCodeSchema).optional(),
   disabledRuleCodes: z.array(ruleCodeSchema).optional(),
@@ -147,11 +146,6 @@ const resolvedRulesSchema = z.object({
   sectionProfileVersion: z.int().positive().nullable(),
   objectProfileIds: z.array(uuidSchema),
   expectedDocTypes: z.array(docTypeCodeSchema),
-  // На выходе — то, что лежит в БД: закрытое перечисление держится на ВХОДЕ,
-  // а профиль, сохранённый до его введения, обязан читаться, а не давать 500
-  // при сериализации ответа.
-  materialCategories: z.array(z.string()),
-  materialMatrix: jsonValueSchema,
   enabledRuleCodes: z.array(ruleCodeSchema),
   thresholds: jsonValueSchema,
   autonomyLevel: autonomyLevelSchema,
@@ -292,7 +286,6 @@ export function registerObjectRuleProfileRoutes(app: AppInstance): void {
         ...resolved,
         objectProfileIds: [...resolved.objectProfileIds],
         expectedDocTypes: [...resolved.expectedDocTypes],
-        materialCategories: [...resolved.materialCategories],
         enabledRuleCodes: [...resolved.enabledRuleCodes],
       });
     },

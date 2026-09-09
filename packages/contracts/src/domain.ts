@@ -282,6 +282,11 @@ export type ObjectContractor = z.infer<typeof objectContractorSchema>;
  * месячной давности невоспроизводим. Пустой `expectedDocTypes` — не «комплект
  * пуст», а «состав не настроен»: правила полноты в этом случае дают `n_a`
  * (§9.1), и различать эти два случая обязан вызывающий код.
+ *
+ * Категорий материалов и матрицы в профиле больше нет (S59): заказчик решил,
+ * что вопрос к материалу один — есть ли у него сертификат, декларация или
+ * паспорт — и от раздела он не зависит. Колонки в БД остаются ради
+ * исторических строк, наружу не отдаются.
  */
 export const sectionProfileSchema = z
   .object({
@@ -291,8 +296,6 @@ export const sectionProfileSchema = z
     effectiveFrom: isoDateSchema,
     effectiveTo: isoDateSchema.nullable(),
     expectedDocTypes: z.array(docTypeCodeSchema),
-    materialCategories: z.array(codeSlugSchema),
-    materialMatrix: jsonValueSchema,
     enabledRuleCodes: z.array(ruleCodeSchema),
     thresholds: jsonValueSchema,
     autonomyLevel: autonomyLevelSchema,

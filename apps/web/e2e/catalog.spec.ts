@@ -32,12 +32,14 @@ test('действующий профиль раздела показан сос
 
   const card = page.getByTestId('section-profile-card').first();
   await expect(card).toBeVisible();
-  // Ожидаемый состав документов, категории материалов и применимые правила —
-  // три вещи, ради которых профиль и существует.
+  // Ожидаемый состав документов и применимые правила — то, ради чего профиль
+  // существует. Категорий материалов на карточке нет с S59: портал их не
+  // читает, и поле обещало бы настройку, которая ни на что не влияет.
+  await expect(card).toContainText('Ожидаемый состав документов');
   await expect(card).toContainText('aosr');
-  await expect(card).toContainText('roll_waterproofing');
   await expect(card).toContainText('AOSR.HDR.022');
   await expect(card).toContainText('с участием человека');
+  await expect(card).not.toContainText('Категории материалов');
 });
 
 test('черновик версии профиля публикуется отдельным действием', async ({ page }) => {

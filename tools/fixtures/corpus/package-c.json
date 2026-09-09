@@ -86,8 +86,8 @@
       "rotation": 0,
       "expected": {
         "label": "B-DOC",
-        "docTypeCode": "technical_conclusion",
-        "typeOutcome": "known",
+        "docTypeCode": "other_tests_conclusions",
+        "typeOutcome": "other",
         "pageRoleCode": null,
         "documentKey": "doc-03"
       }
@@ -101,8 +101,8 @@
       "rotation": 0,
       "expected": {
         "label": "I-DOC",
-        "docTypeCode": "technical_conclusion",
-        "typeOutcome": "known",
+        "docTypeCode": "other_tests_conclusions",
+        "typeOutcome": "other",
         "pageRoleCode": null,
         "documentKey": "doc-03"
       }
@@ -116,8 +116,8 @@
       "rotation": 0,
       "expected": {
         "label": "I-DOC",
-        "docTypeCode": "technical_conclusion",
-        "typeOutcome": "known",
+        "docTypeCode": "other_tests_conclusions",
+        "typeOutcome": "other",
         "pageRoleCode": null,
         "documentKey": "doc-03"
       }
@@ -131,8 +131,8 @@
       "rotation": 0,
       "expected": {
         "label": "I-DOC",
-        "docTypeCode": "technical_conclusion",
-        "typeOutcome": "known",
+        "docTypeCode": "other_tests_conclusions",
+        "typeOutcome": "other",
         "pageRoleCode": null,
         "documentKey": "doc-03"
       }
@@ -146,8 +146,8 @@
       "rotation": 0,
       "expected": {
         "label": "I-DOC",
-        "docTypeCode": "technical_conclusion",
-        "typeOutcome": "known",
+        "docTypeCode": "other_tests_conclusions",
+        "typeOutcome": "other",
         "pageRoleCode": null,
         "documentKey": "doc-03"
       }
@@ -161,8 +161,8 @@
       "rotation": 0,
       "expected": {
         "label": "I-DOC",
-        "docTypeCode": "technical_conclusion",
-        "typeOutcome": "known",
+        "docTypeCode": "other_tests_conclusions",
+        "typeOutcome": "other",
         "pageRoleCode": null,
         "documentKey": "doc-03"
       }
@@ -176,8 +176,8 @@
       "rotation": 0,
       "expected": {
         "label": "I-DOC",
-        "docTypeCode": "technical_conclusion",
-        "typeOutcome": "known",
+        "docTypeCode": "other_tests_conclusions",
+        "typeOutcome": "other",
         "pageRoleCode": null,
         "documentKey": "doc-03"
       }
@@ -191,8 +191,8 @@
       "rotation": 0,
       "expected": {
         "label": "I-DOC",
-        "docTypeCode": "technical_conclusion",
-        "typeOutcome": "known",
+        "docTypeCode": "other_tests_conclusions",
+        "typeOutcome": "other",
         "pageRoleCode": null,
         "documentKey": "doc-03"
       }
@@ -206,8 +206,8 @@
       "rotation": 0,
       "expected": {
         "label": "I-DOC",
-        "docTypeCode": "technical_conclusion",
-        "typeOutcome": "known",
+        "docTypeCode": "other_tests_conclusions",
+        "typeOutcome": "other",
         "pageRoleCode": null,
         "documentKey": "doc-03"
       }
@@ -221,8 +221,8 @@
       "rotation": 0,
       "expected": {
         "label": "I-DOC",
-        "docTypeCode": "technical_conclusion",
-        "typeOutcome": "known",
+        "docTypeCode": "other_tests_conclusions",
+        "typeOutcome": "other",
         "pageRoleCode": null,
         "documentKey": "doc-03"
       }
@@ -236,8 +236,8 @@
       "rotation": 0,
       "expected": {
         "label": "I-DOC",
-        "docTypeCode": "technical_conclusion",
-        "typeOutcome": "known",
+        "docTypeCode": "other_tests_conclusions",
+        "typeOutcome": "other",
         "pageRoleCode": null,
         "documentKey": "doc-03"
       }
@@ -251,8 +251,8 @@
       "rotation": 0,
       "expected": {
         "label": "I-DOC",
-        "docTypeCode": "technical_conclusion",
-        "typeOutcome": "known",
+        "docTypeCode": "other_tests_conclusions",
+        "typeOutcome": "other",
         "pageRoleCode": null,
         "documentKey": "doc-03"
       }
@@ -266,8 +266,8 @@
       "rotation": 0,
       "expected": {
         "label": "I-DOC",
-        "docTypeCode": "technical_conclusion",
-        "typeOutcome": "known",
+        "docTypeCode": "other_tests_conclusions",
+        "typeOutcome": "other",
         "pageRoleCode": null,
         "documentKey": "doc-03"
       }
@@ -281,8 +281,8 @@
       "rotation": 0,
       "expected": {
         "label": "I-DOC",
-        "docTypeCode": "technical_conclusion",
-        "typeOutcome": "known",
+        "docTypeCode": "other_tests_conclusions",
+        "typeOutcome": "other",
         "pageRoleCode": null,
         "documentKey": "doc-03"
       }
@@ -296,8 +296,8 @@
       "rotation": 0,
       "expected": {
         "label": "I-DOC",
-        "docTypeCode": "technical_conclusion",
-        "typeOutcome": "known",
+        "docTypeCode": "other_tests_conclusions",
+        "typeOutcome": "other",
         "pageRoleCode": null,
         "documentKey": "doc-03"
       }
@@ -311,8 +311,8 @@
       "rotation": 0,
       "expected": {
         "label": "I-DOC",
-        "docTypeCode": "technical_conclusion",
-        "typeOutcome": "known",
+        "docTypeCode": "other_tests_conclusions",
+        "typeOutcome": "other",
         "pageRoleCode": null,
         "documentKey": "doc-03"
       }
@@ -326,8 +326,8 @@
       "rotation": 0,
       "expected": {
         "label": "I-DOC",
-        "docTypeCode": "technical_conclusion",
-        "typeOutcome": "known",
+        "docTypeCode": "other_tests_conclusions",
+        "typeOutcome": "other",
         "pageRoleCode": null,
         "documentKey": "doc-03"
       }
@@ -611,8 +611,8 @@
       "rotation": 0,
       "expected": {
         "label": "B-DOC",
-        "docTypeCode": "product_quality_doc",
-        "typeOutcome": "known",
+        "docTypeCode": "other_quality_docs",
+        "typeOutcome": "other",
         "pageRoleCode": null,
         "documentKey": "doc-10"
       }
@@ -701,8 +701,8 @@
       "rotation": 90,
       "expected": {
         "label": "B-DOC",
-        "docTypeCode": "permit_conformity_mark",
-        "typeOutcome": "known",
+        "docTypeCode": "other_quality_docs",
+        "typeOutcome": "other",
         "pageRoleCode": null,
         "documentKey": "doc-13"
       }

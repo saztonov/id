@@ -391,10 +391,16 @@ const PACKAGE_C: ReferencePackageSpec = {
   documents: [
     { key: 'doc-01', docTypeCode: 'aosr', typeOutcome: 'known', pages: [1, 2] },
     { key: 'doc-02', docTypeCode: 'annex_registry', typeOutcome: 'known', pages: [3, 4, 5] },
+    // Техническое заключение, документ о качестве изделий (doc-10) и разрешение
+    // на знак соответствия (doc-13) — виды, снятые таблицей заказчика (S59).
+    // Документы в корпусе остались теми же, но ожидаемый ответ портала теперь —
+    // резерв группы с исходом `other`: снятый вид не распознаётся, а страница
+    // обязана остаться документом, а не потеряться. Границы документов не
+    // меняются: снятие вида — не право разрывать комплект.
     {
       key: 'doc-03',
-      docTypeCode: 'technical_conclusion',
-      typeOutcome: 'known',
+      docTypeCode: 'other_tests_conclusions',
+      typeOutcome: 'other',
       pages: [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23],
       roles: { 23: ROLE_COPY },
     },
@@ -442,8 +448,8 @@ const PACKAGE_C: ReferencePackageSpec = {
     },
     {
       key: 'doc-10',
-      docTypeCode: 'product_quality_doc',
-      typeOutcome: 'known',
+      docTypeCode: 'other_quality_docs',
+      typeOutcome: 'other',
       pages: [41, 42],
       roles: { 42: ROLE_COPY },
     },
@@ -463,11 +469,12 @@ const PACKAGE_C: ReferencePackageSpec = {
     },
     // Разрешение на применение знака соответствия — самостоятельный документ,
     // а не приложение к предыдущему сертификату: у него свой номер, свой срок
-    // и своя подпись. В реестре приложений он не значится вовсе.
+    // и своя подпись. В реестре приложений он не значится вовсе. Вид снят
+    // (S59, см. doc-03), граница документа остаётся.
     {
       key: 'doc-13',
-      docTypeCode: 'permit_conformity_mark',
-      typeOutcome: 'known',
+      docTypeCode: 'other_quality_docs',
+      typeOutcome: 'other',
       pages: [47, 48],
       roles: { 48: ROLE_COPY },
     },

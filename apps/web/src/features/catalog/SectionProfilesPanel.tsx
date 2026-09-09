@@ -4,10 +4,14 @@
  * ## Зачем экран нужен, а не просто «ещё одна таблица справочника»
  *
  * Профиль — это то, чем правила полноты отличают «комплект неполон» от «раздел
- * не настроен». Ожидаемый состав документов, матрица материалов, включённые
- * правила и уровень автономии живут здесь и только здесь; без экрана они
- * правились бы прямым INSERT, а прогон проверок ссылался бы на то, чего никто
- * не видел.
+ * не настроен». Ожидаемый состав документов, включённые правила и уровень
+ * автономии живут здесь и только здесь; без экрана они правились бы прямым
+ * INSERT, а прогон проверок ссылался бы на то, чего никто не видел.
+ *
+ * Категорий и матрицы материалов на экране нет с S59: заказчик решил, что
+ * вопрос к материалу один — есть ли у него сертификат, декларация или паспорт,
+ * — и от раздела он не зависит. Поле, которое портал не читает, обещало бы
+ * администратору настройку, которая ни на что не влияет.
  *
  * ## «Профиля нет» — законное состояние, а не пустая таблица
  *
@@ -40,7 +44,7 @@ import {
   Typography,
 } from 'antd';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { MATERIAL_CATEGORIES, type AutonomyLevel, type SectionProfile } from '@id/contracts';
+import type { AutonomyLevel, SectionProfile } from '@id/contracts';
 import { catalog, checks } from '../../api/endpoints.js';
 import { catalogKeys, adminKeys } from '../../api/keys.js';
 import { describeError, isApiError } from '../../api/problem.js';
@@ -255,9 +259,9 @@ function ProfileVersions({
 /**
  * Состав профиля.
  *
- * Матрица материалов и пороги показываются как есть, JSON'ом: их форма задаётся
- * правилами §9.4 и растёт вместе с ними, а «красивая» таблица с фиксированными
- * колонками спрятала бы ключ, появившийся вчера.
+ * Пороги показываются как есть, JSON'ом: их форма задаётся правилами §9.4 и
+ * растёт вместе с ними, а «красивая» таблица с фиксированными колонками
+ * спрятала бы ключ, появившийся вчера.
  */
 function ProfileCard({ profile }: { profile: SectionProfile }): ReactNode {
   return (
@@ -279,24 +283,6 @@ function ProfileCard({ profile }: { profile: SectionProfile }): ReactNode {
             ))}
           </Space>
         )}
-      </Descriptions.Item>
-      <Descriptions.Item label="Категории материалов">
-        {profile.materialCategories.length === 0 ? (
-          <Typography.Text type="secondary">категории не заданы</Typography.Text>
-        ) : (
-          <Space size={4} wrap>
-            {profile.materialCategories.map((code) => (
-              <ToneTag key={code} tone="info">
-                {code}
-              </ToneTag>
-            ))}
-          </Space>
-        )}
-      </Descriptions.Item>
-      <Descriptions.Item label="Матрица материалов">
-        <Typography.Text code style={{ whiteSpace: 'pre-wrap' }}>
-          {JSON.stringify(profile.materialMatrix, null, 2)}
-        </Typography.Text>
       </Descriptions.Item>
       <Descriptions.Item label="Применимые правила">
         {profile.enabledRuleCodes.length === 0 ? (
@@ -327,7 +313,6 @@ interface ProfileFormValues {
   effectiveFrom: string;
   effectiveTo: string;
   expectedDocTypes: string[];
-  materialCategories: string[];
   enabledRuleCodes: string[];
   autonomyLevel: AutonomyLevel;
   publish: boolean;
@@ -338,7 +323,6 @@ const PROFILE_FIELDS: readonly FieldPath[] = [
   ['effectiveFrom'],
   ['effectiveTo'],
   ['expectedDocTypes'],
-  ['materialCategories'],
   ['enabledRuleCodes'],
   ['autonomyLevel'],
 ];
@@ -375,7 +359,6 @@ function NewProfileDialog({
         effectiveFrom: values.effectiveFrom,
         effectiveTo: values.effectiveTo === '' ? null : values.effectiveTo,
         expectedDocTypes: values.expectedDocTypes,
-        materialCategories: values.materialCategories,
         enabledRuleCodes: values.enabledRuleCodes,
         autonomyLevel: values.autonomyLevel,
         publish: values.publish,
@@ -446,7 +429,6 @@ function NewProfileDialog({
           effectiveFrom: today(),
           effectiveTo: '',
           expectedDocTypes: [],
-          materialCategories: [],
           enabledRuleCodes: [],
           autonomyLevel: 'assisted' as AutonomyLevel,
           publish: false,
@@ -472,14 +454,6 @@ function NewProfileDialog({
               value: type.code,
               label: `${type.code} — ${type.name}`,
             }))}
-          />
-        </Form.Item>
-        <Form.Item name="materialCategories" label="Категории материалов">
-          <Select
-            mode="multiple"
-            allowClear
-            optionFilterProp="label"
-            options={MATERIAL_CATEGORIES.map((code) => ({ value: code, label: code }))}
           />
         </Form.Item>
         <Form.Item

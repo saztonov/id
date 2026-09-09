@@ -359,6 +359,11 @@ export function matchDocTypes(
 
   for (const type of types) {
     if (type.isFallback) continue;
+    // Снятый вид (S59) пропускается ЗДЕСЬ, а не у вызывающих: матчер зовут из
+    // восьми мест с полным `DOC_TYPES`, и фильтр в каждом из них — восемь
+    // способов забыть один. Раз кандидатом он не становится, то не всплывает
+    // и как альтернатива в `resolveDocType`: та читает только совпадения.
+    if (type.retired === true) continue;
     const headingZone = fullZone.slice(0, zoneSizeOf(type));
 
     const negatives = (type.matchHints.negativeAnchors ?? []).map(compile);

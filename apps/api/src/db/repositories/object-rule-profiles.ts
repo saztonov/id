@@ -54,8 +54,6 @@ import {
   docTypeCodeSchema,
   jsonValueSchema,
   ruleCodeSchema,
-  materialCategoryCodeSchema,
-  type MaterialCategoryCode,
   type AutonomyLevel,
   type JsonValue,
   type SectionProfile,
@@ -93,14 +91,16 @@ export const DEFAULT_RELEVANT_DATE_BASIS: RelevantDateBasis = 'application';
  * запроса (неизвестный ключ в наложении означает опечатку, которая иначе молча
  * не сделала бы ничего) и обычной — для разбора уже записанного jsonb, где ключи
  * прошлых версий формы обязаны игнорироваться, а не ломать чтение.
+ *
+ * Так с S59 читаются наложения, записанные с `materialCategories` и
+ * `materialMatrix`: этих ключей в форме больше нет, хранимые строки их ещё
+ * несут, и нестрогая схема их отбрасывает, а не роняет чтение профиля. В теле
+ * НОВОГО запроса они — неизвестный ключ, то есть 422: клиент обязан узнать,
+ * что настройка, которую он шлёт, порталом не читается.
  */
 const OVERRIDE_SHAPE = {
   /** Полная замена ожидаемого состава комплекта. */
   expectedDocTypes: z.array(docTypeCodeSchema).optional(),
-  /** Полная замена перечня уместных категорий материалов. */
-  materialCategories: z.array(materialCategoryCodeSchema).optional(),
-  /** Требования к пакету подтверждения: накладывается по категориям. */
-  materialMatrix: z.record(z.string(), jsonValueSchema).optional(),
   /** Пороги: накладываются по ключам, а не заменяют набор целиком. */
   thresholds: z.record(z.string(), jsonValueSchema).optional(),
   /** Полная замена списка включённых правил. */
@@ -427,8 +427,6 @@ export interface ResolvedRules {
   /** Применённые наложения в порядке применения: объектное, затем разделное. */
   readonly objectProfileIds: readonly string[];
   readonly expectedDocTypes: readonly string[];
-  readonly materialCategories: readonly MaterialCategoryCode[];
-  readonly materialMatrix: JsonValue;
   /** Пустой список — ограничений нет (S58); см. `ProfileNode` в `@id/rules`. */
   readonly enabledRuleCodes: readonly string[];
   /** Снятые наложениями объекта: при пустом списке выше вычитать не из чего. */
@@ -515,8 +513,6 @@ function baseRules(profile: SectionProfile | null): RuleValues {
   if (profile === null) {
     return {
       expectedDocTypes: [],
-      materialCategories: [],
-      materialMatrix: {},
       enabledRuleCodes: [],
       disabledRuleCodes: [],
       thresholds: {},
@@ -527,12 +523,6 @@ function baseRules(profile: SectionProfile | null): RuleValues {
   }
   return {
     expectedDocTypes: profile.expectedDocTypes,
-    // Колонка в БД — text[], а закрытое перечисление держится на входе
-    // (materialCategoryCodeSchema). Приведение здесь, а не проверка: строки
-    // старше введения перечисления читаются как есть, и падать на чтении
-    // исторического профиля нельзя.
-    materialCategories: profile.materialCategories as readonly MaterialCategoryCode[],
-    materialMatrix: profile.materialMatrix,
     enabledRuleCodes: profile.enabledRuleCodes,
     disabledRuleCodes: [],
     thresholds: profile.thresholds,
@@ -544,12 +534,12 @@ function baseRules(profile: SectionProfile | null): RuleValues {
 /**
  * Наложение поверх действующих значений.
  *
- * Списки заменяются целиком, а объекты (`materialMatrix`, `thresholds`)
- * накладываются по верхним ключам. Разница не произвольна: «ожидаемый состав
- * комплекта» — это одно решение, и частичная замена его элементов не имеет
- * смысла, а матрица и пороги — набор независимых требований, и полная замена
- * заставляла бы копировать в каждое наложение объекта всё, что задано у вида
- * раздела. Копия же неизбежно отстанет от исходника — молча.
+ * Списки заменяются целиком, а объект (`thresholds`) накладывается по верхним
+ * ключам. Разница не произвольна: «ожидаемый состав комплекта» — это одно
+ * решение, и частичная замена его элементов не имеет смысла, а пороги — набор
+ * независимых требований, и полная замена заставляла бы копировать в каждое
+ * наложение объекта всё, что задано у вида раздела. Копия же неизбежно
+ * отстанет от исходника — молча.
  */
 function applyOverrides(base: RuleValues, overrides: RuleOverrides): RuleValues {
   const enabled = overrides.enabledRuleCodes ?? base.enabledRuleCodes;
@@ -557,8 +547,6 @@ function applyOverrides(base: RuleValues, overrides: RuleOverrides): RuleValues 
 
   return {
     expectedDocTypes: overrides.expectedDocTypes ?? base.expectedDocTypes,
-    materialCategories: overrides.materialCategories ?? base.materialCategories,
-    materialMatrix: mergeJsonObjects(base.materialMatrix, overrides.materialMatrix),
     enabledRuleCodes: enabled.filter((code) => !disabled.has(code)),
     // Снятые накапливаются по наложениям и отдаются отдельно: при пустом
     // списке включённых (ограничений нет, S58) вычитание выше — из пустоты,

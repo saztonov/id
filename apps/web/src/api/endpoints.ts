@@ -796,7 +796,6 @@ export const catalog = {
     effectiveFrom: string;
     effectiveTo?: string | null;
     expectedDocTypes: readonly string[];
-    materialCategories: readonly string[];
     enabledRuleCodes: readonly string[];
     autonomyLevel: 'assisted' | 'automatic';
     publish: boolean;
@@ -805,7 +804,6 @@ export const catalog = {
       body: {
         ...body,
         expectedDocTypes: [...body.expectedDocTypes],
-        materialCategories: [...body.materialCategories],
         enabledRuleCodes: [...body.enabledRuleCodes],
       },
     }).then((r) => r.data),

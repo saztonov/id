@@ -141,13 +141,16 @@ describe('закоммиченный эталон', () => {
   });
 
   it('размечен без единой страницы, отданной классификатору наугад', () => {
-    // Тип задан либо кодом каталога с исходом `known`, либо не задан вовсе.
+    // Тип задан либо кодом каталога с исходом `known`, либо резервом группы с
+    // исходом `other` (документ снятого вида, S59: он остаётся документом, но
+    // распознаваемого вида у него больше нет), либо не задан вовсе.
     // `uncertain` в эталоне означал бы «разметчик не знал» — такие страницы
     // положено выносить в отчёт, а не прятать в числах.
     for (const pkg of CORPUS) {
       for (const page of pkg.pages) {
         const { docTypeCode, typeOutcome } = page.expected;
         if (docTypeCode === null) expect(typeOutcome).toBe('none');
+        else if (docTypeCode.startsWith('other_')) expect(typeOutcome).toBe('other');
         else expect(typeOutcome).toBe('known');
       }
     }

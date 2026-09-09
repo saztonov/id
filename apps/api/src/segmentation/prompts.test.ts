@@ -13,7 +13,7 @@
  * своём предмете; это данные, а не инструкция модели.
  */
 import { describe, expect, it } from 'vitest';
-import { DOC_TYPES } from '@id/doc-types';
+import { ACTIVE_DOC_TYPES, DOC_TYPES, RETIRED_DOC_TYPE_CODES } from '@id/doc-types';
 import {
   findSectionMarkers,
   PAGE_CLASSIFY_PROMPT,
@@ -66,7 +66,10 @@ describe('промт не знает раздела работ (§0.5, п. 6)', 
 
   it('список кодов передаётся целиком, без отбора «релевантных разделу»', () => {
     const codes = promptDocTypeCodes();
-    const expected = DOC_TYPES.filter((t) => !t.isFallback).map((t) => t.code);
+    // Ожидание считается по `ACTIVE_DOC_TYPES`, а не по полному каталогу:
+    // снятые виды (S59) — единственное законное изъятие из списка, и оно не
+    // отбор по разделу. Проверяется отдельным утверждением ниже.
+    const expected = ACTIVE_DOC_TYPES.filter((t) => !t.isFallback).map((t) => t.code);
     expect(codes).toEqual(expected);
     // Отбор по разделу — самый сильный намёк из возможных: он сообщает раздел
     // вернее любого текста. Поэтому в списке есть и типы, которых в корпусе
@@ -80,6 +83,15 @@ describe('промт не знает раздела работ (§0.5, п. 6)', 
     // `doc_type_candidates` остались бы пустыми.
     expect(promptDocTypeCodes()).not.toContain('unknown_document');
     expect(promptDocTypeCodes().some((c) => c.startsWith('other_'))).toBe(false);
+  });
+
+  it('снятые виды модели не предлагаются (S59)', () => {
+    // Иначе решение заказчика снять вид обходилось бы ответом модели: она
+    // выбрала бы предложенный код, и техзаключение вернулось бы в проверку.
+    expect(RETIRED_DOC_TYPE_CODES.length).toBeGreaterThan(0);
+    for (const code of RETIRED_DOC_TYPE_CODES) {
+      expect(promptDocTypeCodes(), code).not.toContain(code);
+    }
   });
 });
 

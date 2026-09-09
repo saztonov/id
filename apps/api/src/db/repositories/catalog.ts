@@ -102,6 +102,7 @@ import {
   isNull,
   lt,
   ne,
+  notInArray,
   or,
   sql,
   type SQL,
@@ -140,7 +141,8 @@ import type {
   Section,
   SectionProfile,
 } from '@id/contracts';
-import type { DocTypeGroup, DocTypeKind } from '@id/doc-types';
+import { RETIRED_DOC_TYPE_CODES, type DocTypeGroup, type DocTypeKind } from '@id/doc-types';
+import { RETIRED_RULES } from '@id/rules';
 import { type AuthScope } from '../../auth/scope.js';
 import { driverField } from '../driver-errors.js';
 import { withScope } from '../scoped.js';
@@ -1660,8 +1662,6 @@ const SECTION_PROFILE_SELECTION = {
   effectiveFrom: sectionProfiles.effectiveFrom,
   effectiveTo: sectionProfiles.effectiveTo,
   expectedDocTypes: sectionProfiles.expectedDocTypes,
-  materialCategories: sectionProfiles.materialCategories,
-  materialMatrix: sectionProfiles.materialMatrix,
   enabledRuleCodes: sectionProfiles.enabledRuleCodes,
   thresholds: sectionProfiles.thresholds,
   autonomyLevel: sectionProfiles.autonomyLevel,
@@ -2019,10 +2019,11 @@ function absentCodes(
  * Неизвестные коды перечисляются ВСЕ и сразу: администратор правит список из
  * десятка кодов, и отказ по первому превратил бы правку в десять запросов.
  *
- * Категории материалов проверяются не здесь, а схемой входа
- * (`materialCategoryCodeSchema`): их перечень закрыт кодом — категория
- * осмысленна лишь настолько, насколько её понимают правила §9.4, — и потому
- * является вопросом формы, а не состояния БД.
+ * Снятые виды и правила (S59, S30) сверяются с КОДОМ, а не с БД: их строки в
+ * `doc_types` и `rule_definitions` остаются (внешние ключи, снимки наборов), и
+ * по таблице они выглядят заведёнными. Профиль, ссылающийся на снятый вид,
+ * ждал бы в комплекте документ, который портал больше не распознаёт, — то есть
+ * давал бы вечное «комплект неполон»; снятое правило — вечное «не исполнено».
  */
 export async function assertKnownProfileReferences(
   executor: Executor,
@@ -2033,6 +2034,11 @@ export async function assertKnownProfileReferences(
 ): Promise<void> {
   const requestedDocTypes = [...new Set(references.expectedDocTypes)];
   const requestedRules = [...new Set(references.enabledRuleCodes)];
+
+  const retiredDocTypes = requestedDocTypes.filter((code) => RETIRED_DOC_TYPE_CODES.includes(code));
+  const retiredRules = requestedRules.filter((code) =>
+    RETIRED_RULES.some((spec) => spec.code === code),
+  );
 
   const knownDocTypes =
     requestedDocTypes.length === 0
@@ -2049,24 +2055,41 @@ export async function assertKnownProfileReferences(
           .from(ruleDefinitions)
           .where(inArray(ruleDefinitions.code, requestedRules));
 
+  // Снятый код в «неизвестных» не повторяется: по таблице он известен, а если
+  // строка всё же удалена (0047 у правил), одного отказа со своей причиной
+  // достаточно.
   const errors = [
-    ...absentCodes(requestedDocTypes, knownDocTypes).map((code) => ({
+    ...retiredDocTypes.map((code) => ({
       pointer: '/expectedDocTypes',
-      code: 'unknown-doc-type',
-      message: `Вид ИД ${code} не заведён в каталоге`,
+      code: 'retired-doc-type',
+      message: `Вид ИД ${code} снят с использования`,
     })),
-    ...absentCodes(requestedRules, knownRules).map((code) => ({
+    ...absentCodes(requestedDocTypes, knownDocTypes)
+      .filter((code) => !retiredDocTypes.includes(code))
+      .map((code) => ({
+        pointer: '/expectedDocTypes',
+        code: 'unknown-doc-type',
+        message: `Вид ИД ${code} не заведён в каталоге`,
+      })),
+    ...retiredRules.map((code) => ({
       pointer: '/enabledRuleCodes',
-      code: 'unknown-rule',
-      message: `Правило ${code} не заведено в реестре`,
+      code: 'retired-rule',
+      message: `Правило ${code} снято с исполнения`,
     })),
+    ...absentCodes(requestedRules, knownRules)
+      .filter((code) => !retiredRules.includes(code))
+      .map((code) => ({
+        pointer: '/enabledRuleCodes',
+        code: 'unknown-rule',
+        message: `Правило ${code} не заведено в реестре`,
+      })),
   ];
   if (errors.length === 0) return;
 
   throw unprocessable(
     errors,
-    'Профиль ссылается на коды, которых нет в справочниках: такая ссылка молча ' +
-      'отключила бы проверку (§9.1).',
+    'Профиль ссылается на коды, которых нет в справочниках или которые сняты с ' +
+      'использования: такая ссылка молча отключила бы проверку (§9.1).',
   );
 }
 
@@ -2075,8 +2098,6 @@ export interface CreateSectionProfileInput {
   readonly effectiveFrom: string;
   readonly effectiveTo?: string | null | undefined;
   readonly expectedDocTypes: readonly string[];
-  readonly materialCategories: readonly string[];
-  readonly materialMatrix: JsonValue;
   readonly enabledRuleCodes: readonly string[];
   readonly thresholds: JsonValue;
   readonly autonomyLevel: AutonomyLevel;
@@ -2144,8 +2165,11 @@ export async function createSectionProfile(
           effectiveFrom: input.effectiveFrom,
           effectiveTo: input.effectiveTo ?? null,
           expectedDocTypes: [...input.expectedDocTypes],
-          materialCategories: [...input.materialCategories],
-          materialMatrix: input.materialMatrix,
+          // Категорий материалов и матрицы у профиля больше нет (S59): колонки
+          // остаются в схеме ради исторических строк и пишутся пустыми явно,
+          // а не умолчанием БД, чтобы решение читалось здесь, а не в 0002.
+          materialCategories: [],
+          materialMatrix: {},
           enabledRuleCodes: [...input.enabledRuleCodes],
           thresholds: input.thresholds,
           autonomyLevel: input.autonomyLevel,
@@ -2458,6 +2482,12 @@ export interface DocTypeFilter {
  * Клиенту он нужен весь: это выпадающий список подтверждения типа документа на
  * экране разметки. Страница выдачи означала бы, что часть типов в списке
  * отсутствует, и инженер выбрал бы «не тот, зато видимый».
+ *
+ * Снятые виды (S59) в список не попадают ни с каким фильтром — в том числе с
+ * `includeInactive`: отключение наложением — настройка администратора, которую
+ * он же и снимает, а снятие вида — решение заказчика, и предлагать его к
+ * выбору нельзя. Точечное чтение `findDocType` их отдаёт: документы прошлых
+ * прогонов с таким кодом остаются и обязаны показываться своим названием.
  */
 export async function listDocTypes(
   db: Database,
@@ -2474,6 +2504,9 @@ export async function listDocTypes(
         filter.groupCode === undefined ? undefined : eq(docTypes.groupCode, filter.groupCode),
         filter.kind === undefined ? undefined : eq(docTypes.kind, filter.kind),
         filter.includeInactive === true ? undefined : sql`${EFFECTIVE_IS_ACTIVE} is true`,
+        RETIRED_DOC_TYPE_CODES.length === 0
+          ? undefined
+          : notInArray(docTypes.code, [...RETIRED_DOC_TYPE_CODES]),
       ),
     )
     .orderBy(asc(docTypes.groupCode), asc(EFFECTIVE_SORT_ORDER), asc(docTypes.code));
@@ -3196,8 +3229,6 @@ function toSectionProfile(row: {
   effectiveFrom: string;
   effectiveTo: string | null;
   expectedDocTypes: string[];
-  materialCategories: string[];
-  materialMatrix: unknown;
   enabledRuleCodes: string[];
   thresholds: unknown;
   autonomyLevel: string;
@@ -3206,7 +3237,6 @@ function toSectionProfile(row: {
 }): SectionProfile {
   return {
     ...row,
-    materialMatrix: row.materialMatrix as JsonValue,
     thresholds: row.thresholds as JsonValue,
     autonomyLevel: row.autonomyLevel as AutonomyLevel,
   };

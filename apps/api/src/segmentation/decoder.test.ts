@@ -199,6 +199,32 @@ describe('присоединение служебных страниц', () => {
   });
 });
 
+describe('снятые виды (S59)', () => {
+  it('классификация снятым кодом открывает документ резервом своей группы', () => {
+    // Код мог прийти из `page_classifications` прошлого прогона или из кэша
+    // модели. Резерв — своей группы, а не общий: «иное заключение» попадает в
+    // ту же папку дерева и под те же групповые правила.
+    const result = decodeSegmentation(
+      [page('p1', 'ЗАКЛЮЧЕНИЕ № 02(а)-2020'), page('p2', 'ДОКУМЕНТ О КАЧЕСТВЕ № 1 на камни')],
+      [opensKnown('p1', 'technical_conclusion'), opensKnown('p2', 'product_quality_doc')],
+    );
+    expect(result.documents.map((d) => d.docTypeCode)).toEqual([
+      'other_tests_conclusions',
+      'other_quality_docs',
+    ]);
+  });
+
+  it('решение человека снятым кодом не переписывается', () => {
+    // Список видов снятые не предлагает, так что новых таких решений не будет;
+    // старое — вид, который человек назначил, а не догадка системы.
+    const result = decodeSegmentation(
+      [page('p1', 'ЗАКЛЮЧЕНИЕ № 02(а)-2020')],
+      [opensKnown('p1', 'technical_conclusion', { source: 'manual' })],
+    );
+    expect(result.documents[0]?.docTypeCode).toBe('technical_conclusion');
+  });
+});
+
 describe('приложение-продолжение', () => {
   const parent = page('p1', '##### СЕРТИФИКАТ СООТВЕТСТВИЯ\n№ A-1 от 01.02.2026');
 

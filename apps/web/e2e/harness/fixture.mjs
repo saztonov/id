@@ -446,12 +446,11 @@ export function fixtureSql({ sha, size, aggregateHash }) {
     // действием». Одной строки не хватило бы: два состояния различаются на
     // экране кнопкой, и проверять надо оба.
     `INSERT INTO section_profiles (id, section_code, version, effective_from,
-                                    expected_doc_types, material_categories, material_matrix,
+                                    expected_doc_types,
                                     enabled_rule_codes, thresholds, autonomy_level,
                                     published_at, published_by)
        VALUES ('${IDS.sectionProfilePublished}', 'roofing', 1, DATE '2026-01-01',
-               ARRAY['aosr']::text[], ARRAY['roll_waterproofing']::text[],
-               '{"roll_waterproofing": {"passport": true}}'::jsonb,
+               ARRAY['aosr']::text[],
                ARRAY['AOSR.HDR.022']::text[], '{"minCoverage": 0.6}'::jsonb, 'assisted',
                now(), '${IDS.userAdmin}')`,
     `INSERT INTO section_profiles (id, section_code, version, effective_from,

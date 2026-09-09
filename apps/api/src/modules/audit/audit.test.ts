@@ -123,6 +123,8 @@ const FIXTURE: readonly string[] = [
   // Профиль раздела вставляется прямым SQL: проверяется РАЗРЕШЕНИЕ правил, а
   // не создание профиля (оно проверено в catalog.test.ts). Уровень `automatic`
   // взят намеренно — на нём видно, что наложение объекта умеет только понижать.
+  // Колонки категорий и матрицы материалов заполняются нарочно: с S59 портал
+  // их не читает, а исторический профиль с ними обязан разрешаться как прежде.
   `INSERT INTO section_profiles
      (id, section_code, version, effective_from, expected_doc_types,
       material_categories, material_matrix, enabled_rule_codes, thresholds,
@@ -130,7 +132,7 @@ const FIXTURE: readonly string[] = [
      VALUES ('${PROFILE_ROOFING}', '${SECTION_ROOFING}', 1, '2026-01-01',
              '{aosr,cert_conformity}', '{roll_waterproofing}',
              '{"roll_waterproofing": {"documents": ["cert_conformity"]}}'::jsonb,
-             '{AOSR.HDR.020,DATE.312,MAT.110}',
+             '{AOSR.HDR.020,DATE.312,AOSR.HDR.022}',
              '{"ageDays": 28, "minStrengthPct": 100}'::jsonb,
              'automatic', now())`,
 
@@ -337,8 +339,6 @@ interface ResolvedRulesResponse {
   sectionProfileId: string | null;
   objectProfileIds: string[];
   expectedDocTypes: string[];
-  materialCategories: string[];
-  materialMatrix: Record<string, unknown>;
   enabledRuleCodes: string[];
   thresholds: Record<string, unknown>;
   autonomyLevel: string;
@@ -677,7 +677,7 @@ describe('профили правил объекта и разрешение д�
       sectionProfileId: PROFILE_ROOFING,
       objectProfileIds: [],
       expectedDocTypes: ['aosr', 'cert_conformity'],
-      enabledRuleCodes: ['AOSR.HDR.020', 'DATE.312', 'MAT.110'],
+      enabledRuleCodes: ['AOSR.HDR.020', 'DATE.312', 'AOSR.HDR.022'],
       autonomyLevel: 'automatic',
       // Основание релевантной даты по умолчанию — дата применения (§9.2).
       relevantDateBasis: 'application',
@@ -710,7 +710,9 @@ describe('профили правил объекта и разрешение д�
       overrides: {
         expectedDocTypes: ['aosr'],
         thresholds: { ageDays: 14 },
-        disabledRuleCodes: ['MAT.110'],
+        // Действующее правило, а не снятое: наложение со снятым кодом (S59,
+        // минимальный набор) отвергается той же сверкой, что и профиль раздела.
+        disabledRuleCodes: ['AOSR.HDR.022'],
         relevantDateBasis: 'delivery',
         autonomyLevel: 'assisted',
       },
@@ -741,10 +743,11 @@ describe('профили правил объекта и разрешение д�
       completenessConfigured: true,
     });
     expect(rules.thresholds).toEqual({ ageDays: 14, minStrengthPct: 100 });
-    // Матрица материалов не переопределялась — осталась от раздела.
-    expect(rules.materialMatrix).toEqual({
-      roll_waterproofing: { documents: ['cert_conformity'] },
-    });
+    // Категории и матрица материалов из строки профиля наружу не выходят
+    // (S59): портал их не читает, и отдавать их значило бы обещать
+    // клиенту настройку, которая ни на что не влияет.
+    expect(rules).not.toHaveProperty('materialMatrix');
+    expect(rules).not.toHaveProperty('materialCategories');
   });
 
   it('наложение раздела применяется поверх наложения объекта', async () => {
@@ -754,7 +757,6 @@ describe('профили правил объекта и разрешение д�
       publish: true,
       overrides: {
         expectedDocTypes: ['aosr', 'cert_conformity', 'exec_scheme'],
-        materialMatrix: { roll_waterproofing: { documents: ['cert_conformity', 'passport'] } },
       },
     });
     expect(created.statusCode).toBe(201);
@@ -769,13 +771,60 @@ describe('профили правил объекта и разрешение д�
 
     expect(rules.objectProfileIds).toEqual([objectWideProfileId, sectionProfileId]);
     expect(rules.expectedDocTypes).toEqual(['aosr', 'cert_conformity', 'exec_scheme']);
-    expect(rules.materialMatrix).toEqual({
-      roll_waterproofing: { documents: ['cert_conformity', 'passport'] },
-    });
     // Понижение автоматизма из объектного наложения не потерялось.
     expect(rules.autonomyLevel).toBe('assisted');
     // Наложение раздела не задавало порогов — остались от объекта и вида.
     expect(rules.thresholds).toEqual({ ageDays: 14, minStrengthPct: 100 });
+  });
+
+  it('матрица материалов в наложении — неизвестный ключ, а не молча принятая настройка', async () => {
+    // До S59 ключ был законным. Теперь портал его не читает, и принять его
+    // молча значило бы оставить администратора в уверенности, что требования к
+    // материалам настроены. Отказ — тот же, что на опечатку в ключе.
+    const response = await asAdmin('POST', `${P}/objects/${OBJECT_A}/rule-profiles`, {
+      sectionCode: SECTION_ROOFING,
+      effectiveFrom: '2026-02-01',
+      overrides: {
+        materialMatrix: { roll_waterproofing: { documents: ['cert_conformity', 'passport'] } },
+      },
+    });
+    expect(response.statusCode).toBe(422);
+  });
+
+  it('наложение, записанное до S59 с матрицей материалов, читается без неё', async () => {
+    // Хранимый jsonb несёт ключи прежней формы; их отбрасывает нестрогая схема
+    // чтения. Падение здесь означало бы, что каждый объект с историческим
+    // наложением потерял разрешение правил целиком.
+    const legacyId = id(230);
+    await db.query(
+      `INSERT INTO object_rule_profiles
+         (id, object_id, section_code, version, effective_from, overrides, published_at)
+       VALUES ('${legacyId}', '${OBJECT_A}', '${SECTION_PILES}', 1, '2026-01-01',
+               '{"thresholds": {"ageDays": 9},
+                 "materialCategories": ["roll_waterproofing"],
+                 "materialMatrix": {"roll_waterproofing": {"documents": ["passport"]}}}'::jsonb,
+               now())`,
+    );
+
+    const listed = await asAdmin(
+      'GET',
+      `${P}/objects/${OBJECT_A}/rule-profiles?sectionCode=${SECTION_PILES}`,
+    );
+    expect(listed.statusCode).toBe(200);
+    const legacy = listed.json<RuleProfileResponse[]>().find((profile) => profile.id === legacyId);
+    expect(legacy?.overrides).toEqual({ thresholds: { ageDays: 9 } });
+
+    const rules = (
+      await asAdmin(
+        'GET',
+        `${P}/objects/${OBJECT_A}/sections/${SECTION_PILES}/effective-rules?at=2026-06-01`,
+      )
+    ).json<ResolvedRulesResponse>();
+    // Объектное наложение из теста выше действует и на этот раздел; разделное
+    // историческое ложится поверх него.
+    expect(rules.objectProfileIds).toEqual([objectWideProfileId, legacyId]);
+    expect(rules.thresholds).toEqual({ ageDays: 9 });
+    expect(rules).not.toHaveProperty('materialMatrix');
   });
 
   it('наложением нельзя поднять автоматизм (§0.5, п.5)', async () => {

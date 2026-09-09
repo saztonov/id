@@ -32,7 +32,7 @@
  * подставляется: текст реального документа, разумеется, говорит о своём
  * предмете, и это данные, а не инструкция.
  */
-import { DOC_TYPES } from '@id/doc-types';
+import { ACTIVE_DOC_TYPES } from '@id/doc-types';
 import type { PageInput } from './types.js';
 
 export interface PromptText {
@@ -88,9 +88,13 @@ export function findSectionMarkers(text: string): readonly string[] {
  * в `doc_type_candidates` (§3.2). Предложи мы их модели как обычные коды,
  * она выбрала бы резерв вместо честного `other`, и цикл роста каталога
  * остался бы без входных данных.
+ *
+ * Снятые виды (S59) исключены по той же причине, что и из якорей: предложи
+ * их модели — и техзаключение вернулось бы в работу через ответ модели, минуя
+ * решение заказчика. Модель о снятом виде не знает и отвечает `other`.
  */
 export function promptDocTypeCodes(): readonly string[] {
-  return DOC_TYPES.filter((t) => !t.isFallback).map((t) => t.code);
+  return ACTIVE_DOC_TYPES.filter((t) => !t.isFallback).map((t) => t.code);
 }
 
 /** Сколько символов текста страницы уходит в промт. */

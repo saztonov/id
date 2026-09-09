@@ -101,10 +101,12 @@ export function isAnalysisAnchor(code: string | null | undefined): boolean {
  *
  * Здесь группа отвечает на вопрос точно, и именно поэтому прежний список кодов
  * успел разойтись: в копии из `packages/rules` не было `other_quality_docs`,
- * а в двух других он был. Группа шире прежнего перечня ещё на три вида
- * (`iso_certificate`, `permit_conformity_mark`, `product_quality_doc`) — и это
- * то расширение, ради которого замена и делается: документ качества незнакомой
- * формы обязан давать материал наравне со знакомым (§0.5).
+ * а в двух других он был. Группа шире прежнего перечня и на виды вроде
+ * `iso_certificate` и `quality_doc` — и это то расширение, ради которого
+ * замена и делается: документ качества незнакомой формы обязан давать материал
+ * наравне со знакомым (§0.5). Снятые виды группы (`permit_conformity_mark`,
+ * `product_quality_doc`, S59) отвечают здесь по-прежнему «да»: документы
+ * прошлых прогонов с этими кодами остаются документами о качестве.
  */
 export function isQualityDocCode(code: string | null | undefined): boolean {
   return groupOf(code) === 'quality_docs';

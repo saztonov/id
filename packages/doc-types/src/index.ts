@@ -22,7 +22,7 @@ export type {
 } from './types.js';
 export { compileAnchors } from './types.js';
 
-export { DOC_TYPES } from './catalog.js';
+export { ACTIVE_DOC_TYPES, DOC_TYPES, RETIRED_DOC_TYPE_CODES } from './catalog.js';
 export type { DocTypeCode } from './catalog.js';
 
 export { BASE_EVIDENCE_FIELDS, fieldsForType } from './base-fields.js';
