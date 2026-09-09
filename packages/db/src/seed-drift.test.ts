@@ -113,52 +113,19 @@ describe('применение миграций вместе с seed', () => {
     // seed'ом: владение строкой обозначает именно is_system.
     expect(docTypes?.system).toBe(DOC_TYPES.length);
   });
-}); /**
+});
+
+/**
  * TestDatabase реализует SqlExecutor целиком: query для параметризованных
  * запросов и exec для многооператорного тела миграции. Транспортная разница
  * между node-postgres и PGlite закрыта в самом интерфейсе раннера, поэтому на
  * прод уезжает ровно тот код, который проверен здесь.
+ *
+ * Второго `describe` с той же цепочкой миграций здесь больше нет (S59): он
+ * дословно повторял блок выше и гонял 84 миграции в pglite второй раз, — со
+ * своей кучей WASM, — что на гейте с параллельными пакетами отдавалось
+ * нехваткой памяти (S57/S58).
  */
 function asExecutor(db: TestDatabase): SqlExecutor {
   return db;
 }
-
-describe('применение миграций вместе с seed', () => {
-  let db: TestDatabase;
-  let versions: readonly string[];
-  let applied: readonly string[];
-
-  beforeAll(async () => {
-    const migrations = loadMigrations(MIGRATIONS_DIR);
-    versions = migrations.map((mig) => mig.version);
-
-    db = await createPgliteDatabase();
-    ({ applied } = await applyMigrations(asExecutor(db), migrations));
-  }, 300_000);
-
-  afterAll(async () => {
-    await db.close();
-  });
-
-  it('применяет всю цепочку, включая 0009', () => {
-    expect(applied).toStrictEqual(versions);
-    expect(versions).toContain(SEED_VERSION);
-  });
-
-  it('заполняет doc_types и page_roles ровно каталогом', async () => {
-    const [docTypes] = await db.query<{ total: number; system: number }>(
-      `SELECT count(*)::int AS total,
-              (count(*) FILTER (WHERE is_system))::int AS system
-         FROM doc_types`,
-    );
-    const [pageRoles] = await db.query<{ total: number }>(
-      'SELECT count(*)::int AS total FROM page_roles',
-    );
-
-    expect(docTypes?.total).toBe(DOC_TYPES.length);
-    expect(pageRoles?.total).toBe(PAGE_ROLES.length);
-    // Совпадение счёта ничего не стоило бы, окажись часть строк заведена не
-    // seed'ом: владение строкой обозначает именно is_system.
-    expect(docTypes?.system).toBe(DOC_TYPES.length);
-  });
-});
