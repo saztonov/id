@@ -13,12 +13,21 @@
  *
  * ## Что модель НЕ вправе изменить
  *
- * Строку, которую предфильтр нашёл посимвольным совпадением номера. Точное
- * равенство — утверждение более сильное, чем суждение по смыслу, и переспорить
- * его моделью значило бы поставить вероятность выше факта. Довод модели при
- * этом не выбрасывается: он ложится в `matchNote` и виден в отчёте — если
- * модель сомневается в паре, найденной точно, это первое, что должен увидеть
+ * Строку, которую предфильтр РЕШИЛ номером: посимвольным совпадением либо
+ * совпадением после свёртки написания (`FOLDED_SCORE` и выше). Равенство
+ * номера — утверждение более сильное, чем суждение по смыслу, и переспорить
+ * его моделью значило бы поставить вероятность выше факта. Свёртка сюда
+ * входит с S59: боевая строка «РОСС RU.OC54.H005483» (латиница) против
+ * документа «РОСС RU.ОС54.Н005483» (кириллица) — один и тот же номер, и
+ * модель, ответившая по нему с уверенностью 0.5, понижала строку до
+ * `candidate` и обнуляла найденный документ. Довод модели при этом не
+ * выбрасывается: он ложится в `matchNote` и виден в отчёте — если модель
+ * сомневается в паре, найденной по номеру, это первое, что должен увидеть
  * разбирающий, и первое сырьё для табло качества.
+ *
+ * Ступени ниже свёртки (компактная форма, числовое ядро, кусок номера) решёнными
+ * не считаются: там совпала не запись номера, а её часть, и суждение модели по
+ * содержанию строки там уместно.
  *
  * ## Почему «не найдено» ещё не значит «нет в папке»
  *
@@ -39,7 +48,7 @@
  */
 import { z } from 'zod';
 
-import { CANDIDATE_BASES, type CandidateBasis, type MatchState } from './match.js';
+import { CANDIDATE_BASES, FOLDED_SCORE, type CandidateBasis, type MatchState } from './match.js';
 import type { PromptDocument } from './registry-match-prompt.js';
 
 /**
@@ -155,9 +164,36 @@ export interface MergeOptions {
   readonly minConfidence?: number;
 }
 
-/** Точное совпадение предфильтра: посимвольное равенство номера. */
-function isExactPrefilter(row: PrefilterRow): boolean {
-  return row.matchState === 'matched' && row.matchScore === 1;
+/** Состояние строки, по которому судят, решил ли её предфильтр. */
+export interface PrefilterState {
+  readonly matchState: MatchState;
+  readonly matchScore: number | null;
+}
+
+/**
+ * Решённая предфильтром строка: номер совпал посимвольно либо после свёртки
+ * написания (S59). Ниже `FOLDED_SCORE` совпадала не запись номера, а её часть,
+ * и такая строка решённой не считается — см. шапку.
+ */
+export function isSettledPrefilter(row: PrefilterState): boolean {
+  return row.matchState === 'matched' && row.matchScore !== null && row.matchScore >= FOLDED_SCORE;
+}
+
+/**
+ * Стоит ли выборка вызова модели.
+ *
+ * Не стоит, когда предфильтр решил в ней КАЖДУЮ строку: модели нечего в такой
+ * выборке ни найти, ни переспорить, а вызов оплачивается. Пустая выборка не
+ * стоит его тем более. Пропуск безопасен: строки остаются в состоянии
+ * предфильтра, и барьер веера их не ждёт — выборка в него не ставится.
+ */
+export function partitionNeedsModel(rows: readonly PrefilterState[]): boolean {
+  return rows.some((row) => !isSettledPrefilter(row));
+}
+
+/** Довод решённой строки — по счёту ступени, а не по числу в отчёте. */
+function settledNote(row: PrefilterRow): string {
+  return row.matchScore === 1 ? 'номер совпал посимвольно' : 'номер совпал после свёртки написания';
 }
 
 function clampConfidence(value: number): number {
@@ -216,7 +252,7 @@ function silent(row: PrefilterRow, why: string): MergedRow {
       matchScore: row.matchScore,
       matchedBy: 'rule',
       matchBasis: row.matchedDocumentId === null ? null : 'doc_no',
-      matchNote: isExactPrefilter(row) ? 'номер совпал посимвольно' : why,
+      matchNote: isSettledPrefilter(row) ? settledNote(row) : why,
       candidates: row.candidates.map((candidate) => ({ ...candidate, score: 0 })),
       checks: [],
     };
@@ -244,17 +280,24 @@ function mergeOne(
   const confidence = clampConfidence(decision.confidence);
   const note = decision.note.trim() === '' ? null : decision.note.trim();
 
-  // Точное совпадение неприкосновенно: см. шапку. Проверки содержания при этом
-  // сохраняются целиком — ради них строку и показывали модели.
-  if (isExactPrefilter(row)) {
+  // Решённая номером строка неприкосновенна: см. шапку. Счёт остаётся счётом
+  // предфильтра — единица у посимвольного равенства, `FOLDED_SCORE` у свёртки,
+  // — потому что единица означает «совпало посимвольно» и только это.
+  //
+  // Проверки содержания сохраняются в данных строки как сведения. Замечаний
+  // они больше не порождают: правила-ретрансляторы расхождений граф
+  // (`REG.113`–`REG.117`) сняты в S59, а выборка, решённая целиком, модели
+  // теперь и не показывается (`partitionNeedsModel`). Сюда такая строка
+  // попадает только соседкой по выборке с нерешёнными строками.
+  if (isSettledPrefilter(row)) {
     return {
       rowId: row.rowId,
       matchState: 'matched',
       matchedDocumentId: row.matchedDocumentId,
-      matchScore: 1,
+      matchScore: row.matchScore,
       matchedBy: 'rule',
       matchBasis: 'doc_no',
-      matchNote: note ?? 'номер совпал посимвольно',
+      matchNote: note ?? settledNote(row),
       candidates: [],
       checks: decision.checks,
     };

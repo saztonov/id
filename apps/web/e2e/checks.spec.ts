@@ -62,3 +62,33 @@ test('подрядчику перепроверка тоже доступна: �
   await signIn(page, KC.contractor, RECHECK_URL);
   await expect(page.getByTestId('pipeline-recheck')).toBeVisible();
 });
+
+/**
+ * Сворачивание блоков отчёта (S59).
+ *
+ * Папка на двенадцать актов — двенадцать групп по четыре таблицы. Сценарий
+ * проверяет весь путь: секция свёрнута нажатием на заголовок, состояние пережило
+ * перезагрузку (оно хранится в браузере на папку), и её можно развернуть обратно.
+ * Папка — `folderReview`: у неё есть комплект с актом, то есть секция `act`.
+ */
+test('секция отчёта сворачивается по заголовку и остаётся свёрнутой после перезагрузки', async ({
+  page,
+}) => {
+  const url = `/ids/folders/${IDS.folderReview}?tab=checks`;
+  await signIn(page, KC.engineer, url);
+
+  const section = page.getByTestId('checks-report-section-act').first();
+  await expect(section).toBeVisible();
+  await expect(section.locator('table')).toBeVisible();
+
+  await section.getByTestId('checks-report-section-act-header').click();
+  await expect(section.locator('table')).toBeHidden();
+
+  await page.reload();
+  const reloaded = page.getByTestId('checks-report-section-act').first();
+  await expect(reloaded).toBeVisible();
+  await expect(reloaded.locator('table')).toBeHidden();
+
+  await reloaded.getByTestId('checks-report-section-act-header').click();
+  await expect(reloaded.locator('table')).toBeVisible();
+});

@@ -11,6 +11,7 @@
  */
 import type {
   ReportItemStatus,
+  ReportPage,
   ReportRow,
   ReportRowStatus,
   ReportSection,
@@ -158,11 +159,33 @@ export function formatDate(iso: string): string {
  * страницу, не находит обещанного и перестаёт верить остальным строкам тоже.
  */
 export function rowHref(folderId: string, row: ReportRow): string | null {
-  const index = row.page?.workingPageIndex ?? null;
-  if (index === null) return null;
-  const query = new URLSearchParams({ tab: 'markup', page: String(index) });
-  if (row.blockId !== null) query.set('block', row.blockId);
+  return row.page === null ? null : pageHref(folderId, row.page, row.blockId);
+}
+
+/** Адрес страницы разметки; `null` — рабочий документ не собран, идти некуда. */
+export function pageHref(
+  folderId: string,
+  page: ReportPage,
+  blockId: string | null = null,
+): string | null {
+  if (page.workingPageIndex === null) return null;
+  const query = new URLSearchParams({ tab: 'markup', page: String(page.workingPageIndex) });
+  if (blockId !== null) query.set('block', blockId);
   return `/ids/folders/${folderId}?${query.toString()}`;
+}
+
+/**
+ * Страницы похожих документов, которые печатаются ВМЕСТО своей страницы (S59).
+ *
+ * Только когда своей страницы нет: у строки `candidate`/`ambiguous` документ не
+ * подтверждён, и колонка «Стр.» стояла пустой, хотя подпись говорила «похоже на
+ * стр. 19, 20» — проверяющий шёл листать разметку руками. У строки со своей
+ * страницей кандидаты не печатаются: две колонки адресов в одной ячейке
+ * читались бы как два ответа на один вопрос.
+ */
+export function candidatePagesOf(row: ReportRow): readonly ReportPage[] {
+  if (pagesLabel(row) !== null) return [];
+  return row.candidatePages;
 }
 
 /**

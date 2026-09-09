@@ -127,7 +127,7 @@ export interface ReportRow {
   readonly title: string;
   readonly subtitle: string | null;
   /** Адрес для перехода на разметку; `null` — идти некуда. */
-  readonly page: { readonly number: number; readonly workingPageIndex: number | null } | null;
+  readonly page: ReportPage | null;
   /** Диапазон страниц документа для печати: «1–3» либо «8». */
   readonly pages: string | null;
   readonly dates: ReportDates | null;
@@ -153,6 +153,22 @@ export interface ReportRow {
   readonly blockId: string | null;
   readonly findingIds: readonly string[];
   readonly items: readonly ReportItem[];
+  /**
+   * Страницы документов, похожих на строку перечня (S59).
+   *
+   * У строки без подтверждённого документа `page` пуст, а колонка «Стр.» —
+   * прочерк, и проверяющий, прочитав «похоже на стр. 19, 20», шёл на разметку
+   * листать руками. Страницы отдаются данными, а не только текстом подписи,
+   * чтобы клиент мог сделать из каждой ссылку. У документов и замечаний список
+   * пуст: у них есть своя страница.
+   */
+  readonly candidatePages: readonly ReportPage[];
+}
+
+/** Страница отчёта: номер в папке и индекс в рабочем документе (`null` — не собран). */
+export interface ReportPage {
+  readonly number: number;
+  readonly workingPageIndex: number | null;
 }
 
 export interface ReportSection {
@@ -491,7 +507,14 @@ export function registryRowVerdict(input: {
   readonly matchedBy?: 'rule' | 'llm';
   /** Довод словами — то, что модель сказала о своём решении. */
   readonly matchNote?: string | null;
-  /** Проверки содержания строки: расхождения по графам. */
+  /**
+   * Проверки содержания строки: расхождения по графам.
+   *
+   * На вердикт НЕ влияют с S59 — см. довод у ветки `matched`. Параметр
+   * оставлен в подписи намеренно: без него проверку «найденная строка не
+   * получает предупреждения за расхождения» нельзя даже записать, а именно она
+   * держит ветку от возвращения.
+   */
   readonly checks?: readonly { readonly status: string }[];
   /** Хвост «, стр. 42» либо пустая строка. */
   readonly where: string;
@@ -512,18 +535,24 @@ export function registryRowVerdict(input: {
    * возвращение означало бы, что портал снова гадает по числу.
    */
   const note = input.matchNote?.trim() ?? '';
-  const mismatches = (input.checks ?? []).filter((check) => check.status === 'mismatch').length;
 
   if (input.matchState === 'matched') {
+    /**
+     * Найденная строка — ВСЕГДА `ok` (S59).
+     *
+     * С S57 по S59 расхождения по графам поднимали найденную строку до
+     * предупреждения: «найден в комплекте; в описании строки расхождений: 1».
+     * Заказчик показал скриншот: сертификат «РОСС RU.OC54.H005483» назван в
+     * реестре верно, но графа организации называет поставщика, а документ —
+     * изготовителя, и портал объявил это расхождением. Для инженера оба
+     * написания — один и тот же документ, и предупреждение было ложным.
+     *
+     * Решение заказчика: сопоставление строки перечня отвечает ТОЛЬКО на
+     * вопрос «есть документ или нет». Правила-ретрансляторы расхождений граф
+     * (`REG.113–117`) сняты вместе с этой веткой; её возвращение означало бы,
+     * что портал снова спорит с реестром о том, как назвать поставщика.
+     */
     const head = note === '' ? 'найден в комплекте' : `найден в комплекте: ${note}`;
-    if (mismatches > 0) {
-      // Документ найден, а описан неверно — и для инженера это находка, а не
-      // успех: строка перечня утверждает о папке то, чего в ней нет.
-      return {
-        status: 'warning',
-        text: `${head}${input.where}; в описании строки расхождений: ${String(mismatches)}`,
-      };
-    }
     return { status: 'ok', text: `${head}${input.where}` };
   }
 
@@ -563,6 +592,18 @@ export function registryRowVerdict(input: {
   }
 
   return { status: 'warning', text: 'документ комплекта не назван ни одной строкой реестра' };
+}
+
+/**
+ * Хвост подписи о похожих документах: «: похоже на стр. 19, 20».
+ *
+ * Пустая строка, когда сказать нечего. Число кандидатов отдельно не
+ * печатается — оно видно по перечню, а «похожих документов 2» без перечня не
+ * помогает никому. Страницы ожидаются уже упорядоченными (`candidatePages`).
+ */
+export function candidatesTail(pages: readonly ReportPage[]): string {
+  if (pages.length === 0) return '';
+  return `: похоже на стр. ${pages.map((page) => String(page.number)).join(', ')}`;
 }
 
 class ReportFacts {
@@ -810,6 +851,7 @@ class ReportFacts {
         blockId: finding.blockId,
         findingIds: [finding.id],
         items: [],
+        candidatePages: [],
       }));
 
     return {
@@ -847,6 +889,7 @@ class ReportFacts {
       blockId: finding.blockId,
       findingIds: [finding.id],
       items: [],
+      candidatePages: [],
     }));
 
     return {
@@ -893,6 +936,7 @@ class ReportFacts {
       blockId: verdict.source?.blockId ?? null,
       findingIds: own.map((finding) => finding.id),
       items,
+      candidatePages: [],
     };
   }
 
@@ -902,14 +946,20 @@ class ReportFacts {
       matched === null
         ? null
         : this.pageOf(this.context.documents.get(matched)?.firstPageId ?? null);
+    // Страницы похожих документов есть только у строки, которой документ не
+    // подтверждён: у найденной есть своя страница, у отсутствующей — никакой.
+    const candidatePages =
+      row.matchState === 'candidate' || row.matchState === 'ambiguous'
+        ? this.candidatePages(row.candidateDocumentIds)
+        : [];
 
     /**
      * Подпись строки берётся у того, кто решал (S57).
      *
      * Прежде отчёт восстанавливал довод из счёта порогами и повторял признак
      * приложения собственным шаблоном — то есть подписывал строки не тем, чем
-     * они найдены. Довод теперь приходит вместе с решением, а расхождения по
-     * графам показываются числом рядом с ним.
+     * они найдены. Довод теперь приходит вместе с решением; расхождения по
+     * графам подпись не меняют (S59).
      */
     const verdict = registryRowVerdict({
       matchState: row.matchState,
@@ -918,7 +968,7 @@ class ReportFacts {
       matchNote: row.matchNote,
       checks: row.checks,
       where: page === null ? '' : `, стр. ${String(page.number)}`,
-      candidates: this.candidatePages(row.candidateDocumentIds),
+      candidates: candidatesTail(candidatePages),
     });
     const status = verdict.status;
     const statusText = verdict.text;
@@ -947,6 +997,7 @@ class ReportFacts {
       blockId: null,
       findingIds: [],
       items: [],
+      candidatePages,
     };
   }
 
@@ -1086,19 +1137,17 @@ class ReportFacts {
   // ===================================================================
 
   /**
-   * Страницы похожих документов строки: «: похоже на стр. 19, 20».
+   * Первые страницы похожих документов строки, по возрастанию номера.
    *
-   * Пустая строка, когда сказать нечего: страницы кандидатов неизвестны либо
-   * кандидатов нет вовсе. Число кандидатов отдельно не печатается — оно видно
-   * по перечню, а «похожих документов 2» без перечня не помогает никому.
+   * Пусто, когда сказать нечего: страницы кандидатов неизвестны либо
+   * кандидатов нет вовсе. Документ без известной страницы отбрасывается, а не
+   * печатается прочерком: ссылка «в никуда» хуже её отсутствия.
    */
-  private candidatePages(documentIds: readonly string[]): string {
-    const pages = documentIds
-      .map((id) => this.pageOf(this.context.documents.get(id)?.firstPageId ?? null)?.number)
-      .filter((number): number is number => number !== undefined)
-      .sort((left, right) => left - right);
-
-    return pages.length === 0 ? '' : `: похоже на стр. ${pages.join(', ')}`;
+  private candidatePages(documentIds: readonly string[]): readonly ReportPage[] {
+    return documentIds
+      .map((id) => this.pageOf(this.context.documents.get(id)?.firstPageId ?? null))
+      .filter((page): page is ReportPage => page !== null)
+      .sort((left, right) => left.number - right.number);
   }
 
   private titleOf(code: string): string {

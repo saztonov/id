@@ -10,19 +10,43 @@ import { describe, expect, it } from 'vitest';
 
 import {
   acceptDecisions,
+  isSettledPrefilter,
   mergeLlmMatches,
+  partitionNeedsModel,
   registryMatchResponseSchema,
   DECISION_FOREIGN_DOCUMENT,
   DECISION_UNKNOWN_ROW,
   type LlmRowDecision,
   type PrefilterRow,
 } from './match-llm.js';
+import { FOLDED_SCORE } from './match.js';
 
 const exact: PrefilterRow = {
   rowId: 'row-exact',
   matchState: 'matched',
   matchedDocumentId: 'doc-1',
   matchScore: 1,
+  candidates: [],
+};
+
+/**
+ * Найдено свёрткой написания: «РОСС RU.OC54.H005483» в описи латиницей против
+ * «РОСС RU.ОС54.Н005483» на листе кириллицей — одно и то же после фолдинга.
+ */
+const folded: PrefilterRow = {
+  rowId: 'row-folded',
+  matchState: 'matched',
+  matchedDocumentId: 'doc-1',
+  matchScore: FOLDED_SCORE,
+  candidates: [],
+};
+
+/** Совпала компактная форма, не номер: такую строку модель судить вправе. */
+const compact: PrefilterRow = {
+  rowId: 'row-compact',
+  matchState: 'matched',
+  matchedDocumentId: 'doc-1',
+  matchScore: 0.7,
   candidates: [],
 };
 
@@ -84,6 +108,48 @@ describe('mergeLlmMatches', () => {
     expect(row?.matchedBy).toBe('rule');
     expect(row?.matchScore).toBe(1);
     expect(row?.matchNote).toContain('сомневаюсь');
+  });
+
+  it('совпадение после свёртки написания модель не понижает (S59)', () => {
+    // Боевой случай: по строке, найденной фолдингом, модель ответила с
+    // уверенностью 0.5 — и строка становилась `candidate`, а найденный
+    // документ обнулялся. Равенство номера после свёртки — факт того же рода,
+    // что и посимвольное; мутация `>= FOLDED_SCORE` → `=== 1` роняет проверку.
+    const [row] = mergeLlmMatches(
+      [folded],
+      [decision({ rowId: 'row-folded', documentId: 'doc-1', confidence: 0.5 })],
+    );
+    expect(row?.matchState).toBe('matched');
+    expect(row?.matchedDocumentId).toBe('doc-1');
+    expect(row?.matchedBy).toBe('rule');
+    expect(row?.matchBasis).toBe('doc_no');
+    // Счёт остаётся счётом предфильтра: единица означает «совпало
+    // посимвольно», и свёртке её присваивать нельзя.
+    expect(row?.matchScore).toBe(FOLDED_SCORE);
+  });
+
+  it('у решённой строки без довода модели довод называет ступень', () => {
+    const [byFolding] = mergeLlmMatches(
+      [folded],
+      [decision({ rowId: 'row-folded', documentId: 'doc-1', confidence: 0.5, note: '' })],
+    );
+    expect(byFolding?.matchNote).toBe('номер совпал после свёртки написания');
+
+    const [silentFolding] = mergeLlmMatches([folded], []);
+    expect(silentFolding?.matchState).toBe('matched');
+    expect(silentFolding?.matchNote).toBe('номер совпал после свёртки написания');
+  });
+
+  it('ниже свёртки решение модели по-прежнему принимается', () => {
+    // Чувствительность к предыдущему: неприкосновенность распространена на
+    // свёртку, а не на всё, что предфильтр назвал `matched`. Компактная форма
+    // — часть номера, и суждение модели там уместно.
+    const [row] = mergeLlmMatches(
+      [compact],
+      [decision({ rowId: 'row-compact', documentId: 'doc-2', confidence: 0.9 })],
+    );
+    expect(row?.matchedDocumentId).toBe('doc-2');
+    expect(row?.matchedBy).toBe('llm');
   });
 
   it('точное совпадение сохраняет проверки содержания', () => {
@@ -197,6 +263,29 @@ describe('mergeLlmMatches', () => {
     const [row] = mergeLlmMatches([exact], []);
     expect(row?.matchState).toBe('matched');
     expect(row?.matchedDocumentId).toBe('doc-1');
+  });
+});
+
+describe('partitionNeedsModel (S59)', () => {
+  it('выборка, решённая номером целиком, вызова модели не стоит', () => {
+    // Постановщик веера обещал это комментарием, а отсеивал только пустые
+    // выборки. Мутация «убрать фильтр» (вернуть `rows.length > 0`) роняет
+    // проверку.
+    expect(partitionNeedsModel([exact, folded])).toBe(false);
+    expect(partitionNeedsModel([])).toBe(false);
+  });
+
+  it('одна нерешённая строка ставит выборку в веер', () => {
+    expect(partitionNeedsModel([exact, folded, unresolved])).toBe(true);
+    expect(partitionNeedsModel([exact, compact])).toBe(true);
+  });
+
+  it('решённой считается только строка со счётом не ниже свёртки', () => {
+    expect(isSettledPrefilter(exact)).toBe(true);
+    expect(isSettledPrefilter(folded)).toBe(true);
+    expect(isSettledPrefilter(compact)).toBe(false);
+    expect(isSettledPrefilter({ matchState: 'ambiguous', matchScore: null })).toBe(false);
+    expect(isSettledPrefilter({ matchState: 'candidate', matchScore: 1 })).toBe(false);
   });
 });
 

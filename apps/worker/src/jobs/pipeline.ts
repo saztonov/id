@@ -38,6 +38,7 @@ import {
   readMatchFanState,
   registryPartitions,
   documentNumbersOf,
+  partitionNeedsModel,
   readJobAutoContinue,
   readRunAutoContinue,
   listRunBlockEnvelopes,
@@ -2097,15 +2098,21 @@ function segmentationDeps(options: PipelineJobsOptions): SegmentationDeps {
      * Выборки сверки — ключами, без содержимого.
      *
      * Постановщик веера не должен тянуть в память всю папку: ему нужно знать
-     * только, СКОЛЬКО работы и как её адресовать. Строки без сравнимого
-     * состояния сюда не попадают — выборка, где всё уже решено посимвольно,
-     * вызова модели не стоит.
+     * только, СКОЛЬКО работы и как её адресовать.
+     *
+     * Выборка, где предфильтр решил номером КАЖДУЮ строку, вызова модели не
+     * стоит и в веер не ставится (`partitionNeedsModel`, S59). До S59 так
+     * обещал комментарий, а код отсеивал только пустые выборки: на боевой папке
+     * модель получала выборки, в которых ей нечего было ни найти, ни
+     * переспорить, и по строке со свёрнутым номером отвечала неуверенно —
+     * понижая её до `candidate`. Пропущенные строки остаются в состоянии
+     * предфильтра, барьер `doc.match_finalize` их не ждёт.
      */
     matchPartitions: async (folderId) => {
       const scope = await scopeOf(folderId);
       const context = await matchContext(db, scope, folderId);
       return context.partitions
-        .filter((partition) => partition.rows.length > 0)
+        .filter((partition) => partitionNeedsModel(partition.rows))
         .map((partition) => ({ key: partition.key, rows: partition.rows.length }));
     },
 

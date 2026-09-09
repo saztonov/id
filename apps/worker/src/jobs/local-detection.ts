@@ -467,6 +467,19 @@ function fullPageBlock(workingPageIndex: number): DetectedBlockInput {
   };
 }
 
+/** Итог отбора кандидатов страницы: что осталось и почему. */
+export interface BlockSelection {
+  readonly kept: readonly Candidate[];
+  /** Сколько блоков-носителей номера листа добавлено к штампам (0 или 1). */
+  readonly numberZone: number;
+  /**
+   * Страница сведена к штампу: штамп был и был не один среди кандидатов.
+   * Именно этот флаг, а не число отброшенных, отличает в журнале «сведено к
+   * штампу, лишнего не было» от «страница не тронута».
+   */
+  readonly stampOnly: boolean;
+}
+
 /**
  * Отбор кандидатов на КРУПНОМ листе: штампы и верхняя надпись.
  *
@@ -507,10 +520,14 @@ function fullPageBlock(workingPageIndex: number): DetectedBlockInput {
 export function selectLargeSheetBlocks(
   candidates: readonly Candidate[],
   policy: MarkupPolicy,
-): { readonly kept: readonly Candidate[]; readonly numberZone: number } {
+): BlockSelection {
   const stamps = candidates.filter((candidate) => candidate.blockType === 'stamp');
+  // «Сведено к штампу» — только когда было к чему сводить: единственный штамп
+  // без соседей не отбрасывает ничего, а лист без штампа пустеет по правилу
+  // формата, а не ради штампа — журнал обязан различать эти два исхода.
+  const stampOnly = stamps.length > 0 && candidates.length > 1;
   if (policy.numberZone === 'off' || stamps.length === 0) {
-    return { kept: stamps, numberZone: 0 };
+    return { kept: stamps, numberZone: 0, stampOnly };
   }
 
   // Самый верхний текстовый кандидат — и ровно один. Второй по высоте на
@@ -531,8 +548,61 @@ export function selectLargeSheetBlocks(
     }
   }
 
-  if (topmost === null) return { kept: stamps, numberZone: 0 };
-  return { kept: [...stamps, topmost], numberZone: 1 };
+  if (topmost === null) return { kept: stamps, numberZone: 0, stampOnly };
+  return { kept: [...stamps, topmost], numberZone: 1, stampOnly };
+}
+
+/**
+ * Отбор кандидатов на ЛЮБОЙ странице детекции: штамп есть и он не один —
+ * в распознавание идёт только штамп (S59).
+ *
+ * ## Почему штамп можно считать основной надписью чертежа
+ *
+ * Замер по боевой базе: класс `stamp` детектор ставит только на листах
+ * исполнительных схем — 25 из 29 страниц `exec_scheme`, и ни одной на
+ * сертификатах и паспортах. То есть штамп в выдаче детектора — это основная
+ * надпись чертежа, а остальные блоки той же страницы — экспликации, выноски и
+ * подписи к осям, которым в тексте страницы делать нечего (§ выше). Отбор
+ * работает от свойства СТРАНИЦЫ, а не от формата листа: чертёж, попавший на
+ * детекцию в режиме `full_detection` (нечитаемый MediaBox, правило
+ * `detect_all`), получает то же обращение, что и крупный лист.
+ *
+ * ## Почему отбор стоит на стадии детекции
+ *
+ * Это единственное место, где отбросить блок — безопасно. Дальше набор блоков
+ * замораживается: `blocks_hash` ревизии считается по нему, гейт целостности
+ * прогона сверяет его перед стартом, а `vlm.finalize_run` не публикует ничего,
+ * пока результаты не покроют замороженный набор ПОЛНОСТЬЮ (инвариант
+ * «неполный результат не публикуется», `vlm-recognition.ts`). Отбор на
+ * распознавании превращал бы каждый чертёж в неполное покрытие, и прогон
+ * честно отказывал бы; отбор здесь просто не рисует блоки, которых потом не
+ * ждут.
+ *
+ * ## Почему вместе со штампом остаётся верхняя надпись
+ *
+ * Заказчик просил «только штамп», и это сознательное отступление: собственный
+ * номер листа напечатан заголовком ВВЕРХУ листа, а не в штампе (замер в
+ * докстринге `selectLargeSheetBlocks`), и без него правилам нечем сверить
+ * номер схемы с реестром. Политика `numberZone` здесь НЕ читается: она
+ * управляет крупным листом, где «off» — осознанный выбор администратора, а
+ * на произвольной странице со штампом надпись — единственное, что оставляет
+ * страницу проверяемой (`AOSR.P4.080`, `SCH.681`). Боевые ревизии размечены
+ * устаревшей политикой с выключенной зоной, и без этого номер листа терялся бы
+ * на каждом чертеже.
+ *
+ * Страница без штампа остаётся как есть: сертификат или паспорт размечаются
+ * всеми блоками, как раньше. Единственный штамп без соседей — тоже как есть:
+ * отбрасывать нечего.
+ */
+export function selectStampBlocks(
+  candidates: readonly Candidate[],
+  policy: MarkupPolicy,
+): BlockSelection {
+  const hasStamp = candidates.some((candidate) => candidate.blockType === 'stamp');
+  if (!hasStamp || candidates.length < 2) {
+    return { kept: candidates, numberZone: 0, stampOnly: false };
+  }
+  return selectLargeSheetBlocks(candidates, { ...policy, numberZone: 'near_stamp' });
 }
 
 function orderReadingWise(candidates: readonly Candidate[]): readonly Candidate[] {
@@ -715,6 +785,8 @@ export function createLocalDetectionHandler(
     let emptyPages = 0;
     let fullPagePages = 0;
     let numberZoneBlocks = 0;
+    let stampOnlyPages = 0;
+    let stampDroppedBlocks = 0;
     const skippedExisting: number[] = [];
     const targetPageList: number[] = [];
     const fullPagePageList: number[] = [];
@@ -897,7 +969,11 @@ export function createLocalDetectionHandler(
          * экран разметки, — то есть в системе неповёрнутой страницы.
          */
         /**
-         * На крупном листе остаются только штамп и верхняя надпись (S42, S46).
+         * На крупном листе остаются только штамп и верхняя надпись (S42, S46);
+         * на любой другой странице со штампом среди нескольких блоков — тоже
+         * (S59). Разница между режимами — судьба страницы БЕЗ штампа: крупный
+         * лист пустеет (номер гадать портал не берётся), остальные страницы
+         * остаются со всеми блоками — сертификат или паспорт штампа не имеют.
          *
          * Отбор — ДО `orderReadingWise` и до нумерации: `sortOrder` обязан
          * получиться плотным 0..n−1 по оставшимся блокам. Для канонического
@@ -908,8 +984,16 @@ export function createLocalDetectionHandler(
         const selection =
           mode === 'stamp_only'
             ? selectLargeSheetBlocks(detected.candidates, policy)
-            : { kept: detected.candidates, numberZone: 0 };
+            : selectStampBlocks(detected.candidates, policy);
         numberZoneBlocks += selection.numberZone;
+        // Отброшенное РАДИ ШТАМПА, а не всё отброшенное: крупный лист без
+        // штампа тоже теряет кандидатов, но по правилу формата, и смешать эти
+        // числа значило бы приписать штампу листы, на которых его не было.
+        const blocksDropped = selection.stampOnly
+          ? detected.candidates.length - selection.kept.length
+          : 0;
+        if (selection.stampOnly) stampOnlyPages += 1;
+        stampDroppedBlocks += blocksDropped;
 
         const ordered = orderReadingWise(selection.kept);
         const blocks = ordered.map((candidate, index) =>
@@ -946,6 +1030,12 @@ export function createLocalDetectionHandler(
             markup_mode: mode,
             dropped_by_mode: detected.candidates.length - selection.kept.length,
             number_zone_blocks: selection.numberZone,
+            // «Сведено к штампу» отдельно от «отброшено режимом»: на вопрос
+            // «почему на чертеже остался один блок» отвечает первое, и без
+            // флага его нельзя отличить от страницы, где детектор больше
+            // ничего не нашёл.
+            stamp_only: selection.stampOnly,
+            blocks_dropped: blocksDropped,
             content_rotation: contentRotation,
             mode: detected.mode,
             mode_source: detected.modeSource,
@@ -1028,6 +1118,8 @@ export function createLocalDetectionHandler(
         pages_empty: emptyPages,
         pages_full_page: fullPagePages,
         number_zone_blocks: numberZoneBlocks,
+        pages_stamp_only: stampOnlyPages,
+        stamp_dropped_blocks: stampDroppedBlocks,
         pages_manual_skipped: manualSkipped.length,
         imported: importedBlocks,
         overwrite_existing: overwriteExisting,

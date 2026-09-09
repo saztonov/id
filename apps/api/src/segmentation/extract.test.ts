@@ -1083,6 +1083,55 @@ describe('владелец номера и номер под заголовко�
     expect(numberOf('cert_conformity', page)).toBe('RU.СМИК.001.Н.00270');
   });
 
+  describe('номер под заголовком с пробелом внутри (S59)', () => {
+    /** Тот же бланк, но номер с пробелом после кода системы сертификации. */
+    const certificate = (numberLine: string): string =>
+      [
+        '**СИСТЕМА ДОБРОВОЛЬНОЙ СЕРТИФИКАЦИИ**',
+        '',
+        '##### СЕРТИФИКАТ СООТВЕТСТВИЯ',
+        '',
+        numberLine,
+        '',
+        '**Б № 000601**',
+      ].join('\n');
+
+    it('«РОСС RU.ОС54.Н005483» берётся целиком, а не номер бланка', () => {
+      // Бланк печатает номер с пробелом после «РОСС»; ступень, требовавшая
+      // слитного значения, его не брала, и номером на бою становился бланк.
+      expect(numberOf('cert_conformity', certificate('**РОСС RU.ОС54.Н005483**'))).toBe(
+        'РОСС RU.ОС54.Н005483',
+      );
+    });
+
+    it('слитная форма читается как прежде', () => {
+      expect(numberOf('cert_conformity', certificate('**RU.СМИК.001.Н.00270**'))).toBe(
+        'RU.СМИК.001.Н.00270',
+      );
+    });
+
+    it('«№ РОСС …» под заголовком по-прежнему читается ступенью со знаком', () => {
+      // Это другая ступень (`NUMBER_STRONG` при заголовке), и допуск пробелов
+      // в ступени без знака её не задевает.
+      expect(numberOf('cert_conformity', certificate('№ РОСС RU.OC54.H005483'))).toContain(
+        'РОСС RU.OC54.H005483',
+      );
+    });
+
+    it.each([
+      ['дата', '01.02.2026 г.'],
+      ['счётчик листов', 'Лист 1 Листов 2'],
+      ['наименование организации', 'ООО Прогресс'],
+      ['два номера через запятую', 'RU.001.Н.00270, RU.002.Н.00271'],
+      ['обозначение стандарта', 'ТУ 5745-001-12345678-2015'],
+      ['пустая строка', ''],
+    ])('%s под заголовком номером не становится', (_what, line) => {
+      // Допуск пробелов не должен превратить ступень в «первая строка под
+      // титулом»: номером остаётся бланк, а не подпись графы.
+      expect(numberOf('cert_conformity', certificate(line))).toBe('000601');
+    });
+  });
+
   it('регистрационный номер системы сертификации своим не считается', () => {
     const page = [
       '**СИСТЕМА ДОБРОВОЛЬНОЙ СЕРТИФИКАЦИИ АРТАЛИКС**',
@@ -1118,6 +1167,66 @@ describe('владелец номера и номер под заголовко�
     ].join('\n');
 
     expect(numberOf('state_registration_certificate', page)).toBe('RU.77.01.34.015.Е.002917.12.16');
+  });
+});
+
+describe('заголовок реестра приложений: номер реестра и номер акта (S59)', () => {
+  const fieldsOf = (docTypeCode: string, text: string) =>
+    extractFields({ docTypeCode, typeConfident: true, pages: [{ pageTextVersionId: 'v1', text }] });
+  const textOf = (docTypeCode: string, text: string, code: string): string | null =>
+    fieldsOf(docTypeCode, text).find((field) => field.fieldCode === code)?.valueText ?? null;
+
+  /** Три формы заголовка из боевой базы; подвал с ОГРН — как на бою. */
+  const FOOTER =
+    '\n\n| Наименование | № документа | Организация |\n\nООО «Тестовый Подрядчик», ОГРН 1027700012345';
+
+  it('«Реестр № 2 к №…» даёт номер реестра и номер акта', () => {
+    const text = 'Реестр № 2 к №СИН/ОВ1/От/32 от 31.12.2024 г.' + FOOTER;
+    expect(textOf('annex_registry', text, 'registry_number')).toBe('2');
+    expect(textOf('annex_registry', text, 'act_number')).toBe('СИН/ОВ1/От/32');
+  });
+
+  it('«Реестр приложений №1 к акту АОСР № …» даёт номер до конца строки', () => {
+    const text = 'Реестр приложений №1 к акту АОСР № 48-ОТ/-1 этаж' + FOOTER;
+    expect(textOf('annex_registry', text, 'registry_number')).toBe('1');
+    expect(textOf('annex_registry', text, 'act_number')).toBe('48-ОТ/-1 этаж');
+  });
+
+  it('«Реестр 1 к АОСР №ПБ-1 от …» — номер реестра без знака', () => {
+    const text = 'Реестр 1 к АОСР №ПБ-1 от 31.03.2026г' + FOOTER;
+    expect(textOf('annex_registry', text, 'registry_number')).toBe('1');
+    expect(textOf('annex_registry', text, 'act_number')).toBe('ПБ-1');
+  });
+
+  it('ОГРН из подвала номером реестра больше не становится', () => {
+    // До S59 поле извлекалось шаблоном ОГРН и проверялось его контрольной
+    // суммой: на бою «Номер реестра» называл юридическое лицо.
+    const value = textOf('annex_registry', 'РЕЕСТР ПРИЛОЖЕНИЙ' + FOOTER, 'registry_number');
+    expect(value ?? '').not.toMatch(/^\d{13}$/u);
+    expect(value).toBeNull();
+  });
+
+  it('голое «Реестр № N» читается только в первых строках листа', () => {
+    const head = 'Реестр № 3\nк акту скрытых работ' + FOOTER;
+    expect(textOf('annex_registry', head, 'registry_number')).toBe('3');
+
+    const deep = ['РЕЕСТР', ...Array.from({ length: 8 }, (_, i) => `строка ${String(i)}`)].join(
+      '\n',
+    );
+    // Форма с привязкой к акту читается по всему листу — она однозначна.
+    expect(textOf('annex_registry', `${deep}\nСм. реестр № 7 к акту № 5`, 'registry_number')).toBe(
+      '7',
+    );
+    // Голая — нет: ниже по листу «реестр № …» уже упоминание чужой бумаги.
+    expect(textOf('annex_registry', `${deep}\nСм. реестр № 7`, 'registry_number')).toBeNull();
+  });
+
+  it('извлечение идёт по схеме типа: у акта номер реестра не появляется', () => {
+    const codes = fieldsOf('aosr', 'Реестр № 2 к №СИН/ОВ1/От/32 от 31.12.2024 г.').map(
+      (field) => field.fieldCode,
+    );
+    expect(codes).not.toContain('registry_number');
+    expect(codes).not.toContain('act_number');
   });
 });
 

@@ -182,6 +182,91 @@ describe('matchRegistryRows', () => {
     expect(result.rows[0]?.matchedDocumentId).toBeNull();
   });
 
+  describe('коллизия одинаковых номеров сужается датой выдачи (S59)', () => {
+    /**
+     * Боевая папка обратной засыпки: три паспорта качества № 18899 с
+     * датами 18.12, 19.12, 19.12 и три строки реестра с теми же датами. Все
+     * шесть были `ambiguous`, хотя строку с 18.12 от остальных отделяет дата.
+     * Номер синтетический по форме, даты — как на бою.
+     */
+    const passports = [
+      doc('p-18', '18899', 'Паспорт качества', { issuedAt: '2025-12-18' }),
+      doc('p-19a', '18899', 'Паспорт качества', { issuedAt: '2025-12-19' }),
+      doc('p-19b', '18899', 'Паспорт качества', { issuedAt: '2025-12-19' }),
+    ];
+    const rows = [
+      { ...row(1, '18899', 'Паспорт качества'), issuedAt: '2025-12-18' },
+      { ...row(2, '18899', 'Паспорт качества'), issuedAt: '2025-12-19' },
+      { ...row(3, '18899', 'Паспорт качества'), issuedAt: '2025-12-19' },
+    ];
+
+    it('единственный претендент с датой строки становится совпадением ниже точного', () => {
+      const result = matchRegistryRows(rows, passports);
+
+      expect(result.rows[0]).toMatchObject({
+        matchState: 'matched',
+        matchedDocumentId: 'p-18',
+        // Ниже единицы: совпал не номер, а номер вместе с датой, и §9.1 обязан
+        // видеть по счёту, что решение принято с дополнительным признаком.
+        matchScore: 0.95,
+        candidates: [],
+      });
+      expect(result.rows[0]?.reason).toContain('18.12.2025');
+      expect(result.rows[0]?.reason).toContain('3 документов');
+    });
+
+    it('при двух претендентах с одной датой строка остаётся ambiguous между ними', () => {
+      // Никакой раздачи по порядку: две строки 19.12 против двух паспортов
+      // 19.12 различить нечем, и обе честно остаются коллизией. Но уже без
+      // третьего паспорта — его от них отделяет дата.
+      const result = matchRegistryRows(rows, passports);
+
+      for (const match of result.rows.slice(1)) {
+        expect(match.matchState).toBe('ambiguous');
+        expect(match.matchedDocumentId).toBeNull();
+        expect(match.candidates.map((candidate) => candidate.documentId)).toEqual([
+          'p-19a',
+          'p-19b',
+        ]);
+        expect(match.reason).toContain('19.12.2025');
+      }
+      expect(result.extraDocumentIds).toEqual([]);
+    });
+
+    it('без даты у строки или у документов коллизия остаётся со всеми претендентами', () => {
+      // «Дата не прочитана» и «даты разошлись» — разные факты: по первому
+      // сужать нельзя.
+      const undated = matchRegistryRows([row(1, '18899')], passports);
+      expect(undated.rows[0]?.matchState).toBe('ambiguous');
+      expect(undated.rows[0]?.candidates).toHaveLength(3);
+
+      const blind = matchRegistryRows(
+        [{ ...row(1, '18899'), issuedAt: '2025-12-18' }],
+        passports.map((passport) => ({ ...passport, issuedAt: null })),
+      );
+      expect(blind.rows[0]?.matchState).toBe('ambiguous');
+      expect(blind.rows[0]?.candidates).toHaveLength(3);
+    });
+
+    it('после фолдинга дата сужает так же, но со счётом ниже фолдинга', () => {
+      const result = matchRegistryRows(
+        [{ ...row(1, 'РОСС RU.OC54.H005483'), issuedAt: '2025-12-18' }],
+        [
+          doc('c-18', 'РОСС RU.ОС54.Н005483', 'СЕРТИФИКАТ', { issuedAt: '2025-12-18' }),
+          doc('c-19', 'РОСС RU.ОС54.Н005483', 'СЕРТИФИКАТ', { issuedAt: '2025-12-19' }),
+        ],
+      );
+
+      expect(result.rows[0]).toMatchObject({
+        matchState: 'matched',
+        matchedDocumentId: 'c-18',
+        matchScore: 0.8,
+      });
+      expect(result.rows[0]?.reason).toContain('фолдинг');
+      expect(result.rows[0]?.reason).toContain('18.12.2025');
+    });
+  });
+
   it('один документ на нескольких строках реестра — совпадение у каждой', () => {
     // В корпусе один сертификат покрывает три диаметра проката и назван в
     // трёх позициях. Отдавать совпадение только первой значило бы объявить
@@ -747,6 +832,18 @@ describe('documentsNamedInActItem3', () => {
     ]);
 
     expect(named).toEqual([]);
+  });
+
+  it('OCR-форма знака номера «Не» читается как «№» (S59)', () => {
+    // Разбор общий с правилами (`ACT_ITEM_NUMBER` в контрактах): в боевой папке
+    // так прочитано больше четверти номеров, и без этой формы позиция молча
+    // становилась «названной без номера».
+    const named = documentsNamedInActItem3(
+      '1. Щебень фракции 20-40 (Паспорт качества Не 6846 от 12.12.2025г.)',
+      [doc('d1', '6846', 'Паспорт качества')],
+    );
+
+    expect(named).toEqual(['d1']);
   });
 });
 

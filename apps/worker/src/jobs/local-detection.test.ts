@@ -11,16 +11,28 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { LEGACY_MARKUP_POLICY, type MarkupPolicy } from '@id/contracts';
 import type { BundlePageView, DetectedBlockInput, JobContext } from '@id/api';
-import type { Candidate } from '@id/detection';
+import type { Candidate, DetectPageStats, InferenceParams } from '@id/detection';
 
 import {
   createLocalDetectionHandler,
   planDetectionPages,
   selectLargeSheetBlocks,
+  selectStampBlocks,
   type LocalDetectionDeps,
 } from './local-detection.js';
 import { DetectionConfigurationError } from '../detection/errors.js';
+import type { DetectPageResult } from '../detection/detector.js';
 import type { MarkupTarget } from './local-detection.js';
+
+/**
+ * Инференс подменяется целиком: тесту обработчика нужен не ONNX, а ответ на
+ * вопрос «что обработчик делает с кандидатами, которые детектор ему отдал».
+ * Тесты без детектора (комплект из одних A4) до этого вызова не доходят.
+ */
+const detectPageMock = vi.hoisted(() =>
+  vi.fn<(input: { readonly pageIndex: number }) => Promise<DetectPageResult>>(),
+);
+vi.mock('../detection/detector.js', () => ({ detectPage: detectPageMock }));
 
 const FOLDER = '00000000-0000-4000-8000-000000000001';
 const LAYOUT = '00000000-0000-4000-8000-000000000002';
@@ -204,6 +216,99 @@ describe('selectLargeSheetBlocks', () => {
     expect(kept).toEqual([stamp]);
     expect(numberZone).toBe(0);
   });
+
+  it('флаг «сведено к штампу» ставится только там, где было что отбрасывать', () => {
+    // Лист без штампа пустеет по правилу формата, а не ради штампа; единственный
+    // штамп не отбрасывает ничего. Журнал обязан различать эти три исхода.
+    expect(selectLargeSheetBlocks([stamp, heading], SHEET_AWARE).stampOnly).toBe(true);
+    expect(selectLargeSheetBlocks([stamp], SHEET_AWARE).stampOnly).toBe(false);
+    expect(selectLargeSheetBlocks([heading, explication], SHEET_AWARE).stampOnly).toBe(false);
+  });
+});
+
+// =====================================================================
+// Отбор блоков на любой странице со штампом (S59)
+// =====================================================================
+
+describe('selectStampBlocks', () => {
+  const stamp = candidate('stamp', [0.72, 0.82, 0.97, 0.95]);
+  const heading = candidate('text', [0.3, 0.02, 0.9, 0.06]);
+  const explication = candidate('text', [0.05, 0.35, 0.4, 0.6]);
+  const note = candidate('text', [0.05, 0.65, 0.4, 0.7]);
+  const drawing = candidate('image', [0.05, 0.35, 0.7, 0.75]);
+
+  it('больше одного блока и штамп → только штамп и верхняя надпись', () => {
+    // Верхняя надпись — сознательное отступление от «только штамп»: без неё
+    // правилам нечем сверить номер схемы с реестром приложений.
+    const { kept, numberZone, stampOnly } = selectStampBlocks(
+      [explication, stamp, heading, note],
+      SHEET_AWARE,
+    );
+
+    expect(kept).toEqual([stamp, heading]);
+    expect(numberZone).toBe(1);
+    expect(stampOnly).toBe(true);
+  });
+
+  it('два штампа без текста → оба штампа', () => {
+    const second = candidate('stamp', [0.02, 0.82, 0.27, 0.95]);
+
+    const { kept, numberZone, stampOnly } = selectStampBlocks([stamp, second], SHEET_AWARE);
+
+    expect(kept).toEqual([stamp, second]);
+    expect(numberZone).toBe(0);
+    expect(stampOnly).toBe(true);
+  });
+
+  it('один штамп без соседей → без изменений', () => {
+    const { kept, numberZone, stampOnly } = selectStampBlocks([stamp], SHEET_AWARE);
+
+    expect(kept).toEqual([stamp]);
+    expect(numberZone).toBe(0);
+    expect(stampOnly).toBe(false);
+  });
+
+  it('без штампа → все блоки, как раньше', () => {
+    // Сертификат или паспорт штампа не имеет, и сводить их не к чему: в отличие
+    // от крупного листа, такая страница не пустеет.
+    const all = [heading, explication, drawing];
+
+    const { kept, numberZone, stampOnly } = selectStampBlocks(all, SHEET_AWARE);
+
+    expect(kept).toEqual(all);
+    expect(numberZone).toBe(0);
+    expect(stampOnly).toBe(false);
+  });
+
+  it('изображения не проходят при штампе', () => {
+    const topDrawing = candidate('image', [0.05, 0.01, 0.7, 0.2]);
+
+    const { kept } = selectStampBlocks([stamp, topDrawing, drawing], SHEET_AWARE);
+
+    expect(kept).toEqual([stamp]);
+  });
+
+  it('политика numberZone «off» надпись не отключает: без номера страница непроверяема', () => {
+    // Политика управляет КРУПНЫМ листом, где «off» — осознанный выбор
+    // администратора. На произвольной странице со штампом верхняя надпись —
+    // единственное, что оставляет лист проверяемым (`AOSR.P4.080`, `SCH.681`),
+    // а боевые ревизии размечены устаревшей политикой с выключенной зоной.
+    const { kept, numberZone } = selectStampBlocks([heading, stamp, explication], {
+      ...SHEET_AWARE,
+      numberZone: 'off',
+    });
+
+    expect(kept).toEqual([stamp, heading]);
+    expect(numberZone).toBe(1);
+  });
+
+  it('пустой список остаётся пустым', () => {
+    expect(selectStampBlocks([], SHEET_AWARE)).toEqual({
+      kept: [],
+      numberZone: 0,
+      stampOnly: false,
+    });
+  });
 });
 
 // =====================================================================
@@ -362,5 +467,196 @@ describe('createLocalDetectionHandler при sheet_aware', () => {
     );
 
     await expect(handler(context([0]))).rejects.toThrow(DetectionConfigurationError);
+  });
+});
+
+// =====================================================================
+// Обработчик с подменённым детектором: штамп среди нескольких блоков (S59)
+// =====================================================================
+
+/** Растеризатор-двойник: отдаёт размер, согласованный с картой страницы. */
+function fakeRasterizer(size: {
+  widthPx: number;
+  heightPx: number;
+}): LocalDetectionDeps['rasterizer'] {
+  return {
+    kind: 'pdftoppm',
+    version: null,
+    renderPage: ({ dpi }) =>
+      Promise.resolve({
+        widthPx: Math.round((size.widthPx * dpi) / 72),
+        heightPx: Math.round((size.heightPx * dpi) / 72),
+      }),
+  };
+}
+
+/** Статистика страницы, на которой детектор что-то нашёл: поля обязательны по типу. */
+function statsFor(candidates: readonly Candidate[]): DetectPageStats {
+  const byType: Partial<Record<Candidate['blockType'], number>> = {};
+  for (const candidate of candidates) {
+    byType[candidate.blockType] = (byType[candidate.blockType] ?? 0) + 1;
+  }
+  return {
+    tilesPlanned: 1,
+    tilesInferred: 1,
+    rawByType: byType,
+    tilesWithNearFullTile: {},
+    rejectedFullTile: {},
+    rejectedMinBox: 0,
+    afterNms: candidates.length,
+    afterMerge: null,
+    afterThreshold: candidates.length,
+    finalByType: byType,
+    bestRejectedScore: {},
+  };
+}
+
+function detectorDeps(
+  input: {
+    readonly policy: MarkupPolicy;
+    readonly pages: readonly BundlePageView[];
+    readonly candidatesByPage: ReadonlyMap<number, readonly Candidate[]>;
+  },
+  rec: Recorder,
+): LocalDetectionDeps {
+  detectPageMock.mockImplementation(({ pageIndex }) => {
+    const candidates = input.candidatesByPage.get(pageIndex) ?? [];
+    return Promise.resolve({
+      candidates,
+      stats: statsFor(candidates),
+      warning: null,
+      mode: 'tiles',
+      modeSource: 'manifest',
+    });
+  });
+  const first = input.pages[0] ?? page(0, A4_PORTRAIT);
+  return {
+    ...deps({ policy: input.policy, pages: input.pages, modelVersion: 'v-test' }, rec),
+    rasterizer: fakeRasterizer(first),
+    modelStore: {
+      ensureModel: () =>
+        Promise.resolve({
+          session: {},
+          // Без переопределений `applyParamOverrides` возвращает объект как
+          // есть: обработчику от параметров нужны только порог для журнала и
+          // пороги по классам, которые `describeAppliedOverrides` обходит.
+          params: { defaultThreshold: 0.5, thresholds: {} } as InferenceParams,
+          warnings: [],
+        }),
+    } as unknown as LocalDetectionDeps['modelStore'],
+    workingPdf: () => Promise.resolve({ path: 'working.pdf', release: () => Promise.resolve() }),
+  };
+}
+
+function recordingContext(pageIndices: readonly number[]): {
+  readonly ctx: JobContext<'layout.detect_local'>;
+  readonly events: Record<string, unknown>[];
+} {
+  const events: Record<string, unknown>[] = [];
+  const ctx = {
+    ...context(pageIndices),
+    logger: {
+      info: (fields: Record<string, unknown>) => {
+        events.push(fields);
+      },
+      warn: () => {},
+      error: () => {},
+    },
+  } as unknown as JobContext<'layout.detect_local'>;
+  return { ctx, events };
+}
+
+describe('createLocalDetectionHandler: штамп среди нескольких блоков', () => {
+  const stamp = candidate('stamp', [0.72, 0.82, 0.97, 0.95]);
+  const heading = candidate('text', [0.3, 0.02, 0.9, 0.06]);
+  const explication = candidate('text', [0.05, 0.35, 0.4, 0.6]);
+  const note = candidate('text', [0.05, 0.65, 0.4, 0.7]);
+
+  it('в режиме full_detection страница со штампом и тремя текстами сводится к штампу и надписи', async () => {
+    // Прежде отбор действовал только на крупном листе (`stamp_only`), а чертёж,
+    // попавший на детекцию по правилу `detect_all`, уезжал в распознавание
+    // всеми блоками. Заказчик просил «только штамп» на любой такой странице.
+    const rec = recorder();
+    const handler = createLocalDetectionHandler(
+      detectorDeps(
+        {
+          policy: LEGACY_MARKUP_POLICY,
+          pages: [page(0, A4_PORTRAIT)],
+          candidatesByPage: new Map([[0, [explication, stamp, note, heading]]]),
+        },
+        rec,
+      ),
+    );
+    const { ctx, events } = recordingContext([0]);
+
+    await handler(ctx);
+
+    expect(rec.imports).toHaveLength(1);
+    expect(rec.imports[0]?.provenance).toBe('rf_detr');
+    expect(
+      rec.imports[0]?.blocks.map((block) => [block.blockType, block.sortOrder, block.y0]),
+    ).toEqual([
+      ['text', 0, heading.coordsNorm[1]],
+      ['stamp', 1, stamp.coordsNorm[1]],
+    ]);
+
+    const pageStats = events.find((event) => event['event'] === 'detect_local_page_stats');
+    expect(pageStats).toMatchObject({
+      markup_mode: 'full_detection',
+      stamp_only: true,
+      blocks_dropped: 2,
+      number_zone_blocks: 1,
+    });
+    const done = events.find((event) => event['event'] === 'detect_local_done');
+    expect(done).toMatchObject({ pages_stamp_only: 1, stamp_dropped_blocks: 2, imported: 2 });
+  });
+
+  it('в режиме full_detection страница без штампа остаётся со всеми блоками', async () => {
+    const rec = recorder();
+    const handler = createLocalDetectionHandler(
+      detectorDeps(
+        {
+          policy: LEGACY_MARKUP_POLICY,
+          pages: [page(0, A4_PORTRAIT)],
+          candidatesByPage: new Map([[0, [explication, note, heading]]]),
+        },
+        rec,
+      ),
+    );
+    const { ctx, events } = recordingContext([0]);
+
+    await handler(ctx);
+
+    expect(rec.imports[0]?.blocks).toHaveLength(3);
+    const pageStats = events.find((event) => event['event'] === 'detect_local_page_stats');
+    expect(pageStats).toMatchObject({ stamp_only: false, blocks_dropped: 0, dropped_by_mode: 0 });
+  });
+
+  it('в режиме stamp_only крупный лист без штампа по-прежнему пустеет', async () => {
+    // Прежнее поведение крупного листа не меняется: гадать, где номер, портал
+    // не берётся, и это отличает `stamp_only` от нового отбора в других режимах.
+    const rec = recorder();
+    const handler = createLocalDetectionHandler(
+      detectorDeps(
+        {
+          policy: SHEET_AWARE,
+          pages: [page(0, A3_LANDSCAPE)],
+          candidatesByPage: new Map([[0, [explication, note, heading]]]),
+        },
+        rec,
+      ),
+    );
+    const { ctx, events } = recordingContext([0]);
+
+    await handler(ctx);
+
+    expect(rec.imports[0]?.blocks).toEqual([]);
+    const pageStats = events.find((event) => event['event'] === 'detect_local_page_stats');
+    expect(pageStats).toMatchObject({
+      markup_mode: 'stamp_only',
+      stamp_only: false,
+      blocks_dropped: 0,
+      dropped_by_mode: 3,
+    });
   });
 });

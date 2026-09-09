@@ -28,6 +28,10 @@
  * никто не проверял. `ambiguous` — честный результат: сверка нашла кандидатов,
  * но различить их не может, и это решает человек.
  *
+ * Единственное исключение — дата выдачи, известная с обеих сторон и
+ * различающая ровно одного претендента (`narrowByIssuedAt`, S59): это не
+ * выбор, а второй признак, и счёт у такого совпадения ниже счёта ступени.
+ *
  * ## Лестница ступеней и почему частичное совпадение — последняя из них
  *
  * Точное совпадение → фолдинг гомоглифов → числовое ядро → частичное вхождение
@@ -44,7 +48,12 @@
  * дают `ambiguous`, а не выбор наугад.
  */
 
-import { normalizeDocNo } from '@id/contracts';
+import {
+  ACT_ITEM_NUMBER,
+  MIN_ACT_ITEM_NUMBER_LENGTH,
+  normalizeDocNo,
+  PARENT_REFERENCE_BEFORE_NUMBER,
+} from '@id/contracts';
 import { DOC_TYPES, matchDocTypes, resolveDocType } from '@id/doc-types';
 import type { ParsedRegistryRow } from './types.js';
 
@@ -624,14 +633,11 @@ const INNER_NUMBER_SIGN = /№\s*(.+)$/u;
 const NAME_NUMBER_TAIL = /№\s*([^№]+?)(?:\s+от\s+\d|\s*$)/u;
 
 /**
- * Ссылка на ЧУЖОЙ документ перед «№»: «Реестр к АОСР № 48-ОТ/-1 этаж».
- *
- * Предлог «к» отделяет номер родителя от номера самой строки. Без проверки
- * строка перечня приложений искала бы себя и по номеру акта — и находила два
+ * Ссылка на ЧУЖОЙ документ перед «№» («Реестр к АОСР № 48-ОТ/-1 этаж») —
+ * `PARENT_REFERENCE_BEFORE_NUMBER` из контрактов (S59). Без проверки строка
+ * перечня приложений искала бы себя и по номеру акта — и находила два
  * документа, то есть честное «неоднозначно» вместо единственного верного.
  */
-const PARENT_REFERENCE_BEFORE_NUMBER = /(?:^|[^\p{L}])к\s+\p{L}[^№]*$/u;
-
 function nameAlias(name: string): string {
   const match = NAME_NUMBER_TAIL.exec(name);
   if (match?.index === undefined) return '';
@@ -703,6 +709,58 @@ function indexBy(
   }
 
   return index;
+}
+
+/**
+ * Счета совпадений, у которых коллизию номера развела дата выдачи (S59).
+ *
+ * На 0.05 ниже счёта своей ступени и записаны числом, а не разностью: совпал
+ * не номер — номер совпал у всех претендентов, — а номер вместе с датой, и
+ * §9.1 обязан видеть по счёту, что решение принято с дополнительным признаком,
+ * не путая его с посимвольным равенством. Разность `0.85 - 0.05` дала бы в
+ * `registry_rows.match_score` хвост двоичной дроби вместо 0.8.
+ */
+const EXACT_BY_DATE_SCORE = 0.95;
+const FOLDED_BY_DATE_SCORE = 0.8;
+
+/**
+ * Сужение коллизии номера датой выдачи (S59).
+ *
+ * Наблюдение с боевой папки обратной засыпки: три паспорта качества
+ * № 18899 с датами выдачи 18.12.2025, 19.12.2025 и 19.12.2025 против трёх строк
+ * реестра с тем же номером и теми же датами. Все шесть строк получали
+ * `ambiguous` — при том, что строку с 18.12 от двух других отделяет дата, и
+ * отделяет однозначно.
+ *
+ * Сужение НЕ раздаёт документы по порядку и не выбирает «первого попавшегося»:
+ * дата обязана быть известна с обеих сторон, а совпадением становится только
+ * единственный выживший. Если выживших несколько (две строки 19.12 против двух
+ * паспортов 19.12), коллизия остаётся коллизией — но уже между ними: третий
+ * паспорт от них отделён датой. Если дата не совпала ни у кого или её нет,
+ * претенденты остаются все, как и прежде: решить это может только человек.
+ * Образец — `narrowByContractor` в описи передачи.
+ */
+function narrowByIssuedAt(
+  found: readonly string[],
+  rowIssuedAt: string | null,
+  issuedAtOf: ReadonlyMap<string, string | null>,
+): readonly string[] {
+  if (rowIssuedAt === null) return found;
+  const narrowed = found.filter((id) => (issuedAtOf.get(id) ?? null) === rowIssuedAt);
+  return narrowed.length > 0 ? narrowed : found;
+}
+
+/** ISO-дата `YYYY-MM-DD` → `DD.MM.YYYY`, как она напечатана в реестре и в доводе. */
+function formatIssuedAt(iso: string): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/u.exec(iso);
+  if (match === null) return iso;
+  return `${match[3] ?? ''}.${match[2] ?? ''}.${match[1] ?? ''}`;
+}
+
+/** Хвост довода `ambiguous`, когда дата сузила претендентов, но не до одного. */
+function narrowedByDateNote(total: number, survived: number, rowIssuedAt: string | null): string {
+  if (rowIssuedAt === null || survived >= total) return '';
+  return `; по дате выдачи ${formatIssuedAt(rowIssuedAt)} подходят ${survived}`;
 }
 
 /**
@@ -847,33 +905,12 @@ function oneCharCandidates(
 }
 
 /**
- * Ссылка на документ в прозе п. 3 акта: значение после «№» до конца ссылки.
- *
- * Пункт 3 бланка перечисляет применённые материалы вместе с реквизитами
- * подтверждающих документов, и записан он одной строкой прозы:
- *
- * ```
- * 1.Песок для строительных работ (Паспорт №0297 от 26.09.2024г., Сертификат
- * соответствия №RU.MCC.234.435.37815 (с 01.08.2023г. по 01.08.2026г.).
- * ```
- *
- * Границей номера служит то, что за ним идёт: предлог «от» перед датой, запятая,
- * точка с запятой или скобка. Пробелы ВНУТРИ номера допускаются — «№ РОСС RU
- * BY.HE06.H22245» пишется через них, — и именно поэтому границей не может быть
- * пробел.
- */
-const ACT_ITEM3_NUMBER = /(?:№|N(?![\p{L}]))\s*([^,;()]+?)(?=\s+от\s|\s*[,;()]|$)/gu;
-
-/**
- * Короче этого ссылка номером не считается.
- *
- * Двузначное значение после «№» — это пункт перечня или номер партии, а не
- * номер документа; сопоставление по нему нашло бы случайный лист.
- */
-const MIN_ACT_ITEM3_NUMBER_LENGTH = 3;
-
-/**
  * Документы комплекта, названные в п. 3 акта.
+ *
+ * Ссылка на документ в прозе пункта разбирается `ACT_ITEM_NUMBER` из
+ * контрактов (S59): тот же шаблон читают правила, и вторая копия здесь уже
+ * успела разойтись с первой. Там же — нижняя граница длины
+ * `MIN_ACT_ITEM_NUMBER_LENGTH` и OCR-формы знака номера («Не», «No»).
  *
  * ## Зачем это нужно
  *
@@ -906,12 +943,12 @@ export function documentsNamedInActItem3(
   const byFolded = indexBy(documents, (value) => normalizeDocNo(value).folded);
   const named: string[] = [];
 
-  for (const match of text.matchAll(ACT_ITEM3_NUMBER)) {
+  for (const match of text.matchAll(ACT_ITEM_NUMBER)) {
     const raw = (match[1] ?? '').trim();
     if (raw === '') continue;
 
     const { normalized, folded } = normalizeDocNo(raw);
-    if (normalized.length < MIN_ACT_ITEM3_NUMBER_LENGTH) continue;
+    if (normalized.length < MIN_ACT_ITEM_NUMBER_LENGTH) continue;
     // Ссылка без единой цифры — это проза, дочитанная шаблоном до знака
     // препинания, а не номер документа.
     if (!/\d/u.test(normalized)) continue;
@@ -949,6 +986,7 @@ export function matchRegistryRows(
   const byNormalized = indexBy(documents, (value) => normalizeDocNo(value).normalized);
   const byFolded = indexBy(documents, (value) => normalizeDocNo(value).folded);
   const typeOf = new Map(documents.map((d) => [d.documentId, d.docTypeCode]));
+  const issuedAtOf = new Map(documents.map((d) => [d.documentId, d.issuedAt]));
 
   const named = new Set<string>();
   const matches: RegistryMatch[] = [];
@@ -1054,14 +1092,33 @@ export function matchRegistryRows(
     if (exact.length > 1) {
       // Несколько документов с одним номером — это не «выбери первый».
       // Такое бывает при дублирующем скане одного листа, и решить, какой
-      // экземпляр считать приложенным, может только человек.
+      // экземпляр считать приложенным, может только человек. Единственное,
+      // что вправе сделать сверка, — развести претендентов датой выдачи, и
+      // только когда дата различает ровно одного (S59).
+      const byDate = narrowByIssuedAt(exact, row.issuedAt, issuedAtOf);
+      if (byDate.length === 1) {
+        matches.push({
+          rowNo: row.rowNo,
+          matchState: 'matched',
+          matchedDocumentId: byDate[0] ?? null,
+          matchScore: EXACT_BY_DATE_SCORE,
+          reason:
+            `номер общий у ${exact.length} документов комплекта, выбран по дате выдачи ` +
+            formatIssuedAt(row.issuedAt ?? ''),
+          candidates: [],
+        });
+        continue;
+      }
+
       matches.push({
         rowNo: row.rowNo,
         matchState: 'ambiguous',
         matchedDocumentId: null,
         matchScore: null,
-        reason: `точный номер найден у ${exact.length} документов комплекта`,
-        candidates: exact.map((documentId) => ({
+        reason:
+          `точный номер найден у ${exact.length} документов комплекта` +
+          narrowedByDateNote(exact.length, byDate.length, row.issuedAt),
+        candidates: byDate.map((documentId) => ({
           documentId,
           basis: 'doc_no' as const,
           score: EXACT_SCORE,
@@ -1086,13 +1143,31 @@ export function matchRegistryRows(
     }
 
     if (folded.length > 1) {
+      const byDate = narrowByIssuedAt(folded, row.issuedAt, issuedAtOf);
+      if (byDate.length === 1) {
+        matches.push({
+          rowNo: row.rowNo,
+          matchState: 'matched',
+          matchedDocumentId: byDate[0] ?? null,
+          matchScore: FOLDED_BY_DATE_SCORE,
+          reason:
+            `после фолдинга гомоглифов номер общий у ${folded.length} документов комплекта, ` +
+            `выбран по дате выдачи ${formatIssuedAt(row.issuedAt ?? '')}`,
+          candidates: [],
+        });
+        continue;
+      }
+
       matches.push({
         rowNo: row.rowNo,
         matchState: 'ambiguous',
         matchedDocumentId: null,
         matchScore: null,
-        reason: `после фолдинга гомоглифов номеру соответствуют ${folded.length} документов: различить их сверка не может`,
-        candidates: folded.map((documentId) => ({
+        reason:
+          `после фолдинга гомоглифов номеру соответствуют ${folded.length} документов: ` +
+          'различить их сверка не может' +
+          narrowedByDateNote(folded.length, byDate.length, row.issuedAt),
+        candidates: byDate.map((documentId) => ({
           documentId,
           basis: 'doc_no' as const,
           score: FOLDED_SCORE,

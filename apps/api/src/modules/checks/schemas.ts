@@ -170,17 +170,17 @@ const reportItemSchema = z.object({
   hint: z.string().nullable(),
 });
 
+const reportPageSchema = z.object({
+  number: z.int().positive(),
+  workingPageIndex: z.int().nonnegative().nullable(),
+});
+
 const reportRowSchema = z.object({
   id: z.string(),
   kind: z.enum(['document', 'registry_row', 'finding']),
   title: z.string(),
   subtitle: z.string().nullable(),
-  page: z
-    .object({
-      number: z.int().positive(),
-      workingPageIndex: z.int().nonnegative().nullable(),
-    })
-    .nullable(),
+  page: reportPageSchema.nullable(),
   /** Диапазон страниц документа для печати: «1–3» либо «8». */
   pages: z.string().nullable(),
   dates: z
@@ -202,6 +202,12 @@ const reportRowSchema = z.object({
   blockId: z.uuid().nullable(),
   findingIds: z.array(z.uuid()),
   items: z.array(reportItemSchema),
+  /**
+   * Страницы похожих документов у строки перечня без подтверждённого
+   * документа (S59): клиент делает из них ссылки на разметку. У документов и
+   * замечаний пусто — у них своя `page`.
+   */
+  candidatePages: z.array(reportPageSchema),
 });
 
 const reportSectionSchema = z.object({

@@ -547,7 +547,9 @@ export type { LlmReviewDeps, LlmReviewOutcome, ReviewDocument } from './checks/l
 export { LLM_REVIEW_PROMPT, renderReviewUserPrompt } from './checks/llm-review-prompt.js';
 export {
   acceptDecisions,
+  isSettledPrefilter,
   mergeLlmMatches,
+  partitionNeedsModel,
   registryMatchResponseSchema,
   MIN_MATCH_CONFIDENCE,
   LLM_MATCH_REASONS,
@@ -565,6 +567,7 @@ export type {
   MergedRow,
   PartitionRow,
   PrefilterRow,
+  PrefilterState,
   RowCheck,
 } from './segmentation/match-llm.js';
 export {

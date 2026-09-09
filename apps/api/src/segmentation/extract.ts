@@ -39,7 +39,7 @@
  * поверки прибора, сроком аккредитации или чем угодно ещё.
  */
 
-import { checkInn, checkOgrn } from '@id/contracts';
+import { checkInn } from '@id/contracts';
 import {
   BASE_EVIDENCE_FIELDS,
   DOC_TYPES,
@@ -899,16 +899,6 @@ const TNVED = /ТН\s*ВЭД[^0-9]{0,30}(\d[\d\s]{3,13}\d)/dgiu;
 
 const INN = /ИНН\s*[:;]?\s*(\d{9,12})/dgiu;
 
-/**
- * ОГРН и ОГРНИП. Диапазон длин шире положенных 13 и 15 намеренно.
- *
- * В корпусе есть значение из 12 цифр вместо 13 — дефект оформления документа,
- * который правило §9 обязано увидеть и объявить `fail`. Шаблон, требующий
- * ровно 13 цифр, такое значение просто не нашёл бы, и дефект исчез бы вместе
- * с реквизитом (`docs/CORPUS_FINDINGS.md`).
- */
-const OGRN = /ОГРН(?:ИП)?\s*[:;]?\s*(\d{11,16})/dgiu;
-
 const BATCH = /парти[ияюе][^0-9№]{0,15}(?:№|N)?\s*([0-9][^\s|,;]*)/dgiu;
 const HEAT = /плавк[аиуе][^0-9№]{0,15}(?:№|N)?\s*([0-9][^\s|,;]*)/dgiu;
 
@@ -938,8 +928,58 @@ const ACCREDITATION = /((?:RA|РА)\.(?:RU|РУ)\.?[0-9A-ZА-Я]{2,12})/dgiu;
  * в нём есть и цифра, и разделитель или буква, длина от шести знаков, и стоит
  * оно вплотную под заголовком документа. Дата под заголовком номером не
  * становится — у неё свой шаблон.
+ *
+ * ## Почему в значении допущены пробелы (S59)
+ *
+ * Бланк печатает «РОСС RU.ОС54.Н005483» — с пробелом после кода системы
+ * сертификации. Ступень, требовавшая одного слитного значения, такую строку
+ * не брала, и номером сертификата на бою становился номер бланка. Допущено не
+ * больше двух внутренних пробелов, и каждое слово между ними — либо само
+ * похоже на номер, либо короткий код из заглавных букв («РОСС», «RU»):
+ * «Лист 1 Листов 2», «ООО Прогресс», «01.02.2026 г.» под это не подходят
+ * (`headingNumberLike`).
  */
-const HEADING_NUMBER_LINE = /^(?:[*_#>\s]*)([\p{L}\d][\p{L}\d./-]{5,})[*_\s]*$/u;
+const HEADING_NUMBER_LINE =
+  /^(?:[*_#>\s]*)([\p{L}\d][\p{L}\d./-]*(?:\s[\p{L}\d][\p{L}\d./-]*){0,2})[*_\s]*$/u;
+
+/** Короче этого (без пробелов) значение под заголовком номером не считается. */
+const MIN_HEADING_NUMBER_LENGTH = 6;
+
+/** Слово рядом с номером, которое не номер: код системы, страны — «РОСС», «RU». */
+const HEADING_NUMBER_CODE_WORD = /^\p{Lu}{1,5}$/u;
+
+/**
+ * Обозначение стандарта или реквизит организации под заголовком — не номер
+ * документа: у них свои шаблоны (`GOST_TU`, `INN`), и стоять под титулом
+ * паспорта они могут.
+ */
+const HEADING_NUMBER_FOREIGN = /^(?:ГОСТ|СТО|ТУ|СП|СНиП|ОКПД|ОКПО|ИНН|ОГРН|КПП)(?:\s|$)/iu;
+
+/**
+ * Похоже ли значение под заголовком на номер целиком.
+ *
+ * Условия перенесены из шаблона в код вместе с допуском пробелов: хотя бы одно
+ * слово несёт и цифру, и букву или разделитель, остальные — короткие коды из
+ * заглавных; дата и обозначение стандарта отвергаются; слово из одних цифр
+ * («Лист 1») номером не становится, как не становилось и прежде.
+ */
+function headingNumberLike(value: string): boolean {
+  if (value.replace(/\s+/gu, '').length < MIN_HEADING_NUMBER_LENGTH) return false;
+  if (HEADING_NUMBER_FOREIGN.test(value)) return false;
+
+  const date = new RegExp(`^${ANY_DATE}$`, 'u');
+  let numberLike = 0;
+  for (const token of value.split(/\s+/u)) {
+    if (/\d/u.test(token) && /[\p{L}./-]/u.test(token)) {
+      // Дата под заголовком — не номер: у неё свой реквизит и свой шаблон.
+      if (date.test(token)) return false;
+      numberLike += 1;
+      continue;
+    }
+    if (!HEADING_NUMBER_CODE_WORD.test(token)) return false;
+  }
+  return numberLike > 0;
+}
 
 /** Сколько непустых строк под заголовком просматривается. */
 const HEADING_NUMBER_LOOKAHEAD = 2;
@@ -1033,9 +1073,7 @@ function headingNumberHits(text: string): readonly RawHit[] {
 
       const match = HEADING_NUMBER_LINE.exec(candidate);
       const value = match?.[1] ?? '';
-      // Дата под заголовком — не номер: у неё свой реквизит и свой шаблон.
-      if (value === '' || !/\d/u.test(value) || !/[\p{L}./-]/u.test(value)) continue;
-      if (new RegExp(`^${ANY_DATE}$`, 'u').test(value)) continue;
+      if (value === '' || !headingNumberLike(value)) continue;
 
       const at = candidate.indexOf(value);
       hits.push({
@@ -1516,10 +1554,25 @@ const TYPE_RULES: readonly RuleSpec[] = [
         CONFIDENCE.labelled,
       ),
   },
+  // ── Реквизиты реестра приложений ─────────────────────────────────────────
+  //
+  // Оба кода объявлены каталогом только у `annex_registry`, и `RULES_BY_CODE`
+  // читается по схеме типа: на акте, где `act_number` отдан модели, эти
+  // правила не исполняются.
   {
     fieldCode: 'registry_number',
     merge: 'text',
-    find: (text) => sweep(text, OGRN, CONFIDENCE.labelled),
+    find: (text) =>
+      firstOf(
+        sweep(text, REGISTRY_TITLE_TO_ACT, CONFIDENCE.labelled),
+        sweep(headOf(text, REGISTRY_HEADING_LINES), REGISTRY_TITLE_BARE, CONFIDENCE.labelled),
+      ),
+  },
+  {
+    fieldCode: 'act_number',
+    merge: 'text',
+    find: (text) =>
+      sweep(headOf(text, REGISTRY_HEADING_LINES), REGISTRY_ACT_NUMBER, CONFIDENCE.labelled),
   },
   // ── Шифры листов: исполнительная схема и генплан ─────────────────────────
   //
@@ -1596,17 +1649,76 @@ const WORK_PERIOD_END = new RegExp(String.raw`окончани[яе]\s+рабо�
 const REGISTRY_REF = /((?:реестр|перечень)[а-я]*\s+приложени[а-я]+(?:\s*(?:№|N)\s*[\w./-]+)?)/dgiu;
 
 /**
- * ОГРН проверяется той же единственной реализацией, что и ИНН.
+ * Заголовок реестра приложений: номер реестра и номер акта, к которому он
+ * составлен (S59).
  *
- * Отдельной ступенью, а не внутри `TYPE_RULES`: `registry_number` — код
- * каталога, а проверка контрольной суммы к нему привязана здесь, чтобы её
- * нельзя было забыть при добавлении соседнего правила.
+ * До S59 `registry_number` извлекался шаблоном ОГРН и проверялся контрольной
+ * суммой ОГРН — на бою поле реестра было заполнено ОГРН организации из его
+ * подвала, то есть реквизит «Номер реестра» называл юридическое лицо. Бланк
+ * пишет заголовок тремя способами, и все три встречаются в боевой базе:
+ * «Реестр № 2 к №СИН/ОВ1/От/32 от 31.12.2024 г.», «Реестр приложений №1 к
+ * акту АОСР № 48-ОТ/-1 этаж», «Реестр 1 к АОСР №ПБ-1 от 31.03.2026г».
+ *
+ * Форма номера реестра — короткое число с необязательной точкой («1», «2»,
+ * «1.1») — та же, что у `registryRefNumber` в контрактах, которым ссылку на
+ * реестр читают правила; сам `registryRefNumber` здесь не вызывается, потому
+ * что отдаёт значение без границ в тексте, а доказательство §3.5 требует спана.
+ *
+ * Ступени: сначала заголовок с привязкой к акту «… к АОСР/акту/№ …» — по всему
+ * листу, затем голое «Реестр № N» — только в первых строках: ниже по листу
+ * «реестр № …» уже упоминание чужой бумаги в строке перечня.
+ */
+const REGISTRY_NUMBER_FORM = String.raw`(\d{1,3}(?:\.\d{1,3})?)(?![\d.])`;
+const REGISTRY_NUMBER_SIGN = String.raw`(?:№|N[oО]?|Не)?`;
+
+const REGISTRY_TITLE_TO_ACT = new RegExp(
+  String.raw`реестр\p{L}*(?:\s+приложений)?\s*${REGISTRY_NUMBER_SIGN}\s*${REGISTRY_NUMBER_FORM}\s+к\s+(?:АОСР|акту|№|N)`,
+  'dgiu',
+);
+
+const REGISTRY_TITLE_BARE = new RegExp(
+  String.raw`реестр\p{L}*(?:\s+приложений)?\s*${REGISTRY_NUMBER_SIGN}\s*${REGISTRY_NUMBER_FORM}`,
+  'dgiu',
+);
+
+/**
+ * Номер акта из заголовка реестра: «№ X» после «к АОСР» / «к акту» / «к №», до
+ * предлога «от» перед датой либо до конца строки. Предлог «к» отделяет номер
+ * акта от номера самого реестра — тот же признак, что и у сверки
+ * (`PARENT_REFERENCE_BEFORE_NUMBER`).
+ */
+const REGISTRY_ACT_NUMBER =
+  /(?:^|[^\p{L}])к\s+(?:акту(?:\s+освидетельствования\s+скрытых\s+работ)?\s+)?(?:АОСР\s*)?(?:№|N)\s*([^\n]+?)(?=\s+от\s|\s*$)/dgimu;
+
+/** Сколько непустых строк листа считаются его заголовком. */
+const REGISTRY_HEADING_LINES = 6;
+
+/**
+ * Начало текста: первые `count` непустых строк.
+ *
+ * Возвращается ПРЕФИКС текста, а не список строк: спаны находок в нём
+ * совпадают со спанами в полном тексте, и доказательство остаётся верным.
+ */
+function headOf(text: string, count: number): string {
+  let seen = 0;
+  let offset = 0;
+  for (const line of text.split('\n')) {
+    const end = offset + line.length;
+    if (line.trim() !== '' && (seen += 1) >= count) return text.slice(0, end);
+    offset = end + 1;
+  }
+  return text;
+}
+
+/**
+ * ИНН проверяется контрольной суммой той же реализацией, что и в контрактах.
+ *
+ * Отдельной ступенью, а не внутри `TYPE_RULES`: проверка привязана к коду
+ * каталога здесь, чтобы её нельзя было забыть при добавлении соседнего
+ * правила. `registry_number` из таблицы снят (S59): номер реестра — не ОГРН.
  */
 const CHECKSUMMED_FIELDS: ReadonlyMap<string, (value: string) => { readonly ok: boolean }> =
-  new Map([
-    ['manufacturer_inn', checkInn],
-    ['registry_number', checkOgrn],
-  ]);
+  new Map([['manufacturer_inn', checkInn]]);
 
 // =====================================================================
 // Сборка значений

@@ -177,6 +177,7 @@ export function registerCheckRoutes(app: AppInstance): void {
               ...row,
               findingIds: [...row.findingIds],
               items: row.items.map((item) => ({ ...item })),
+              candidatePages: row.candidatePages.map((page) => ({ ...page })),
             })),
           })),
         })),

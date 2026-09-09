@@ -37,6 +37,7 @@ function row(over: Partial<ReportRow> & { id: string }): ReportRow {
     blockId: null,
     findingIds: [],
     items: [],
+    candidatePages: [],
     ...over,
   };
 }

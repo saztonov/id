@@ -34,22 +34,34 @@
  * Порядок групп: комплекты по номеру акта, затем «Вне комплектов» (опись,
  * титулы), затем замечания без адреса.
  *
+ * ## Блоки сворачиваются (S59)
+ *
+ * Папка на двенадцать актов — это двенадцать групп по четыре таблицы, и до
+ * нужной приходилось прокручивать всё. Заголовок комплекта и заголовок секции
+ * сворачивают своё содержимое; свёрнутое запоминается в браузере на папку
+ * (`collapse-state.ts`). ADR-0016 это не нарушает: сворачивается ПОКАЗ, ни одной
+ * кнопки, меняющей состав, здесь по-прежнему нет.
+ *
  * ## Контракт `data-testid`
  *
- * `checks-report` · `checks-report-group-{kind}` ·
- * `checks-report-section-{kind}` · `checks-report-row-{id}`
+ * `checks-report` · `checks-report-group-{kind}` · `checks-report-group-{kind}-header` ·
+ * `checks-report-section-{kind}` · `checks-report-section-{kind}-header` ·
+ * `checks-report-row-{id}`
  */
-import type { ReactNode } from 'react';
-import { Space, Table, Typography } from 'antd';
+import { useState, type ReactNode } from 'react';
+import { Collapse, Space, Table, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 
 import type { CheckReport, ReportGroup, ReportRow, ReportSection } from '../../api/types.js';
 import { Link } from '../../app/router.js';
 import { ToneTag } from '../../shared/tags.js';
+import { readCollapsedKeys, storeCollapsedKeys, toggleCollapsedKey } from './collapse-state.js';
 import {
+  candidatePagesOf,
   datesLabel,
   itemLabel,
   markOf,
+  pageHref,
   pagesLabel,
   rowDetailText,
   rowHref,
@@ -57,6 +69,12 @@ import {
   sectionTally,
   toneOf,
 } from './report.js';
+
+/** Что свёрнуто и как переключить. Одно состояние на весь отчёт. */
+interface CollapseState {
+  readonly collapsed: readonly string[];
+  readonly toggle: (key: string) => void;
+}
 
 export function ReportTable({
   folderId,
@@ -73,6 +91,26 @@ export function ReportTable({
     );
   }
 
+  return <ReportBody folderId={folderId} report={report} />;
+}
+
+/**
+ * Тело отчёта со своим состоянием свёрнутых блоков.
+ *
+ * Отдельный компонент, а не `useState` в `ReportTable`: у пустого отчёта
+ * состояние не нужно, а хук нельзя вызывать после раннего `return`.
+ */
+function ReportBody({ folderId, report }: { folderId: string; report: CheckReport }): ReactNode {
+  const [collapsed, setCollapsed] = useState<readonly string[]>(() => readCollapsedKeys(folderId));
+  const toggle = (key: string): void => {
+    setCollapsed((previous) => {
+      const next = toggleCollapsedKey(previous, key);
+      storeCollapsedKeys(folderId, next);
+      return next;
+    });
+  };
+  const state: CollapseState = { collapsed, toggle };
+
   return (
     <div data-testid="checks-report">
       {report.groups.map((group, index) => (
@@ -80,6 +118,8 @@ export function ReportTable({
           key={group.complectId ?? `${group.kind}-${String(index)}`}
           folderId={folderId}
           group={group}
+          groupKey={`group:${group.complectId ?? `${group.kind}-${String(index)}`}`}
+          state={state}
         />
       ))}
     </div>
@@ -94,19 +134,55 @@ export function ReportTable({
  * пишет в комплект барьер извлечения, и второе место, собирающее тот же
  * заголовок, разошлось бы с первым.
  */
-function GroupBlock({ folderId, group }: { folderId: string; group: ReportGroup }): ReactNode {
+function GroupBlock({
+  folderId,
+  group,
+  groupKey,
+  state,
+}: {
+  folderId: string;
+  group: ReportGroup;
+  groupKey: string;
+  state: CollapseState;
+}): ReactNode {
+  const open = !state.collapsed.includes(groupKey);
+
   return (
     <section
       data-testid={`checks-report-group-${group.kind}`}
-      style={{ marginBottom: 32 }}
+      style={{ marginBottom: 24 }}
       aria-label={group.title}
     >
-      <Typography.Title level={2} style={{ fontSize: 18, marginTop: 0, marginBottom: 12 }}>
-        {group.title}
-      </Typography.Title>
-      {group.sections.map((section) => (
-        <SectionBlock key={section.kind} folderId={folderId} section={section} />
-      ))}
+      <Collapse
+        ghost
+        activeKey={open ? [groupKey] : []}
+        onChange={() => {
+          state.toggle(groupKey);
+        }}
+        items={[
+          {
+            key: groupKey,
+            label: (
+              <Typography.Title
+                level={2}
+                style={{ fontSize: 18, margin: 0 }}
+                data-testid={`checks-report-group-${group.kind}-header`}
+              >
+                {group.title}
+              </Typography.Title>
+            ),
+            children: group.sections.map((section) => (
+              <SectionBlock
+                key={section.kind}
+                folderId={folderId}
+                section={section}
+                sectionKey={`${groupKey}:${section.kind}`}
+                state={state}
+              />
+            )),
+          },
+        ]}
+      />
     </section>
   );
 }
@@ -114,32 +190,69 @@ function GroupBlock({ folderId, group }: { folderId: string; group: ReportGroup 
 function SectionBlock({
   folderId,
   section,
+  sectionKey,
+  state,
 }: {
   folderId: string;
   section: ReportSection;
+  sectionKey: string;
+  state: CollapseState;
 }): ReactNode {
   const tally = sectionTally(section);
+  const open = !state.collapsed.includes(sectionKey);
+
+  const header = (
+    <Space align="baseline" wrap data-testid={`checks-report-section-${section.kind}-header`}>
+      <Typography.Title level={3} style={{ fontSize: 16, margin: 0 }}>
+        {section.title}
+      </Typography.Title>
+      {tally !== null && <Typography.Text type="secondary">{tally}</Typography.Text>}
+    </Space>
+  );
 
   return (
-    <div data-testid={`checks-report-section-${section.kind}`} style={{ marginBottom: 24 }}>
-      <Space align="baseline" wrap style={{ marginBottom: 4 }}>
-        <Typography.Title level={3} style={{ fontSize: 16, margin: 0 }}>
-          {section.title}
-        </Typography.Title>
-        {tally !== null && <Typography.Text type="secondary">{tally}</Typography.Text>}
-      </Space>
+    <div data-testid={`checks-report-section-${section.kind}`} style={{ marginBottom: 16 }}>
+      <Collapse
+        ghost
+        size="small"
+        activeKey={open ? [sectionKey] : []}
+        onChange={() => {
+          state.toggle(sectionKey);
+        }}
+        items={[{ key: sectionKey, label: header, children: <SectionBody /> }]}
+      />
+    </div>
+  );
 
-      {/*
+  function SectionBody(): ReactNode {
+    return (
+      <>
+        {/*
         Заявление о секции целиком — «реестр приложений в комплекте не найден».
         Это не замечание: подрядчику нечего с ним сделать кнопкой, но пустая
         секция без объяснения неотличима от сломанного экрана.
       */}
-      {section.note !== null && (
-        <Typography.Paragraph type="secondary" style={{ marginBottom: 8 }}>
-          {section.note}
-        </Typography.Paragraph>
-      )}
+        {section.note !== null && (
+          <Typography.Paragraph type="secondary" style={{ marginBottom: 8 }}>
+            {section.note}
+          </Typography.Paragraph>
+        )}
 
+        {section.rows.length > 0 && <SectionTable folderId={folderId} section={section} />}
+      </>
+    );
+  }
+}
+
+function SectionTable({
+  folderId,
+  section,
+}: {
+  folderId: string;
+  section: ReportSection;
+}): ReactNode {
+  return (
+    <>
       {section.rows.length > 0 && (
         <Table<ReportRow>
           rowKey="id"
@@ -169,7 +282,7 @@ function SectionBlock({
           columns={reportColumns(folderId)}
         />
       )}
-    </div>
+    </>
   );
 }
 
@@ -288,7 +401,33 @@ function ItemList({ row }: { row: ReportRow }): ReactNode {
  */
 function PagesCell({ folderId, row }: { folderId: string; row: ReportRow }): ReactNode {
   const label = pagesLabel(row);
-  if (label === null) return null;
+  if (label === null) {
+    /*
+      Своей страницы нет — печатаются страницы ПОХОЖИХ документов (S59). У
+      строки реестра в состоянии `candidate`/`ambiguous` документ не подтверждён,
+      и колонка стояла пустой, хотя подпись говорила «похоже на стр. 19, 20».
+      Каждая страница — своя ссылка; подпись говорит, что это лишь кандидат.
+    */
+    const candidates = candidatePagesOf(row);
+    if (candidates.length === 0) return null;
+    return (
+      <Space size={4} wrap>
+        {candidates.map((page) => {
+          const href = pageHref(folderId, page);
+          const text = String(page.number);
+          return href === null ? (
+            <Typography.Text key={page.number} type="secondary" title="страница похожего документа">
+              {text}
+            </Typography.Text>
+          ) : (
+            <Link key={page.number} to={href} title="страница похожего документа">
+              {text}
+            </Link>
+          );
+        })}
+      </Space>
+    );
+  }
   const href = rowHref(folderId, row);
   if (href === null) return <Typography.Text>{label}</Typography.Text>;
 

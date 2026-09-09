@@ -625,12 +625,18 @@ export interface ReportItem {
   hint: string | null;
 }
 
+/** Страница отчёта: номер в папке и индекс в рабочем документе (`null` — не собран). */
+export interface ReportPage {
+  number: number;
+  workingPageIndex: number | null;
+}
+
 export interface ReportRow {
   id: string;
   kind: 'document' | 'registry_row' | 'finding';
   title: string;
   subtitle: string | null;
-  page: { number: number; workingPageIndex: number | null } | null;
+  page: ReportPage | null;
   /** Диапазон страниц документа для печати: «1–3» либо «8». */
   pages: string | null;
   dates: {
@@ -649,6 +655,12 @@ export interface ReportRow {
   blockId: string | null;
   findingIds: string[];
   items: ReportItem[];
+  /**
+   * Страницы похожих документов у строки перечня без подтверждённого документа
+   * (S59): из каждой делается ссылка на разметку. У документов и замечаний
+   * пусто — у них своя `page`.
+   */
+  candidatePages: ReportPage[];
 }
 
 export interface ReportSection {
